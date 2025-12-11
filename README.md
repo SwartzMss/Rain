@@ -1,101 +1,113 @@
 # Rain
-# Log Viewer Web Application
 
-## 简介
+Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析、搜索本地日志/压缩包的能力，帮助快速定位问题。当前目标是完成文件上传和多视图浏览的 MVP，后续会迭代实时推送与权限控制。
 
-这是一个日志查看工具的 Web 应用，允许用户通过浏览器上传日志文件（支持多种格式），并查看其内容。支持压缩包文件上传，并能够解压并检索其中的内容。
+## 功能概览
 
-### 核心功能（MVP）
+- **多格式上传**：支持 `.txt`、`.log`、`.zip`、`.tar.gz` 等文件类型，单次上传允许多个文件。
+- **Files View**：展示上传历史及压缩包内部结构，按层级浏览，支持惰性展开嵌套压缩包。
+- **Logs View**：聚合所有纯文本日志，提供关键词搜索和文本预览。
+- **压缩包处理**：支持 `.zip`、`.tar.gz` 解压，自动识别编码格式，记录解析状态。
+- **安全限制**：对单文件大小、展开总字节数、递归深度设定硬限制，避免 Zip Bomb。
+- **扩展计划**：WebSocket 实时推送、日志过滤器、用户认证在 roadmap 中排队。
 
-- **文件上传**：支持上传 `.txt`, `.log`, `.zip`, `.tar.gz` 等格式的文件。
-- **日志展示**：上传后直接展示文件内容。
-- **压缩包文件处理**：支持上传并解压 `.zip`, `.tar.gz` 等压缩包文件，能够查看其中的文件内容。
-- **视图展示**：
-  - **Files View**：查看文件列表（包括压缩包内容），并支持嵌套压缩包的逐级解析。
-  - **Logs View**：搜索并查看所有日志文件的内容，快速定位感兴趣的日志信息。
+## 架构与实现摘要
+
+| 层级 | 说明 |
+| --- | --- |
+| 前端 | React + Vite + TailwindCSS，单页应用，提供 Files / Logs 两个主视图；通过 REST API 交互。 |
+| 后端 | Rust + Actix-Web，负责上传、压缩解析、文本索引、API；内置 Actix WebSocket 支持，未来可用于实时流。 |
+| 存储 | 文件内容保存在 `data/uploads/<uuid>` 目录；解析出的元数据、索引信息放在 SQLite（后续可替换为 Postgres）。 |
+| 搜索 | 服务端使用 SQLite FTS5 构建倒排索引，支持简单关键词匹配；返回命中片段供前端展示。 |
+
+### 数据流
+
+1. 前端通过 `/api/uploads` 上传文件；后端对每个文件生成 UUID 并落盘。
+2. 后端同步解析文本文件，异步处理压缩包首层目录，记录结构信息。
+3. 前端请求 `/api/files` 获取 Files View 树状数据；点击目录时再调用 `/api/files/{id}/children` 触发惰性展开。
+4. Logs View 请求 `/api/logs/search?q=<keyword>`，由后端返回匹配的文件段落。
 
 ## 技术栈
 
-- **前端**：
-  - React
-  - Vite
-  - TailwindCSS
-
-- **后端**：
-  - Rust (Actix / Rocket)
-  - WebSocket（用于实时推送，未来版本）
-  - `zip` / `flate2` 库（处理压缩包）
-
-- **部署**：
-  - Docker
+- **前端**：React 18、Vite、TailwindCSS、TypeScript。
+- **后端**：Rust 1.75+、Actix-Web、Tokio、`zip`、`flate2`、`tar`、`walkdir`、`rusqlite`（FTS5）。
+- **工具**：pnpm 或 npm、Cargo、SQLite 3.42+。
 
 ## 安装与运行
 
-### 1. 克隆代码库
+### 前置依赖
+
+- Node.js 20+（推荐配合 pnpm）
+- Rust 1.75+ 与 Cargo
+- SQLite（用于本地测试，可随 binary 自动创建）
+
+### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/your-username/log-viewer.git
-cd log-viewer
-2. 前端安装
+git clone https://github.com/your-username/rain.git
+cd rain
+```
+
+### 2. 启动前端
+
+```bash
 cd frontend
 npm install
-npm run dev
+npm run dev  # 默认 http://localhost:5173
+```
 
-3. 后端安装
+环境变量：
+
+- `VITE_API_BASE_URL`：后端 API 地址，默认 `http://localhost:8080`.
+
+### 3. 启动后端
+
+```bash
 cd backend
-cargo build --release
 cargo run
+```
 
-4. 访问 Web 应用
+默认监听 `http://localhost:8080`，上传文件保存在 `data/uploads` 目录，可通过 `RAIN_DATA_ROOT` 修改。
 
-打开浏览器，访问 http://localhost:3000 以查看应用。
+### 4. 访问应用
 
-功能列表
-第一阶段（MVP）
+浏览器打开 `http://localhost:5173`，前端会将请求代理到后端 API。
 
-文件上传：
+> Docker 镜像暂不提供，待 MVP 稳定后再补充。
 
-支持上传 .txt, .log, .zip, .tar.gz 等文件格式。
+## 运行时策略
 
-上传文件后，直接展示其内容。
+- **惰性展开**：默认只解析压缩包第一层；当用户展开某个目录时，后端才继续解压，并在解析完成前返回“loading”状态。
+- **大小限制**：单文件 50 MB，单次上传总量 200 MB，展开后的累计大小上限 500 MB；超限时直接拒绝。
+- **递归深度**：最多 5 层嵌套，再深将提示用户手动拆包。
+- **索引更新**：文本文件解析完即写入 FTS5 索引；压缩包中文件在惰性展开后再索引。
 
-压缩包处理：
+## Roadmap
 
-支持上传并解压 .zip, .tar.gz 文件。
+1. WebSocket 实时推送最新日志。
+2. 日志过滤器：时间、级别、关键词组合过滤。
+3. 用户认证与权限管理，多租户隔离。
+4. 对象存储适配（S3/MinIO），支持集群部署。
+5. Docker Compose / K8s 部署模版。
 
-在浏览器中展示压缩包内部的文件列表和内容，支持递归解析压缩包。
+## 贡献指南
 
-视图展示：
+1. Fork 仓库并创建 `feature/<topic>` 分支。
+2. 提交前运行：
+   ```bash
+   cd frontend && npm test && npm run lint
+   cd backend && cargo fmt && cargo clippy && cargo test
+   ```
+3. 提交 PR 时附带变更描述、截图/日志。
+4. 遵循 MIT 许可证。
 
-Files View：展示所有上传的文件以及压缩包内的文件信息。如果文件是压缩包，展示其内的文件列表，支持逐级解析压缩包。
+## License
 
-支持 递归解析 压缩包，逐步查看压缩包内部的文件。
+MIT License（详见 `LICENSE` 文件）。
 
-支持 文本文件预览，对于 .txt 和 .log 等文件，能够直接显示其内容。
+## Open Issues
 
-Logs View：展示所有日志文件的内容，支持全文搜索，不关注具体哪个文件。
-
-搜索功能：允许用户搜索所有日志文件中的关键字，迅速定位感兴趣的日志信息。
-
-后续功能
-
-实时日志推送（WebSocket）：
-
-支持未来版本通过 WebSocket 推送日志更新。
-
-日志过滤与搜索：
-
-按时间、级别等条件过滤日志文件。
-
-用户认证与权限管理：
-
-支持多用户环境，只有授权用户才能上传和管理文件。
-
-开发与贡献
-
-欢迎贡献代码！如果你有任何建议或遇到问题，请提 Issue
- 或提交 Pull Request。
-
-License
-
-MIT License
+1. **对象存储**：当前仅使用本地磁盘；若要云端部署，需要评估 S3/MinIO 接入和多节点一致性策略。
+2. **Zip Bomb 防护实现细节**：需要明确如何检测压缩比、如何提前中断解压。
+3. **搜索增强**：是否支持正则、模糊匹配和命中高亮仍待定义。
+4. **日志编码**：目前假设 UTF-8；多语言日志的编码识别策略需要补充。
