@@ -17,8 +17,8 @@ Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析�
 | --- | --- |
 | 前端 | React + Vite + TailwindCSS，单页应用，提供 Files / Logs 两个主视图；通过 REST API 交互。 |
 | 后端 | Rust + Actix-Web，负责上传、压缩解析、文本索引、API；内置 Actix WebSocket 支持，未来可用于实时流。 |
-| 存储 | 文件内容保存在 `data/uploads/<uuid>` 目录；解析出的元数据、索引信息放在 SQLite（后续可替换为 Postgres）。 |
-| 搜索 | 服务端使用 SQLite FTS5 构建倒排索引，支持简单关键词匹配；返回命中片段供前端展示。 |
+| 存储 | 文件内容保存在 `data/uploads/<uuid>` 目录；解析出的元数据、索引信息统一写入 PostgreSQL。 |
+| 搜索 | PostgreSQL 使用 `tsvector`/GIN 构建倒排索引，支持关键词搜索并返回命中片段供前端展示。 |
 
 ### 数据流
 
@@ -110,7 +110,7 @@ Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析�
 
 1. **项目与权限框架**：实现 `projects` / `bundles` 基础 CRUD、鉴权模型，确保上传与浏览都需绑定项目。
 2. **上传与解析管线**：后端完成多文件上传接口、磁盘落盘、异步解压/解析线程、状态轮询/WebSocket 推送。
-3. **PostgreSQL 迁移**：根据“数据库设计”章节编写迁移脚本与 DAO 层，接入 `bundles`、`files`、`timelines`、`log_segments` 等表。
+3. **PostgreSQL 架构优化**：完善迁移脚本与 DAO 层，覆盖 `bundles`、`files`、`timelines`、`log_segments` 等表并补充索引/分区策略。
 4. **Files View API**：实现文件树增量加载、`metadata`/`content` 接口、路径搜索、文件导出，并接入 FileBrowser 埋点。
 5. **Logs View 流程**：构建时间线生成器、日志全文检索接口、流式拉取 API，支持按 timeline/关键词过滤。
 6. **监控与埋点**：完善 Umami 上报、FileBrowser 行为统计、解析任务 metrics（Prometheus/Grafana）。
@@ -119,8 +119,8 @@ Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析�
 ## 技术栈
 
 - **前端**：React 18、Vite、TailwindCSS、TypeScript。
-- **后端**：Rust 1.75+、Actix-Web、Tokio、`zip`、`flate2`、`tar`、`walkdir`、`rusqlite`（FTS5）。
-- **工具**：pnpm 或 npm、Cargo、SQLite 3.42+。
+- **后端**：Rust 1.75+、Actix-Web、Tokio、`zip`、`flate2`、`tar`、`walkdir`、`sqlx`（PostgreSQL 驱动）。
+- **工具**：pnpm 或 npm、Cargo、PostgreSQL 15+、`psql`/pgAdmin。
 
 ## 安装与运行
 
@@ -128,7 +128,23 @@ Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析�
 
 - Node.js 20+（推荐配合 pnpm）
 - Rust 1.75+ 与 Cargo
-- SQLite（用于本地测试，可随 binary 自动创建）
+- PostgreSQL 15+（含客户端工具）
+
+### 0. 数据库准备
+
+1. 确保本地 PostgreSQL 已启动，并准备好可用数据库（下文以 `rain` 为例，可按需替换）。
+2. 在 `backend/.env` 写入数据库与数据目录配置，示例：
+   ```dotenv
+   DATABASE_URL=postgres://<user>:<password>@localhost:5432/rain
+   RAIN_DATA_ROOT=../data/uploads
+   RAIN_LOG_DIR=../log
+   ```
+   可直接复制 `backend/.env.example` 再根据环境调整；`.env` 将被后端与迁移脚本自动读取。
+3. 运行迁移初始化结构：
+   ```bash
+   cd backend
+   sqlx migrate run
+   ```
 
 ### 1. 克隆仓库
 
@@ -156,7 +172,7 @@ cd backend
 cargo run
 ```
 
-默认监听 `http://localhost:8080`，上传文件保存在 `data/uploads` 目录，可通过 `RAIN_DATA_ROOT` 修改。
+默认监听 `http://localhost:8080`，上传文件保存在 `data/uploads` 目录，可通过 `RAIN_DATA_ROOT` 修改；运行前请在 `backend/.env` 配置 `DATABASE_URL`，否则无法连接 PostgreSQL。
 
 ### 4. 访问应用
 
@@ -164,12 +180,34 @@ cargo run
 
 > Docker 镜像暂不提供，待 MVP 稳定后再补充。
 
+## 调试指南
+
+1. 复制环境变量：
+   ```bash
+   cp backend/.env.example backend/.env
+   ```
+   按需调整 `DATABASE_URL`、`RAIN_DATA_ROOT`、`RAIN_LOG_DIR` 等值。
+2. 启动后端并观察日志：
+   ```bash
+   cd backend
+   cargo run
+   tail -f ../log/backend.log  # 所有 tracing 日志写入仓库根目录的 log/
+   ```
+   可通过 `curl http://localhost:8080/healthz` 验证服务启动情况。
+3. 启动前端：
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+   访问 `http://localhost:5173` 即可实时调试，接口请求会转发至 `VITE_API_BASE_URL`。
+
 ## 运行时策略
 
 - **惰性展开**：默认只解析压缩包第一层；当用户展开某个目录时，后端才继续解压，并在解析完成前返回“loading”状态。
 - **大小限制**：单文件 50 MB，单次上传总量 200 MB，展开后的累计大小上限 500 MB；超限时直接拒绝。
 - **递归深度**：最多 5 层嵌套，再深将提示用户手动拆包。
-- **索引更新**：文本文件解析完即写入 FTS5 索引；压缩包中文件在惰性展开后再索引。
+- **索引更新**：文本文件解析完即写入 PostgreSQL `tsvector` 索引；压缩包中文件在惰性展开后再索引。
+- **日志输出**：后端通过 `tracing` 将运行日志写入 `log/backend.log`，方便与前端/数据库调试联动。
 
 ## Roadmap
 

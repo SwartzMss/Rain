@@ -1,0 +1,24 @@
+# Backend artifacts
+backend/target/
+backend/.env
+backend/.env.local
+
+# Frontend artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Workspace-wide ignores
+log/*
+!log/.gitkeep
+/target/
+/node_modules/
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!*.env.example
+*.log
+coverage/
+.idea/
+.vscode/
