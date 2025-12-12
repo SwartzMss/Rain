@@ -27,6 +27,65 @@ Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析�
 3. 前端请求 `/api/files` 获取 Files View 树状数据；点击目录时再调用 `/api/files/{id}/children` 触发惰性展开。
 4. Logs View 请求 `/api/logs/search?q=<keyword>`，由后端返回匹配的文件段落。
 
+## 前后端 API 设计
+
+围绕“上传 → 解析 → 浏览 → 搜索 → 埋点”这条主流程，前端会调用以下 REST 接口与后端交互，示例中的 `bundleId` 使用 `lp1yp7` 这一演示值（每次上传都会生成不同的 ID）。
+
+### 上传与案件上下文
+
+- `POST /api/uploads`：多文件上传，返回每个文件的 `uploadId` 与初始解析状态。
+- `GET /api/uploads/{uploadId}`：轮询单次上传的任务进度、错误详情。
+- `GET /api/issues/{issueId}` / `GET /api/analysissuite/{owner}/{caseId}`：查询某个案件下的 log bundle 列表。示例响应：
+
+```json
+{
+  "name": "CN013",
+  "log_bundles": [
+    { "hash": "qqmzk6", "name": "0608.zip", "status": { "upload_status": "READY" } },
+    { "hash": "lp1yp7", "name": "0704.zip", "status": { "upload_status": "READY" } }
+  ]
+}
+```
+
+### 文件浏览（Files View）
+
+- `GET /api/files/v1/{bundleId}/files/{fileId}/metadata?include_rain_metadata=true`：返回文件/目录的基础信息、扩展元数据。
+- `GET /api/files/v1/{bundleId}/files/{fileId}`：实际文件内容或子节点数据（如 `GET .../lp1yp7/files/490`）。
+- `GET /api/files/v1/{bundleId}/search?path=...`：按路径快速查找 `fileId`。
+- `POST /api/v2/file_browser_stats/{bundleId}/FileBrowser_fileselect`：记录用户展开/选择行为，便于之后分析。
+
+### 日志视图（Logs View）
+
+- `GET /api/log/v2/{bundleId}/_info`：提供可选时间线与默认值，样例：
+
+```json
+{
+  "timelines": [
+    { "name": "all", "label": "All files", "status": "uploaded" },
+    { "name": "runtime", "label": "Runtime", "status": "uploaded" },
+    { "name": "pm_4_startup", "label": "PM 4 Startup", "status": "uploaded" }
+  ],
+  "default": "runtime"
+}
+```
+
+- `GET /api/log/v2/{bundleId}/search?q=...&timeline=...`：关键词搜索命中片段。
+- `GET /api/log/v2/{bundleId}/streams/{timeline}?from=...&size=...`：流式按时间线加载日志内容。
+
+### 埋点与统计
+
+- `POST https://rain-umami.rain-dev.dyn.nesc.net/api/send`：前端页面埋点上报，其中 `cache`、`sessionId`、`visitId` 来自服务端响应：
+
+```json
+{
+  "cache": ".eyJ3ZWJzaXRlSWQiOiI2OTRjMjcyOS02YjAwLTQyNTQtYmEzNC1kNGE5ZmIzYzYwMzMiLCJzZXNzaW9uSWQiOiIzOTEwNTFjZC0xNjgxLTUyNTUtOTVkMy0zM2QyMzU4MTk3NDAiLCJ2aXNpdElkIjoiODkzMjFlMGQtNDJiNi01ODMwLTg4ZjAtODg4ZTkyODU0M2M1IiwiaWF0IjoxNzY1NTA5MzI4fQ.Bob5N1gFJ6kIzaEi_T0_-0UKCFYrwnaNdhe4pVfbT8w",
+  "sessionId": "391051cd--5255-95d3-33d235819740",
+  "visitId": "-42b6-5830-88f0-888e928543c5"
+}
+```
+
+- `POST /api/file_browser_stats/...` 等埋点接口用于记录 Files View 的交互；后续也可扩展日志筛选、搜索等事件。
+
 ## 技术栈
 
 - **前端**：React 18、Vite、TailwindCSS、TypeScript。
