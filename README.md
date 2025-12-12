@@ -86,6 +86,36 @@ Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析�
 
 - `POST /api/file_browser_stats/...` 等埋点接口用于记录 Files View 的交互；后续也可扩展日志筛选、搜索等事件。
 
+## 数据库设计
+
+采用 PostgreSQL 存储结构化信息，文件内容则保留在磁盘/对象存储中，仅在表中记录路径和校验信息，核心表如下：
+
+| 表 | 关键字段 | 说明 |
+| --- | --- | --- |
+| `projects` | `id (uuid)`, `code`, `name`, `description`, `owner`, `archived`, `created_at` | 项目/问题单目录（如 `CN013`），所有 bundle 隶属于某个项目。 |
+| `bundles` | `id (uuid)`, `project_id`, `name`, `status`, `upload_user`, `size_bytes`, `file_count`, `error_msg`, `raw_path`, `created_at`, `finished_at` | 一次上传与解析的整体信息，`id` 类似 `lp1yp7`，与解析任务状态挂钩。 |
+| `files` | `id (bigserial)`, `bundle_id`, `parent_id`, `name`, `path`, `size_bytes`, `mime_type`, `is_dir`, `timeline`, `compression_level`, `status`, `checksum`, `storage_path`, `created_at` | 解析出的文件树节点，`parent_id` 形成层级，`storage_path` 指向解压后的文件。 |
+| `file_metadata` | `file_id`, `meta jsonb` | 存放需要额外返回的雨量元数据（编码、解析策略等），供 `?include_rain_metadata=true` 使用。 |
+| `timelines` | `id`, `bundle_id`, `name`, `label`, `status`, `owner`, `order_index`, `is_default` | `GET /api/log/v2/{bundle}/_info` 的数据来源。 |
+| `log_segments` | `id`, `bundle_id`, `file_id`, `timeline`, `offset`, `length`, `content`, `tsv tsvector` | 日志全文索引，每行一段文本；`tsvector` 建 GIN 索引以支持搜索。 |
+| `events_file_browser`（可选） | `id`, `bundle_id`, `file_id`, `event_type`, `payload jsonb`, `session_id`, `occurred_at` | 保存 Files View 埋点数据，便于行为分析。 |
+
+> 如需细分上传请求，可额外保留 `uploads` 表（记录原始上传信息）并与 `bundles` 关联。权限/多租户场景可引入 `orgs`、`permissions` 等扩展表。
+
+解析线程负责在解压完毕后批量写入 `files`、`timelines`、`log_segments`，并更新 `bundles.status`；大文件仍以文件系统路径的形式暴露，由 API 在请求时读取返回。
+
+## 设计路线图（Design Roadmap）
+
+结合现阶段需求，按优先级划分的建设顺序如下：
+
+1. **项目与权限框架**：实现 `projects` / `bundles` 基础 CRUD、鉴权模型，确保上传与浏览都需绑定项目。
+2. **上传与解析管线**：后端完成多文件上传接口、磁盘落盘、异步解压/解析线程、状态轮询/WebSocket 推送。
+3. **PostgreSQL 迁移**：根据“数据库设计”章节编写迁移脚本与 DAO 层，接入 `bundles`、`files`、`timelines`、`log_segments` 等表。
+4. **Files View API**：实现文件树增量加载、`metadata`/`content` 接口、路径搜索、文件导出，并接入 FileBrowser 埋点。
+5. **Logs View 流程**：构建时间线生成器、日志全文检索接口、流式拉取 API，支持按 timeline/关键词过滤。
+6. **监控与埋点**：完善 Umami 上报、FileBrowser 行为统计、解析任务 metrics（Prometheus/Grafana）。
+7. **高级特性**：目录导出再压缩、权限细粒度控制（角色/组织）、对象存储支持、实时推送/协作等迭代需求。
+
 ## 技术栈
 
 - **前端**：React 18、Vite、TailwindCSS、TypeScript。
