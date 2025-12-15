@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod error;
+mod ingest;
 mod models;
 mod routes;
 
@@ -9,7 +10,7 @@ use std::{fs, path::PathBuf};
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, middleware::Logger, web};
 use config::AppConfig;
-use db::init_pool;
+use db::{init_pool, prepare_schema};
 use routes::register;
 use sqlx::PgPool;
 use tracing::info;
@@ -42,6 +43,9 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     let pool = init_pool(&config.database_url).expect("failed to init postgres pool");
+    prepare_schema(&pool, config.reset_db)
+        .await
+        .expect("failed to prepare database schema");
 
     info!(
         host = %config.host,

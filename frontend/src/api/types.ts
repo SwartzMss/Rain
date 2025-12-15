@@ -43,3 +43,11 @@ export interface LogSearchResponse {
   total: number;
   hits: LogSearchHit[];
 }
+
+export interface UploadResponse {
+  issue_code: string;
+  bundle_hash: string;
+  bundle_name: string;
+  file_count: number;
+  total_bytes: number;
+}

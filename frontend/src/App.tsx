@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { NavTabs } from './components/NavTabs';
 import { FilesView } from './features/files/FilesView';
 import { LogsView } from './features/logs/LogsView';
+import type { BundleInfo } from './lib/bundles';
 import './App.css';
 
 type TabId = 'files' | 'logs';
@@ -13,6 +14,16 @@ const tabs: { id: TabId; label: string; hint: string }[] = [
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>('files');
+  const [activeBundle, setActiveBundle] = useState<BundleInfo | null>(null);
+  const [recentBundles, setRecentBundles] = useState<BundleInfo[]>([]);
+
+  const handleBundleSelected = (bundle: BundleInfo) => {
+    setActiveBundle(bundle);
+    setRecentBundles((prev) => {
+      const filtered = prev.filter((item) => item.hash !== bundle.hash);
+      return [bundle, ...filtered].slice(0, 6);
+    });
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -30,7 +41,15 @@ function App() {
       </header>
 
       <main className="mx-auto max-w-6xl px-6 py-6">
-        {activeTab === 'files' ? <FilesView /> : <LogsView />}
+        {activeTab === 'files' ? (
+          <FilesView activeBundle={activeBundle} onBundleSelected={handleBundleSelected} />
+        ) : (
+          <LogsView
+            activeBundle={activeBundle}
+            recentBundles={recentBundles}
+            onBundleSelected={handleBundleSelected}
+          />
+        )}
       </main>
     </div>
   );

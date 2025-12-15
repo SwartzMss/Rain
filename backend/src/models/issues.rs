@@ -27,3 +27,17 @@ pub struct IssueBundlesResponse {
     #[serde(rename = "log_bundles")]
     pub log_bundles: Vec<UploadSummary>,
 }
+
+impl UploadStatus {
+    pub fn from_db_value(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("READY") {
+            UploadStatus::Ready
+        } else if value.eq_ignore_ascii_case("PROCESSING") {
+            UploadStatus::Processing
+        } else if value.eq_ignore_ascii_case("FAILED") {
+            UploadStatus::Failed
+        } else {
+            UploadStatus::Pending
+        }
+    }
+}

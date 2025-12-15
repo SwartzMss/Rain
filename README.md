@@ -139,12 +139,8 @@ Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析�
    RAIN_DATA_ROOT=../data/uploads
    RAIN_LOG_DIR=../log
    ```
-   可直接复制 `backend/.env.example` 再根据环境调整；`.env` 将被后端与迁移脚本自动读取。
-3. 运行迁移初始化结构：
-   ```bash
-   cd backend
-   sqlx migrate run
-   ```
+   可直接复制 `backend/.env.example` 再根据环境调整；`.env` 会在后端启动时加载。
+   如果需要强制重建库表，可将 `RESET_DB=true` 写入 `.env`，服务在启动时会清空并重新创建所有表，默认为 `false`。
 
 ### 1. 克隆仓库
 
@@ -172,7 +168,7 @@ cd backend
 cargo run
 ```
 
-默认监听 `http://localhost:8080`，上传文件保存在 `data/uploads` 目录，可通过 `RAIN_DATA_ROOT` 修改；运行前请在 `backend/.env` 配置 `DATABASE_URL`，否则无法连接 PostgreSQL。
+默认监听 `http://localhost:8080`，上传文件保存在 `data/uploads` 目录，可通过 `RAIN_DATA_ROOT` 修改；运行前请在 `backend/.env` 配置 `DATABASE_URL`，否则无法连接 PostgreSQL。服务会在启动时自动检测并创建缺失的数据库表。
 
 ### 4. 访问应用
 

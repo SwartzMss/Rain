@@ -1,14 +1,28 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { rainApi } from '../../api/client';
 import type { LogSearchResponse } from '../../api/types';
+import type { BundleInfo } from '../../lib/bundles';
+import { formatBundleLabel } from '../../lib/bundles';
 
-export function LogsView() {
-  const [bundleId, setBundleId] = useState('lp1yp7');
+interface LogsViewProps {
+  activeBundle: BundleInfo | null;
+  recentBundles: BundleInfo[];
+  onBundleSelected: (bundle: BundleInfo) => void;
+}
+
+export function LogsView({ activeBundle, recentBundles, onBundleSelected }: LogsViewProps) {
+  const [bundleId, setBundleId] = useState(activeBundle?.hash ?? '');
   const [query, setQuery] = useState('error');
   const [timeline, setTimeline] = useState<string>('');
   const [result, setResult] = useState<LogSearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (activeBundle?.hash) {
+      setBundleId(activeBundle.hash);
+    }
+  }, [activeBundle?.hash]);
 
   const handleSearch = async (event: FormEvent) => {
     event.preventDefault();
@@ -34,12 +48,35 @@ export function LogsView() {
       </header>
 
       <form onSubmit={handleSearch} className="grid gap-3 md:grid-cols-[1fr_1fr_0.8fr_auto]">
-        <input
-          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-          placeholder="bundleId"
-          value={bundleId}
-          onChange={(event) => setBundleId(event.target.value)}
-        />
+        <div className="space-y-2">
+          <input
+            className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+            placeholder="bundleId"
+            value={bundleId}
+            onChange={(event) => setBundleId(event.target.value)}
+          />
+          {recentBundles.length > 0 ? (
+            <select
+              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-300 focus:border-brand-500 focus:outline-none"
+              value={bundleId && recentBundles.find((item) => item.hash === bundleId) ? bundleId : ''}
+              onChange={(event) => {
+                const value = event.target.value;
+                setBundleId(value);
+                const bundle = recentBundles.find((item) => item.hash === value);
+                if (bundle) {
+                  onBundleSelected(bundle);
+                }
+              }}
+            >
+              <option value="">最近的 bundle...</option>
+              {recentBundles.map((item) => (
+                <option key={item.hash} value={item.hash}>
+                  {formatBundleLabel(item)}
+                </option>
+              ))}
+            </select>
+          ) : null}
+        </div>
         <input
           className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
           placeholder="关键词，例如 error"
@@ -80,7 +117,9 @@ export function LogsView() {
           </ul>
         </div>
       ) : (
-        <p className="text-sm text-slate-500">输入 bundleId 和关键词后开始搜索。</p>
+        <p className="text-sm text-slate-500">
+          在 Files View 上传日志后，从上方下拉选择 bundle 或输入 bundleId，再输入关键词开始搜索。
+        </p>
       )}
     </section>
   );
