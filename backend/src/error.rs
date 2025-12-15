@@ -7,8 +7,6 @@ pub enum AppError {
     Config(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
-    #[error("bad request: {0}")]
-    BadRequest(String),
     #[error("internal server error")]
     Internal(#[from] actix_web::error::Error),
 }
@@ -18,7 +16,6 @@ impl ResponseError for AppError {
         match self {
             AppError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

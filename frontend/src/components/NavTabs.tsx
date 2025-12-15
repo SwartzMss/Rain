@@ -1,16 +1,20 @@
-type Tab = {
-  id: string;
+type Tab<T extends string = string> = {
+  id: T;
   label: string;
   hint?: string;
 };
 
-interface NavTabsProps {
-  tabs: Tab[];
-  activeId: string;
-  onChange: (id: string) => void;
+interface NavTabsProps<T extends string = string> {
+  tabs: Tab<T>[];
+  activeId: T;
+  onChange: (id: T) => void;
 }
 
-export function NavTabs({ tabs, activeId, onChange }: NavTabsProps) {
+export function NavTabs<T extends string>({
+  tabs,
+  activeId,
+  onChange
+}: NavTabsProps<T>) {
   return (
     <nav className="flex gap-4 border-b border-slate-800 text-sm text-slate-400">
       {tabs.map((tab) => {
