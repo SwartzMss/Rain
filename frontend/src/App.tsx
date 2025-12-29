@@ -33,7 +33,6 @@ function App() {
             <p className="text-sm uppercase tracking-[0.3em] text-brand-500">Rain</p>
             <h1 className="text-2xl font-semibold text-white">日志解析控制台</h1>
           </div>
-          <p className="text-sm text-slate-400">API: {import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'}</p>
         </div>
         <div className="mx-auto max-w-6xl px-6">
           <NavTabs tabs={tabs} activeId={activeTab} onChange={setActiveTab} />
