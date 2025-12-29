@@ -1,4 +1,10 @@
-import type { FileNodeResponse, IssueBundlesResponse, LogSearchResponse, UploadResponse } from './types';
+import type {
+  FileContentResponse,
+  FileNodeResponse,
+  IssueBundlesResponse,
+  LogSearchResponse,
+  UploadResponse
+} from './types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080';
 
@@ -34,9 +40,15 @@ export const rainApi = {
   fetchFileNode(bundleId: string, fileId: string) {
     return request<FileNodeResponse>(`/api/files/v1/${bundleId}/files/${fileId}`);
   },
-  searchLogs(bundleId: string, query: string, timeline?: string) {
+  fetchFileContent(bundleId: string, fileId: string) {
+    return request<FileContentResponse>(`/api/files/v1/${bundleId}/files/${fileId}/content`);
+  },
+  searchLogs(bundleId: string, query: string, options?: { timeline?: string; path_like?: string; from?: number; size?: number }) {
     const params = new URLSearchParams({ q: query });
-    if (timeline) params.set('timeline', timeline);
+    if (options?.timeline) params.set('timeline', options.timeline);
+    if (options?.path_like) params.set('path_like', options.path_like);
+    if (typeof options?.from === 'number') params.set('from', String(options.from));
+    if (typeof options?.size === 'number') params.set('size', String(options.size));
     return request<LogSearchResponse>(`/api/log/v2/${bundleId}/search?${params.toString()}`);
   },
   uploadLogs(issueCode: string, files: File[], bundleName?: string) {

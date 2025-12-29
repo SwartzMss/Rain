@@ -7,6 +7,8 @@ pub struct LogSearchHit {
     pub snippet: String,
     pub timeline: Option<String>,
     pub offset: Option<i64>,
+    pub line_number: Option<i64>,
+    pub chunk_index: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

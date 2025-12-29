@@ -1,16 +1,21 @@
-use serde_json::json;
 use std::{
     collections::HashMap,
     io,
     path::{Path, PathBuf},
 };
+use tokio::io::AsyncReadExt;
 use tokio::{fs, task};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::error::AppError;
 
-const MAX_LOG_LINES: usize = 1000;
+const SMALL_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2MB
+const MEDIUM_FILE_BYTES: u64 = 20 * 1024 * 1024; // 20MB
+const MAX_READ_BYTES: u64 = 25 * 1024 * 1024; // avoid loading huge files into memory
+const MAX_LINES_SMALL: usize = 50_000;
+const MAX_LINES_MEDIUM: usize = 10_000;
+const MAX_LINES_LARGE: usize = 2_000;
 
 pub struct ProcessFileOptions<'a> {
     pub pool: &'a sqlx::PgPool,
@@ -40,9 +45,10 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
 
     let disk_path = bundle_dir.join(file_name);
     fs::write(&disk_path, bytes).await.map_err(io_error)?;
+    let size_bytes = bytes.len() as u64;
 
     let relative_path = format!("/{bundle_hash}/{file_name}");
-    let meta = json!({
+    let meta = serde_json::json!({
         "original_name": original_name,
         "storage_path": disk_path.to_string_lossy(),
         "kind": "uploaded_file"
@@ -62,7 +68,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     .await?;
 
     if is_text_like(file_name, content_type) {
-        ingest_text_file(pool, bundle_id, file_id, &disk_path).await?;
+        ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes).await?;
     }
 
     if is_zip_file(file_name) {
@@ -73,7 +79,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         extract_zip_archive(&disk_path, &extracted_dir).await?;
 
         let extracted_relative_path = format!("/{bundle_hash}/{extracted_dir_name}");
-        let dir_meta = json!({
+        let dir_meta = serde_json::json!({
             "source": file_name,
             "storage_path": extracted_dir.to_string_lossy(),
             "kind": "extracted_dir"
@@ -143,7 +149,7 @@ async fn ingest_directory(
         } else {
             None
         };
-        let meta = json!({
+        let meta = serde_json::json!({
             "storage_path": disk_path.to_string_lossy(),
             "kind": if is_dir { "extracted_dir" } else { "extracted_file" }
         });
@@ -161,8 +167,11 @@ async fn ingest_directory(
         )
         .await?;
 
-        if !is_dir && is_text_like(name, None) {
-            ingest_text_file(pool, bundle_id, record_id, &disk_path).await?;
+        if !is_dir
+            && is_text_like(name, None)
+            && let Some(size) = size_bytes
+        {
+            ingest_text_file(pool, bundle_id, record_id, &disk_path, size as u64).await?;
         }
 
         if is_dir {
@@ -215,13 +224,20 @@ async fn ingest_text_file(
     bundle_id: Uuid,
     file_id: i64,
     disk_path: &Path,
+    size_bytes: u64,
 ) -> Result<(), AppError> {
-    let bytes = fs::read(disk_path).await.map_err(io_error)?;
-    let content = String::from_utf8_lossy(&bytes);
+    let file = fs::File::open(disk_path).await.map_err(io_error)?;
+    let mut buffer = Vec::new();
+    let max_read = size_bytes.min(MAX_READ_BYTES);
+    let mut limited = file.take(max_read);
+    limited.read_to_end(&mut buffer).await.map_err(io_error)?;
+
+    let content = String::from_utf8_lossy(&buffer);
     let mut inserted = 0usize;
+    let line_limit = compute_line_limit(size_bytes);
 
     for (index, line) in content.lines().enumerate() {
-        if inserted >= MAX_LOG_LINES {
+        if inserted >= line_limit {
             break;
         }
         let trimmed = line.trim();
@@ -230,7 +246,7 @@ async fn ingest_text_file(
         }
         sqlx::query(
             r#"
-            INSERT INTO log_segments (bundle_id, file_id, timeline, content, offset)
+            INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset)
             VALUES ($1, $2, $3, $4, $5)
             "#,
         )
@@ -329,4 +345,14 @@ fn is_zip_file(name: &str) -> bool {
 
 fn io_error(err: std::io::Error) -> AppError {
     AppError::Io(err)
+}
+
+fn compute_line_limit(size_bytes: u64) -> usize {
+    if size_bytes <= SMALL_FILE_BYTES {
+        MAX_LINES_SMALL
+    } else if size_bytes <= MEDIUM_FILE_BYTES {
+        MAX_LINES_MEDIUM
+    } else {
+        MAX_LINES_LARGE
+    }
 }

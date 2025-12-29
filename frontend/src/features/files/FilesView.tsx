@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { rainApi } from '../../api/client';
-import type { FileNode, IssueBundlesResponse, UploadResponse } from '../../api/types';
+import type { FileContentResponse, FileNode, IssueBundlesResponse, UploadResponse } from '../../api/types';
 import { StatusBadge } from '../../components/StatusBadge';
 import type { BundleInfo } from '../../lib/bundles';
 
@@ -37,6 +37,9 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [initializedBundleId, setInitializedBundleId] = useState<string>('');
+  const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
+  const [fileContentLoading, setFileContentLoading] = useState(false);
+  const [fileContentError, setFileContentError] = useState<string | null>(null);
 
   const fetchIssueBundles = async (value: string) => {
     const trimmed = value.trim();
@@ -223,6 +226,34 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
   const selectedChildren = selectedNode?.childrenIds
     ?.map((childId) => treeNodes[childId])
     .filter((child): child is TreeNode => Boolean(child));
+
+  useEffect(() => {
+    setFileContent(null);
+    setFileContentError(null);
+    if (!bundleId || !selectedNode || selectedNode.is_dir) return;
+    let ignore = false;
+    const fetchContent = async () => {
+      setFileContentLoading(true);
+      try {
+        const content = await rainApi.fetchFileContent(bundleId, selectedNode.id);
+        if (!ignore) {
+          setFileContent(content);
+        }
+      } catch (error) {
+        if (!ignore) {
+          setFileContentError((error as Error).message || '加载文件失败');
+        }
+      } finally {
+        if (!ignore) {
+          setFileContentLoading(false);
+        }
+      }
+    };
+    fetchContent();
+    return () => {
+      ignore = true;
+    };
+  }, [bundleId, selectedNode?.id, selectedNode?.is_dir]);
 
   const renderTreeNode = (nodeId: string, depth = 0): JSX.Element | null => {
     const node = treeNodes[nodeId];
@@ -429,6 +460,27 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
                     <pre className="mt-3 max-h-48 overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-300">
                       {JSON.stringify(selectedNode.meta, null, 2)}
                     </pre>
+                  ) : null}
+                  {!selectedNode.is_dir ? (
+                    <div className="mt-4 space-y-2">
+                      <h3 className="text-sm font-semibold text-slate-300">文件预览</h3>
+                      {fileContentLoading ? (
+                        <p className="text-sm text-slate-500">读取中...</p>
+                      ) : fileContentError ? (
+                        <p className="text-sm text-rose-300">{fileContentError}</p>
+                      ) : fileContent ? (
+                        <div className="space-y-2">
+                          <pre className="max-h-80 overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
+                            {fileContent.preview}
+                          </pre>
+                          {fileContent.truncated ? (
+                            <p className="text-xs text-amber-300">已截断预览（最多 64KB）。</p>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-500">选择文件即可加载内容。</p>
+                      )}
+                    </div>
                   ) : null}
                 </div>
 

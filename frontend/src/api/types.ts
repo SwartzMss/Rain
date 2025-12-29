@@ -37,6 +37,8 @@ export interface LogSearchHit {
   snippet: string;
   timeline?: string;
   offset?: number;
+  line_number?: number;
+  chunk_index?: number;
 }
 
 export interface LogSearchResponse {
@@ -50,4 +52,12 @@ export interface UploadResponse {
   bundle_name: string;
   file_count: number;
   total_bytes: number;
+}
+
+export interface FileContentResponse {
+  path: string;
+  size_bytes?: number;
+  mime_type?: string;
+  preview: string;
+  truncated: boolean;
 }

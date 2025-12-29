@@ -42,8 +42,9 @@ async fn main() -> std::io::Result<()> {
         .with(fmt::layer().with_ansi(false).with_writer(file_writer))
         .init();
 
-    let pool = init_pool(&config.database_url).expect("failed to init postgres pool");
-    prepare_schema(&pool, config.reset_db)
+    let pool = init_pool(&config.database_url, &config.database_schema)
+        .expect("failed to init postgres pool");
+    prepare_schema(&pool, config.reset_db, &config.database_schema)
         .await
         .expect("failed to prepare database schema");
 
