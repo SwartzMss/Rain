@@ -23,7 +23,6 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
   const [issueLoading, setIssueLoading] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
 
-  const [bundleName, setBundleName] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const [uploading, setUploading] = useState(false);
@@ -197,21 +196,16 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
     setUploadError(null);
     setUploadSuccess(null);
     try {
-      const response = await rainApi.uploadLogs(
-        uploadIssueId.trim(),
-        Array.from(selectedFiles),
-        bundleName.trim() || undefined
-      );
+      const response = await rainApi.uploadLogs(uploadIssueId.trim(), Array.from(selectedFiles));
       setUploadSuccess(response);
       setIssueId(response.issue_code);
       setUploadIssueId(response.issue_code);
-      setBundleName('');
       setSelectedFiles(null);
       setFileInputKey((key) => key + 1);
       await fetchIssueBundles(response.issue_code).catch(() => undefined);
       onBundleSelected({
         hash: response.bundle_hash,
-        name: response.bundle_name,
+        name: response.bundle_hash,
         issue: response.issue_code
       });
     } catch (error) {
@@ -305,12 +299,6 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
             value={uploadIssueId}
             onChange={(event) => setUploadIssueId(event.target.value)}
           />
-          <input
-            className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-            placeholder="Bundle 名称，可选"
-            value={bundleName}
-            onChange={(event) => setBundleName(event.target.value)}
-          />
           <div className="md:col-span-2">
             <input
               key={fileInputKey}
@@ -340,7 +328,7 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
             <p className="font-semibold">上传成功</p>
             <p>Issue：{uploadSuccess.issue_code}</p>
             <p>
-              Bundle：{uploadSuccess.bundle_name}（ID: <code className="text-white">{uploadSuccess.bundle_hash}</code>）
+              Bundle ID: <code className="text-white">{uploadSuccess.bundle_hash}</code>
             </p>
             <p>
               文件数量：{uploadSuccess.file_count}，共 {(uploadSuccess.total_bytes / 1024).toFixed(1)} KB

@@ -51,12 +51,9 @@ export const rainApi = {
     if (typeof options?.size === 'number') params.set('size', String(options.size));
     return request<LogSearchResponse>(`/api/log/v2/${bundleId}/search?${params.toString()}`);
   },
-  uploadLogs(issueCode: string, files: File[], bundleName?: string) {
+  uploadLogs(issueCode: string, files: File[]) {
     const formData = new FormData();
     formData.append('issue_code', issueCode);
-    if (bundleName) {
-      formData.append('bundle_name', bundleName);
-    }
     files.forEach((file) => formData.append('files', file, file.name));
     return request<UploadResponse>(`/api/uploads`, {
       method: 'POST',

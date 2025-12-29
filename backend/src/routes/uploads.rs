@@ -18,7 +18,6 @@ pub async fn upload_logs(
     mut payload: Multipart,
 ) -> Result<HttpResponse, AppError> {
     let mut issue_code_field: Option<String> = None;
-    let mut bundle_name_field: Option<String> = None;
     let mut files: Vec<UploadedFile> = Vec::new();
 
     while let Some(mut field) = payload
@@ -33,10 +32,6 @@ pub async fn upload_logs(
             "issue_code" => {
                 let value = collect_text_field(&mut field).await?;
                 issue_code_field = Some(value);
-            }
-            "bundle_name" => {
-                let value = collect_text_field(&mut field).await?;
-                bundle_name_field = Some(value);
             }
             "files" => {
                 let filename = content_disposition
@@ -74,20 +69,7 @@ pub async fn upload_logs(
     }
 
     let bundle_hash = Uuid::new_v4().simple().to_string();
-    let fallback_name = files
-        .first()
-        .map(|file| file.original_name.clone())
-        .unwrap_or_else(|| format!("bundle-{bundle_hash}"));
-    let bundle_name = bundle_name_field
-        .and_then(|value| {
-            let trimmed = value.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        })
-        .unwrap_or(fallback_name);
+    let bundle_name = format!("bundle-{bundle_hash}");
 
     ensure_issue(&state.pool, &issue_code).await?;
 
@@ -125,7 +107,6 @@ pub async fn upload_logs(
     Ok(HttpResponse::Ok().json(UploadResponse {
         issue_code,
         bundle_hash,
-        bundle_name,
         file_count: files.len() as u64,
         total_bytes: total_bytes as u64,
     }))
@@ -135,7 +116,6 @@ pub async fn upload_logs(
 struct UploadResponse {
     issue_code: String,
     bundle_hash: String,
-    bundle_name: String,
     file_count: u64,
     total_bytes: u64,
 }
