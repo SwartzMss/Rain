@@ -16,6 +16,7 @@ log/*
 !log/.gitkeep
 /target/
 /node_modules/
+/data/
 .DS_Store
 Thumbs.db
 .env
