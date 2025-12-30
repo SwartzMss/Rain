@@ -147,10 +147,10 @@ export function BundleView() {
       try {
         const rootNode = await loadNode(selectedBundle, 'root', null);
         if (!ignore && rootNode) {
-          setSelectedNodeId((rootNode as TreeNode).id);
-          if ((rootNode as TreeNode).is_dir) {
-            setExpandedNodes(new Set([(rootNode as TreeNode).id]));
-          }
+          const rootTree = rootNode as TreeNode;
+          const firstChild = rootTree.childrenIds[0];
+          setExpandedNodes(new Set([rootTree.id]));
+          setSelectedNodeId(firstChild ?? null);
         }
       } catch {
         // error handled
@@ -198,9 +198,7 @@ export function BundleView() {
     .filter((child): child is TreeNode => Boolean(child));
 
   const activeIssueLabel = activeBundle.issue || '未知 Issue';
-  const activeBundleLabel = bundleId || '未选择';
   const activeNodeLabel = selectedNode?.name || '未选择文件';
-  const activeNodePath = selectedNode?.path || '选择文件后显示路径';
 
   useEffect(() => {
     setFileContent(null);
@@ -280,60 +278,20 @@ export function BundleView() {
 
   return (
     <div className="space-y-6">
-      <section className="panel">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-brand-500">文件界面</p>
-            <h2 className="text-lg font-semibold text-white">Bundle 文件树 / 预览</h2>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => navigate('/')}
-              className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-slate-700 hover:bg-slate-800"
-            >
-              返回工作台
-            </button>
-            <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
-              <p className="text-[10px] uppercase text-slate-500">Issue</p>
-              <p className="font-semibold text-white">{activeIssueLabel}</p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
-              <p className="text-[10px] uppercase text-slate-500">Bundle</p>
-              <p className="font-mono text-[11px] text-white">{activeBundleLabel}</p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
-              <p className="text-[10px] uppercase text-slate-500">当前节点</p>
-              <p className="truncate text-white">{activeNodeLabel}</p>
-              <p className="truncate font-mono text-[10px] text-slate-500">{activeNodePath}</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
       <section className="panel space-y-4">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-brand-500">步骤</p>
-            <h2 className="text-lg font-semibold text-white">左侧树 / 右侧预览</h2>
-            <p className="text-sm text-slate-400">点击目录或文件，右侧保持独立预览区域；ZIP 会拆解成目录。</p>
-          </div>
-          {bundleId ? (
-            <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
-              当前 Bundle: <span className="font-mono text-slate-200">{bundleId}</span>
-            </div>
-          ) : null}
-        </div>
-
         {treeError ? <p className="text-sm text-rose-300">{treeError}</p> : null}
 
         <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-3">
+            <p className="text-xs text-slate-400">Issue: {activeIssueLabel}</p>
             {bundleId ? (
               treeNodes['root'] ? (
                 <div className="space-y-2 text-sm text-slate-200">
-                  <p className="mb-2 text-xs text-slate-500">点击目录展开子节点；ZIP 会被拆成多级目录。</p>
-                  {renderTreeNode('root')}
+                  {(treeNodes['root'].childrenIds.length ?? 0) > 0 ? (
+                    treeNodes['root'].childrenIds.map((childId) => renderTreeNode(childId, 0))
+                  ) : (
+                    <p className="text-sm text-slate-500">暂无文件。</p>
+                  )}
                 </div>
               ) : treeLoading ? (
                 <p className="text-sm text-slate-400">文件树加载中...</p>
@@ -348,37 +306,8 @@ export function BundleView() {
           <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200">
             {selectedNode ? (
               <div className="space-y-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 space-y-1">
-                    <p className="text-xs uppercase text-slate-500">当前节点</p>
-                    <p className="truncate text-lg font-semibold text-white">{selectedNode.name}</p>
-                    <p className="break-all text-xs text-slate-500">{selectedNode.path}</p>
-                  </div>
-                  <span
-                    className={[
-                      'rounded-full px-3 py-1 text-xs font-semibold',
-                      selectedNode.is_dir
-                        ? 'bg-amber-500/20 text-amber-200'
-                        : isArchiveNode(selectedNode)
-                          ? 'bg-brand-500/20 text-brand-100'
-                          : 'bg-slate-800 text-slate-200'
-                    ].join(' ')}
-                  >
-                    {nodeTypeLabel(selectedNode)}
-                  </span>
-                </div>
-                <p className="text-sm text-slate-400">
-                  {selectedNode.is_dir ? '目录' : '文件'} · {formatSize(selectedNode.size_bytes)}
-                </p>
-                {selectedNode.meta ? (
-                  <pre className="max-h-48 overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-300">
-                    {JSON.stringify(selectedNode.meta, null, 2)}
-                  </pre>
-                ) : null}
-
                 {!selectedNode.is_dir ? (
                   <div className="space-y-2">
-                    <h3 className="text-sm font-semibold text-slate-200">文件预览</h3>
                     {fileContentLoading ? (
                       <p className="text-sm text-slate-500">读取中...</p>
                     ) : fileContentError ? (
@@ -386,7 +315,7 @@ export function BundleView() {
                     ) : fileContent ? (
                       canPreviewAsText(selectedNode, fileContent) ? (
                         <div className="space-y-2">
-                          <pre className="max-h-80 overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
+                          <pre className="max-h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
                             {fileContent.preview}
                           </pre>
                           {fileContent.truncated ? (
@@ -403,51 +332,9 @@ export function BundleView() {
                     )}
                   </div>
                 ) : (
-                  <p className="text-sm text-slate-500">选择文件后，右侧会自动展示文本内容。</p>
+                  <p className="text-sm text-slate-500">选择文件后展示内容。</p>
                 )}
 
-                <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-                  <div className="flex items-center justify-between text-sm text-slate-300">
-                    <h3 className="font-semibold">子节点</h3>
-                    <span className="text-xs text-slate-500">{selectedChildren?.length ?? 0} 项</span>
-                  </div>
-                  {selectedNode.is_dir ? (
-                    selectedChildren && selectedChildren.length > 0 ? (
-                      <ul className="mt-2 divide-y divide-slate-800">
-                        {selectedChildren.map((child) => (
-                          <li key={child.id} className="flex items-center gap-3 py-2">
-                            <span
-                              className={`flex h-8 w-8 items-center justify-center rounded border text-[10px] font-semibold ${
-                                child.is_dir
-                                  ? 'border-amber-400/60 text-amber-200'
-                                  : isArchiveNode(child)
-                                    ? 'border-brand-400/60 text-brand-200'
-                                    : 'border-slate-600 text-slate-300'
-                              }`}
-                            >
-                              {child.is_dir ? 'DIR' : isArchiveNode(child) ? 'ZIP' : 'FILE'}
-                            </span>
-                            <div className="min-w-0">
-                              <p className="truncate text-sm text-white">{child.name}</p>
-                              <p className="text-xs uppercase text-slate-500">
-                                {child.is_dir ? '目录' : child.mime_type ?? 'file'}
-                              </p>
-                            </div>
-                            <span className="ml-auto text-xs text-slate-500">
-                              {child.is_dir ? '--' : formatSize(child.size_bytes)}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="mt-2 text-sm text-slate-500">
-                        {selectedNode.hasLoadedChildren ? '暂无子节点。' : '展开目录即可加载子节点。'}
-                      </p>
-                    )
-                  ) : (
-                    <p className="mt-2 text-sm text-slate-500">选择目录可查看其子节点。</p>
-                  )}
-                </div>
               </div>
             ) : (
               <p className="text-sm text-slate-500">请选择一个 Issue / Bundle 并点击文件树中的节点。</p>

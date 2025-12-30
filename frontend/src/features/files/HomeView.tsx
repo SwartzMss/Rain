@@ -1,8 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rainApi } from '../../api/client';
-import type { IssueBundlesResponse, IssueSummary, UploadResponse } from '../../api/types';
-import { StatusBadge } from '../../components/StatusBadge';
+import type { IssueSummary, UploadResponse } from '../../api/types';
 
 const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
 
@@ -18,8 +17,8 @@ export function HomeView() {
   const navigate = useNavigate();
 
   const [issueId, setIssueId] = useState('');
+  const [issueFilter, setIssueFilter] = useState('');
   const [uploadIssueId, setUploadIssueId] = useState('');
-  const [issueData, setIssueData] = useState<IssueBundlesResponse | null>(null);
   const [issueLoading, setIssueLoading] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
   const [issues, setIssues] = useState<IssueSummary[]>([]);
@@ -36,7 +35,6 @@ export function HomeView() {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
     if (stored) {
       setIssueId(stored);
-      setUploadIssueId(stored);
     }
   }, []);
 
@@ -66,23 +64,6 @@ export function HomeView() {
     loadIssues().catch(() => undefined);
   }, [loadIssues]);
 
-  const fetchIssueBundles = async (value: string) => {
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    setIssueLoading(true);
-    setIssueError(null);
-    try {
-      const data = await rainApi.fetchIssueBundles(trimmed);
-      setIssueData(data);
-    } catch (error) {
-      setIssueError((error as Error).message || '查询失败');
-      setIssueData(null);
-      throw error;
-    } finally {
-      setIssueLoading(false);
-    }
-  };
-
   const navigateToBundle = (hash: string, issueCode?: string, bundleName?: string) => {
     if (!hash) return;
     navigate(`/bundle/${hash}`, {
@@ -93,10 +74,25 @@ export function HomeView() {
     });
   };
 
-  const handleIssueLookup = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!issueId.trim()) return;
-    await fetchIssueBundles(issueId).catch(() => undefined);
+  const openIssue = async (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    setIssueLoading(true);
+    setIssueError(null);
+    try {
+      const data = await rainApi.fetchIssueBundles(trimmed);
+      const firstBundle = data.log_bundles[0];
+      if (!firstBundle) {
+        setIssueError('该 Issue 暂无 bundle');
+        return;
+      }
+      setIssueId(trimmed);
+      navigateToBundle(firstBundle.hash, data.name ?? trimmed, firstBundle.name);
+    } catch (error) {
+      setIssueError((error as Error).message || '查询失败');
+    } finally {
+      setIssueLoading(false);
+    }
   };
 
   const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
@@ -119,7 +115,7 @@ export function HomeView() {
       setUploadIssueId(response.issue_code);
       setSelectedFiles(null);
       setFileInputKey((key) => key + 1);
-      await fetchIssueBundles(response.issue_code).catch(() => undefined);
+      await openIssue(response.issue_code).catch(() => undefined);
       loadIssues().catch(() => undefined);
     } catch (error) {
       setUploadError((error as Error).message || '上传失败');
@@ -137,96 +133,52 @@ export function HomeView() {
             <p className="text-xs uppercase tracking-[0.2em] text-brand-500">Issue 操作</p>
             <h2 className="text-lg font-semibold text-white">创建 / 上传 / 查询</h2>
           </div>
-          {issueData ? (
-            <span className="rounded-full bg-slate-900 px-3 py-1 text-xs text-slate-300">
-              {issueData.log_bundles.length} 个 bundle
-            </span>
-          ) : null}
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-white">Issue 列表</h3>
-              {issueData ? <span className="text-xs text-slate-400">{issueData.log_bundles.length} 个 bundle</span> : null}
-            </div>
-
-            <form onSubmit={handleIssueLookup} className="flex flex-col gap-3 sm:flex-row">
-              <input
-                className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                placeholder="查询 Issue ID，例如 CN013"
-                value={issueId}
-                onChange={(event) => setIssueId(event.target.value)}
-              />
-              <button
-                type="submit"
-                className="rounded-lg bg-brand-500 px-6 py-2 font-semibold text-slate-900 transition hover:bg-brand-700"
-                disabled={issueLoading}
-              >
-                {issueLoading ? '加载中...' : '查询'}
-              </button>
-            </form>
-
-            {issueError ? <p className="text-sm text-rose-300">{issueError}</p> : null}
             <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-sm font-semibold text-white">所有 Issue</h4>
-                <button
-                  type="button"
-                  onClick={() => loadIssues().catch(() => undefined)}
-                  className="text-xs text-brand-300 hover:text-brand-200"
-                  disabled={issuesLoading}
-                >
-                  {issuesLoading ? '刷新中...' : '刷新'}
-                </button>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <h4 className="text-sm font-semibold text-white">Issue 列表</h4>
               </div>
+              <input
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+                placeholder="输入 Issue ID，例如 CN013"
+                value={issueFilter}
+                onChange={(event) => setIssueFilter(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    openIssue(issueFilter).catch(() => undefined);
+                  }
+                }}
+              />
+              {issueError ? <p className="text-sm text-rose-300">{issueError}</p> : null}
               {issuesError ? <p className="text-xs text-rose-300">{issuesError}</p> : null}
               <div className="max-h-56 space-y-1 overflow-y-auto text-sm">
-                {issues.length === 0 && !issuesLoading ? (
-                  <p className="text-xs text-slate-500">暂无 Issue</p>
-                ) : (
-                  issues.map((item) => (
+                {issues
+                  .filter((item) => {
+                    const filter = issueFilter.trim().toLowerCase();
+                    if (!filter) return true;
+                    return item.code.toLowerCase().includes(filter) || item.name.toLowerCase().includes(filter);
+                  })
+                  .map((item) => (
                     <button
                       key={item.code}
                       type="button"
-                      onClick={() => {
-                        setIssueId(item.code);
-                        setUploadIssueId(item.code);
-                        fetchIssueBundles(item.code).catch(() => undefined);
-                      }}
+                      onDoubleClick={() => openIssue(item.code).catch(() => undefined)}
                       className="flex w-full items-center justify-between rounded-lg border border-transparent px-3 py-2 text-left transition hover:border-slate-700 hover:bg-slate-900/70"
+                      disabled={issueLoading}
                     >
                       <span className="font-semibold text-white">{item.code}</span>
-                      <span className="text-xs text-slate-400">{item.bundle_count} 个 bundle</span>
+                      <div className="text-right text-xs text-slate-400">
+                        <p>{item.bundle_count} 个 bundle</p>
+                        <p className="text-[10px] text-slate-500">双击打开</p>
+                      </div>
                     </button>
-                  ))
-                )}
+                  ))}
               </div>
             </div>
-
-            {issueData ? (
-              <div className="grid gap-3">
-                {issueData.log_bundles.map((bundle) => {
-                  return (
-                    <button
-                      key={bundle.hash}
-                      type="button"
-                      onClick={() => navigateToBundle(bundle.hash, issueData?.name ?? issueId, bundle.name)}
-                      className="flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-900/70 px-4 py-3 text-left transition hover:border-slate-700 hover:bg-slate-900/80"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 space-y-1">
-                          <p className="truncate text-base font-semibold text-white">{bundle.name}</p>
-                          <p className="truncate font-mono text-[11px] text-slate-500">{bundle.hash}</p>
-                        </div>
-                        <StatusBadge status={bundle.status.upload_status} />
-                      </div>
-                      <p className="text-xs text-slate-500">点击进入文件页面。</p>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
           </div>
 
           <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
