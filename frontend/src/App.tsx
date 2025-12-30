@@ -1,54 +1,40 @@
 import { useState } from 'react';
-import { NavTabs } from './components/NavTabs';
 import { FilesView } from './features/files/FilesView';
-import { LogsView } from './features/logs/LogsView';
 import type { BundleInfo } from './lib/bundles';
 import './App.css';
 
-type TabId = 'files' | 'logs';
-
-const tabs: { id: TabId; label: string; hint: string }[] = [
-  { id: 'files', label: 'Files View', hint: '浏览上传结构' },
-  { id: 'logs', label: 'Logs View', hint: '全文搜索日志' }
-];
-
 function App() {
-  const [activeTab, setActiveTab] = useState<TabId>('files');
   const [activeBundle, setActiveBundle] = useState<BundleInfo | null>(null);
-  const [recentBundles, setRecentBundles] = useState<BundleInfo[]>([]);
 
   const handleBundleSelected = (bundle: BundleInfo) => {
     setActiveBundle(bundle);
-    setRecentBundles((prev) => {
-      const filtered = prev.filter((item) => item.hash !== bundle.hash);
-      return [bundle, ...filtered].slice(0, 6);
-    });
   };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-6xl items-start justify-between gap-4 px-6 py-6">
           <div>
-            <p className="text-sm uppercase tracking-[0.3em] text-brand-500">Rain</p>
-            <h1 className="text-2xl font-semibold text-white">日志解析控制台</h1>
+            <p className="text-xs uppercase tracking-[0.3em] text-brand-500">Rain</p>
+            <h1 className="text-3xl font-semibold text-white">Issue 控制台</h1>
+            <p className="mt-1 text-sm text-slate-400">创建 Issue、上传文件后，直接在同一界面浏览结构与预览文本。</p>
           </div>
-        </div>
-        <div className="mx-auto max-w-6xl px-6">
-          <NavTabs tabs={tabs} activeId={activeTab} onChange={setActiveTab} />
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm text-slate-300">
+            <p className="text-xs uppercase tracking-wide text-slate-500">当前选择</p>
+            {activeBundle ? (
+              <div className="mt-1 space-y-1">
+                <p className="font-semibold text-white">{activeBundle.issue ?? '未命名 Issue'}</p>
+                <p className="font-mono text-xs text-slate-400">{activeBundle.hash}</p>
+              </div>
+            ) : (
+              <p className="mt-1 text-slate-500">尚未选择 Issue/Bundles，上传或查询后自动定位。</p>
+            )}
+          </div>
         </div>
       </header>
 
       <main className="mx-auto max-w-6xl px-6 py-6">
-        {activeTab === 'files' ? (
-          <FilesView activeBundle={activeBundle} onBundleSelected={handleBundleSelected} />
-        ) : (
-          <LogsView
-            activeBundle={activeBundle}
-            recentBundles={recentBundles}
-            onBundleSelected={handleBundleSelected}
-          />
-        )}
+        <FilesView activeBundle={activeBundle} onBundleSelected={handleBundleSelected} />
       </main>
     </div>
   );
