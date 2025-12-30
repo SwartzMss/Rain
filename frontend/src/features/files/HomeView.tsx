@@ -1,8 +1,10 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rainApi } from '../../api/client';
-import type { IssueBundlesResponse, UploadResponse } from '../../api/types';
+import type { IssueBundlesResponse, IssueSummary, UploadResponse } from '../../api/types';
 import { StatusBadge } from '../../components/StatusBadge';
+
+const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
 
 const formatBytes = (bytes: number) => {
   if (!bytes) return '0 B';
@@ -20,12 +22,49 @@ export function HomeView() {
   const [issueData, setIssueData] = useState<IssueBundlesResponse | null>(null);
   const [issueLoading, setIssueLoading] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
+  const [issues, setIssues] = useState<IssueSummary[]>([]);
+  const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issuesError, setIssuesError] = useState<string | null>(null);
 
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
+
+  useEffect(() => {
+    const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
+    if (stored) {
+      setIssueId(stored);
+      setUploadIssueId(stored);
+    }
+  }, []);
+
+  useEffect(() => {
+    const trimmed = issueId.trim();
+    if (trimmed) {
+      localStorage.setItem(LAST_ISSUE_STORAGE_KEY, trimmed);
+    } else {
+      localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
+    }
+  }, [issueId]);
+
+  const loadIssues = useCallback(async () => {
+    setIssuesLoading(true);
+    setIssuesError(null);
+    try {
+      const data = await rainApi.fetchIssues();
+      setIssues(data);
+    } catch (error) {
+      setIssuesError((error as Error).message || '加载 Issue 列表失败');
+    } finally {
+      setIssuesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadIssues().catch(() => undefined);
+  }, [loadIssues]);
 
   const fetchIssueBundles = async (value: string) => {
     const trimmed = value.trim();
@@ -81,7 +120,7 @@ export function HomeView() {
       setSelectedFiles(null);
       setFileInputKey((key) => key + 1);
       await fetchIssueBundles(response.issue_code).catch(() => undefined);
-      navigateToBundle(response.bundle_hash, response.issue_code, response.bundle_hash);
+      loadIssues().catch(() => undefined);
     } catch (error) {
       setUploadError((error as Error).message || '上传失败');
       setUploadSuccess(null);
@@ -129,6 +168,41 @@ export function HomeView() {
             </form>
 
             {issueError ? <p className="text-sm text-rose-300">{issueError}</p> : null}
+            <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-semibold text-white">所有 Issue</h4>
+                <button
+                  type="button"
+                  onClick={() => loadIssues().catch(() => undefined)}
+                  className="text-xs text-brand-300 hover:text-brand-200"
+                  disabled={issuesLoading}
+                >
+                  {issuesLoading ? '刷新中...' : '刷新'}
+                </button>
+              </div>
+              {issuesError ? <p className="text-xs text-rose-300">{issuesError}</p> : null}
+              <div className="max-h-56 space-y-1 overflow-y-auto text-sm">
+                {issues.length === 0 && !issuesLoading ? (
+                  <p className="text-xs text-slate-500">暂无 Issue</p>
+                ) : (
+                  issues.map((item) => (
+                    <button
+                      key={item.code}
+                      type="button"
+                      onClick={() => {
+                        setIssueId(item.code);
+                        setUploadIssueId(item.code);
+                        fetchIssueBundles(item.code).catch(() => undefined);
+                      }}
+                      className="flex w-full items-center justify-between rounded-lg border border-transparent px-3 py-2 text-left transition hover:border-slate-700 hover:bg-slate-900/70"
+                    >
+                      <span className="font-semibold text-white">{item.code}</span>
+                      <span className="text-xs text-slate-400">{item.bundle_count} 个 bundle</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
 
             {issueData ? (
               <div className="grid gap-3">
@@ -199,7 +273,7 @@ export function HomeView() {
                 className="rounded-lg bg-brand-500 px-5 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
                 disabled={uploading}
               >
-                {uploading ? '上传中...' : '上传并打开'}
+                {uploading ? '上传中...' : '上传'}
               </button>
             </div>
             {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}

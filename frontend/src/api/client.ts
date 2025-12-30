@@ -2,6 +2,7 @@ import type {
   FileContentResponse,
   FileNodeResponse,
   IssueBundlesResponse,
+  IssueSummary,
   LogSearchResponse,
   UploadResponse
 } from './types';
@@ -34,6 +35,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const rainApi = {
+  fetchIssues() {
+    return request<IssueSummary[]>(`/api/issues`);
+  },
   fetchIssueBundles(issueId: string) {
     return request<IssueBundlesResponse>(`/api/issues/${issueId}`);
   },

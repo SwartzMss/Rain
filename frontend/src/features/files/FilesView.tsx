@@ -1,13 +1,8 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { rainApi } from '../../api/client';
-import type { FileContentResponse, FileNode, IssueBundlesResponse, UploadResponse } from '../../api/types';
-import { StatusBadge } from '../../components/StatusBadge';
+import type { FileContentResponse, FileNode } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
-
-interface FilesViewProps {
-  activeBundle: BundleInfo | null;
-  onBundleSelected: (bundle: BundleInfo) => void;
-}
 
 type TreeNode = Omit<FileNode, 'id' | 'children'> & {
   id: string;
@@ -55,20 +50,19 @@ const nodeTypeLabel = (node: TreeNode) => {
   return '文件';
 };
 
-export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
-  const [issueId, setIssueId] = useState('');
-  const [uploadIssueId, setUploadIssueId] = useState('');
-  const [issueData, setIssueData] = useState<IssueBundlesResponse | null>(null);
-  const [issueLoading, setIssueLoading] = useState(false);
-  const [issueError, setIssueError] = useState<string | null>(null);
+export function BundleView() {
+  const { bundleHash = '' } = useParams<{ bundleHash: string }>();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const locationState = (location.state as { issue?: string; bundleName?: string } | null) ?? null;
 
-  const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
-  const [fileInputKey, setFileInputKey] = useState(0);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
+  const activeBundle: BundleInfo = {
+    hash: bundleHash,
+    name: locationState?.bundleName || bundleHash,
+    issue: locationState?.issue
+  };
 
-  const bundleId = activeBundle?.hash ?? '';
+  const bundleId = activeBundle.hash || '';
   const [treeNodes, setTreeNodes] = useState<Record<string, TreeNode>>({});
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -78,23 +72,6 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
   const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
   const [fileContentLoading, setFileContentLoading] = useState(false);
   const [fileContentError, setFileContentError] = useState<string | null>(null);
-
-  const fetchIssueBundles = async (value: string) => {
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    setIssueLoading(true);
-    setIssueError(null);
-    try {
-      const data = await rainApi.fetchIssueBundles(trimmed);
-      setIssueData(data);
-    } catch (error) {
-      setIssueError((error as Error).message || '查询失败');
-      setIssueData(null);
-      throw error;
-    } finally {
-      setIssueLoading(false);
-    }
-  };
 
   const toTreeNode = (node: FileNode, parentId: string | null = null): TreeNode => ({
     id: node.id.toString(),
@@ -215,50 +192,15 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
     setSelectedNodeId(node.id);
   };
 
-  const handleIssueLookup = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!issueId.trim()) return;
-    await fetchIssueBundles(issueId).catch(() => undefined);
-  };
-
-  const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!uploadIssueId.trim()) {
-      setUploadError('请输入 Issue ID');
-      return;
-    }
-    if (!selectedFiles || selectedFiles.length === 0) {
-      setUploadError('请至少选择一个文件');
-      return;
-    }
-    setUploading(true);
-    setUploadError(null);
-    setUploadSuccess(null);
-    try {
-      const response = await rainApi.uploadLogs(uploadIssueId.trim(), Array.from(selectedFiles));
-      setUploadSuccess(response);
-      setIssueId(response.issue_code);
-      setUploadIssueId(response.issue_code);
-      setSelectedFiles(null);
-      setFileInputKey((key) => key + 1);
-      await fetchIssueBundles(response.issue_code).catch(() => undefined);
-      onBundleSelected({
-        hash: response.bundle_hash,
-        name: response.bundle_hash,
-        issue: response.issue_code
-      });
-    } catch (error) {
-      setUploadError((error as Error).message || '上传失败');
-      setUploadSuccess(null);
-    } finally {
-      setUploading(false);
-    }
-  };
-
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const selectedChildren = selectedNode?.childrenIds
     ?.map((childId) => treeNodes[childId])
     .filter((child): child is TreeNode => Boolean(child));
+
+  const activeIssueLabel = activeBundle.issue || '未知 Issue';
+  const activeBundleLabel = bundleId || '未选择';
+  const activeNodeLabel = selectedNode?.name || '未选择文件';
+  const activeNodePath = selectedNode?.path || '选择文件后显示路径';
 
   useEffect(() => {
     setFileContent(null);
@@ -338,71 +280,32 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
 
   return (
     <div className="space-y-6">
-      <section className="panel space-y-6">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+      <section className="panel">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-brand-500">Step 1</p>
-            <h2 className="text-lg font-semibold text-white">创建 Issue / 上传文件</h2>
-            <p className="text-sm text-slate-400">同一界面完成 Issue 创建与文件上传，上传完成后自动跳转到对应文件结构。</p>
+            <p className="text-xs uppercase tracking-[0.2em] text-brand-500">文件界面</p>
+            <h2 className="text-lg font-semibold text-white">Bundle 文件树 / 预览</h2>
           </div>
-          {uploadSuccess ? (
-            <div className="rounded-lg border border-emerald-600/40 bg-emerald-500/10 px-4 py-3 text-xs text-emerald-200">
-              <p className="font-semibold">上传成功</p>
-              <p>Issue：{uploadSuccess.issue_code}</p>
-              <p className="font-mono text-[11px] text-emerald-100">{uploadSuccess.bundle_hash}</p>
-              <p>文件 {uploadSuccess.file_count} 个 · 共 {(uploadSuccess.total_bytes / 1024).toFixed(1)} KB</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigate('/')}
+              className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-slate-700 hover:bg-slate-800"
+            >
+              返回工作台
+            </button>
+            <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
+              <p className="text-[10px] uppercase text-slate-500">Issue</p>
+              <p className="font-semibold text-white">{activeIssueLabel}</p>
             </div>
-          ) : null}
-        </div>
-
-        <div className="grid gap-4 lg:grid-cols-[1.4fr_minmax(0,1fr)]">
-          <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-            <label className="block text-sm text-slate-300">
-              Issue ID
-              <input
-                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                placeholder="例如 CN013（若不存在将自动创建）"
-                value={uploadIssueId}
-                onChange={(event) => setUploadIssueId(event.target.value)}
-              />
-            </label>
-            <div className="space-y-2">
-              <label className="block text-sm text-slate-300">上传日志 / 压缩包</label>
-              <input
-                key={fileInputKey}
-                type="file"
-                multiple
-                onChange={(event) => setSelectedFiles(event.target.files)}
-                className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-2 text-sm text-slate-300 file:mr-4 file:rounded-md file:border-0 file:bg-brand-500 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-slate-900"
-              />
-              <p className="text-xs text-slate-500">
-                {selectedFiles?.length
-                  ? `已选择 ${selectedFiles.length} 个文件`
-                  : '支持 .log/.txt/.zip，压缩包会自动解压成目录结构。'}
-              </p>
+            <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
+              <p className="text-[10px] uppercase text-slate-500">Bundle</p>
+              <p className="font-mono text-[11px] text-white">{activeBundleLabel}</p>
             </div>
-            <div className="flex items-center justify-between text-xs text-slate-500">
-              <span>新建 Issue 将自动写入数据库并生成 bundle。</span>
-              <button
-                type="submit"
-                className="rounded-lg bg-brand-500 px-5 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
-                disabled={uploading}
-              >
-                {uploading ? '上传中...' : '上传并进入'}
-              </button>
-            </div>
-            {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
-          </form>
-
-          <div className="space-y-3 rounded-lg border border-dashed border-slate-800 bg-slate-900/40 p-4">
-            <p className="text-sm font-semibold text-white">操作提示</p>
-            <ul className="space-y-2 text-sm text-slate-300">
-              <li>1. 输入想要的 Issue ID，系统不存在时会自动创建。</li>
-              <li>2. 选择单个文件或压缩包，可一次选择多个条目。</li>
-              <li>3. 点击“上传并进入”后，会自动定位到该 Issue / Bundle。</li>
-            </ul>
-            <div className="text-xs text-slate-500">
-              需要查看历史上传？在下方输入 Issue ID 即可列出所有 bundle，点击即可进入子界面。
+            <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
+              <p className="text-[10px] uppercase text-slate-500">当前节点</p>
+              <p className="truncate text-white">{activeNodeLabel}</p>
+              <p className="truncate font-mono text-[10px] text-slate-500">{activeNodePath}</p>
             </div>
           </div>
         </div>
@@ -411,87 +314,9 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
       <section className="panel space-y-4">
         <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-brand-500">Step 2</p>
-            <h2 className="text-lg font-semibold text-white">选择 Issue / Bundle</h2>
-            <p className="text-sm text-slate-400">输入 Issue ID 列出上传记录，点击即可进入文件结构子界面。</p>
-          </div>
-          {issueData ? (
-            <span className="rounded-full bg-slate-900 px-3 py-1 text-xs text-slate-300">
-              {issueData.log_bundles.length} 个 bundle
-            </span>
-          ) : null}
-        </div>
-
-        <form onSubmit={handleIssueLookup} className="flex flex-col gap-3 sm:flex-row">
-          <input
-            className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-            placeholder="Issue ID，例如 CN013"
-            value={issueId}
-            onChange={(event) => setIssueId(event.target.value)}
-          />
-          <button
-            type="submit"
-            className="rounded-lg bg-brand-500 px-6 py-2 font-semibold text-slate-900 transition hover:bg-brand-700"
-            disabled={issueLoading}
-          >
-            {issueLoading ? '加载中...' : '查询'}
-          </button>
-        </form>
-
-        {issueError ? <p className="text-sm text-rose-300">{issueError}</p> : null}
-
-        {issueData ? (
-          <div className="grid gap-3 md:grid-cols-2">
-            {issueData.log_bundles.map((bundle) => {
-              const isActive = bundle.hash === bundleId;
-              return (
-                <button
-                  key={bundle.hash}
-                  type="button"
-                  onClick={() =>
-                    onBundleSelected({
-                      hash: bundle.hash,
-                      name: bundle.name,
-                      issue: issueData?.name ?? issueId
-                    })
-                  }
-                  className={[
-                    'flex flex-col gap-2 rounded-lg border px-4 py-3 text-left transition',
-                    isActive
-                      ? 'border-brand-500/70 bg-slate-900 shadow-sm'
-                      : 'border-slate-800 bg-slate-900/50 hover:border-slate-700 hover:bg-slate-900/70'
-                  ].join(' ')}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0 space-y-1">
-                      <p className="truncate text-base font-semibold text-white">
-                        {bundle.name}
-                        {isActive ? <span className="ml-2 text-xs text-brand-400">当前</span> : null}
-                      </p>
-                      <p className="truncate font-mono text-[11px] text-slate-500">{bundle.hash}</p>
-                    </div>
-                    <StatusBadge status={bundle.status.upload_status} />
-                  </div>
-                  <p className="text-xs text-slate-500">点击进入，展开文件树并预览上传文件。</p>
-                </button>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="rounded-lg border border-dashed border-slate-800 bg-slate-950/40 p-4 text-sm text-slate-500">
-            上传完成或查询 Issue 后，这里会展示对应的 bundle 列表。
-          </div>
-        )}
-      </section>
-
-      <section className="panel space-y-4">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-brand-500">Step 3</p>
-            <h2 className="text-lg font-semibold text-white">文件结构 / 预览</h2>
-            <p className="text-sm text-slate-400">
-              选择 Issue 后进入子界面：左侧用图标区分目录 / 压缩包 / 文件，右侧展示文本预览；二进制则提示不支持。
-            </p>
+            <p className="text-xs uppercase tracking-[0.2em] text-brand-500">步骤</p>
+            <h2 className="text-lg font-semibold text-white">左侧树 / 右侧预览</h2>
+            <p className="text-sm text-slate-400">点击目录或文件，右侧保持独立预览区域；ZIP 会拆解成目录。</p>
           </div>
           {bundleId ? (
             <div className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
@@ -502,23 +327,21 @@ export function FilesView({ activeBundle, onBundleSelected }: FilesViewProps) {
 
         {treeError ? <p className="text-sm text-rose-300">{treeError}</p> : null}
 
-        <div className="grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
           <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
             {bundleId ? (
               treeNodes['root'] ? (
                 <div className="space-y-2 text-sm text-slate-200">
-                  <p className="mb-2 text-xs text-slate-500">
-                    点击目录展开子节点；ZIP 会被拆成多级目录。
-                  </p>
+                  <p className="mb-2 text-xs text-slate-500">点击目录展开子节点；ZIP 会被拆成多级目录。</p>
                   {renderTreeNode('root')}
                 </div>
               ) : treeLoading ? (
                 <p className="text-sm text-slate-400">文件树加载中...</p>
               ) : (
-                <p className="text-sm text-slate-500">选择上方的 bundle 后自动加载文件树。</p>
+                <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
               )
             ) : (
-              <p className="text-sm text-slate-500">先在上方选择 Issue / Bundle。</p>
+              <p className="text-sm text-slate-500">先选择 Issue / Bundle。</p>
             )}
           </div>
 

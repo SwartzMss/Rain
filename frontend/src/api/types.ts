@@ -14,6 +14,12 @@ export interface IssueBundlesResponse {
   log_bundles: UploadSummary[];
 }
 
+export interface IssueSummary {
+  code: string;
+  name: string;
+  bundle_count: number;
+}
+
 export interface FileNode {
   id: number | string;
   name: string;

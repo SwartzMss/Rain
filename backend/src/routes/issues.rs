@@ -5,10 +5,30 @@ use sqlx::FromRow;
 use crate::{
     AppState,
     error::AppError,
-    models::issues::{IssueBundlesResponse, UploadStatus, UploadStatusWrapper},
+    models::issues::{IssueBundlesResponse, IssueSummary, UploadStatus, UploadStatusWrapper},
 };
 
 // scoped under /api in routes::register, so keep relative paths here
+#[get("/issues")]
+pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
+    let rows = sqlx::query_as::<_, IssueSummary>(
+        r#"
+        SELECT
+            code,
+            name,
+            (SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code) AS bundle_count
+        FROM issues
+        ORDER BY code DESC
+        LIMIT 200
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(HttpResponse::Ok().json(rows))
+}
+
 #[get("/issues/{issue_id}")]
 pub async fn get_issue_bundles(
     path: web::Path<String>,

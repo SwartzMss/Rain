@@ -10,6 +10,7 @@ mod uploads;
 pub fn register(cfg: &mut web::ServiceConfig) {
     cfg.service(health::health).service(
         web::scope("/api")
+            .service(issues::list_issues)
             .service(issues::get_issue_bundles)
             .service(files::get_file_node)
             .service(files::get_file_content)

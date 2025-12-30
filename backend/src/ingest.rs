@@ -244,6 +244,11 @@ async fn ingest_text_file(
         if trimmed.is_empty() {
             continue;
         }
+        // Postgres rejects strings containing null bytes, so strip them from ingested content.
+        let cleaned = trimmed.replace('\0', "");
+        if cleaned.is_empty() {
+            continue;
+        }
         sqlx::query(
             r#"
             INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset)
@@ -253,7 +258,7 @@ async fn ingest_text_file(
         .bind(bundle_id)
         .bind(file_id)
         .bind(Some("all".to_string()))
-        .bind(trimmed)
+        .bind(cleaned)
         .bind(Some(index as i64))
         .execute(pool)
         .await

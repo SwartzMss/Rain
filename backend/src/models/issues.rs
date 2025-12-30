@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -26,6 +27,13 @@ pub struct IssueBundlesResponse {
     pub name: String,
     #[serde(rename = "log_bundles")]
     pub log_bundles: Vec<UploadSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct IssueSummary {
+    pub code: String,
+    pub name: String,
+    pub bundle_count: i64,
 }
 
 impl UploadStatus {
