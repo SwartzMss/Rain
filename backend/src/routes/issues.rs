@@ -8,7 +8,8 @@ use crate::{
     models::issues::{IssueBundlesResponse, UploadStatus, UploadStatusWrapper},
 };
 
-#[get("/api/issues/{issue_id}")]
+// scoped under /api in routes::register, so keep relative paths here
+#[get("/issues/{issue_id}")]
 pub async fn get_issue_bundles(
     path: web::Path<String>,
     state: web::Data<AppState>,
@@ -23,7 +24,7 @@ pub async fn get_issue_bundles(
             .ok_or_else(|| AppError::NotFound(format!("issue {issue_code}")))?;
 
     let rows = sqlx::query_as::<_, BundleRow>(
-        "SELECT hash, name, status FROM bundles WHERE issue_code = $1 ORDER BY created_at DESC",
+        "SELECT hash, name, status::text AS status FROM bundles WHERE issue_code = $1 ORDER BY created_at DESC",
     )
     .bind(&issue.code)
     .fetch_all(&state.pool)

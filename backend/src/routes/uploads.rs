@@ -12,7 +12,8 @@ use crate::{
 
 use super::issues::ensure_issue;
 
-#[post("/api/uploads")]
+// scoped under /api in routes::register, so use relative path
+#[post("/uploads")]
 pub async fn upload_logs(
     state: web::Data<AppState>,
     mut payload: Multipart,
@@ -40,6 +41,7 @@ pub async fn upload_logs(
                     .unwrap_or_else(|| "upload.log".into());
 
                 let content_type = field.content_type().map(|mime| mime.to_string());
+
                 let bytes = collect_binary_field(&mut field).await?;
 
                 if !bytes.is_empty() {

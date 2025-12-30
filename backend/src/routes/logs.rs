@@ -22,7 +22,8 @@ struct LogQuery {
     size: Option<i64>,
 }
 
-#[get("/api/log/v2/{bundle_id}/search")]
+// scoped under /api in routes::register
+#[get("/log/v2/{bundle_id}/search")]
 pub async fn search_logs(
     path: web::Path<String>,
     query: web::Query<LogQuery>,

@@ -22,7 +22,8 @@ struct FilePath {
     file_id: String,
 }
 
-#[get("/api/files/v1/{bundle_id}/files/{file_id}")]
+// scoped under /api in routes::register
+#[get("/files/v1/{bundle_id}/files/{file_id}")]
 pub async fn get_file_node(
     params: web::Path<FilePath>,
     state: web::Data<AppState>,
@@ -69,7 +70,7 @@ pub async fn get_file_node(
     Ok(HttpResponse::Ok().json(FileNodeResponse { node, children }))
 }
 
-#[get("/api/files/v1/{bundle_id}/files/{file_id}/content")]
+#[get("/files/v1/{bundle_id}/files/{file_id}/content")]
 pub async fn get_file_content(
     params: web::Path<FilePath>,
     state: web::Data<AppState>,
@@ -128,7 +129,7 @@ pub async fn fetch_file(
 ) -> Result<FileRow, AppError> {
     sqlx::query_as::<_, FileRow>(
         r#"
-        SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
+        SELECT id, name, path, is_dir, size_bytes, mime_type, status::text AS status, meta
         FROM files
         WHERE bundle_id = $1 AND id = $2
         LIMIT 1
@@ -150,7 +151,7 @@ pub async fn fetch_children(
     if let Some(parent) = parent_id {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
+            SELECT id, name, path, is_dir, size_bytes, mime_type, status::text AS status, meta
             FROM files
             WHERE bundle_id = $1 AND parent_id = $2
             ORDER BY is_dir DESC, name ASC
@@ -163,7 +164,7 @@ pub async fn fetch_children(
     } else {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
+            SELECT id, name, path, is_dir, size_bytes, mime_type, status::text AS status, meta
             FROM files
             WHERE bundle_id = $1 AND parent_id IS NULL
             ORDER BY is_dir DESC, name ASC
