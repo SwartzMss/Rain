@@ -127,6 +127,8 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_http_version 1.1;
+        client_max_body_size 200m;
+        proxy_request_buffering off;
     }
 
     location /ws/ {
