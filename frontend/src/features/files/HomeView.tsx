@@ -64,30 +64,15 @@ export function HomeView() {
     loadIssues().catch(() => undefined);
   }, [loadIssues]);
 
-  const navigateToBundle = (hash: string, issueCode?: string, bundleName?: string) => {
-    if (!hash) return;
-    navigate(`/bundle/${hash}`, {
-      state: {
-        issue: issueCode || uploadIssueId || issueId || undefined,
-        bundleName: bundleName || hash
-      }
-    });
-  };
-
   const openIssue = async (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return;
     setIssueLoading(true);
     setIssueError(null);
     try {
-      const data = await rainApi.fetchIssueBundles(trimmed);
-      const firstBundle = data.log_bundles[0];
-      if (!firstBundle) {
-        setIssueError('该 Issue 暂无 bundle');
-        return;
-      }
+      await rainApi.fetchIssueBundles(trimmed);
       setIssueId(trimmed);
-      navigateToBundle(firstBundle.hash, data.name ?? trimmed, firstBundle.name);
+      navigate(`/issue/${trimmed}`);
     } catch (error) {
       setIssueError((error as Error).message || '查询失败');
     } finally {
@@ -171,10 +156,7 @@ export function HomeView() {
                       disabled={issueLoading}
                     >
                       <span className="font-semibold text-white">{item.code}</span>
-                      <div className="text-right text-xs text-slate-400">
-                        <p>{item.bundle_count} 个 bundle</p>
-                        <p className="text-[10px] text-slate-500">双击打开</p>
-                      </div>
+                      <span className="text-[10px] text-slate-500">双击打开</span>
                     </button>
                   ))}
               </div>

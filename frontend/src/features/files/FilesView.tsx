@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import { rainApi } from '../../api/client';
 import type { FileContentResponse, FileNode } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
 
 type TreeNode = Omit<FileNode, 'id' | 'children'> & {
   id: string;
+  rawId: string;
+  bundleId: string;
   parentId: string | null;
   childrenIds: string[];
   hasLoadedChildren: boolean;
 };
 
 const archivePattern = /\.(zip|tar|gz|tgz|rar|7z)$/i;
-const textualMimeHints = ['text', 'json', 'xml', 'yaml', 'yml', 'html', 'csv', 'javascript', 'typescript', 'css', 'shell', 'markdown'];
-
 const isArchiveNode = (node?: { name: string }) => (node?.name ? archivePattern.test(node.name) : false);
 
 const formatSize = (bytes?: number) => {
@@ -29,52 +29,52 @@ const formatSize = (bytes?: number) => {
   return `${fixed} ${units[unit]}`;
 };
 
-const canPreviewAsText = (node: TreeNode | null, content: FileContentResponse | null) => {
-  const mime = (content?.mime_type ?? node?.mime_type ?? '').toLowerCase();
-  if (mime && textualMimeHints.some((hint) => mime.includes(hint))) {
-    return true;
-  }
-  if (content?.preview) {
-    const sample = content.preview.slice(0, 2000);
-    const controlMatches = sample.match(/[^\x09\x0A\x0D\x20-\x7E]/g);
-    if (!controlMatches) return true;
-    const ratio = controlMatches.length / sample.length;
-    return ratio < 0.05;
-  }
-  return false;
-};
-
 const nodeTypeLabel = (node: TreeNode) => {
   if (node.is_dir) return '目录';
   if (isArchiveNode(node)) return '压缩包';
   return '文件';
 };
 
-export function BundleView() {
-  const { bundleHash = '' } = useParams<{ bundleHash: string }>();
+const isExtractionFolder = (node: TreeNode, parent?: TreeNode | null) => {
+  if (!node.is_dir || !node.name.toLowerCase().endsWith('_extracted')) return false;
+  return parent ? isArchiveNode(parent) : false;
+};
+
+type BundleViewProps = {
+  legacyBundleHash?: string;
+  legacyState?: unknown;
+};
+
+export function BundleView(props?: BundleViewProps) {
+  const params = useParams<{ issueCode?: string; bundleHash?: string }>();
+  const bundleHash = params.bundleHash || props?.legacyBundleHash || '';
+  const issueCodeFromRoute = params.issueCode;
   const location = useLocation();
-  const navigate = useNavigate();
-  const locationState = (location.state as { issue?: string; bundleName?: string } | null) ?? null;
+  const locationState = (location.state as { issue?: string; bundleName?: string } | null) ?? (props?.legacyState as
+    | { issue?: string; bundleName?: string }
+    | null);
 
   const activeBundle: BundleInfo = {
     hash: bundleHash,
     name: locationState?.bundleName || bundleHash,
-    issue: locationState?.issue
+    issue: issueCodeFromRoute || locationState?.issue
   };
 
   const bundleId = activeBundle.hash || '';
+  const [rootIds, setRootIds] = useState<string[]>([]);
   const [treeNodes, setTreeNodes] = useState<Record<string, TreeNode>>({});
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
-  const [initializedBundleId, setInitializedBundleId] = useState<string>('');
   const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
   const [fileContentLoading, setFileContentLoading] = useState(false);
   const [fileContentError, setFileContentError] = useState<string | null>(null);
 
-  const toTreeNode = (node: FileNode, parentId: string | null = null): TreeNode => ({
-    id: node.id.toString(),
+  const toTreeNode = (bundleId: string, node: FileNode, parentId: string | null = null): TreeNode => ({
+    id: `${bundleId}:${node.id.toString()}`,
+    rawId: node.id.toString(),
+    bundleId,
     parentId,
     name: node.name,
     path: node.path,
@@ -88,33 +88,55 @@ export function BundleView() {
   });
 
   const loadNode = useCallback(
-    async (bundle: string, nodeId: string, parentId: string | null = null): Promise<TreeNode | null> => {
+    async (
+      bundle: string,
+      nodeId: string,
+      parentId: string | null = null
+    ): Promise<{ node: TreeNode; children: TreeNode[] } | null> => {
       if (!bundle) return null;
       setTreeLoading(true);
       setTreeError(null);
       try {
         const response = await rainApi.fetchFileNode(bundle, nodeId);
         let normalized: TreeNode | null = null;
+        const childrenNodes: TreeNode[] = [];
+        const key = response.node.id.toString();
+        const inferredParent = parentId ?? null;
+        const base = toTreeNode(bundle, response.node, inferredParent);
+        base.hasLoadedChildren = true;
+
+        // flatten extraction folders under archives
+        for (const child of response.children ?? []) {
+          const childNode = toTreeNode(bundle, child, base.id);
+          const parentForChild = base;
+          if (isExtractionFolder(childNode, parentForChild)) {
+            try {
+              const extracted = await rainApi.fetchFileNode(bundle, child.id.toString());
+              (extracted.children ?? []).forEach((grand) => {
+                const grandNode = toTreeNode(bundle, grand, base.id);
+                childrenNodes.push(grandNode);
+              });
+            } catch {
+              // ignore extraction load errors
+            }
+          } else {
+            childrenNodes.push(childNode);
+          }
+        }
+
+        base.childrenIds = childrenNodes.map((child) => child.id);
+        normalized = base;
 
         setTreeNodes((prev) => {
           const next = { ...prev };
-          const key = response.node.id.toString();
-          const inferredParent = next[key]?.parentId ?? parentId ?? null;
-          const base = toTreeNode(response.node, inferredParent);
-          base.hasLoadedChildren = true;
-          base.childrenIds = (response.children ?? []).map((child) => child.id.toString());
-          normalized = base;
-          next[key] = base;
-
-          (response.children ?? []).forEach((child) => {
-            const childId = child.id.toString();
-            next[childId] = toTreeNode(child, base.id);
+          next[base.id] = base;
+          childrenNodes.forEach((child) => {
+            next[child.id] = child;
           });
-
           return next;
         });
 
-        return normalized;
+        return normalized ? { node: normalized, children: childrenNodes } : null;
       } catch (error) {
         setTreeError((error as Error).message || '加载文件树失败');
         throw error;
@@ -126,57 +148,98 @@ export function BundleView() {
   );
 
   useEffect(() => {
-    const selectedBundle = bundleId;
-    if (!selectedBundle) {
-      setTreeNodes({});
-      setExpandedNodes(new Set());
-      setSelectedNodeId(null);
-      setInitializedBundleId('');
-      setTreeError(null);
-      return;
-    }
-    if (selectedBundle === initializedBundleId) {
-      return;
-    }
+    const issueCode = issueCodeFromRoute || locationState?.issue || '';
+    const fallbackBundles = bundleId ? [{ hash: bundleId, name: activeBundle.name }] : [];
+
     let ignore = false;
     const init = async () => {
+      setTreeLoading(true);
+      setTreeError(null);
       setTreeNodes({});
       setExpandedNodes(new Set());
+      setRootIds([]);
       setSelectedNodeId(null);
-      setTreeError(null);
-      try {
-        const rootNode = await loadNode(selectedBundle, 'root', null);
-        if (!ignore && rootNode) {
-          const rootTree = rootNode as TreeNode;
-          const firstChild = rootTree.childrenIds[0];
-          setExpandedNodes(new Set([rootTree.id]));
-          setSelectedNodeId(firstChild ?? null);
-        }
-      } catch {
-        // error handled
-      } finally {
-        if (!ignore) {
-          setInitializedBundleId(selectedBundle);
+
+      let bundles = fallbackBundles;
+      if (issueCode) {
+        try {
+          const data = await rainApi.fetchIssueBundles(issueCode);
+          const list = data.log_bundles.map((bundle) => ({ hash: bundle.hash, name: bundle.name || bundle.hash }));
+          if (list.length > 0) {
+            bundles = list;
+          }
+        } catch (error) {
+          setTreeError((error as Error).message || '加载 Issue 失败');
         }
       }
+
+      const expandedAll = new Set<string>();
+      const collectedRoots: string[] = [];
+      let first: string | null = null;
+
+      for (const bundle of bundles) {
+        try {
+          const result = await loadNode(bundle.hash, 'root', null);
+          if (!result) continue;
+
+          setTreeNodes((prev) => {
+            const next = { ...prev };
+            const current = next[result.node.id];
+            if (current) {
+              next[result.node.id] = { ...current, name: bundle.name };
+            }
+            return next;
+          });
+
+          const queue = result.children.filter((child) => child.is_dir || isArchiveNode(child));
+          while (queue.length > 0) {
+            const current = queue.shift()!;
+            const res = await loadNode(bundle.hash, current.rawId, current.parentId);
+            if (res?.node && (res.node.is_dir || isArchiveNode(res.node))) {
+              res.children
+                .filter((child) => child.is_dir || isArchiveNode(child))
+                .forEach((child) => queue.push(child));
+            }
+          }
+
+          collectedRoots.push(result.node.id);
+          if (!first) {
+            first = result.node.childrenIds[0] ?? result.node.id;
+          }
+        } catch (error) {
+          setTreeError((error as Error).message || '加载文件树失败');
+        }
+      }
+
+      if (!ignore) {
+        setExpandedNodes(expandedAll);
+        setRootIds(collectedRoots);
+        setSelectedNodeId((prev) => prev || first);
+      }
+      setTreeLoading(false);
     };
-    init();
+
+    init().catch(() => setTreeLoading(false));
     return () => {
       ignore = true;
     };
-  }, [bundleId, initializedBundleId, loadNode]);
+  }, [issueCodeFromRoute, locationState?.issue, bundleId, activeBundle.name, loadNode]);
 
   const handleNodeClick = async (nodeId: string) => {
-    if (!bundleId) return;
     let node: TreeNode | null = treeNodes[nodeId] ?? null;
+    const [prefBundle, rawFromId] = nodeId.includes(':') ? nodeId.split(/:(.+)/) : [bundleId, nodeId];
+    const bundleForNode = node?.bundleId || prefBundle || bundleId;
+    if (!bundleForNode) return;
     if (!node) {
-      node = await loadNode(bundleId, nodeId, null);
+      const result = await loadNode(bundleForNode, rawFromId, null);
+      node = result?.node ?? null;
     }
     if (!node) return;
 
-    if (node.is_dir) {
+    const canExpand = node.is_dir || isArchiveNode(node);
+    if (canExpand) {
       if (!node.hasLoadedChildren) {
-        await loadNode(bundleId, node.id, node.parentId);
+        await loadNode(bundleForNode, node.rawId, node.parentId);
       }
       setExpandedNodes((prev) => {
         const next = new Set(prev);
@@ -193,9 +256,6 @@ export function BundleView() {
   };
 
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
-  const selectedChildren = selectedNode?.childrenIds
-    ?.map((childId) => treeNodes[childId])
-    .filter((child): child is TreeNode => Boolean(child));
 
   const activeIssueLabel = activeBundle.issue || '未知 Issue';
   const activeNodeLabel = selectedNode?.name || '未选择文件';
@@ -203,12 +263,14 @@ export function BundleView() {
   useEffect(() => {
     setFileContent(null);
     setFileContentError(null);
-    if (!bundleId || !selectedNode || selectedNode.is_dir) return;
+    if (!selectedNode || selectedNode.is_dir) return;
+    const bundleForContent = selectedNode.bundleId || bundleId;
+    if (!bundleForContent) return;
     let ignore = false;
     const fetchContent = async () => {
       setFileContentLoading(true);
       try {
-        const content = await rainApi.fetchFileContent(bundleId, selectedNode.id);
+        const content = await rainApi.fetchFileContent(bundleForContent, selectedNode.rawId);
         if (!ignore) {
           setFileContent(content);
         }
@@ -228,11 +290,70 @@ export function BundleView() {
     };
   }, [bundleId, selectedNode?.id, selectedNode?.is_dir]);
 
+  useEffect(() => {
+    if (!selectedNode) return;
+    if (!selectedNode.is_dir && !isArchiveNode(selectedNode)) return;
+    if (selectedNode.hasLoadedChildren) return;
+    loadNode(selectedNode.bundleId || bundleId, selectedNode.rawId, selectedNode.parentId).catch(() => undefined);
+  }, [
+    bundleId,
+    selectedNode?.id,
+    selectedNode?.is_dir,
+    selectedNode?.parentId,
+    selectedNode?.hasLoadedChildren,
+    loadNode,
+    selectedNode
+  ]);
+
+  useEffect(() => {
+    if (selectedNodeId) return;
+    if (rootIds.length === 0) return;
+    const firstRoot = treeNodes[rootIds[0]];
+    const resolveVisible = (nodeId: string | null): string | null => {
+      if (!nodeId) return null;
+      const node = treeNodes[nodeId];
+      if (!node) return null;
+      const parent = node.parentId ? treeNodes[node.parentId] : null;
+      if (isExtractionFolder(node, parent)) {
+        return resolveVisible(node.childrenIds[0] ?? null);
+      }
+      return nodeId;
+    };
+    const candidate = resolveVisible(firstRoot?.childrenIds[0] ?? rootIds[0]);
+    if (candidate) {
+      setSelectedNodeId(candidate);
+    }
+  }, [rootIds, treeNodes, selectedNodeId]);
+
+  useEffect(() => {
+    if (!selectedNode) return;
+    if (!selectedNode.is_dir && !isArchiveNode(selectedNode)) return;
+    setExpandedNodes((prev) => {
+      if (prev.has(selectedNode.id)) return prev;
+      const next = new Set(prev);
+      next.add(selectedNode.id);
+      return next;
+    });
+  }, [selectedNode]);
+
   const renderTreeNode = (nodeId: string, depth = 0): JSX.Element | null => {
     const node = treeNodes[nodeId];
     if (!node) return null;
+    const parentNode = node.parentId ? treeNodes[node.parentId] : null;
+    if (isExtractionFolder(node, parentNode)) {
+      return (
+        <div key={nodeId} className="border-l border-slate-800 pl-3">
+          {node.childrenIds.length > 0 ? (
+            node.childrenIds.map((childId) => renderTreeNode(childId, depth))
+          ) : (
+            <p className="py-1 text-xs text-slate-500">暂无子节点</p>
+          )}
+        </div>
+      );
+    }
     const isExpanded = expandedNodes.has(nodeId);
     const isSelected = selectedNodeId === nodeId;
+    const canExpand = node.is_dir || isArchiveNode(node);
     const badgeColor = node.is_dir
       ? 'border-amber-400/60 text-amber-200'
       : isArchiveNode(node)
@@ -256,14 +377,14 @@ export function BundleView() {
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{node.name}</p>
             <p className="text-[10px] uppercase text-slate-500">
-              {node.is_dir ? `${node.childrenIds.length || 0} 子节点` : node.mime_type ?? 'file'}
+              {canExpand ? `${node.childrenIds.length || 0} 子节点` : node.mime_type ?? 'file'}
             </p>
           </div>
           <span className="ml-auto text-xs text-slate-500">
-            {node.is_dir ? (isExpanded ? '收起' : '展开') : formatSize(node.size_bytes)}
+            {canExpand ? (isExpanded ? '收起' : '展开') : formatSize(node.size_bytes)}
           </span>
         </button>
-        {node.is_dir && isExpanded ? (
+        {canExpand && isExpanded ? (
           <div className="border-l border-slate-800 pl-3">
             {node.childrenIds.length > 0 ? (
               node.childrenIds.map((childId) => renderTreeNode(childId, depth + 1))
@@ -284,61 +405,58 @@ export function BundleView() {
         <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
           <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-3">
             <p className="text-xs text-slate-400">Issue: {activeIssueLabel}</p>
-            {bundleId ? (
-              treeNodes['root'] ? (
-                <div className="space-y-2 text-sm text-slate-200">
-                  {(treeNodes['root'].childrenIds.length ?? 0) > 0 ? (
-                    treeNodes['root'].childrenIds.map((childId) => renderTreeNode(childId, 0))
-                  ) : (
-                    <p className="text-sm text-slate-500">暂无文件。</p>
-                  )}
-                </div>
-              ) : treeLoading ? (
-                <p className="text-sm text-slate-400">文件树加载中...</p>
-              ) : (
-                <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
-              )
+            {rootIds.length > 0 ? (
+              <div className="space-y-2 text-sm text-slate-200">
+                {rootIds.map((rootId) => (
+                  <div key={rootId} className="space-y-1">
+                    {treeNodes[rootId]?.childrenIds.length ? (
+                      treeNodes[rootId].childrenIds.map((childId) => {
+                        const topNode = treeNodes[childId];
+                        if (!topNode) return null;
+                        return renderTreeNode(childId, 0);
+                      })
+                    ) : (
+                      <p className="text-sm text-slate-500">暂无文件。</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : treeLoading ? (
+              <p className="text-sm text-slate-400">文件树加载中...</p>
             ) : (
-              <p className="text-sm text-slate-500">先选择 Issue / Bundle。</p>
+              <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
             )}
           </div>
 
           <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200">
-            {selectedNode ? (
-              <div className="space-y-4">
-                {!selectedNode.is_dir ? (
-                  <div className="space-y-2">
-                    {fileContentLoading ? (
-                      <p className="text-sm text-slate-500">读取中...</p>
-                    ) : fileContentError ? (
-                      <p className="text-sm text-rose-300">{fileContentError}</p>
-                    ) : fileContent ? (
-                      canPreviewAsText(selectedNode, fileContent) ? (
-                        <div className="space-y-2">
-                          <pre className="max-h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
-                            {fileContent.preview}
-                          </pre>
-                          {fileContent.truncated ? (
-                            <p className="text-xs text-amber-300">已截断预览（最多 64KB）。</p>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <p className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-                          检测到二进制或非文本文件，暂不支持预览，建议下载到本地查看。
-                        </p>
-                      )
-                    ) : (
-                      <p className="text-sm text-slate-500">选择文件即可加载内容。</p>
-                    )}
-                  </div>
-                ) : (
-                  <p className="text-sm text-slate-500">选择文件后展示内容。</p>
-                )}
-
-              </div>
-            ) : (
-              <p className="text-sm text-slate-500">请选择一个 Issue / Bundle 并点击文件树中的节点。</p>
-            )}
+            <div className="space-y-4">
+              {!selectedNode ? (
+                <p className="text-sm text-slate-500">请选择一个文件查看内容。</p>
+              ) : isArchiveNode(selectedNode) ? (
+                <p className="text-sm text-slate-500">压缩包请在左侧展开查看内部文件。</p>
+              ) : selectedNode.is_dir ? (
+                <p className="text-sm text-slate-500">当前为目录，选择文件后展示内容。</p>
+              ) : (
+                <div className="space-y-2">
+                  {fileContentLoading ? (
+                    <p className="text-sm text-slate-500">读取中...</p>
+                  ) : fileContentError ? (
+                    <p className="text-sm text-rose-300">{fileContentError}</p>
+                  ) : fileContent ? (
+                    <div className="space-y-2">
+                      <pre className="max-h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
+                        {fileContent.preview}
+                      </pre>
+                      {fileContent.truncated ? (
+                        <p className="text-xs text-amber-300">已截断预览（最多 64KB）。</p>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500">选择文件即可加载内容。</p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </section>
