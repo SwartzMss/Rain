@@ -101,7 +101,6 @@ export function HomeView() {
       setUploadIssueId(response.issue_code);
       setSelectedFiles(null);
       setFileInputKey((key) => key + 1);
-      await openIssue(response.issue_code).catch(() => undefined);
       loadIssues().catch(() => undefined);
     } catch (error) {
       setUploadError((error as Error).message || '上传失败');
