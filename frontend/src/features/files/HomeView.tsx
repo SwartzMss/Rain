@@ -72,6 +72,7 @@ export function HomeView() {
     try {
       await rainApi.fetchIssueBundles(trimmed);
       setIssueId(trimmed);
+      setUploadIssueId(trimmed);
       navigate(`/issue/${trimmed}`);
     } catch (error) {
       setIssueError((error as Error).message || '查询失败');
@@ -151,6 +152,10 @@ export function HomeView() {
                     <button
                       key={item.code}
                       type="button"
+                      onClick={() => {
+                        setIssueId(item.code);
+                        setUploadIssueId(item.code);
+                      }}
                       onDoubleClick={() => openIssue(item.code).catch(() => undefined)}
                       className="flex w-full items-center justify-between rounded-lg border border-transparent px-3 py-2 text-left transition hover:border-slate-700 hover:bg-slate-900/70"
                       disabled={issueLoading}

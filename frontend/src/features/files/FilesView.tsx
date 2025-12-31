@@ -428,7 +428,7 @@ export function BundleView(props?: BundleViewProps) {
             )}
           </div>
 
-          <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200">
+          <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200 min-h-[80vh]">
             <div className="space-y-4">
               {!selectedNode ? (
                 <p className="text-sm text-slate-500">请选择一个文件查看内容。</p>
@@ -444,7 +444,7 @@ export function BundleView(props?: BundleViewProps) {
                     <p className="text-sm text-rose-300">{fileContentError}</p>
                   ) : fileContent ? (
                     <div className="space-y-2">
-                      <pre className="max-h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
+                      <pre className="h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
                         {fileContent.preview}
                       </pre>
                       {fileContent.truncated ? (
