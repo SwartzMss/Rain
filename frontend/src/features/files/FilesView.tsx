@@ -402,7 +402,7 @@ export function BundleView(props?: BundleViewProps) {
       <section className="panel space-y-4">
         {treeError ? <p className="text-sm text-rose-300">{treeError}</p> : null}
 
-        <div className="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="grid gap-4 lg:grid-cols-[460px_minmax(0,1fr)]">
           <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-3">
             <p className="text-xs text-slate-400">Issue: {activeIssueLabel}</p>
             {rootIds.length > 0 ? (

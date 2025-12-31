@@ -10,7 +10,7 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl flex-col gap-4 px-6 py-6 lg:flex-row lg:items-center lg:justify-between">
+        <div className="mx-auto flex w-full max-w-none flex-col gap-4 px-6 py-6 lg:flex-row lg:items-center lg:justify-between">
           <Link to="/" className="text-white no-underline">
             <h1 className="text-4xl font-semibold text-white">Rain</h1>
           </Link>
@@ -18,7 +18,7 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 py-6">
+      <main className="mx-auto w-full max-w-none px-6 py-6">
         <Routes>
           <Route path="/" element={<HomeView />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />
