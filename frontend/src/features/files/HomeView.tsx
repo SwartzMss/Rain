@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rainApi } from '../../api/client';
-import type { IssueBundlesResponse, IssueSummary, UploadResponse, UploadSummary } from '../../api/types';
+import type { FileNode, IssueBundlesResponse, IssueSummary, UploadResponse, UploadSummary } from '../../api/types';
 
 const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
 
@@ -29,6 +29,7 @@ export function HomeView() {
   const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [deletingBundle, setDeletingBundle] = useState<string | null>(null);
+  const [bundleFiles, setBundleFiles] = useState<Record<string, { files: FileNode[]; loading: boolean; error: string | null }>>({});
 
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -113,6 +114,33 @@ export function HomeView() {
       setIssueError((error as Error).message || '查询失败');
     } finally {
       setIssueLoading(false);
+    }
+  };
+
+  const displayName = (bundle: UploadSummary) => {
+    if (bundle.name && bundle.name.startsWith('bundle-')) {
+      return bundle.name.replace(/^bundle-/, '');
+    }
+    return bundle.name || bundle.hash;
+  };
+
+  const loadBundleFiles = async (hash: string) => {
+    setBundleFiles((prev) => ({
+      ...prev,
+      [hash]: { files: prev[hash]?.files ?? [], loading: true, error: null }
+    }));
+    try {
+      const response = await rainApi.fetchFileNode(hash, 'root');
+      const filtered = (response.children ?? []).filter((child) => child.meta?.kind === 'uploaded_file');
+      setBundleFiles((prev) => ({
+        ...prev,
+        [hash]: { files: filtered, loading: false, error: null }
+      }));
+    } catch (error) {
+      setBundleFiles((prev) => ({
+        ...prev,
+        [hash]: { files: [], loading: false, error: (error as Error).message || '加载文件失败' }
+      }));
     }
   };
 
@@ -334,6 +362,83 @@ export function HomeView() {
             </div>
             {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
           </form>
+
+          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white">上传记录</h3>
+              <button
+                type="button"
+                className="text-xs text-brand-300 hover:text-brand-200"
+                onClick={() => loadBundles(issueId || uploadIssueId).catch(() => undefined)}
+                disabled={bundlesLoading}
+              >
+                {bundlesLoading ? '刷新中...' : '刷新'}
+              </button>
+            </div>
+            {bundlesError ? <p className="text-xs text-rose-300">{bundlesError}</p> : null}
+            <div className="space-y-2 text-sm text-slate-200">
+              {bundles.length === 0 && !bundlesLoading ? (
+                <p className="text-xs text-slate-500">暂无上传记录</p>
+              ) : (
+                bundles.map((bundle) => {
+                  const filesState = bundleFiles[bundle.hash];
+                  const files = filesState?.files ?? [];
+                  const loading = filesState?.loading;
+                  const error = filesState?.error;
+                  return (
+                    <div key={bundle.hash} className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/70 p-3">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate font-semibold text-white">{displayName(bundle)}</span>
+                        <button
+                          type="button"
+                          className="text-[11px] text-brand-300 hover:text-brand-200"
+                          onClick={() => loadBundleFiles(bundle.hash).catch(() => undefined)}
+                          disabled={loading}
+                        >
+                          {loading ? '加载中...' : '查看文件'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const confirmed = window.confirm(`确定删除上传 ${displayName(bundle)} 吗？此操作不可恢复。`);
+                            if (!confirmed) return;
+                            setDeletingBundle(bundle.hash);
+                            rainApi
+                              .deleteBundle(issueId || uploadIssueId, bundle.hash)
+                              .then(() => {
+                                loadBundles(issueId || uploadIssueId).catch(() => undefined);
+                                loadIssues().catch(() => undefined);
+                              })
+                              .catch((error) => setBundlesError((error as Error).message || '删除上传失败'))
+                              .finally(() => setDeletingBundle(null));
+                          }}
+                          className="ml-auto rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
+                          disabled={deletingBundle === bundle.hash}
+                        >
+                          {deletingBundle === bundle.hash ? '删除中...' : '删除'}
+                        </button>
+                      </div>
+                      {error ? <p className="text-xs text-rose-300">{error}</p> : null}
+                      {loading ? (
+                        <p className="text-xs text-slate-500">文件加载中...</p>
+                      ) : files.length === 0 ? (
+                        <p className="text-xs text-slate-500">暂无文件</p>
+                      ) : (
+                        <ul className="space-y-1 text-xs text-slate-300">
+                          {files.map((file) => (
+                            <li key={file.id} className="truncate">
+                              {typeof file.meta?.original_name === 'string' ? (file.meta.original_name as string) : file.name}{' '}
+                              ({((file.size_bytes ?? 0) / 1024).toFixed(1)} KB)
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
         </div>
       </section>
     </div>
