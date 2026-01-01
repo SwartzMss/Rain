@@ -53,14 +53,16 @@ export function BundleView(props?: BundleViewProps) {
   const locationState = (location.state as { issue?: string; bundleName?: string } | null) ?? (props?.legacyState as
     | { issue?: string; bundleName?: string }
     | null);
+  const issueCode = issueCodeFromRoute || locationState?.issue || '';
 
   const activeBundle: BundleInfo = {
     hash: bundleHash,
     name: locationState?.bundleName || bundleHash,
-    issue: issueCodeFromRoute || locationState?.issue
+    issue: issueCode
   };
 
   const bundleId = activeBundle.hash || '';
+  const [bundleList, setBundleList] = useState<{ hash: string; name: string }[]>([]);
   const [rootIds, setRootIds] = useState<string[]>([]);
   const [treeNodes, setTreeNodes] = useState<Record<string, TreeNode>>({});
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
@@ -70,6 +72,8 @@ export function BundleView(props?: BundleViewProps) {
   const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
   const [fileContentLoading, setFileContentLoading] = useState(false);
   const [fileContentError, setFileContentError] = useState<string | null>(null);
+   const [deletingBundle, setDeletingBundle] = useState<string | null>(null);
+   const [refreshKey, setRefreshKey] = useState(0);
 
   const toTreeNode = (bundleId: string, node: FileNode, parentId: string | null = null): TreeNode => ({
     id: `${bundleId}:${node.id.toString()}`,
@@ -168,9 +172,15 @@ export function BundleView(props?: BundleViewProps) {
           if (list.length > 0) {
             bundles = list;
           }
+          if (!ignore) {
+            setBundleList(list);
+          }
         } catch (error) {
           setTreeError((error as Error).message || '加载 Issue 失败');
         }
+      }
+      if (!issueCode && !ignore) {
+        setBundleList(fallbackBundles);
       }
 
       const expandedAll = new Set<string>();
@@ -223,7 +233,7 @@ export function BundleView(props?: BundleViewProps) {
     return () => {
       ignore = true;
     };
-  }, [issueCodeFromRoute, locationState?.issue, bundleId, activeBundle.name, loadNode]);
+  }, [issueCodeFromRoute, locationState?.issue, bundleId, activeBundle.name, loadNode, refreshKey]);
 
   const handleNodeClick = async (nodeId: string) => {
     let node: TreeNode | null = treeNodes[nodeId] ?? null;
@@ -253,6 +263,25 @@ export function BundleView(props?: BundleViewProps) {
     }
 
     setSelectedNodeId(node.id);
+  };
+
+  const handleDeleteBundle = async (targetHash: string) => {
+    if (!issueCode) {
+      setTreeError('缺少 Issue 信息，无法删除');
+      return;
+    }
+    const confirmed = window.confirm('确定删除该上传及其文件吗？此操作不可恢复。');
+    if (!confirmed) return;
+    setDeletingBundle(targetHash);
+    try {
+      await rainApi.deleteBundle(issueCode, targetHash);
+      setBundleList((prev) => prev.filter((item) => item.hash !== targetHash));
+      setRefreshKey((key) => key + 1);
+    } catch (error) {
+      setTreeError((error as Error).message || '删除失败');
+    } finally {
+      setDeletingBundle(null);
+    }
   };
 
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
@@ -405,6 +434,23 @@ export function BundleView(props?: BundleViewProps) {
         <div className="grid gap-4 lg:grid-cols-[460px_minmax(0,1fr)]">
           <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-3">
             <p className="text-xs text-slate-400">Issue: {activeIssueLabel}</p>
+            {bundleList.length > 0 ? (
+              <div className="space-y-1 text-xs text-slate-300">
+                {bundleList.map((bundle) => (
+                  <div key={bundle.hash} className="flex items-center gap-2">
+                    <span className="truncate font-semibold text-white">{bundle.name || bundle.hash}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteBundle(bundle.hash)}
+                      className="ml-auto rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
+                      disabled={deletingBundle === bundle.hash}
+                    >
+                      {deletingBundle === bundle.hash ? '删除中...' : '删除上传'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {rootIds.length > 0 ? (
               <div className="space-y-2 text-sm text-slate-200">
                 {rootIds.map((rootId) => (

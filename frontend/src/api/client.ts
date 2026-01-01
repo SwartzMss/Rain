@@ -47,6 +47,9 @@ export const rainApi = {
   fetchFileContent(bundleId: string, fileId: string) {
     return request<FileContentResponse>(`/api/files/v1/${bundleId}/files/${fileId}/content`);
   },
+  deleteBundle(issueCode: string, bundleHash: string) {
+    return request<void>(`/api/issues/${issueCode}/bundles/${bundleHash}`, { method: 'DELETE' });
+  },
   searchLogs(bundleId: string, query: string, options?: { timeline?: string; path_like?: string; from?: number; size?: number }) {
     const params = new URLSearchParams({ q: query });
     if (options?.timeline) params.set('timeline', options.timeline);

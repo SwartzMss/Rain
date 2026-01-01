@@ -12,6 +12,7 @@ pub fn register(cfg: &mut web::ServiceConfig) {
         web::scope("/api")
             .service(issues::list_issues)
             .service(issues::get_issue_bundles)
+            .service(issues::delete_issue_bundle)
             .service(files::get_file_node)
             .service(files::get_file_content)
             .service(logs::search_logs)
