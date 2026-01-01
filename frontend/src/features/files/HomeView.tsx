@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rainApi } from '../../api/client';
-import type { IssueSummary, UploadResponse } from '../../api/types';
+import type { IssueBundlesResponse, IssueSummary, UploadResponse, UploadSummary } from '../../api/types';
 
 const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
 
@@ -25,6 +25,10 @@ export function HomeView() {
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [issuesError, setIssuesError] = useState<string | null>(null);
   const [deletingIssue, setDeletingIssue] = useState<string | null>(null);
+  const [bundles, setBundles] = useState<UploadSummary[]>([]);
+  const [bundlesLoading, setBundlesLoading] = useState(false);
+  const [bundlesError, setBundlesError] = useState<string | null>(null);
+  const [deletingBundle, setDeletingBundle] = useState<string | null>(null);
 
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -65,13 +69,43 @@ export function HomeView() {
     loadIssues().catch(() => undefined);
   }, [loadIssues]);
 
+  useEffect(() => {
+    if (!issueId.trim()) {
+      setBundles([]);
+      return;
+    }
+    loadBundles(issueId).catch(() => undefined);
+  }, [issueId, loadBundles]);
+
+  const loadBundles = useCallback(
+    async (code: string) => {
+      const trimmed = code.trim();
+      if (!trimmed) {
+        setBundles([]);
+        return;
+      }
+      setBundlesLoading(true);
+      setBundlesError(null);
+      try {
+        const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
+        setBundles(data.log_bundles);
+      } catch (error) {
+        setBundlesError((error as Error).message || '加载上传列表失败');
+        setBundles([]);
+      } finally {
+        setBundlesLoading(false);
+      }
+    },
+    []
+  );
+
   const openIssue = async (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return;
     setIssueLoading(true);
     setIssueError(null);
     try {
-      await rainApi.fetchIssueBundles(trimmed);
+      await loadBundles(trimmed);
       setIssueId(trimmed);
       setUploadIssueId(trimmed);
       navigate(`/issue/${trimmed}`);
@@ -91,6 +125,7 @@ export function HomeView() {
       setIssueId('');
       setIssueFilter('');
       setUploadIssueId('');
+      setBundles([]);
       loadIssues().catch(() => undefined);
     } catch (error) {
       setIssuesError((error as Error).message || '删除失败');
@@ -120,6 +155,7 @@ export function HomeView() {
       setSelectedFiles(null);
       setFileInputKey((key) => key + 1);
       loadIssues().catch(() => undefined);
+      loadBundles(response.issue_code).catch(() => undefined);
     } catch (error) {
       setUploadError((error as Error).message || '上传失败');
       setUploadSuccess(null);
@@ -172,6 +208,7 @@ export function HomeView() {
                       onClick={() => {
                         setIssueId(item.code);
                         setUploadIssueId(item.code);
+                        loadBundles(item.code).catch(() => undefined);
                       }}
                       onDoubleClick={() => openIssue(item.code).catch(() => undefined)}
                       className="flex w-full items-center justify-between rounded-lg border border-transparent px-3 py-2 text-left transition hover:border-slate-700 hover:bg-slate-900/70"
@@ -196,6 +233,44 @@ export function HomeView() {
                   ))}
               </div>
             </div>
+            {issueId.trim() ? (
+              <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-white">上传记录（{issueId}）</h4>
+                  <button
+                    type="button"
+                    className="text-xs text-brand-300 hover:text-brand-200"
+                    onClick={() => loadBundles(issueId).catch(() => undefined)}
+                    disabled={bundlesLoading}
+                  >
+                    {bundlesLoading ? '刷新中...' : '刷新'}
+                  </button>
+                </div>
+                {bundlesError ? <p className="text-xs text-rose-300">{bundlesError}</p> : null}
+                <div className="space-y-1">
+                  {bundles.length === 0 && !bundlesLoading ? (
+                    <p className="text-xs text-slate-500">暂无上传记录</p>
+                  ) : (
+                    bundles.map((bundle) => (
+                      <div
+                        key={bundle.hash}
+                        className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-sm text-white"
+                      >
+                        <span className="truncate">{bundle.name || bundle.hash}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteBundle(issueId, bundle.hash).catch(() => undefined)}
+                          className="rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
+                          disabled={deletingBundle === bundle.hash}
+                        >
+                          {deletingBundle === bundle.hash ? '删除中...' : '删除'}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
