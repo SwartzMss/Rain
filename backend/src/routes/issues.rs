@@ -102,6 +102,7 @@ struct BundleRow {
 struct BundleIdRow {
     id: Uuid,
     hash: String,
+    #[allow(dead_code)]
     issue_code: String,
 }
 
