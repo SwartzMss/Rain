@@ -156,3 +156,71 @@ pub async fn delete_issue_bundle(
 
     Ok(HttpResponse::NoContent().finish())
 }
+
+#[delete("/issues/{issue_id}")]
+pub async fn delete_issue(
+    path: web::Path<String>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let issue_code = path.into_inner();
+    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+
+    let bundles: Vec<BundleIdRow> = sqlx::query_as(
+        r#"
+        SELECT id, hash, issue_code
+        FROM bundles
+        WHERE issue_code = $1
+        "#,
+    )
+    .bind(&issue_code)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    if bundles.is_empty() {
+        sqlx::query("DELETE FROM issues WHERE code = $1")
+            .bind(&issue_code)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+        tx.commit().await.map_err(AppError::Database)?;
+        return Ok(HttpResponse::NoContent().finish());
+    }
+
+    for bundle in &bundles {
+        sqlx::query("DELETE FROM log_segments WHERE bundle_id = $1")
+            .bind(bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
+        sqlx::query("DELETE FROM files WHERE bundle_id = $1")
+            .bind(bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
+        sqlx::query("DELETE FROM bundles WHERE id = $1")
+            .bind(bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+    }
+
+    sqlx::query("DELETE FROM issues WHERE code = $1")
+        .bind(&issue_code)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    tx.commit().await.map_err(AppError::Database)?;
+
+    for bundle in bundles {
+        let dir = state.data_root.join(&bundle.hash);
+        if fs::metadata(&dir).await.is_ok() {
+            let _ = fs::remove_dir_all(&dir).await;
+        }
+    }
+
+    Ok(HttpResponse::NoContent().finish())
+}

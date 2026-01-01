@@ -24,6 +24,7 @@ export function HomeView() {
   const [issues, setIssues] = useState<IssueSummary[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [issuesError, setIssuesError] = useState<string | null>(null);
+  const [deletingIssue, setDeletingIssue] = useState<string | null>(null);
 
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -78,6 +79,23 @@ export function HomeView() {
       setIssueError((error as Error).message || '查询失败');
     } finally {
       setIssueLoading(false);
+    }
+  };
+
+  const handleDeleteIssue = async (code: string) => {
+    const confirmed = window.confirm(`确定删除 Issue ${code} 及其上传吗？此操作不可恢复。`);
+    if (!confirmed) return;
+    setDeletingIssue(code);
+    try {
+      await rainApi.deleteIssue(code);
+      setIssueId('');
+      setIssueFilter('');
+      setUploadIssueId('');
+      loadIssues().catch(() => undefined);
+    } catch (error) {
+      setIssuesError((error as Error).message || '删除失败');
+    } finally {
+      setDeletingIssue(null);
     }
   };
 
@@ -160,7 +178,20 @@ export function HomeView() {
                       disabled={issueLoading}
                     >
                       <span className="font-semibold text-white">{item.code}</span>
-                      <span className="text-[10px] text-slate-500">双击打开</span>
+                      <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                        <span className="text-[10px] text-slate-500">双击打开</span>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleDeleteIssue(item.code).catch(() => undefined);
+                          }}
+                          className="rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
+                          disabled={deletingIssue === item.code}
+                        >
+                          {deletingIssue === item.code ? '删除中...' : '删除'}
+                        </button>
+                      </div>
                     </button>
                   ))}
               </div>
