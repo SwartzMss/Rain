@@ -261,56 +261,6 @@ export function HomeView() {
                   ))}
               </div>
             </div>
-            {issueId.trim() ? (
-              <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-sm font-semibold text-white">上传记录（{issueId}）</h4>
-                  <button
-                    type="button"
-                    className="text-xs text-brand-300 hover:text-brand-200"
-                    onClick={() => loadBundles(issueId).catch(() => undefined)}
-                    disabled={bundlesLoading}
-                  >
-                    {bundlesLoading ? '刷新中...' : '刷新'}
-                  </button>
-                </div>
-                {bundlesError ? <p className="text-xs text-rose-300">{bundlesError}</p> : null}
-                <div className="space-y-1">
-                  {bundles.length === 0 && !bundlesLoading ? (
-                    <p className="text-xs text-slate-500">暂无上传记录</p>
-                  ) : (
-                    bundles.map((bundle) => (
-                      <div
-                        key={bundle.hash}
-                        className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 text-sm text-white"
-                      >
-                        <span className="truncate">{bundle.name || bundle.hash}</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const confirmed = window.confirm(`确定删除上传 ${bundle.hash} 吗？此操作不可恢复。`);
-                            if (!confirmed) return;
-                            setDeletingBundle(bundle.hash);
-                            rainApi
-                              .deleteBundle(issueId, bundle.hash)
-                              .then(() => {
-                                loadBundles(issueId).catch(() => undefined);
-                                loadIssues().catch(() => undefined);
-                              })
-                              .catch((error) => setBundlesError((error as Error).message || '删除上传失败'))
-                              .finally(() => setDeletingBundle(null));
-                          }}
-                          className="rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
-                          disabled={deletingBundle === bundle.hash}
-                        >
-                          {deletingBundle === bundle.hash ? '删除中...' : '删除'}
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            ) : null}
           </div>
 
           <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
