@@ -65,18 +65,6 @@ export function HomeView() {
     }
   }, []);
 
-  useEffect(() => {
-    loadIssues().catch(() => undefined);
-  }, [loadIssues]);
-
-  useEffect(() => {
-    if (!issueId.trim()) {
-      setBundles([]);
-      return;
-    }
-    loadBundles(issueId).catch(() => undefined);
-  }, [issueId, loadBundles]);
-
   const loadBundles = useCallback(
     async (code: string) => {
       const trimmed = code.trim();
@@ -98,6 +86,18 @@ export function HomeView() {
     },
     []
   );
+
+  useEffect(() => {
+    loadIssues().catch(() => undefined);
+  }, [loadIssues]);
+
+  useEffect(() => {
+    if (!issueId.trim()) {
+      setBundles([]);
+      return;
+    }
+    loadBundles(issueId).catch(() => undefined);
+  }, [issueId, loadBundles]);
 
   const openIssue = async (value: string) => {
     const trimmed = value.trim();
@@ -259,7 +259,19 @@ export function HomeView() {
                         <span className="truncate">{bundle.name || bundle.hash}</span>
                         <button
                           type="button"
-                          onClick={() => handleDeleteBundle(issueId, bundle.hash).catch(() => undefined)}
+                          onClick={() => {
+                            const confirmed = window.confirm(`确定删除上传 ${bundle.hash} 吗？此操作不可恢复。`);
+                            if (!confirmed) return;
+                            setDeletingBundle(bundle.hash);
+                            rainApi
+                              .deleteBundle(issueId, bundle.hash)
+                              .then(() => {
+                                loadBundles(issueId).catch(() => undefined);
+                                loadIssues().catch(() => undefined);
+                              })
+                              .catch((error) => setBundlesError((error as Error).message || '删除上传失败'))
+                              .finally(() => setDeletingBundle(null));
+                          }}
                           className="rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
                           disabled={deletingBundle === bundle.hash}
                         >
