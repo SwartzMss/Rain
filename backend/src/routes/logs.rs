@@ -10,7 +10,7 @@ use crate::{
 
 use super::helpers::load_bundle;
 
-const MAX_LOG_RESULTS: i64 = 50;
+const MAX_LOG_RESULTS: i64 = 1000;
 const LINES_PER_CHUNK: i64 = 200;
 
 #[derive(Deserialize)]

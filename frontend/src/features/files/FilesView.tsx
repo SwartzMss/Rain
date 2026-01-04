@@ -77,6 +77,21 @@ export function BundleView(props?: BundleViewProps) {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
+  const formatHitPath = (raw: string) => {
+    const parts = raw.replace(/^\//, '').split('/');
+    if (parts.length === 0) return raw;
+    // drop bundle hash
+    const [, ...rest] = parts;
+    if (rest.length === 0) return raw.replace(/^\//, '');
+    const normalized = rest.map((segment, index) => {
+      if (index === 0 && segment.endsWith('_extracted')) {
+        return segment.replace(/_extracted$/, '');
+      }
+      return segment;
+    });
+    return normalized.join('/');
+  };
+
   const toTreeNode = (bundleId: string, node: FileNode, parentId: string | null = null): TreeNode => ({
     id: `${bundleId}:${node.id.toString()}`,
     rawId: node.id.toString(),
@@ -164,7 +179,7 @@ export function BundleView(props?: BundleViewProps) {
     setSearchLoading(true);
     setSearchError(null);
     try {
-      const response = await rainApi.searchIssueLogs(issue, keyword, { size: 50 });
+      const response = await rainApi.searchIssueLogs(issue, keyword, { size: 500 });
       setSearchResults(response.hits);
     } catch (error) {
       setSearchResults([]);
@@ -258,6 +273,8 @@ export function BundleView(props?: BundleViewProps) {
   }, [issueCode, refreshKey]);
 
   const handleNodeClick = async (nodeId: string) => {
+    setSearchResults([]);
+    setSearchError(null);
     let node: TreeNode | null = treeNodes[nodeId] ?? null;
     const [prefBundle, rawFromId] = nodeId.includes(':') ? nodeId.split(/:(.+)/) : [bundleId, nodeId];
     const bundleForNode = node?.bundleId || prefBundle || bundleId;
@@ -461,9 +478,6 @@ export function BundleView(props?: BundleViewProps) {
                 </button>
               </div>
               {searchError ? <p className="text-xs text-rose-300">{searchError}</p> : null}
-              {searchResults.length > 0 ? (
-                <div className="text-[11px] text-slate-400">共 {searchResults.length} 条（最多显示 50 条）</div>
-              ) : null}
             </div>
             {rootIds.length > 0 ? (
               <div className="space-y-2 text-sm text-slate-200">
@@ -490,71 +504,34 @@ export function BundleView(props?: BundleViewProps) {
 
           <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200 min-h-[80vh]">
             <div className="space-y-4">
-              {searchResults.length > 0 ? (
-                <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-                  <div className="flex items-center justify-between text-[11px] text-slate-400">
-                    <span>搜索结果（{searchResults.length} 条，最多显示 50 条）</span>
+              <div className="space-y-2">
+                {searchResults.length > 0 ? (
+                  <pre className="whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-100">
+                    {searchResults.map((hit) => hit.snippet).join('\n')}
+                  </pre>
+                ) : !selectedNode ? (
+                  <p className="text-sm text-slate-500">请选择一个文件查看内容。</p>
+                ) : isArchiveNode(selectedNode) ? (
+                  <p className="text-sm text-slate-500">压缩包请在左侧展开查看内部文件。</p>
+                ) : selectedNode.is_dir ? (
+                  <p className="text-sm text-slate-500">当前为目录，选择文件后展示内容。</p>
+                ) : fileContentLoading ? (
+                  <p className="text-sm text-slate-500">读取中...</p>
+                ) : fileContentError ? (
+                  <p className="text-sm text-rose-300">{fileContentError}</p>
+                ) : fileContent ? (
+                  <div className="space-y-2">
+                    <pre className="h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
+                      {fileContent.preview}
+                    </pre>
+                    {fileContent.truncated ? (
+                      <p className="text-xs text-amber-300">已截断预览（最多 64KB）。</p>
+                    ) : null}
                   </div>
-                  <ul className="space-y-2 max-h-72 overflow-auto">
-                    {searchResults.map((hit, index) => (
-                      <li
-                        key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
-                        className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/70 p-2"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate font-semibold text-white">{hit.path}</span>
-                          <span className="text-[11px] text-slate-400">
-                            {hit.line_number !== null && hit.line_number !== undefined
-                              ? `行 ${hit.line_number}${hit.line_end ? ` - ${hit.line_end}` : ''}`
-                              : '行号未知'}
-                          </span>
-                        </div>
-                        <p className="line-clamp-2 whitespace-pre-wrap text-xs text-slate-300">{hit.snippet}</p>
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
-                            onClick={() => {
-                              const targetId = `${hit.bundle_hash}:${hit.file_id}`;
-                              setSelectedNodeId(targetId);
-                              handleNodeClick(targetId).catch(() => undefined);
-                            }}
-                            disabled={!hit.bundle_hash}
-                          >
-                            打开文件
-                          </button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {!selectedNode ? (
-                <p className="text-sm text-slate-500">请选择一个文件查看内容。</p>
-              ) : isArchiveNode(selectedNode) ? (
-                <p className="text-sm text-slate-500">压缩包请在左侧展开查看内部文件。</p>
-              ) : selectedNode.is_dir ? (
-                <p className="text-sm text-slate-500">当前为目录，选择文件后展示内容。</p>
-              ) : (
-                <div className="space-y-2">
-                  {fileContentLoading ? (
-                    <p className="text-sm text-slate-500">读取中...</p>
-                  ) : fileContentError ? (
-                    <p className="text-sm text-rose-300">{fileContentError}</p>
-                  ) : fileContent ? (
-                    <div className="space-y-2">
-                      <pre className="h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
-                        {fileContent.preview}
-                      </pre>
-                      {fileContent.truncated ? (
-                        <p className="text-xs text-amber-300">已截断预览（最多 64KB）。</p>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <p className="text-sm text-slate-500">选择文件即可加载内容。</p>
-                  )}
-                </div>
-              )}
+                ) : (
+                  <p className="text-sm text-slate-500">选择文件即可加载内容。</p>
+                )}
+              </div>
             </div>
           </div>
         </div>
