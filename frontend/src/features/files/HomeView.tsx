@@ -296,7 +296,6 @@ export function HomeView() {
                 <div className="rounded-lg border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
                   <p className="font-semibold">上传成功</p>
                   <p>Issue：{uploadSuccess.issue_code}</p>
-                  <p className="font-mono text-[11px] text-emerald-100">{uploadSuccess.bundle_hash}</p>
                   <p>文件 {uploadSuccess.file_count} 个 · 共 {(uploadSuccess.total_bytes / 1024).toFixed(1)} KB</p>
                 </div>
               ) : null}
