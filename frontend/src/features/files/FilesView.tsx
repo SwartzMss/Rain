@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { rainApi } from '../../api/client';
-import type { FileContentResponse, FileNode } from '../../api/types';
+import type { FileContentResponse, FileNode, IssueLogSearchHit } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
 
 type TreeNode = Omit<FileNode, 'id' | 'children'> & {
@@ -72,6 +72,10 @@ export function BundleView(props?: BundleViewProps) {
   const [fileContentLoading, setFileContentLoading] = useState(false);
   const [fileContentError, setFileContentError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [searchResults, setSearchResults] = useState<IssueLogSearchHit[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const toTreeNode = (bundleId: string, node: FileNode, parentId: string | null = null): TreeNode => ({
     id: `${bundleId}:${node.id.toString()}`,
@@ -148,6 +152,27 @@ export function BundleView(props?: BundleViewProps) {
     },
     []
   );
+
+  const runSearch = useCallback(async () => {
+    const issue = issueCode;
+    const keyword = searchTerm.trim();
+    if (!issue || !keyword) {
+      setSearchResults([]);
+      setSearchError(null);
+      return;
+    }
+    setSearchLoading(true);
+    setSearchError(null);
+    try {
+      const response = await rainApi.searchIssueLogs(issue, keyword, { size: 50 });
+      setSearchResults(response.hits);
+    } catch (error) {
+      setSearchResults([]);
+      setSearchError((error as Error).message || '搜索失败');
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [issueCode, searchTerm]);
 
   useEffect(() => {
     const issueCode = issueCodeFromRoute || locationState?.issue || '';
@@ -226,6 +251,11 @@ export function BundleView(props?: BundleViewProps) {
       ignore = true;
     };
   }, [issueCodeFromRoute, locationState?.issue, bundleId, activeBundle.name, loadNode, refreshKey]);
+
+  useEffect(() => {
+    setSearchResults([]);
+    setSearchError(null);
+  }, [issueCode, refreshKey]);
 
   const handleNodeClick = async (nodeId: string) => {
     let node: TreeNode | null = treeNodes[nodeId] ?? null;
@@ -432,6 +462,71 @@ export function BundleView(props?: BundleViewProps) {
 
           <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200 min-h-[80vh]">
             <div className="space-y-4">
+              <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                  <input
+                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white focus:border-brand-500 focus:outline-none"
+                    placeholder="在当前 Issue 的所有文件内搜索内容"
+                    value={searchTerm}
+                    onChange={(event) => setSearchTerm(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        runSearch().catch(() => undefined);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="rounded-lg bg-brand-500 px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
+                    onClick={() => runSearch().catch(() => undefined)}
+                    disabled={searchLoading || !issueCode || !searchTerm.trim()}
+                  >
+                    {searchLoading ? '搜索中...' : '搜索'}
+                  </button>
+                </div>
+                {searchError ? <p className="mt-2 text-xs text-rose-300">{searchError}</p> : null}
+                {searchResults.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    <div className="flex items-center justify-between text-[11px] text-slate-400">
+                      <span>共 {searchResults.length} 条（最多显示 50 条）</span>
+                    </div>
+                    <ul className="space-y-2">
+                      {searchResults.map((hit, index) => (
+                        <li
+                          key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
+                          className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/70 p-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate font-semibold text-white">{hit.path}</span>
+                            <span className="text-[11px] text-slate-400">
+                              {hit.line_number !== null && hit.line_number !== undefined
+                                ? `行 ${hit.line_number}${hit.line_end ? ` - ${hit.line_end}` : ''}`
+                                : '行号未知'}
+                            </span>
+                          </div>
+                          <p className="line-clamp-2 whitespace-pre-wrap text-xs text-slate-300">{hit.snippet}</p>
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
+                              onClick={() => {
+                                const targetId = `${hit.bundle_hash}:${hit.file_id}`;
+                                setSelectedNodeId(targetId);
+                                handleNodeClick(targetId).catch(() => undefined);
+                              }}
+                              disabled={!hit.bundle_hash}
+                            >
+                              打开文件
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+
               {!selectedNode ? (
                 <p className="text-sm text-slate-500">请选择一个文件查看内容。</p>
               ) : isArchiveNode(selectedNode) ? (
