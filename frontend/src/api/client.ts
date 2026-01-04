@@ -47,6 +47,9 @@ export const rainApi = {
   fetchFileContent(bundleId: string, fileId: string) {
     return request<FileContentResponse>(`/api/files/v1/${bundleId}/files/${fileId}/content`);
   },
+  deleteFile(bundleId: string, fileId: string) {
+    return request<void>(`/api/files/v1/${bundleId}/files/${fileId}`, { method: 'DELETE' });
+  },
   deleteBundle(issueCode: string, bundleHash: string) {
     return request<void>(`/api/issues/${issueCode}/bundles/${bundleHash}`, { method: 'DELETE' });
   },

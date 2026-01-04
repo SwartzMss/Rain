@@ -30,6 +30,7 @@ export function HomeView() {
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [deletingBundle, setDeletingBundle] = useState<string | null>(null);
   const [bundleFiles, setBundleFiles] = useState<Record<string, { files: FileNode[]; loading: boolean; error: string | null }>>({});
+  const [deletingFileKey, setDeletingFileKey] = useState<string | null>(null);
   const currentIssueCode = issueId.trim() || uploadIssueId.trim();
 
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
@@ -139,13 +140,6 @@ export function HomeView() {
     }
   };
 
-  const displayName = (bundle: UploadSummary) => {
-    if (bundle.name && bundle.name.startsWith('bundle-')) {
-      return bundle.name.replace(/^bundle-/, '');
-    }
-    return bundle.name || bundle.hash;
-  };
-
   const loadBundleFiles = async (hash: string) => {
     setBundleFiles((prev) => ({
       ...prev,
@@ -165,6 +159,15 @@ export function HomeView() {
       }));
     }
   };
+
+  useEffect(() => {
+    if (!bundles.length) return;
+    bundles.forEach((bundle) => {
+      if (!bundleFiles[bundle.hash]) {
+        loadBundleFiles(bundle.hash).catch(() => undefined);
+      }
+    });
+  }, [bundles, bundleFiles, loadBundleFiles]);
 
   const handleDeleteIssue = async (code: string) => {
     const confirmed = window.confirm(`确定删除 Issue ${code} 及其上传吗？此操作不可恢复。`);
@@ -226,7 +229,7 @@ export function HomeView() {
           </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-4 lg:grid-cols-3">
           <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4">
             <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -287,68 +290,69 @@ export function HomeView() {
             </div>
           </div>
 
-          <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
-            {uploadSuccess ? (
-              <div className="rounded-lg border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
-                <p className="font-semibold">上传成功</p>
-                <p>Issue：{uploadSuccess.issue_code}</p>
-                <p className="font-mono text-[11px] text-emerald-100">{uploadSuccess.bundle_hash}</p>
-                <p>文件 {uploadSuccess.file_count} 个 · 共 {(uploadSuccess.total_bytes / 1024).toFixed(1)} KB</p>
-              </div>
-            ) : null}
-            <h3 className="text-sm font-semibold text-white">创建 / 上传</h3>
-            <label className="block text-sm text-slate-300">
-              Issue ID
-              <input
-                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                value={uploadIssueId}
-                onChange={(event) => setUploadIssueId(event.target.value)}
-              />
-            </label>
-            <div className="space-y-2">
-              <label className="block text-sm text-slate-300">上传日志 / 压缩包</label>
-              <input
-                key={fileInputKey}
-                type="file"
-                multiple
-                onChange={(event) => setSelectedFiles(event.target.files)}
-                className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-2 text-sm text-slate-300 file:mr-4 file:rounded-md file:border-0 file:bg-brand-500 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-slate-900"
-              />
-              {selectedFiles && selectedFiles.length > 0 ? (
-                <ul className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-200">
-                  {Array.from(selectedFiles).map((file) => (
-                    <li key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between gap-3">
-                      <span className="truncate">{file.name}</span>
-                      <span className="shrink-0 text-slate-400">{formatBytes(file.size)}</span>
-                    </li>
-                  ))}
-                </ul>
+          <div className="space-y-4 lg:col-span-2">
+            <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+              {uploadSuccess ? (
+                <div className="rounded-lg border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+                  <p className="font-semibold">上传成功</p>
+                  <p>Issue：{uploadSuccess.issue_code}</p>
+                  <p className="font-mono text-[11px] text-emerald-100">{uploadSuccess.bundle_hash}</p>
+                  <p>文件 {uploadSuccess.file_count} 个 · 共 {(uploadSuccess.total_bytes / 1024).toFixed(1)} KB</p>
+                </div>
               ) : null}
-            </div>
-            <div className="flex items-center justify-end text-xs text-slate-500">
-              <button
-                type="submit"
-                className="rounded-lg bg-brand-500 px-5 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
-                disabled={uploading}
-              >
-                {uploading ? '上传中...' : '上传'}
-              </button>
-            </div>
-            {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
-          </form>
-
-          {currentIssueCode ? (
-            <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-white">上传记录</h3>
+              <h3 className="text-sm font-semibold text-white">创建 / 上传</h3>
+              <label className="block text-sm text-slate-300">
+                Issue ID
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+                  value={uploadIssueId}
+                  onChange={(event) => setUploadIssueId(event.target.value)}
+                />
+              </label>
+              <div className="space-y-2">
+                <label className="block text-sm text-slate-300">上传日志 / 压缩包</label>
+                <input
+                  key={fileInputKey}
+                  type="file"
+                  multiple
+                  onChange={(event) => setSelectedFiles(event.target.files)}
+                  className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-2 text-sm text-slate-300 file:mr-4 file:rounded-md file:border-0 file:bg-brand-500 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-slate-900"
+                />
+                {selectedFiles && selectedFiles.length > 0 ? (
+                  <ul className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-200">
+                    {Array.from(selectedFiles).map((file) => (
+                      <li key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between gap-3">
+                        <span className="truncate">{file.name}</span>
+                        <span className="shrink-0 text-slate-400">{formatBytes(file.size)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+              <div className="flex items-center justify-end text-xs text-slate-500">
                 <button
-                  type="button"
-                  className="text-xs text-brand-300 hover:text-brand-200"
-                  onClick={() => {
-                    if (!currentIssueCode) return;
-                    loadBundles(currentIssueCode).catch(() => undefined);
-                  }}
-                  disabled={bundlesLoading}
+                  type="submit"
+                  className="rounded-lg bg-brand-500 px-5 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
+                  disabled={uploading}
+                >
+                  {uploading ? '上传中...' : '上传'}
+                </button>
+              </div>
+              {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
+            </form>
+
+            {currentIssueCode ? (
+              <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-white">当前文件</h3>
+                  <button
+                    type="button"
+                    className="text-xs text-brand-300 hover:text-brand-200"
+                    onClick={() => {
+                      if (!currentIssueCode) return;
+                      loadBundles(currentIssueCode).catch(() => undefined);
+                    }}
+                    disabled={bundlesLoading}
                 >
                   {bundlesLoading ? '刷新中...' : '刷新'}
                 </button>
@@ -358,66 +362,91 @@ export function HomeView() {
                 {bundles.length === 0 && !bundlesLoading ? (
                   <p className="text-xs text-slate-500">暂无上传记录</p>
                 ) : (
-                  bundles.map((bundle) => {
-                    const filesState = bundleFiles[bundle.hash];
-                    const files = filesState?.files ?? [];
-                    const loading = filesState?.loading;
-                    const error = filesState?.error;
-                    return (
-                      <div key={bundle.hash} className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/70 p-3">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate font-semibold text-white">{displayName(bundle)}</span>
-                          <button
-                            type="button"
-                            className="text-[11px] text-brand-300 hover:text-brand-200"
-                            onClick={() => loadBundleFiles(bundle.hash).catch(() => undefined)}
-                            disabled={loading}
-                          >
-                            {loading ? '加载中...' : '查看文件'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const confirmed = window.confirm(`确定删除上传 ${displayName(bundle)} 吗？此操作不可恢复。`);
-                              if (!confirmed) return;
-                              setDeletingBundle(bundle.hash);
-                              rainApi
-                                .deleteBundle(currentIssueCode, bundle.hash)
-                                .then(() => {
-                                  loadBundles(currentIssueCode).catch(() => undefined);
-                                  loadIssues().catch(() => undefined);
-                                })
-                                .catch((error) => setBundlesError((error as Error).message || '删除上传失败'))
-                                .finally(() => setDeletingBundle(null));
-                            }}
-                            className="ml-auto rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
-                            disabled={deletingBundle === bundle.hash}
-                          >
-                            {deletingBundle === bundle.hash ? '删除中...' : '删除'}
-                          </button>
-                        </div>
-                        {error ? <p className="text-xs text-rose-300">{error}</p> : null}
-                        {loading ? (
-                          <p className="text-xs text-slate-500">文件加载中...</p>
-                        ) : files.length === 0 ? (
-                          <p className="text-xs text-slate-500">暂无文件</p>
-                        ) : (
-                          <ul className="space-y-1 text-xs text-slate-300">
-                            {files.map((file) => (
-                              <li key={file.id} className="truncate">
-                                {typeof file.meta?.original_name === 'string' ? (file.meta.original_name as string) : file.name}{' '}
-                                ({((file.size_bytes ?? 0) / 1024).toFixed(1)} KB)
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
+                  (() => {
+                    const allFiles = bundles.flatMap((bundle) =>
+                      (bundleFiles[bundle.hash]?.files ?? []).map((file) => ({
+                        bundleHash: bundle.hash,
+                        file
+                      }))
                     );
-                  })
+                    const anyLoading =
+                      bundlesLoading ||
+                      bundles.some((bundle) => bundleFiles[bundle.hash]?.loading);
+                    const anyError =
+                      bundlesError ||
+                      bundles.find((bundle) => bundleFiles[bundle.hash]?.error)?.hash;
+                    if (anyLoading && allFiles.length === 0) {
+                      return <p className="text-xs text-slate-500">文件加载中...</p>;
+                    }
+                    if (allFiles.length === 0) {
+                      return <p className="text-xs text-slate-500">暂无文件</p>;
+                    }
+                    return (
+                      <ul className="space-y-1 text-xs text-slate-300">
+                        {allFiles.map(({ bundleHash, file }) => {
+                          const label =
+                            typeof file.meta?.original_name === 'string'
+                              ? (file.meta.original_name as string)
+                              : file.name;
+                          const key = `${bundleHash}:${file.id}`;
+                          const deleting = deletingFileKey === key || deletingBundle === bundleHash;
+                          return (
+                            <li key={`${bundleHash}:${file.id}`} className="flex items-center gap-2">
+                              <span className="truncate">
+                                {label} ({((file.size_bytes ?? 0) / 1024).toFixed(1)} KB)
+                              </span>
+                              <button
+                                type="button"
+                                className="ml-auto rounded border border-rose-500/40 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
+                                disabled={deleting}
+                                onClick={() => {
+                                  const confirmed = window.confirm(`确定删除文件 ${label} 吗？此操作不可恢复。`);
+                                  if (!confirmed) return;
+                                  setDeletingFileKey(key);
+                                  rainApi
+                                    .deleteFile(bundleHash, String(file.id))
+                                    .then(() => {
+                                      loadBundleFiles(bundleHash).catch(() => undefined);
+                                      if (currentIssueCode) {
+                                        loadBundles(currentIssueCode).catch(() => undefined);
+                                      }
+                                    })
+                                    .catch((err) => {
+                                      setBundleFiles((prev) => ({
+                                        ...prev,
+                                        [bundleHash]: {
+                                          files: prev[bundleHash]?.files ?? [],
+                                          loading: false,
+                                          error: (err as Error).message || '删除文件失败'
+                                        }
+                                      }));
+                                    })
+                                    .finally(() => setDeletingFileKey(null));
+                                }}
+                              >
+                                {deleting ? '删除中...' : '删除'}
+                              </button>
+                            </li>
+                          );
+                        })}
+                        {anyLoading ? <p className="text-xs text-slate-500">文件加载中...</p> : null}
+                        {anyError && !bundlesError
+                          ? (
+                            <p className="text-xs text-rose-300">
+                              {bundles
+                                .map((bundle) => bundleFiles[bundle.hash]?.error)
+                                .find((msg) => msg)}
+                            </p>
+                          )
+                          : null}
+                      </ul>
+                    );
+                  })()
                 )}
               </div>
             </div>
           ) : null}
+          </div>
         </div>
       </section>
     </div>

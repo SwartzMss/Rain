@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use actix_web::{HttpResponse, get, web};
+use actix_web::{HttpResponse, delete, get, web};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::FromRow;
@@ -108,6 +108,100 @@ pub async fn get_file_content(
         "preview": preview,
         "truncated": truncated,
     })))
+}
+
+#[delete("/files/v1/{bundle_id}/files/{file_id}")]
+pub async fn delete_file_node(
+    params: web::Path<FilePath>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let FilePath { bundle_id, file_id } = params.into_inner();
+    let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    let parsed_id = file_id
+        .parse::<i64>()
+        .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
+    let record = fetch_file(&state.pool, bundle.id, parsed_id).await?;
+    let base_path = record.path.trim_end_matches('/').to_string();
+    let child_like = format!("{}/%", base_path);
+    let extracted_root = format!("{}_extracted", base_path);
+    let extracted_like = format!("{extracted_root}/%");
+
+    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+
+    let file_ids: Vec<i64> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM files
+        WHERE bundle_id = $1
+          AND (
+                id = $2
+             OR path = $3
+             OR path LIKE $4
+             OR path = $5
+             OR path LIKE $6
+          )
+        "#,
+    )
+    .bind(bundle.id)
+    .bind(parsed_id)
+    .bind(&base_path)
+    .bind(&child_like)
+    .bind(&extracted_root)
+    .bind(&extracted_like)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    if !file_ids.is_empty() {
+        sqlx::query("DELETE FROM log_segments WHERE file_id = ANY($1)")
+            .bind(&file_ids)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+    }
+
+    sqlx::query(
+        r#"
+        DELETE FROM files
+        WHERE bundle_id = $1
+          AND (
+                id = $2
+             OR path = $3
+             OR path LIKE $4
+             OR path = $5
+             OR path LIKE $6
+          )
+        "#,
+    )
+    .bind(bundle.id)
+    .bind(parsed_id)
+    .bind(&base_path)
+    .bind(&child_like)
+    .bind(&extracted_root)
+    .bind(&extracted_like)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    tx.commit().await.map_err(AppError::Database)?;
+
+    let data_root = data_root(&state);
+    let main_path = data_root.join(base_path.trim_start_matches('/'));
+    let extracted_path = data_root.join(extracted_root.trim_start_matches('/'));
+
+    if record.is_dir {
+        if tokio::fs::metadata(&main_path).await.is_ok() {
+            let _ = tokio::fs::remove_dir_all(&main_path).await;
+        }
+    } else if tokio::fs::metadata(&main_path).await.is_ok() {
+        let _ = tokio::fs::remove_file(&main_path).await;
+    }
+
+    if tokio::fs::metadata(&extracted_path).await.is_ok() {
+        let _ = tokio::fs::remove_dir_all(&extracted_path).await;
+    }
+
+    Ok(HttpResponse::NoContent().finish())
 }
 
 #[derive(FromRow)]
