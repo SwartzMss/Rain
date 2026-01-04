@@ -66,3 +66,17 @@ export interface FileContentResponse {
   preview: string;
   truncated: boolean;
 }
+
+export interface IssueLogSearchHit {
+  file_id: string | number;
+  path: string;
+  bundle_hash?: string;
+  snippet: string;
+  line_end?: number | null;
+  line_number?: number | null;
+}
+
+export interface IssueLogSearchResponse {
+  total: number;
+  hits: IssueLogSearchHit[];
+}

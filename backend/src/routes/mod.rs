@@ -17,6 +17,7 @@ pub fn register(cfg: &mut web::ServiceConfig) {
             .service(files::get_file_node)
             .service(files::get_file_content)
             .service(files::delete_file_node)
+            .service(logs::search_issue_logs)
             .service(logs::search_logs)
             .service(uploads::upload_logs),
     );

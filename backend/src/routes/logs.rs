@@ -106,9 +106,112 @@ pub async fn search_logs(
         .map(|row| LogSearchHit {
             file_id: row.file_id.to_string(),
             path: row.path,
+            bundle_hash: Some(bundle.hash.clone()),
             snippet: build_snippet(&row.content, &needle),
             timeline: row.timeline,
             offset: row.offset,
+            line_end: row.offset.map(|offset| offset + LINES_PER_CHUNK - 1),
+            line_number: row.offset,
+            chunk_index: row.offset.map(|offset| offset / LINES_PER_CHUNK),
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(LogSearchResponse {
+        total: total.max(0) as u64,
+        hits,
+    }))
+}
+
+#[derive(Deserialize)]
+struct IssueLogQuery {
+    q: String,
+    path_like: Option<String>,
+    from: Option<i64>,
+    size: Option<i64>,
+}
+
+#[get("/issues/{issue_code}/search")]
+pub async fn search_issue_logs(
+    path: web::Path<String>,
+    query: web::Query<IssueLogQuery>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let issue_code = path.into_inner();
+    let term = query.into_inner();
+    let search_term = term.q.trim();
+    if search_term.is_empty() {
+        return Err(AppError::BadRequest("query parameter q is required".into()));
+    }
+
+    let like_pattern = format!("%{}%", search_term);
+    let path_like = term.path_like.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let from = term.from.unwrap_or(0).max(0);
+    let size = term
+        .size
+        .unwrap_or(MAX_LOG_RESULTS)
+        .clamp(1, MAX_LOG_RESULTS);
+
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM log_segments ls
+        JOIN bundles b ON b.id = ls.bundle_id
+        JOIN files f ON f.id = ls.file_id
+        WHERE b.issue_code = $1
+          AND ls.content ILIKE $2
+          AND ($3::text IS NULL OR f.path ILIKE $3)
+        "#,
+    )
+    .bind(&issue_code)
+    .bind(&like_pattern)
+    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
+    .fetch_one(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let rows = sqlx::query_as::<_, IssueLogRow>(
+        r#"
+        SELECT ls.file_id,
+               f.path,
+               ls.line_offset AS offset,
+               ls.content,
+               b.hash as bundle_hash
+        FROM log_segments ls
+        JOIN bundles b ON b.id = ls.bundle_id
+        JOIN files f ON f.id = ls.file_id
+        WHERE b.issue_code = $1
+          AND ls.content ILIKE $2
+          AND ($3::text IS NULL OR f.path ILIKE $3)
+        ORDER BY ls.line_offset NULLS FIRST, ls.id
+        LIMIT $4 OFFSET $5
+        "#,
+    )
+    .bind(&issue_code)
+    .bind(&like_pattern)
+    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
+    .bind(size)
+    .bind(from)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let needle = search_term.to_ascii_lowercase();
+    let hits = rows
+        .into_iter()
+        .map(|row| LogSearchHit {
+            file_id: row.file_id.to_string(),
+            path: row.path,
+            bundle_hash: Some(row.bundle_hash),
+            snippet: build_snippet(&row.content, &needle),
+            timeline: None,
+            offset: row.offset,
+            line_end: row.offset.map(|offset| offset + LINES_PER_CHUNK - 1),
             line_number: row.offset,
             chunk_index: row.offset.map(|offset| offset / LINES_PER_CHUNK),
         })
@@ -127,6 +230,15 @@ struct LogRow {
     timeline: Option<String>,
     offset: Option<i64>,
     content: String,
+}
+
+#[derive(FromRow)]
+struct IssueLogRow {
+    file_id: i64,
+    path: String,
+    offset: Option<i64>,
+    content: String,
+    bundle_hash: String,
 }
 
 fn build_snippet(content: &str, needle: &str) -> String {

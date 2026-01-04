@@ -409,19 +409,19 @@ export function BundleView(props?: BundleViewProps) {
             <p className="text-xs text-slate-400">Issue: {activeIssueLabel}</p>
             {rootIds.length > 0 ? (
               <div className="space-y-2 text-sm text-slate-200">
-                {rootIds.map((rootId) => (
-                  <div key={rootId} className="space-y-1">
-                    {treeNodes[rootId]?.childrenIds.length ? (
-                      treeNodes[rootId].childrenIds.map((childId) => {
+                {rootIds.some((rootId) => (treeNodes[rootId]?.childrenIds.length ?? 0) > 0) ? (
+                  rootIds.map((rootId) => (
+                    <div key={rootId} className="space-y-1">
+                      {(treeNodes[rootId]?.childrenIds ?? []).map((childId) => {
                         const topNode = treeNodes[childId];
                         if (!topNode) return null;
                         return renderTreeNode(childId, 0);
-                      })
-                    ) : (
-                      <p className="text-sm text-slate-500">暂无文件。</p>
-                    )}
-                  </div>
-                ))}
+                      })}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-500">暂无文件。</p>
+                )}
               </div>
             ) : treeLoading ? (
               <p className="text-sm text-slate-400">文件树加载中...</p>

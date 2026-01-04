@@ -222,7 +222,6 @@ export function HomeView() {
       setUploading(false);
     }
   };
-
   const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     // no-op: upload is triggered by drop or file selection
@@ -361,92 +360,89 @@ export function HomeView() {
                 </div>
               {bundlesError ? <p className="text-xs text-rose-300">{bundlesError}</p> : null}
               <div className="space-y-2 text-sm text-slate-200">
-                {(!currentIssueCode || bundles.length === 0) && !bundlesLoading ? (
-                  <p className="text-xs text-slate-500">暂无上传记录</p>
-                ) : (
-                  (() => {
-                    const allFiles = bundles.flatMap((bundle) =>
-                      (bundleFiles[bundle.hash]?.files ?? []).map((file) => ({
-                        bundleHash: bundle.hash,
-                        file
-                      }))
-                    );
-                    const anyLoading =
-                      bundlesLoading ||
-                      bundles.some((bundle) => bundleFiles[bundle.hash]?.loading);
-                    const anyError =
-                      bundlesError ||
-                      bundles.find((bundle) => bundleFiles[bundle.hash]?.error)?.hash;
-                    if (anyLoading && allFiles.length === 0) {
-                      return <p className="text-xs text-slate-500">文件加载中...</p>;
-                    }
-                    if (allFiles.length === 0) {
-                      return <p className="text-xs text-slate-500">暂无文件</p>;
-                    }
-                    return (
-                      <ul className="space-y-1 text-sm md:text-base text-slate-300">
-                        {allFiles.map(({ bundleHash, file }) => {
-                          const label =
-                            typeof file.meta?.original_name === 'string'
-                              ? (file.meta.original_name as string)
-                              : file.name;
-                          const key = `${bundleHash}:${file.id}`;
-                          const deleting = deletingFileKey === key || deletingBundle === bundleHash;
-                          return (
-                            <li key={`${bundleHash}:${file.id}`} className="flex items-center gap-2">
-                              <span className="truncate">
-                                {label} ({((file.size_bytes ?? 0) / 1024).toFixed(1)} KB)
-                              </span>
-                              <button
-                                type="button"
-                                className="ml-auto rounded border border-rose-500/40 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
-                                disabled={deleting}
-                                onClick={() => {
-                                  setConfirmDialog({
-                                    message: `确定删除文件 ${label} 吗？此操作不可恢复。`,
-                                    onConfirm: async () => {
-                                      setDeletingFileKey(key);
-                                      try {
-                                        await rainApi.deleteFile(bundleHash, String(file.id));
-                                        await loadBundleFiles(bundleHash);
-                                        if (currentIssueCode) {
-                                          await loadBundles(currentIssueCode);
-                                        }
-                                      } catch (err) {
-                                        setBundleFiles((prev) => ({
-                                          ...prev,
-                                          [bundleHash]: {
-                                            files: prev[bundleHash]?.files ?? [],
-                                            loading: false,
-                                            error: (err as Error).message || '删除文件失败'
-                                          }
-                                        }));
-                                      } finally {
-                                        setDeletingFileKey(null);
+                {(() => {
+                  const allFiles = bundles.flatMap((bundle) =>
+                    (bundleFiles[bundle.hash]?.files ?? []).map((file) => ({
+                      bundleHash: bundle.hash,
+                      file
+                    }))
+                  );
+                  const anyLoading =
+                    bundlesLoading ||
+                    bundles.some((bundle) => bundleFiles[bundle.hash]?.loading);
+                  const anyError =
+                    bundlesError ||
+                    bundles.find((bundle) => bundleFiles[bundle.hash]?.error)?.hash;
+
+                  if (anyLoading && allFiles.length === 0) {
+                    return <p className="text-xs text-slate-500">文件加载中...</p>;
+                  }
+                  if (allFiles.length === 0) {
+                    return <p className="text-xs text-slate-500">暂无文件</p>;
+                  }
+                  return (
+                    <ul className="space-y-1 text-sm md:text-base text-slate-300">
+                      {allFiles.map(({ bundleHash, file }) => {
+                        const label =
+                          typeof file.meta?.original_name === 'string'
+                            ? (file.meta.original_name as string)
+                            : file.name;
+                        const key = `${bundleHash}:${file.id}`;
+                        const deleting = deletingFileKey === key || deletingBundle === bundleHash;
+                        return (
+                          <li key={`${bundleHash}:${file.id}`} className="flex items-center gap-2">
+                            <span className="truncate">
+                              {label} ({((file.size_bytes ?? 0) / 1024).toFixed(1)} KB)
+                            </span>
+                            <button
+                              type="button"
+                              className="ml-auto rounded border border-rose-500/40 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
+                              disabled={deleting}
+                              onClick={() => {
+                                setConfirmDialog({
+                                  message: `确定删除文件 ${label} 吗？此操作不可恢复。`,
+                                  onConfirm: async () => {
+                                    setDeletingFileKey(key);
+                                    try {
+                                      await rainApi.deleteFile(bundleHash, String(file.id));
+                                      await loadBundleFiles(bundleHash);
+                                      if (currentIssueCode) {
+                                        await loadBundles(currentIssueCode);
                                       }
+                                    } catch (err) {
+                                      setBundleFiles((prev) => ({
+                                        ...prev,
+                                        [bundleHash]: {
+                                          files: prev[bundleHash]?.files ?? [],
+                                          loading: false,
+                                          error: (err as Error).message || '删除文件失败'
+                                        }
+                                      }));
+                                    } finally {
+                                      setDeletingFileKey(null);
                                     }
-                                  });
-                                }}
-                              >
-                                {deleting ? '删除中...' : '删除'}
-                              </button>
-                            </li>
-                          );
-                        })}
-                        {anyLoading ? <p className="text-xs text-slate-500">文件加载中...</p> : null}
-                        {anyError && !bundlesError
-                          ? (
-                            <p className="text-xs text-rose-300">
-                              {bundles
-                                .map((bundle) => bundleFiles[bundle.hash]?.error)
-                                .find((msg) => msg)}
-                            </p>
-                          )
-                          : null}
-                      </ul>
-                    );
-                  })()
-                )}
+                                  }
+                                });
+                              }}
+                            >
+                              {deleting ? '删除中...' : '删除'}
+                            </button>
+                          </li>
+                        );
+                      })}
+                      {anyLoading ? <p className="text-xs text-slate-500">文件加载中...</p> : null}
+                      {anyError && !bundlesError
+                        ? (
+                          <p className="text-xs text-rose-300">
+                            {bundles
+                              .map((bundle) => bundleFiles[bundle.hash]?.error)
+                              .find((msg) => msg)}
+                          </p>
+                        )
+                        : null}
+                    </ul>
+                  );
+                })()}
               </div>
             </div>
           ) : null}

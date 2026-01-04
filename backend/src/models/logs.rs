@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 pub struct LogSearchHit {
     pub file_id: String,
     pub path: String,
+    pub bundle_hash: Option<String>,
     pub snippet: String,
     pub timeline: Option<String>,
     pub offset: Option<i64>,
+    pub line_end: Option<i64>,
     pub line_number: Option<i64>,
     pub chunk_index: Option<i64>,
 }
