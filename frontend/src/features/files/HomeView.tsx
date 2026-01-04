@@ -32,6 +32,11 @@ export function HomeView() {
   const [bundleFiles, setBundleFiles] = useState<Record<string, { files: FileNode[]; loading: boolean; error: string | null }>>({});
   const [deletingFileKey, setDeletingFileKey] = useState<string | null>(null);
   const currentIssueCode = uploadIssueId.trim();
+  const [confirmDialog, setConfirmDialog] = useState<{
+    message: string;
+    onConfirm: () => Promise<void> | void;
+    busy?: boolean;
+  } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -169,23 +174,26 @@ export function HomeView() {
   }, [bundles, bundleFiles, loadBundleFiles]);
 
   const handleDeleteIssue = async (code: string) => {
-    const confirmed = window.confirm(`确定删除 Issue ${code} 及其上传吗？此操作不可恢复。`);
-    if (!confirmed) return;
-    setDeletingIssue(code);
-    try {
-      await rainApi.deleteIssue(code);
-      setIssueId('');
-      setIssueFilter('');
-      setUploadIssueId('');
-      setBundles([]);
-      setBundleFiles({});
-      setBundlesError(null);
-      loadIssues().catch(() => undefined);
-    } catch (error) {
-      setIssuesError((error as Error).message || '删除失败');
-    } finally {
-      setDeletingIssue(null);
-    }
+    setConfirmDialog({
+      message: `确定删除 Issue ${code} 及其上传吗？此操作不可恢复。`,
+      onConfirm: async () => {
+        setDeletingIssue(code);
+        try {
+          await rainApi.deleteIssue(code);
+          setIssueId('');
+          setIssueFilter('');
+          setUploadIssueId('');
+          setBundles([]);
+          setBundleFiles({});
+          setBundlesError(null);
+          loadIssues().catch(() => undefined);
+        } catch (error) {
+          setIssuesError((error as Error).message || '删除失败');
+        } finally {
+          setDeletingIssue(null);
+        }
+      }
+    });
   };
 
   const performUpload = async (files: File[]) => {
@@ -394,28 +402,30 @@ export function HomeView() {
                                 className="ml-auto rounded border border-rose-500/40 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
                                 disabled={deleting}
                                 onClick={() => {
-                                  const confirmed = window.confirm(`确定删除文件 ${label} 吗？此操作不可恢复。`);
-                                  if (!confirmed) return;
-                                  setDeletingFileKey(key);
-                                  rainApi
-                                    .deleteFile(bundleHash, String(file.id))
-                                    .then(() => {
-                                      loadBundleFiles(bundleHash).catch(() => undefined);
-                                      if (currentIssueCode) {
-                                        loadBundles(currentIssueCode).catch(() => undefined);
-                                      }
-                                    })
-                                    .catch((err) => {
-                                      setBundleFiles((prev) => ({
-                                        ...prev,
-                                        [bundleHash]: {
-                                          files: prev[bundleHash]?.files ?? [],
-                                          loading: false,
-                                          error: (err as Error).message || '删除文件失败'
+                                  setConfirmDialog({
+                                    message: `确定删除文件 ${label} 吗？此操作不可恢复。`,
+                                    onConfirm: async () => {
+                                      setDeletingFileKey(key);
+                                      try {
+                                        await rainApi.deleteFile(bundleHash, String(file.id));
+                                        await loadBundleFiles(bundleHash);
+                                        if (currentIssueCode) {
+                                          await loadBundles(currentIssueCode);
                                         }
-                                      }));
-                                    })
-                                    .finally(() => setDeletingFileKey(null));
+                                      } catch (err) {
+                                        setBundleFiles((prev) => ({
+                                          ...prev,
+                                          [bundleHash]: {
+                                            files: prev[bundleHash]?.files ?? [],
+                                            loading: false,
+                                            error: (err as Error).message || '删除文件失败'
+                                          }
+                                        }));
+                                      } finally {
+                                        setDeletingFileKey(null);
+                                      }
+                                    }
+                                  });
                                 }}
                               >
                                 {deleting ? '删除中...' : '删除'}
@@ -443,6 +453,40 @@ export function HomeView() {
           </div>
         </div>
       </section>
+
+      {confirmDialog ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
+          <div className="w-full max-w-sm rounded-xl border border-slate-800 bg-slate-900/90 p-5 shadow-2xl">
+            <p className="text-sm text-slate-200">{confirmDialog.message}</p>
+            <div className="mt-4 flex items-center justify-end gap-3 text-sm">
+              <button
+                type="button"
+                className="rounded-lg border border-slate-700 px-4 py-2 text-slate-200 hover:border-slate-500"
+                onClick={() => setConfirmDialog(null)}
+                disabled={!!confirmDialog.busy}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-rose-500 px-4 py-2 font-semibold text-slate-900 transition hover:bg-rose-400 disabled:opacity-60"
+                onClick={async () => {
+                  if (!confirmDialog) return;
+                  setConfirmDialog((prev) => (prev ? { ...prev, busy: true } : prev));
+                  try {
+                    await confirmDialog.onConfirm();
+                  } finally {
+                    setConfirmDialog(null);
+                  }
+                }}
+                disabled={!!confirmDialog.busy}
+              >
+                {confirmDialog.busy ? '处理中...' : '确定删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

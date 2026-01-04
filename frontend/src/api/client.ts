@@ -26,12 +26,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init
   });
 
+  const text = await response.text();
+
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed: ${response.status}`);
+    throw new Error(text || `Request failed: ${response.status}`);
   }
 
-  return response.json() as Promise<T>;
+  if (!text) {
+    return undefined as T;
+  }
+
+  return JSON.parse(text) as T;
 }
 
 export const rainApi = {
