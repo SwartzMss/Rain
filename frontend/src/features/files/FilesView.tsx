@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { rainApi } from '../../api/client';
 import type { FileContentResponse, FileNode, IssueLogSearchHit } from '../../api/types';
@@ -586,12 +586,27 @@ export function BundleView(props?: BundleViewProps) {
                   <p className="text-sm text-rose-300">{fileContentError}</p>
                 ) : fileContent ? (
                   <div className="space-y-2">
-                    <pre
-                      ref={contentRef}
+                    <div
+                      ref={contentRef as React.RefObject<HTMLDivElement>}
                       className="h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs leading-5 text-slate-100"
                     >
-                      {fileContent.preview}
-                    </pre>
+                      <div className="grid grid-cols-[auto_1fr] gap-3 font-mono">
+                        <div className="select-none text-right text-slate-500">
+                          {fileContent.preview
+                            .split('\n')
+                            .map((_, idx) => (
+                              <div key={idx}>{idx + 1}</div>
+                            ))}
+                        </div>
+                        <div>
+                          {fileContent.preview.split('\n').map((line, idx) => (
+                            <div key={idx} className="whitespace-pre">
+                              {line}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
                     {fileContent.truncated ? (
                       <p className="text-xs text-amber-300">已截断预览（最多 64KB）。</p>
                     ) : null}
