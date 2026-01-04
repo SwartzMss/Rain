@@ -336,7 +336,19 @@ fn is_text_like(name: &str, content_type: Option<&str>) -> bool {
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase())
             .as_deref(),
-        Some("log") | Some("txt")
+        Some("log")
+            | Some("txt")
+            | Some("toml")
+            | Some("rs")
+            | Some("json")
+            | Some("yaml")
+            | Some("yml")
+            | Some("md")
+            | Some("cfg")
+            | Some("conf")
+            | Some("ini")
+            | Some("env")
+            | Some("csv")
     )
 }
 

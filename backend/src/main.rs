@@ -48,6 +48,13 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("failed to prepare database schema");
 
+    if config.reset_db {
+        if fs::metadata(&config.data_root).is_ok() {
+            let _ = fs::remove_dir_all(&config.data_root);
+        }
+        fs::create_dir_all(&config.data_root).expect("failed to recreate data root");
+    }
+
     info!(
         host = %config.host,
         port = config.port,
