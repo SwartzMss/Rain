@@ -462,9 +462,38 @@ export function BundleView(props?: BundleViewProps) {
               </div>
               {searchError ? <p className="text-xs text-rose-300">{searchError}</p> : null}
               {searchResults.length > 0 ? (
-                <div className="space-y-2">
+                <div className="text-[11px] text-slate-400">共 {searchResults.length} 条（最多显示 50 条）</div>
+              ) : null}
+            </div>
+            {rootIds.length > 0 ? (
+              <div className="space-y-2 text-sm text-slate-200">
+                {rootIds.some((rootId) => (treeNodes[rootId]?.childrenIds.length ?? 0) > 0) ? (
+                  rootIds.map((rootId) => (
+                    <div key={rootId} className="space-y-1">
+                      {(treeNodes[rootId]?.childrenIds ?? []).map((childId) => {
+                        const topNode = treeNodes[childId];
+                        if (!topNode) return null;
+                        return renderTreeNode(childId, 0);
+                      })}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-500">暂无文件。</p>
+                )}
+              </div>
+            ) : treeLoading ? (
+              <p className="text-sm text-slate-400">文件树加载中...</p>
+            ) : (
+              <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200 min-h-[80vh]">
+            <div className="space-y-4">
+              {searchResults.length > 0 ? (
+                <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
                   <div className="flex items-center justify-between text-[11px] text-slate-400">
-                    <span>共 {searchResults.length} 条（最多显示 50 条）</span>
+                    <span>搜索结果（{searchResults.length} 条，最多显示 50 条）</span>
                   </div>
                   <ul className="space-y-2 max-h-72 overflow-auto">
                     {searchResults.map((hit, index) => (
@@ -500,32 +529,6 @@ export function BundleView(props?: BundleViewProps) {
                   </ul>
                 </div>
               ) : null}
-            </div>
-            {rootIds.length > 0 ? (
-              <div className="space-y-2 text-sm text-slate-200">
-                {rootIds.some((rootId) => (treeNodes[rootId]?.childrenIds.length ?? 0) > 0) ? (
-                  rootIds.map((rootId) => (
-                    <div key={rootId} className="space-y-1">
-                      {(treeNodes[rootId]?.childrenIds ?? []).map((childId) => {
-                        const topNode = treeNodes[childId];
-                        if (!topNode) return null;
-                        return renderTreeNode(childId, 0);
-                      })}
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-sm text-slate-500">暂无文件。</p>
-                )}
-              </div>
-            ) : treeLoading ? (
-              <p className="text-sm text-slate-400">文件树加载中...</p>
-            ) : (
-              <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
-            )}
-          </div>
-
-          <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200 min-h-[80vh]">
-            <div className="space-y-4">
               {!selectedNode ? (
                 <p className="text-sm text-slate-500">请选择一个文件查看内容。</p>
               ) : isArchiveNode(selectedNode) ? (
