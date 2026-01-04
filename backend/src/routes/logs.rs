@@ -100,14 +100,13 @@ pub async fn search_logs(
     .await
     .map_err(AppError::Database)?;
 
-    let needle = search_term.to_ascii_lowercase();
     let hits = rows
         .into_iter()
         .map(|row| LogSearchHit {
             file_id: row.file_id.to_string(),
             path: row.path,
             bundle_hash: Some(bundle.hash.clone()),
-            snippet: build_snippet(&row.content, &needle),
+            snippet: row.content,
             timeline: row.timeline,
             offset: row.offset,
             line_end: row.offset.map(|offset| offset + LINES_PER_CHUNK - 1),
@@ -201,14 +200,13 @@ pub async fn search_issue_logs(
     .await
     .map_err(AppError::Database)?;
 
-    let needle = search_term.to_ascii_lowercase();
     let hits = rows
         .into_iter()
         .map(|row| LogSearchHit {
             file_id: row.file_id.to_string(),
             path: row.path,
             bundle_hash: Some(row.bundle_hash),
-            snippet: build_snippet(&row.content, &needle),
+            snippet: row.content,
             timeline: None,
             offset: row.offset,
             line_end: row.offset.map(|offset| offset + LINES_PER_CHUNK - 1),
@@ -239,31 +237,4 @@ struct IssueLogRow {
     offset: Option<i64>,
     content: String,
     bundle_hash: String,
-}
-
-fn build_snippet(content: &str, needle: &str) -> String {
-    if needle.is_empty() {
-        return content.to_string();
-    }
-
-    let lower = content.to_ascii_lowercase();
-    if let Some(pos) = lower.find(needle) {
-        let start = pos.saturating_sub(40);
-        let end = (pos + needle.len() + 40).min(content.len());
-        if let Some(window) = content.get(start..end) {
-            let mut snippet = String::new();
-            if start > 0 {
-                snippet.push_str("...");
-            }
-            snippet.push_str(window);
-            if end < content.len() {
-                snippet.push_str("...");
-            }
-            snippet
-        } else {
-            content.chars().take(120).collect()
-        }
-    } else {
-        content.chars().take(120).collect()
-    }
 }
