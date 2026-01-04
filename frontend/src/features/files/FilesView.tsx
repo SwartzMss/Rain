@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { rainApi } from '../../api/client';
 import type { FileContentResponse, FileNode, IssueLogSearchHit } from '../../api/types';
@@ -76,6 +76,9 @@ export function BundleView(props?: BundleViewProps) {
   const [searchResults, setSearchResults] = useState<IssueLogSearchHit[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchMode, setSearchMode] = useState<'log' | 'detailed'>('log');
+  const [targetLine, setTargetLine] = useState<number | null>(null);
+  const contentRef = useRef<HTMLPreElement | null>(null);
 
   const formatHitPath = (raw: string) => {
     const parts = raw.replace(/^\//, '').split('/');
@@ -272,7 +275,12 @@ export function BundleView(props?: BundleViewProps) {
     setSearchError(null);
   }, [issueCode, refreshKey]);
 
-  const handleNodeClick = async (nodeId: string) => {
+  const handleNodeClick = async (nodeId: string, line?: number | null) => {
+    if (typeof line === 'number' && line > 0) {
+      setTargetLine(line);
+    } else {
+      setTargetLine(null);
+    }
     setSearchResults([]);
     setSearchError(null);
     let node: TreeNode | null = treeNodes[nodeId] ?? null;
@@ -385,6 +393,17 @@ export function BundleView(props?: BundleViewProps) {
     });
   }, [selectedNode]);
 
+  useEffect(() => {
+    if (!contentRef.current) return;
+    if (targetLine === null || targetLine === undefined) return;
+    if (!fileContent) return;
+    const pre = contentRef.current;
+    const lineHeightPx = 20;
+    const lines = fileContent.preview.split('\n');
+    const clampedIndex = Math.min(Math.max(targetLine - 1, 0), Math.max(lines.length - 1, 0));
+    pre.scrollTop = Math.max(0, clampedIndex * lineHeightPx);
+  }, [fileContent, targetLine]);
+
   const renderTreeNode = (nodeId: string, depth = 0): JSX.Element | null => {
     const node = treeNodes[nodeId];
     if (!node) return null;
@@ -470,12 +489,31 @@ export function BundleView(props?: BundleViewProps) {
                 />
                 <button
                   type="button"
-                  className="rounded-lg bg-brand-500 px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
+                  className="rounded-lg bg-brand-500 px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60 whitespace-nowrap sm:w-auto w-full"
                   onClick={() => runSearch().catch(() => undefined)}
                   disabled={searchLoading || !issueCode || !searchTerm.trim()}
                 >
                   {searchLoading ? '搜索中...' : '搜索'}
                 </button>
+              </div>
+              <div className="flex flex-col gap-2 text-xs text-slate-300 sm:flex-row sm:items-center sm:gap-3">
+                <span className="whitespace-nowrap">搜索模式</span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className={`rounded border px-3 py-1 ${searchMode === 'log' ? 'border-brand-500 bg-brand-500/20 text-brand-100' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}
+                    onClick={() => setSearchMode('log')}
+                  >
+                    日志模式
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded border px-3 py-1 ${searchMode === 'detailed' ? 'border-brand-500 bg-brand-500/20 text-brand-100' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}
+                    onClick={() => setSearchMode('detailed')}
+                  >
+                    搜索模式
+                  </button>
+                </div>
               </div>
               {searchError ? <p className="text-xs text-rose-300">{searchError}</p> : null}
             </div>
@@ -506,9 +544,36 @@ export function BundleView(props?: BundleViewProps) {
             <div className="space-y-4">
               <div className="space-y-2">
                 {searchResults.length > 0 ? (
-                  <pre className="whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-100">
-                    {searchResults.map((hit) => hit.snippet).join('\n')}
-                  </pre>
+                  searchMode === 'log' ? (
+                    <pre className="whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-100">
+                      {searchResults.map((hit) => hit.snippet).join('\n')}
+                    </pre>
+                  ) : (
+                    <ul className="space-y-2">
+                      {searchResults.map((hit, index) => (
+                        <li
+                          key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
+                          className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/70 p-3 cursor-pointer"
+                          onDoubleClick={() => {
+                            if (!hit.bundle_hash) return;
+                            const targetId = `${hit.bundle_hash}:${hit.file_id}`;
+                            setSelectedNodeId(targetId);
+                            handleNodeClick(targetId, hit.line_number ?? null).catch(() => undefined);
+                          }}
+                        >
+                          <p className="text-[11px] text-slate-400">
+                            {formatHitPath(hit.path)}{' '}
+                            <span className="text-slate-500">
+                              {hit.line_number !== null && hit.line_number !== undefined
+                                ? `行 ${hit.line_number}${hit.line_end ? ` - ${hit.line_end}` : ''}`
+                                : '行号未知'}
+                            </span>
+                          </p>
+                          <pre className="whitespace-pre-wrap text-xs text-slate-100">{hit.snippet}</pre>
+                        </li>
+                      ))}
+                    </ul>
+                  )
                 ) : !selectedNode ? (
                   <p className="text-sm text-slate-500">请选择一个文件查看内容。</p>
                 ) : isArchiveNode(selectedNode) ? (
@@ -521,7 +586,10 @@ export function BundleView(props?: BundleViewProps) {
                   <p className="text-sm text-rose-300">{fileContentError}</p>
                 ) : fileContent ? (
                   <div className="space-y-2">
-                    <pre className="h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs text-slate-100">
+                    <pre
+                      ref={contentRef}
+                      className="h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs leading-5 text-slate-100"
+                    >
                       {fileContent.preview}
                     </pre>
                     {fileContent.truncated ? (
