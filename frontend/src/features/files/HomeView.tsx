@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rainApi } from '../../api/client';
 import type { FileNode, IssueBundlesResponse, IssueSummary, UploadResponse, UploadSummary } from '../../api/types';
@@ -31,10 +31,9 @@ export function HomeView() {
   const [deletingBundle, setDeletingBundle] = useState<string | null>(null);
   const [bundleFiles, setBundleFiles] = useState<Record<string, { files: FileNode[]; loading: boolean; error: string | null }>>({});
   const [deletingFileKey, setDeletingFileKey] = useState<string | null>(null);
-  const currentIssueCode = issueId.trim() || uploadIssueId.trim();
+  const currentIssueCode = uploadIssueId.trim();
 
-  const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
-  const [fileInputKey, setFileInputKey] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
@@ -114,14 +113,14 @@ export function HomeView() {
   }, [loadIssues]);
 
   useEffect(() => {
-    if (!issueId.trim()) {
+    if (!currentIssueCode) {
       setBundles([]);
       setBundleFiles({});
       setBundlesError(null);
       return;
     }
-    loadBundles(issueId).catch(() => undefined);
-  }, [issueId, loadBundles]);
+    loadBundles(currentIssueCode).catch(() => undefined);
+  }, [currentIssueCode, loadBundles]);
 
   const openIssue = async (value: string) => {
     const trimmed = value.trim();
@@ -189,13 +188,12 @@ export function HomeView() {
     }
   };
 
-  const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const performUpload = async (files: File[]) => {
     if (!uploadIssueId.trim()) {
       setUploadError('请输入 Issue ID');
       return;
     }
-    if (!selectedFiles || selectedFiles.length === 0) {
+    if (!files || files.length === 0) {
       setUploadError('请至少选择一个文件');
       return;
     }
@@ -203,12 +201,10 @@ export function HomeView() {
     setUploadError(null);
     setUploadSuccess(null);
     try {
-      const response = await rainApi.uploadLogs(uploadIssueId.trim(), Array.from(selectedFiles));
+      const response = await rainApi.uploadLogs(uploadIssueId.trim(), files);
       setUploadSuccess(response);
-      setIssueId(response.issue_code);
       setUploadIssueId(response.issue_code);
-      setSelectedFiles(null);
-      setFileInputKey((key) => key + 1);
+      setIssueId(response.issue_code);
       loadIssues().catch(() => undefined);
       loadBundles(response.issue_code).catch(() => undefined);
     } catch (error) {
@@ -219,24 +215,28 @@ export function HomeView() {
     }
   };
 
+  const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    // no-op: upload is triggered by drop or file selection
+  };
+
   return (
-    <div className="space-y-6">
-      <section className="panel space-y-4">
+    <div className="min-h-screen space-y-6 pb-6 flex flex-col text-sm md:text-base">
+      <section className="panel space-y-4 h-full flex-1 flex flex-col">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-brand-500">Issue 操作</p>
-            <h2 className="text-lg font-semibold text-white">创建 / 上传 / 查询</h2>
+            <p className="text-xs sm:text-sm uppercase tracking-[0.2em] text-brand-500">Issue 操作</p>
           </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4">
-            <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+        <div className="grid items-stretch gap-4 lg:grid-cols-3 flex-1">
+          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4 h-full flex flex-col">
+            <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm md:text-base">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <h4 className="text-sm font-semibold text-white">Issue 列表</h4>
+                <h4 className="text-sm sm:text-base font-semibold text-white">Issue 列表</h4>
               </div>
               <input
-                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none text-sm md:text-base"
                 placeholder="输入 Issue ID，例如 CN013"
                 value={issueFilter}
                 onChange={(event) => setIssueFilter(event.target.value)}
@@ -290,8 +290,8 @@ export function HomeView() {
             </div>
           </div>
 
-          <div className="space-y-4 lg:col-span-2">
-            <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+          <div className="space-y-4 lg:col-span-2 h-full flex flex-col">
+            <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4 w-full">
               {uploadSuccess ? (
                 <div className="rounded-lg border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
                   <p className="font-semibold">上传成功</p>
@@ -309,56 +309,51 @@ export function HomeView() {
                 />
               </label>
               <div className="space-y-2">
-                <label className="block text-sm text-slate-300">上传日志 / 压缩包</label>
                 <input
-                  key={fileInputKey}
+                  ref={fileInputRef}
                   type="file"
                   multiple
-                  onChange={(event) => setSelectedFiles(event.target.files)}
-                  className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-2 text-sm text-slate-300 file:mr-4 file:rounded-md file:border-0 file:bg-brand-500 file:px-3 file:py-1 file:text-sm file:font-semibold file:text-slate-900"
+                  className="hidden"
+                  onChange={(event) => {
+                    const files = event.target.files;
+                    if (files && files.length > 0) {
+                      performUpload(Array.from(files)).catch(() => undefined);
+                    }
+                    if (fileInputRef.current) {
+                      fileInputRef.current.value = '';
+                    }
+                  }}
                 />
-                {selectedFiles && selectedFiles.length > 0 ? (
-                  <ul className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-200">
-                    {Array.from(selectedFiles).map((file) => (
-                      <li key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between gap-3">
-                        <span className="truncate">{file.name}</span>
-                        <span className="shrink-0 text-slate-400">{formatBytes(file.size)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
-              <div className="flex items-center justify-end text-xs text-slate-500">
-                <button
-                  type="submit"
-                  className="rounded-lg bg-brand-500 px-5 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
-                  disabled={uploading}
+                <div
+                  className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-6 text-center text-sm text-slate-200 transition hover:border-brand-500 hover:bg-slate-900/70 cursor-pointer"
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (event.dataTransfer?.files?.length) {
+                      performUpload(Array.from(event.dataTransfer.files)).catch(() => undefined);
+                    }
+                  }}
                 >
-                  {uploading ? '上传中...' : '上传'}
-                </button>
+                  <p className="font-semibold text-white">{uploading ? '上传中...' : '拖拽文件到这里上传'}</p>
+                  <p className="text-xs text-slate-400">支持日志或压缩包，点击也可选择文件</p>
+                </div>
               </div>
               {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
             </form>
 
             {currentIssueCode ? (
-              <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+              <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4 flex-1 flex flex-col">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-white">当前文件</h3>
-                  <button
-                    type="button"
-                    className="text-xs text-brand-300 hover:text-brand-200"
-                    onClick={() => {
-                      if (!currentIssueCode) return;
-                      loadBundles(currentIssueCode).catch(() => undefined);
-                    }}
-                    disabled={bundlesLoading}
-                >
-                  {bundlesLoading ? '刷新中...' : '刷新'}
-                </button>
-              </div>
+                </div>
               {bundlesError ? <p className="text-xs text-rose-300">{bundlesError}</p> : null}
               <div className="space-y-2 text-sm text-slate-200">
-                {bundles.length === 0 && !bundlesLoading ? (
+                {(!currentIssueCode || bundles.length === 0) && !bundlesLoading ? (
                   <p className="text-xs text-slate-500">暂无上传记录</p>
                 ) : (
                   (() => {
@@ -381,7 +376,7 @@ export function HomeView() {
                       return <p className="text-xs text-slate-500">暂无文件</p>;
                     }
                     return (
-                      <ul className="space-y-1 text-xs text-slate-300">
+                      <ul className="space-y-1 text-sm md:text-base text-slate-300">
                         {allFiles.map(({ bundleHash, file }) => {
                           const label =
                             typeof file.meta?.original_name === 'string'
