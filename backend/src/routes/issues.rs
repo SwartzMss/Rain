@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, delete, get, web};
+use actix_web::{HttpResponse, delete, get, post, web};
 use serde::Deserialize;
 use sqlx::FromRow;
 use tokio::fs;
@@ -10,6 +10,7 @@ use crate::{
 };
 
 const ISSUE_CODE_MAX_LEN: usize = 64;
+const ISSUE_NAME_MAX_LEN: usize = 128;
 
 pub fn normalize_issue_code(value: &str) -> Result<String, AppError> {
     let code = value.trim().to_uppercase();
@@ -48,6 +49,56 @@ pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, App
     .map_err(AppError::Database)?;
 
     Ok(HttpResponse::Ok().json(rows))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateIssueRequest {
+    pub code: String,
+    pub name: Option<String>,
+}
+
+#[post("/issues")]
+pub async fn create_issue(
+    state: web::Data<AppState>,
+    payload: web::Json<CreateIssueRequest>,
+) -> Result<HttpResponse, AppError> {
+    let code = normalize_issue_code(&payload.code)?;
+    let name = payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&code)
+        .to_owned();
+
+    if name.len() > ISSUE_NAME_MAX_LEN {
+        return Err(AppError::BadRequest(
+            "issue name must not exceed 128 characters".into(),
+        ));
+    }
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO issues (code, name)
+        VALUES (?, ?)
+        ON CONFLICT(code) DO NOTHING
+        "#,
+    )
+    .bind(&code)
+    .bind(&name)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::Conflict(format!("issue {code} already exists")));
+    }
+
+    Ok(HttpResponse::Created().json(IssueSummary {
+        code,
+        name,
+        bundle_count: 0,
+    }))
 }
 
 #[get("/issues/{issue_id}")]
@@ -89,21 +140,27 @@ pub async fn get_issue_bundles(
     Ok(HttpResponse::Ok().json(response))
 }
 
-pub async fn ensure_issue(pool: &sqlx::SqlitePool, code: &str) -> Result<(), AppError> {
+pub async fn require_issue_exists(pool: &sqlx::SqlitePool, code: &str) -> Result<String, AppError> {
     let code = normalize_issue_code(code)?;
-    sqlx::query(
+    let exists: bool = sqlx::query_scalar(
         r#"
-        INSERT INTO issues (code, name)
-        VALUES (?, ?)
-        ON CONFLICT (code) DO NOTHING
+        SELECT EXISTS(
+            SELECT 1
+            FROM issues
+            WHERE code = ?
+        )
         "#,
     )
     .bind(&code)
-    .bind(&code)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(AppError::Database)?;
-    Ok(())
+
+    if !exists {
+        return Err(AppError::NotFound(format!("issue {code}")));
+    }
+
+    Ok(code)
 }
 
 #[derive(FromRow, Deserialize)]

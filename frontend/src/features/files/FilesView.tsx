@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
-import type { FileLinesResponse, FileNode, IssueLogSearchHit } from '../../api/types';
+import type { FileLinesResponse, FileNode, IssueLogSearchHit, UploadSummary } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
 
 type TreeNode = Omit<FileNode, 'id' | 'children'> & {
@@ -39,6 +39,16 @@ const nodeTypeLabel = (node: TreeNode) => {
 const isExtractionFolder = (node: TreeNode, parent?: TreeNode | null) => {
   if (!node.is_dir || !node.name.toLowerCase().endsWith('_extracted')) return false;
   return parent ? isArchiveNode(parent) : false;
+};
+
+const bundleStatusLabel = (bundle: UploadSummary) => {
+  if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
+    return '正在建立索引';
+  }
+  if (bundle.status.upload_status === 'FAILED') {
+    return '处理失败';
+  }
+  return bundle.status.upload_status;
 };
 
 type BundleViewProps = {
@@ -80,6 +90,7 @@ export function BundleView(props?: BundleViewProps) {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchMode, setSearchMode] = useState<'log' | 'detailed'>('log');
   const [targetLine, setTargetLine] = useState<number | null>(null);
+  const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const contentRef = useRef<HTMLDivElement | null>(null);
 
   const formatHitPath = (raw: string) => {
@@ -206,15 +217,22 @@ export function BundleView(props?: BundleViewProps) {
       setExpandedNodes(new Set());
       setRootIds([]);
       setSelectedNodeId(null);
+      setNonReadyBundles([]);
 
       let bundles = fallbackBundles;
       if (issueCode) {
         try {
           const data = await rainApi.fetchIssueBundles(issueCode);
-          const list = data.log_bundles.map((bundle) => ({ hash: bundle.hash, name: bundle.name || bundle.hash }));
-          if (list.length > 0) {
-            bundles = list;
+          const notReady = data.log_bundles.filter(
+            (bundle) => bundle.status.upload_status !== 'READY'
+          );
+          if (!ignore) {
+            setNonReadyBundles(notReady);
           }
+          const list = data.log_bundles
+            .filter((bundle) => bundle.status.upload_status === 'READY')
+            .map((bundle) => ({ hash: bundle.hash, name: bundle.name || bundle.hash }));
+          bundles = list;
         } catch (error) {
           setTreeError(normalizeApiError(error));
         }
@@ -482,6 +500,18 @@ export function BundleView(props?: BundleViewProps) {
         <div className="grid gap-4 lg:grid-cols-[460px_minmax(0,1fr)]">
           <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-3">
             <p className="text-xs text-slate-400">Issue: {activeIssueLabel}</p>
+            {nonReadyBundles.length > 0 ? (
+              <div className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
+                {nonReadyBundles.map((bundle) => (
+                  <div key={bundle.hash} className="flex items-center justify-between gap-3">
+                    <span className="truncate">{bundle.name || bundle.hash}</span>
+                    <span className={bundle.status.upload_status === 'FAILED' ? 'text-rose-300' : 'text-amber-200'}>
+                      {bundleStatusLabel(bundle)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
                 <input

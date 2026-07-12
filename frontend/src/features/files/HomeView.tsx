@@ -32,12 +32,15 @@ export function HomeView() {
 
   const [selectedIssueCode, setSelectedIssueCode] = useState('');
   const [issueSearchText, setIssueSearchText] = useState('');
-  const [issueDraftCode, setIssueDraftCode] = useState('');
-  const [issueLoading, setIssueLoading] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
   const [issues, setIssues] = useState<IssueSummary[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [issuesError, setIssuesError] = useState<string | null>(null);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [newIssueCode, setNewIssueCode] = useState('');
+  const [newIssueName, setNewIssueName] = useState('');
+  const [creatingIssue, setCreatingIssue] = useState(false);
+  const [createIssueError, setCreateIssueError] = useState<string | null>(null);
   const [deletingIssue, setDeletingIssue] = useState<string | null>(null);
   const [bundles, setBundles] = useState<UploadSummary[]>([]);
   const [bundlesLoading, setBundlesLoading] = useState(false);
@@ -64,8 +67,11 @@ export function HomeView() {
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
     if (stored) {
-      setSelectedIssueCode(stored);
-      setIssueDraftCode(stored);
+      try {
+        setSelectedIssueCode(normalizeIssueCode(stored));
+      } catch {
+        localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
+      }
     }
   }, []);
 
@@ -116,7 +122,12 @@ export function HomeView() {
         const message = normalizeApiError(error);
         if (/not found|404/i.test(message)) {
           setBundles([]);
-          setBundlesError(null);
+          setBundleFiles({});
+          setBundlesError('Issue 不存在或已被删除');
+          if (selectedIssueRef.current === trimmed) {
+            setSelectedIssueCode('');
+            localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
+          }
           throw new Error('未找到 Issue');
         } else {
           setBundlesError(normalizeApiError(error));
@@ -159,8 +170,9 @@ export function HomeView() {
   }, [bundles, currentIssueCode, loadBundles]);
 
   useEffect(() => {
-    const taskId = uploadSuccess?.task_id;
+    const taskId = uploadTask?.task_id;
     if (!taskId) return;
+    if (uploadTask.status === 'READY' || uploadTask.status === 'FAILED') return;
 
     let cancelled = false;
     let timer: number | undefined;
@@ -170,13 +182,14 @@ export function HomeView() {
         const task = await rainApi.fetchUploadTask(taskId);
         if (cancelled) return;
         setUploadTask(task);
-        loadIssues().catch(() => undefined);
-        if (selectedIssueRef.current === task.issue_code) {
-          loadBundles(task.issue_code).catch(() => undefined);
+        if (task.status === 'READY' || task.status === 'FAILED') {
+          if (selectedIssueRef.current === task.issue_code) {
+            await loadBundles(task.issue_code);
+          }
+          await loadIssues();
+          return;
         }
-        if (task.status !== 'READY' && task.status !== 'FAILED') {
-          timer = window.setTimeout(poll, 1500);
-        }
+        timer = window.setTimeout(poll, 1500);
       } catch (error) {
         if (!cancelled) {
           setUploadError(normalizeApiError(error));
@@ -192,17 +205,46 @@ export function HomeView() {
         window.clearTimeout(timer);
       }
     };
-  }, [uploadSuccess?.task_id, loadIssues, loadBundles]);
+  }, [uploadTask?.task_id, uploadTask?.status, loadIssues, loadBundles]);
 
-  const openIssue = (value: string) => {
+  const selectIssue = (value: string) => {
     try {
       const code = normalizeIssueCode(value);
       setIssueError(null);
       setSelectedIssueCode(code);
-      setIssueDraftCode(code);
-      navigate(`/issue/${encodeURIComponent(code)}`);
     } catch (error) {
       setIssueError(normalizeApiError(error));
+    }
+  };
+
+  const handleCreateIssue = async () => {
+    let code: string;
+    try {
+      code = normalizeIssueCode(newIssueCode);
+    } catch (error) {
+      setCreateIssueError(normalizeApiError(error));
+      return;
+    }
+
+    setCreatingIssue(true);
+    setCreateIssueError(null);
+    try {
+      const issue = await rainApi.createIssue({
+        code,
+        name: newIssueName.trim() || undefined
+      });
+      setIssues((prev) => [issue, ...prev.filter((item) => item.code !== issue.code)]);
+      setSelectedIssueCode(issue.code);
+      setBundles([]);
+      setBundleFiles({});
+      setNewIssueCode('');
+      setNewIssueName('');
+      setCreateDialogOpen(false);
+      localStorage.setItem(LAST_ISSUE_STORAGE_KEY, issue.code);
+    } catch (error) {
+      setCreateIssueError(normalizeApiError(error));
+    } finally {
+      setCreatingIssue(false);
     }
   };
 
@@ -260,9 +302,6 @@ export function HomeView() {
             setBundleFiles({});
             setBundlesError(null);
           }
-          if (issueDraftCode.trim().toUpperCase() === code) {
-            setIssueDraftCode('');
-          }
           loadIssues().catch(() => undefined);
         } catch (error) {
           setIssuesError(normalizeApiError(error));
@@ -277,15 +316,8 @@ export function HomeView() {
     if (uploadingRef.current) {
       return;
     }
-    if (!issueDraftCode.trim()) {
-      setUploadError('请输入 Issue ID');
-      return;
-    }
-    let issueCode: string;
-    try {
-      issueCode = normalizeIssueCode(issueDraftCode);
-    } catch (error) {
-      setUploadError(normalizeApiError(error));
+    if (!selectedIssueCode) {
+      setUploadError('请先选择或创建 Issue');
       return;
     }
     if (!files || files.length === 0) {
@@ -299,7 +331,7 @@ export function HomeView() {
     setUploadSuccess(null);
     setUploadTask(null);
     try {
-      const response = await rainApi.uploadLogs(issueCode, files, setUploadProgress);
+      const response = await rainApi.uploadLogs(selectedIssueCode, files, setUploadProgress);
       setUploadSuccess(response);
       setUploadTask({
         task_id: response.task_id,
@@ -309,9 +341,8 @@ export function HomeView() {
         progress_percent: response.status === 'READY' ? 100 : 0,
         total_bytes: response.total_bytes
       });
-      setIssueDraftCode(response.issue_code);
-      setSelectedIssueCode(response.issue_code);
-      loadIssues().catch(() => undefined);
+      await loadBundles(selectedIssueCode);
+      await loadIssues();
     } catch (error) {
       setUploadError(normalizeApiError(error));
       setUploadSuccess(null);
@@ -340,6 +371,16 @@ export function HomeView() {
             <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm md:text-base">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <h4 className="text-sm sm:text-base font-semibold text-white">Issue 列表</h4>
+                <button
+                  type="button"
+                  className="rounded border border-brand-500/50 px-3 py-1 text-xs font-semibold text-brand-100 transition hover:bg-brand-500/10"
+                  onClick={() => {
+                    setCreateDialogOpen(true);
+                    setCreateIssueError(null);
+                  }}
+                >
+                  + 新建 Issue
+                </button>
               </div>
               <input
                 className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none text-sm md:text-base"
@@ -349,7 +390,7 @@ export function HomeView() {
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
-                    openIssue(issueSearchText);
+                    selectIssue(issueSearchText);
                   }
                 }}
               />
@@ -383,11 +424,18 @@ export function HomeView() {
                     >
                       <button
                         type="button"
-                        onClick={() => openIssue(item.code)}
-                        className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
-                        disabled={issueLoading}
+                        onClick={() => selectIssue(item.code)}
+                        className="flex min-w-0 flex-1 flex-col text-left"
                       >
                         <span className="truncate font-semibold text-white">{item.code}</span>
+                        <span className="text-[10px] text-slate-500">{item.bundle_count} 个上传包</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/issue/${encodeURIComponent(item.code)}`)}
+                        className="shrink-0 rounded border border-slate-600 px-2 py-1 text-[11px] text-slate-200 transition hover:bg-slate-800"
+                      >
+                        查看
                       </button>
                       <button
                         type="button"
@@ -424,14 +472,13 @@ export function HomeView() {
                 </div>
               ) : null}
               <h3 className="text-sm font-semibold text-white">上传日志</h3>
-              <label className="block text-sm text-slate-300">
-                Issue ID
-                <input
-                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                  value={issueDraftCode}
-                  onChange={(event) => setIssueDraftCode(event.target.value)}
-                />
-              </label>
+              {selectedIssueCode ? (
+                <p className="text-sm text-slate-300">
+                  当前上传到：<strong className="text-white">{selectedIssueCode}</strong>
+                </p>
+              ) : (
+                <p className="text-sm text-slate-400">请先选择或创建一个 Issue</p>
+              )}
               <div className="space-y-2">
                 <input
                   ref={fileInputRef}
@@ -441,6 +488,7 @@ export function HomeView() {
                   disabled={uploading}
                   onChange={(event) => {
                     if (uploadingRef.current) return;
+                    if (!selectedIssueCode) return;
                     const files = event.target.files;
                     if (files && files.length > 0) {
                       performUpload(Array.from(files)).catch(() => undefined);
@@ -452,9 +500,9 @@ export function HomeView() {
                 />
                 <div
                   className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-6 text-center text-sm text-slate-200 transition hover:border-brand-500 hover:bg-slate-900/70 cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
-                  aria-disabled={uploading}
+                  aria-disabled={!selectedIssueCode || uploading}
                   onClick={() => {
-                    if (!uploadingRef.current) {
+                    if (selectedIssueCode && !uploadingRef.current) {
                       fileInputRef.current?.click();
                     }
                   }}
@@ -465,6 +513,7 @@ export function HomeView() {
                   onDrop={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
+                    if (!selectedIssueCode) return;
                     if (uploadingRef.current) return;
                     if (event.dataTransfer?.files?.length) {
                       performUpload(Array.from(event.dataTransfer.files)).catch(() => undefined);
@@ -587,10 +636,65 @@ export function HomeView() {
                 })()}
               </div>
             </div>
-          ) : null}
+          ) : (
+            <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-400">
+              请选择一个 Issue，或新建 Issue 后上传日志。
+            </div>
+          )}
           </div>
         </div>
       </section>
+
+      {createDialogOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900/95 p-5 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white">新建 Issue</h3>
+            <div className="mt-4 space-y-3">
+              <label className="block text-sm text-slate-300">
+                Issue ID
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+                  value={newIssueCode}
+                  onChange={(event) => setNewIssueCode(event.target.value)}
+                  placeholder="例如 CN014"
+                />
+              </label>
+              <label className="block text-sm text-slate-300">
+                名称（可选）
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+                  value={newIssueName}
+                  onChange={(event) => setNewIssueName(event.target.value)}
+                />
+              </label>
+              {createIssueError ? <p className="text-sm text-rose-300">{createIssueError}</p> : null}
+            </div>
+            <div className="mt-5 flex justify-end gap-3 text-sm">
+              <button
+                type="button"
+                className="rounded-lg border border-slate-700 px-4 py-2 text-slate-200 hover:border-slate-500"
+                onClick={() => {
+                  setCreateDialogOpen(false);
+                  setCreateIssueError(null);
+                }}
+                disabled={creatingIssue}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-brand-500 px-4 py-2 font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
+                onClick={() => {
+                  handleCreateIssue().catch(() => undefined);
+                }}
+                disabled={creatingIssue}
+              >
+                {creatingIssue ? '创建中...' : '创建'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {confirmDialog ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">

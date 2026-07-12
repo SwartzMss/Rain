@@ -95,18 +95,6 @@ pub async fn cleanup_expired_bundles(
             .map_err(AppError::Database)?;
     }
 
-    sqlx::query(
-        r#"
-        DELETE FROM issues
-        WHERE NOT EXISTS (
-            SELECT 1 FROM bundles WHERE bundles.issue_code = issues.code
-        )
-        "#,
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-
     tx.commit().await.map_err(AppError::Database)?;
 
     for bundle in &bundles {

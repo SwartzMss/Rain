@@ -15,7 +15,7 @@ use crate::{
     models::issues::UploadStatus,
 };
 
-use super::issues::{ensure_issue, normalize_issue_code};
+use super::issues::{normalize_issue_code, require_issue_exists};
 
 const MAX_UPLOAD_FILES: usize = 100;
 const MAX_UPLOAD_FILE_BYTES: usize = 512 * 1024 * 1024;
@@ -132,7 +132,7 @@ pub async fn upload_logs(
     let bundle_hash = Uuid::new_v4().simple().to_string();
     let bundle_name = format!("bundle-{bundle_hash}");
 
-    if let Err(error) = ensure_issue(&state.pool, &issue_code).await {
+    if let Err(error) = require_issue_exists(&state.pool, &issue_code).await {
         let _ = fs::remove_dir_all(&temp_dir).await;
         return Err(error);
     }
@@ -211,7 +211,7 @@ pub async fn upload_logs(
             fs::rename(&staging_bundle_dir, &final_bundle_dir)
                 .await
                 .map_err(AppError::Io)?;
-            update_bundle_storage_paths(
+            finalize_bundle_ready_with_retry(
                 &pool,
                 &task_bundle_id,
                 &staging_bundle_dir,
@@ -238,13 +238,6 @@ pub async fn upload_logs(
             )
             .await;
             let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED").await;
-        } else if let Err(error) = update_bundle_status(&pool, &task_bundle_id, "READY").await {
-            error!(
-                bundle_id = %task_bundle_id,
-                bundle_hash = %task_bundle_hash,
-                error = %error,
-                "failed to mark uploaded log bundle ready"
-            );
         }
 
         let _ = fs::remove_dir_all(&temp_dir).await;
@@ -405,12 +398,40 @@ async fn update_bundle_status(
     Ok(())
 }
 
-async fn update_bundle_storage_paths(
+async fn finalize_bundle_ready_with_retry(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
     staging_bundle_dir: &std::path::Path,
     final_bundle_dir: &std::path::Path,
 ) -> Result<(), AppError> {
+    let mut last_error: Option<AppError> = None;
+    for attempt in 1..=3 {
+        match finalize_bundle_ready(pool, bundle_id, staging_bundle_dir, final_bundle_dir).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                error!(
+                    bundle_id = %bundle_id,
+                    attempt,
+                    error = %error,
+                    "failed to finalize uploaded log bundle"
+                );
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+            }
+        }
+    }
+
+    let _ = update_bundle_status(pool, bundle_id, "FAILED").await;
+    Err(last_error.unwrap_or_else(|| AppError::Database(sqlx::Error::RowNotFound)))
+}
+
+async fn finalize_bundle_ready(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    staging_bundle_dir: &std::path::Path,
+    final_bundle_dir: &std::path::Path,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let rows = sqlx::query_as::<_, FileMetaRow>(
         r#"
         SELECT id, meta
@@ -419,11 +440,10 @@ async fn update_bundle_storage_paths(
         "#,
     )
     .bind(bundle_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(AppError::Database)?;
 
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     for row in rows {
         let Some(meta_text) = row.meta else {
             continue;
@@ -454,6 +474,12 @@ async fn update_bundle_storage_paths(
             .await
             .map_err(AppError::Database)?;
     }
+    sqlx::query("UPDATE bundles SET status = 'READY' WHERE id = ?")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
     tx.commit().await.map_err(AppError::Database)?;
     Ok(())
 }

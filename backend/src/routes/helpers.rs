@@ -22,12 +22,19 @@ pub async fn load_bundle(pool: &sqlx::SqlitePool, hash: &str) -> Result<BundleRo
 }
 
 pub fn ensure_bundle_ready(bundle: &BundleRow) -> Result<(), AppError> {
-    if !bundle.status.eq_ignore_ascii_case("READY") {
-        return Err(AppError::Conflict(
-            "bundle is not ready; please wait for processing to finish".into(),
-        ));
+    match bundle.status.as_str() {
+        status if status.eq_ignore_ascii_case("READY") => Ok(()),
+        status
+            if status.eq_ignore_ascii_case("PROCESSING")
+                || status.eq_ignore_ascii_case("PENDING") =>
+        {
+            Err(AppError::Conflict("bundle is still processing".into()))
+        }
+        status if status.eq_ignore_ascii_case("FAILED") => {
+            Err(AppError::Conflict("bundle processing failed".into()))
+        }
+        _ => Err(AppError::Conflict("invalid bundle status".into())),
     }
-    Ok(())
 }
 
 pub fn data_root(state: &actix_web::web::Data<AppState>) -> std::path::PathBuf {

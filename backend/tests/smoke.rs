@@ -21,6 +21,21 @@ async fn upload_search_tree_and_delete_issue() {
     db::prepare_schema(&pool, true)
         .await
         .expect("prepare schema");
+    insert_issues(
+        &pool,
+        &[
+            "SMOKE",
+            "GZIP",
+            "TARGZ",
+            "DIRDELETE",
+            "FAILEDCASE",
+            "LARGE",
+            "BADUTF8",
+            "LONGLINE",
+            "COLLISION",
+        ],
+    )
+    .await;
     let app_pool = pool.clone();
 
     let app = test::init_service(
@@ -536,6 +551,146 @@ async fn upload_search_tree_and_delete_issue() {
 }
 
 #[actix_web::test]
+async fn issue_creation_and_upload_require_existing_issue() {
+    let test_dir = TestDir::new("rain-issue-create");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let data_root = test_dir.path.join("uploads");
+    fs::create_dir_all(&data_root).expect("create data root");
+
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState {
+                pool: pool.clone(),
+                data_root: data_root.clone(),
+            }))
+            .configure(routes::register),
+    )
+    .await;
+
+    let create = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues")
+            .set_json(serde_json::json!({
+                "code": "new001",
+                "name": "First issue"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let created: Value = test::read_body_json(create).await;
+    assert_eq!(created["code"], "NEW001");
+    assert_eq!(created["name"], "First issue");
+    assert_eq!(created["bundle_count"], 0);
+
+    let duplicate = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues")
+            .set_json(serde_json::json!({ "code": "NEW001" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+    let invalid = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues")
+            .set_json(serde_json::json!({ "code": "BAD/ID" }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let issues: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get().uri("/api/issues").to_request(),
+    )
+    .await;
+    let created_issue = issues
+        .as_array()
+        .expect("issues")
+        .iter()
+        .find(|issue| issue["code"] == "NEW001")
+        .expect("created issue in list");
+    assert_eq!(created_issue["bundle_count"], 0);
+
+    let missing_boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let missing_upload_body = multipart_body(
+        &missing_boundary,
+        "MISSING",
+        "missing.log",
+        "ERROR missing\n",
+    );
+    let missing_upload = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={missing_boundary}"),
+            ))
+            .set_payload(missing_upload_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(missing_upload.status(), StatusCode::NOT_FOUND);
+
+    let upload_boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let upload_body = multipart_body(
+        &upload_boundary,
+        "NEW001",
+        "app.log",
+        "ERROR created upload\n",
+    );
+    let upload = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={upload_boundary}"),
+            ))
+            .set_payload(upload_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(upload.status(), StatusCode::ACCEPTED);
+
+    sqlx::query("UPDATE bundles SET created_at = datetime('now', '-2 days') WHERE issue_code = ?")
+        .bind("NEW001")
+        .execute(&pool)
+        .await
+        .expect("age bundle");
+    let removed = db::cleanup_expired_bundles(&pool, &data_root, 1)
+        .await
+        .expect("cleanup expired bundles");
+    assert_eq!(removed, 1);
+    let still_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issues WHERE code = ?)")
+            .bind("NEW001")
+            .fetch_one(&pool)
+            .await
+            .expect("issue exists after cleanup");
+    assert!(still_exists);
+
+    let delete_empty = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/issues/NEW001")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete_empty.status(), StatusCode::NO_CONTENT);
+}
+
+#[actix_web::test]
 async fn prepare_schema_merges_legacy_issue_code_case_variants() {
     let test_dir = TestDir::new("rain-issue-migrate");
     let db_url = sqlite_url(&test_dir.path.join("rain.db"));
@@ -751,6 +906,17 @@ fn multipart_body(boundary: &str, issue_code: &str, filename: &str, content: &st
         "text/plain",
         content.as_bytes(),
     )
+}
+
+async fn insert_issues(pool: &sqlx::SqlitePool, issue_codes: &[&str]) {
+    for code in issue_codes {
+        sqlx::query("INSERT INTO issues (code, name) VALUES (?, ?)")
+            .bind(code)
+            .bind(code)
+            .execute(pool)
+            .await
+            .expect("insert issue");
+    }
 }
 
 fn multipart_body_bytes(
