@@ -8,6 +8,8 @@ use crate::{
     models::logs::{LogSearchHit, LogSearchResponse},
 };
 
+use super::issues::normalize_issue_code;
+
 use super::helpers::load_bundle;
 
 const DEFAULT_LOG_RESULTS: i64 = 50;
@@ -148,7 +150,7 @@ pub async fn search_issue_logs(
     query: web::Query<IssueLogQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let issue_code = path.into_inner();
+    let issue_code = normalize_issue_code(&path.into_inner())?;
     let term = query.into_inner();
     let search_term = term.q.trim();
     if search_term.is_empty() {

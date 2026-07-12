@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { rainApi } from '../../api/client';
+import { normalizeApiError, rainApi } from '../../api/client';
 import type { LogSearchResponse } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
 import { formatBundleLabel } from '../../lib/bundles';
@@ -44,7 +44,7 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
       });
       setResult(response);
     } catch (err) {
-      setError((err as Error).message || '搜索失败');
+      setError(normalizeApiError(err));
       setResult(null);
     } finally {
       setLoading(false);

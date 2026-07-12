@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
-import { rainApi } from '../../api/client';
+import { normalizeApiError, rainApi } from '../../api/client';
 import type { FileLinesResponse, FileNode, IssueLogSearchHit } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
 
@@ -164,7 +164,7 @@ export function BundleView(props?: BundleViewProps) {
 
         return normalized ? { node: normalized, children: childrenNodes } : null;
       } catch (error) {
-        setTreeError((error as Error).message || '加载文件树失败');
+        setTreeError(normalizeApiError(error));
         throw error;
       } finally {
         setTreeLoading(false);
@@ -188,7 +188,7 @@ export function BundleView(props?: BundleViewProps) {
       setSearchResults(response.hits);
     } catch (error) {
       setSearchResults([]);
-      setSearchError((error as Error).message || '搜索失败');
+      setSearchError(normalizeApiError(error));
     } finally {
       setSearchLoading(false);
     }
@@ -216,7 +216,7 @@ export function BundleView(props?: BundleViewProps) {
             bundles = list;
           }
         } catch (error) {
-          setTreeError((error as Error).message || '加载 Issue 失败');
+          setTreeError(normalizeApiError(error));
         }
       }
 
@@ -254,7 +254,7 @@ export function BundleView(props?: BundleViewProps) {
             first = result.node.childrenIds[0] ?? result.node.id;
           }
         } catch (error) {
-          setTreeError((error as Error).message || '加载文件树失败');
+          setTreeError(normalizeApiError(error));
         }
       }
 
@@ -340,7 +340,7 @@ export function BundleView(props?: BundleViewProps) {
         }
       } catch (error) {
         if (!ignore) {
-          setFileContentError((error as Error).message || '加载文件失败');
+          setFileContentError(normalizeApiError(error));
         }
       } finally {
         if (!ignore) {

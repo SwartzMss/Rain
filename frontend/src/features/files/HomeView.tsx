@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { rainApi } from '../../api/client';
+import { normalizeApiError, normalizeIssueCode, rainApi } from '../../api/client';
 import type {
   FileNode,
   IssueBundlesResponse,
@@ -55,7 +55,6 @@ export function HomeView() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedLoadHandledRef = useRef(false);
   const [uploading, setUploading] = useState(false);
-  const [creatingIssue, setCreatingIssue] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
@@ -85,7 +84,7 @@ export function HomeView() {
       const data = await rainApi.fetchIssues();
       setIssues(data);
     } catch (error) {
-      setIssuesError((error as Error).message || '加载 Issue 列表失败');
+      setIssuesError(normalizeApiError(error));
     } finally {
       setIssuesLoading(false);
     }
@@ -112,13 +111,13 @@ export function HomeView() {
           );
         });
       } catch (error) {
-        const message = (error as Error).message || '';
+        const message = normalizeApiError(error);
         if (/not found|404/i.test(message)) {
           setBundles([]);
           setBundlesError(null);
           throw new Error('未找到 Issue');
         } else {
-          setBundlesError(message || '加载上传列表失败');
+          setBundlesError(normalizeApiError(error));
           setBundles([]);
           throw error;
         }
@@ -180,7 +179,7 @@ export function HomeView() {
         }
       } catch (error) {
         if (!cancelled) {
-          setUploadError((error as Error).message || '查询上传任务失败');
+          setUploadError(normalizeApiError(error));
         }
       }
     };
@@ -196,48 +195,29 @@ export function HomeView() {
   }, [uploadSuccess?.task_id, loadIssues, loadBundles]);
 
   const openIssue = async (value: string) => {
-    const trimmed = value.trim();
-    if (!trimmed) return;
+    let code: string;
+    try {
+      code = normalizeIssueCode(value);
+    } catch (error) {
+      setIssueError(normalizeApiError(error));
+      return;
+    }
     setIssueLoading(true);
     setIssueError(null);
     try {
-      const data = await rainApi.fetchIssueBundles(trimmed);
+      const data = await rainApi.fetchIssueBundles(code);
       setBundles(data.log_bundles);
       setBundleFiles({});
       setBundlesError(null);
       selectedLoadHandledRef.current = true;
-      setSelectedIssueCode(trimmed);
-      setIssueDraftCode(trimmed);
-      navigate(`/issue/${trimmed}`);
+      setSelectedIssueCode(code);
+      setIssueDraftCode(code);
+      navigate(`/issue/${encodeURIComponent(code)}`);
     } catch (error) {
-      const message = (error as Error).message || '查询失败';
-      setIssueError(message === '未找到 Issue' ? '未找到 Issue，请先在右侧创建或上传日志' : message);
+      const message = normalizeApiError(error);
+      setIssueError(message === '未找到 Issue' ? '未找到 Issue，请先上传日志' : message);
     } finally {
       setIssueLoading(false);
-    }
-  };
-
-  const handleCreateIssue = async () => {
-    const code = issueDraftCode.trim();
-    if (!code) {
-      setUploadError('请输入 Issue ID');
-      return;
-    }
-
-    setCreatingIssue(true);
-    setUploadError(null);
-    setUploadSuccess(null);
-    setUploadTask(null);
-    try {
-      const issue = await rainApi.createIssue({ code });
-      setIssueDraftCode(issue.code);
-      setSelectedIssueCode(issue.code);
-      setIssueSearchText(issue.code);
-      await loadIssues();
-    } catch (error) {
-      setUploadError((error as Error).message || '创建 Issue 失败');
-    } finally {
-      setCreatingIssue(false);
     }
   };
 
@@ -265,7 +245,7 @@ export function HomeView() {
           files: prev[hash]?.files ?? [],
           loading: false,
           loaded: true,
-          error: (error as Error).message || '加载文件失败'
+          error: normalizeApiError(error)
         }
       }));
     }
@@ -289,15 +269,18 @@ export function HomeView() {
         setDeletingIssue(code);
         try {
           await rainApi.deleteIssue(code);
-          setSelectedIssueCode('');
-          setIssueSearchText('');
-          setIssueDraftCode('');
-          setBundles([]);
-          setBundleFiles({});
-          setBundlesError(null);
+          if (selectedIssueCode.trim() === code) {
+            setSelectedIssueCode('');
+            setBundles([]);
+            setBundleFiles({});
+            setBundlesError(null);
+          }
+          if (issueDraftCode.trim().toUpperCase() === code) {
+            setIssueDraftCode('');
+          }
           loadIssues().catch(() => undefined);
         } catch (error) {
-          setIssuesError((error as Error).message || '删除失败');
+          setIssuesError(normalizeApiError(error));
         } finally {
           setDeletingIssue(null);
         }
@@ -310,6 +293,13 @@ export function HomeView() {
       setUploadError('请输入 Issue ID');
       return;
     }
+    let issueCode: string;
+    try {
+      issueCode = normalizeIssueCode(issueDraftCode);
+    } catch (error) {
+      setUploadError(normalizeApiError(error));
+      return;
+    }
     if (!files || files.length === 0) {
       setUploadError('请至少选择一个文件');
       return;
@@ -320,7 +310,7 @@ export function HomeView() {
     setUploadSuccess(null);
     setUploadTask(null);
     try {
-      const response = await rainApi.uploadLogs(issueDraftCode.trim(), files, setUploadProgress);
+      const response = await rainApi.uploadLogs(issueCode, files, setUploadProgress);
       setUploadSuccess(response);
       setUploadTask({
         task_id: response.task_id,
@@ -334,7 +324,7 @@ export function HomeView() {
       setSelectedIssueCode(response.issue_code);
       loadIssues().catch(() => undefined);
     } catch (error) {
-      setUploadError((error as Error).message || '上传失败');
+      setUploadError(normalizeApiError(error));
       setUploadSuccess(null);
     } finally {
       setUploading(false);
@@ -374,7 +364,21 @@ export function HomeView() {
                 }}
               />
               {issueError ? <p className="text-sm text-rose-300">{issueError}</p> : null}
-              {issuesError ? <p className="text-xs text-rose-300">{issuesError}</p> : null}
+              {issuesError ? (
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                  <span>{issuesError}</span>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded border border-rose-400/50 px-2 py-1 text-[11px] font-semibold text-rose-100 transition hover:bg-rose-500/10 disabled:opacity-60"
+                    onClick={() => {
+                      loadIssues().catch(() => undefined);
+                    }}
+                    disabled={issuesLoading}
+                  >
+                    {issuesLoading ? '连接中...' : '重新连接'}
+                  </button>
+                </div>
+              ) : null}
               <div className="max-h-56 space-y-1 overflow-y-auto text-sm">
                 {issues
                   .filter((item) => {
@@ -383,33 +387,34 @@ export function HomeView() {
                     return item.code.toLowerCase().includes(filter) || item.name.toLowerCase().includes(filter);
                   })
                   .map((item) => (
-                    <button
+                    <div
                       key={item.code}
-                      type="button"
-                      onClick={() => {
-                        setSelectedIssueCode(item.code);
-                        setIssueDraftCode(item.code);
-                      }}
-                      onDoubleClick={() => openIssue(item.code).catch(() => undefined)}
-                      className="flex w-full items-center justify-between rounded-lg border border-transparent px-3 py-2 text-left transition hover:border-slate-700 hover:bg-slate-900/70"
-                      disabled={issueLoading}
+                      className="flex w-full items-center gap-2 rounded-lg border border-transparent px-3 py-2 transition hover:border-slate-700 hover:bg-slate-900/70"
                     >
-                      <span className="font-semibold text-white">{item.code}</span>
-                      <div className="flex items-center gap-2 text-[11px] text-slate-400">
-                        <span className="text-[10px] text-slate-500">双击打开</span>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleDeleteIssue(item.code).catch(() => undefined);
-                          }}
-                          className="rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
-                          disabled={deletingIssue === item.code}
-                        >
-                          {deletingIssue === item.code ? '删除中...' : '删除'}
-                        </button>
-                      </div>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedIssueCode(item.code);
+                          setIssueDraftCode(item.code);
+                        }}
+                        onDoubleClick={() => openIssue(item.code).catch(() => undefined)}
+                        className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
+                        disabled={issueLoading}
+                      >
+                        <span className="truncate font-semibold text-white">{item.code}</span>
+                        <span className="shrink-0 text-[10px] text-slate-500">双击打开</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleDeleteIssue(item.code).catch(() => undefined);
+                        }}
+                        className="shrink-0 rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
+                        disabled={deletingIssue === item.code}
+                      >
+                        {deletingIssue === item.code ? '删除中...' : '删除'}
+                      </button>
+                    </div>
                   ))}
               </div>
             </div>
@@ -433,26 +438,14 @@ export function HomeView() {
                   </p>
                 </div>
               ) : null}
-              <h3 className="text-sm font-semibold text-white">创建 Issue / 上传日志</h3>
+              <h3 className="text-sm font-semibold text-white">上传日志</h3>
               <label className="block text-sm text-slate-300">
                 Issue ID
-                <div className="mt-1 flex flex-col gap-2 sm:flex-row">
-                  <input
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                    value={issueDraftCode}
-                    onChange={(event) => setIssueDraftCode(event.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="rounded-lg border border-brand-500/60 px-4 py-2 text-sm font-semibold text-brand-100 transition hover:bg-brand-500/10 disabled:opacity-60"
-                    onClick={() => {
-                      handleCreateIssue().catch(() => undefined);
-                    }}
-                    disabled={creatingIssue || !issueDraftCode.trim()}
-                  >
-                    {creatingIssue ? '创建中...' : '创建 Issue'}
-                  </button>
-                </div>
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+                  value={issueDraftCode}
+                  onChange={(event) => setIssueDraftCode(event.target.value)}
+                />
               </label>
               <div className="space-y-2">
                 <input
@@ -571,7 +564,7 @@ export function HomeView() {
                                           files: prev[bundleHash]?.files ?? [],
                                           loading: false,
                                           loaded: true,
-                                          error: (err as Error).message || '删除文件失败'
+                                          error: normalizeApiError(err)
                                         }
                                       }));
                                     } finally {

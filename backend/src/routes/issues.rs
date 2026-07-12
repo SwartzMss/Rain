@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, delete, get, post, web};
+use actix_web::{HttpResponse, delete, get, web};
 use serde::Deserialize;
 use sqlx::FromRow;
 use tokio::fs;
@@ -8,6 +8,26 @@ use crate::{
     error::AppError,
     models::issues::{IssueBundlesResponse, IssueSummary, UploadStatus, UploadStatusWrapper},
 };
+
+const ISSUE_CODE_MAX_LEN: usize = 64;
+
+pub fn normalize_issue_code(value: &str) -> Result<String, AppError> {
+    let code = value.trim().to_uppercase();
+    if code.is_empty() || code.len() > ISSUE_CODE_MAX_LEN {
+        return Err(AppError::BadRequest(
+            "issue_code must be 1-64 characters".into(),
+        ));
+    }
+    if !code
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(AppError::BadRequest(
+            "issue_code may only contain letters, numbers, '.', '_' and '-'".into(),
+        ));
+    }
+    Ok(code)
+}
 
 // scoped under /api in routes::register, so keep relative paths here
 #[get("/issues")]
@@ -30,55 +50,12 @@ pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, App
     Ok(HttpResponse::Ok().json(rows))
 }
 
-#[derive(Deserialize)]
-pub struct CreateIssueRequest {
-    code: String,
-    name: Option<String>,
-}
-
-#[post("/issues")]
-pub async fn create_issue(
-    payload: web::Json<CreateIssueRequest>,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, AppError> {
-    let code = payload.code.trim();
-    if code.is_empty() {
-        return Err(AppError::BadRequest("issue code is required".into()));
-    }
-
-    let name = payload
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(code);
-
-    sqlx::query(
-        r#"
-        INSERT INTO issues (code, name)
-        VALUES (?, ?)
-        ON CONFLICT (code) DO UPDATE SET name = excluded.name
-        "#,
-    )
-    .bind(code)
-    .bind(name)
-    .execute(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    Ok(HttpResponse::Created().json(IssueSummary {
-        code: code.to_owned(),
-        name: name.to_owned(),
-        bundle_count: 0,
-    }))
-}
-
 #[get("/issues/{issue_id}")]
 pub async fn get_issue_bundles(
     path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let issue_code = path.into_inner();
+    let issue_code = normalize_issue_code(&path.into_inner())?;
     let issue =
         sqlx::query_as::<_, IssueRow>("SELECT code, name FROM issues WHERE code = ? LIMIT 1")
             .bind(&issue_code)
@@ -113,6 +90,7 @@ pub async fn get_issue_bundles(
 }
 
 pub async fn ensure_issue(pool: &sqlx::SqlitePool, code: &str) -> Result<(), AppError> {
+    let code = normalize_issue_code(code)?;
     sqlx::query(
         r#"
         INSERT INTO issues (code, name)
@@ -120,8 +98,8 @@ pub async fn ensure_issue(pool: &sqlx::SqlitePool, code: &str) -> Result<(), App
         ON CONFLICT (code) DO NOTHING
         "#,
     )
-    .bind(code)
-    .bind(code)
+    .bind(&code)
+    .bind(&code)
     .execute(pool)
     .await
     .map_err(AppError::Database)?;
@@ -155,6 +133,7 @@ pub async fn delete_issue_bundle(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let (issue_code, bundle_hash) = path.into_inner();
+    let issue_code = normalize_issue_code(&issue_code)?;
     let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
 
     let bundle: BundleIdRow = sqlx::query_as(
@@ -225,7 +204,7 @@ pub async fn delete_issue(
     path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let issue_code = path.into_inner();
+    let issue_code = normalize_issue_code(&path.into_inner())?;
     let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
 
     let bundles: Vec<BundleIdRow> = sqlx::query_as(

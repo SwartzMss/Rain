@@ -11,7 +11,6 @@ pub fn register(cfg: &mut web::ServiceConfig) {
     cfg.service(health::health).service(
         web::scope("/api")
             .service(issues::list_issues)
-            .service(issues::create_issue)
             .service(issues::get_issue_bundles)
             .service(issues::delete_issue_bundle)
             .service(issues::delete_issue)

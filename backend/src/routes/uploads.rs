@@ -15,7 +15,7 @@ use crate::{
     models::issues::UploadStatus,
 };
 
-use super::issues::ensure_issue;
+use super::issues::{ensure_issue, normalize_issue_code};
 
 const MAX_UPLOAD_FILES: usize = 100;
 const MAX_UPLOAD_FILE_BYTES: usize = 512 * 1024 * 1024;
@@ -113,9 +113,9 @@ pub async fn upload_logs(
     }
 
     let issue_code = issue_code_field
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::BadRequest("issue_code is required".into()));
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("issue_code is required".into()))
+        .and_then(normalize_issue_code);
     let issue_code = match issue_code {
         Ok(issue_code) => issue_code,
         Err(error) => {

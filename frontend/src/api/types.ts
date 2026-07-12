@@ -20,11 +20,6 @@ export interface IssueSummary {
   bundle_count: number;
 }
 
-export interface CreateIssueRequest {
-  code: string;
-  name?: string;
-}
-
 export interface FileNode {
   id: number | string;
   name: string;
