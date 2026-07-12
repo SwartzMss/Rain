@@ -294,19 +294,14 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(failed_task["status"], "FAILED");
-    let failed_tree: Value = test::call_and_read_body_json(
+    let failed_tree = test::call_service(
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{failed_bundle}/files/root"))
             .to_request(),
     )
     .await;
-    assert!(
-        failed_tree["children"]
-            .as_array()
-            .expect("children")
-            .is_empty()
-    );
+    assert_eq!(failed_tree.status(), StatusCode::CONFLICT);
 
     let parsed_events: i64 = sqlx::query_scalar(
         r#"
@@ -538,6 +533,186 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+async fn prepare_schema_merges_legacy_issue_code_case_variants() {
+    let test_dir = TestDir::new("rain-issue-migrate");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+
+    sqlx::query("INSERT INTO issues (code, name) VALUES (?, ?)")
+        .bind("cn013")
+        .bind("lower")
+        .execute(&pool)
+        .await
+        .expect("insert lower issue");
+    sqlx::query("INSERT INTO issues (code, name) VALUES (?, ?)")
+        .bind("CN013")
+        .bind("upper")
+        .execute(&pool)
+        .await
+        .expect("insert upper issue");
+    sqlx::query(
+        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES (?, ?, ?, ?, 'READY')",
+    )
+    .bind("bundle-lower")
+    .bind("cn013")
+    .bind("hash-lower")
+    .bind("lower bundle")
+    .execute(&pool)
+    .await
+    .expect("insert lower bundle");
+    sqlx::query(
+        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES (?, ?, ?, ?, 'READY')",
+    )
+    .bind("bundle-upper")
+    .bind("CN013")
+    .bind("hash-upper")
+    .bind("upper bundle")
+    .execute(&pool)
+    .await
+    .expect("insert upper bundle");
+
+    db::prepare_schema(&pool, false)
+        .await
+        .expect("migrate issue codes");
+
+    let issue_codes: Vec<String> = sqlx::query_scalar("SELECT code FROM issues ORDER BY code")
+        .fetch_all(&pool)
+        .await
+        .expect("fetch issues");
+    assert_eq!(issue_codes, vec!["CN013"]);
+
+    let bundle_issue_codes: Vec<String> =
+        sqlx::query_scalar("SELECT issue_code FROM bundles ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("fetch bundle issue codes");
+    assert_eq!(bundle_issue_codes, vec!["CN013", "CN013"]);
+}
+
+#[actix_web::test]
+async fn processing_bundles_cannot_be_deleted() {
+    let test_dir = TestDir::new("rain-processing-delete");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let data_root = test_dir.path.join("uploads");
+    fs::create_dir_all(&data_root).expect("create data root");
+
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues (code, name) VALUES (?, ?)")
+        .bind("BUSY")
+        .bind("BUSY")
+        .execute(&pool)
+        .await
+        .expect("insert issue");
+    sqlx::query(
+        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES (?, ?, ?, ?, 'PROCESSING')",
+    )
+    .bind("busy-bundle")
+    .bind("BUSY")
+    .bind("busy-hash")
+    .bind("busy bundle")
+    .execute(&pool)
+    .await
+    .expect("insert processing bundle");
+    let file_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO files (bundle_id, name, path, is_dir, status)
+        VALUES (?, ?, ?, 0, 'PROCESSING')
+        RETURNING id
+        "#,
+    )
+    .bind("busy-bundle")
+    .bind("busy.log")
+    .bind("/busy-hash/busy.log")
+    .fetch_one(&pool)
+    .await
+    .expect("insert processing file");
+    let segment_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO log_segments (bundle_id, file_id, content, line_offset, line_end, chunk_index)
+        VALUES (?, ?, ?, 0, 1, 0)
+        RETURNING id
+        "#,
+    )
+    .bind("busy-bundle")
+    .bind(file_id)
+    .bind("ERROR processing partial index")
+    .fetch_one(&pool)
+    .await
+    .expect("insert processing segment");
+    sqlx::query(
+        r#"
+        INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
+        VALUES (?, ?, ?, ?, NULL)
+        "#,
+    )
+    .bind("ERROR processing partial index")
+    .bind(segment_id)
+    .bind("busy-bundle")
+    .bind(file_id)
+    .execute(&pool)
+    .await
+    .expect("insert processing fts");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState { pool, data_root }))
+            .configure(routes::register),
+    )
+    .await;
+
+    let delete_bundle = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/issues/BUSY/bundles/busy-hash")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete_bundle.status(), StatusCode::CONFLICT);
+
+    let bundle_search = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/log/v2/busy-hash/search?q=processing")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(bundle_search.status(), StatusCode::CONFLICT);
+
+    let file_root = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/files/v1/busy-hash/files/root")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(file_root.status(), StatusCode::CONFLICT);
+
+    let issue_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/BUSY/search?q=processing&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(issue_search["total"], 0);
+
+    let delete_issue = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/issues/BUSY")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete_issue.status(), StatusCode::CONFLICT);
 }
 
 async fn wait_for_issue_ready(pool: &sqlx::SqlitePool, issue_code: &str) {

@@ -1,4 +1,4 @@
-use std::{path::Path, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
 
 use sqlx::{
     FromRow, SqlitePool,
@@ -27,7 +27,9 @@ pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppErr
     if reset {
         reset_schema(pool).await?;
     }
-    create_schema(pool).await
+    create_schema(pool).await?;
+    migrate_issue_codes_to_uppercase(pool).await?;
+    Ok(())
 }
 
 pub async fn cleanup_expired_bundles(
@@ -126,10 +128,94 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
     Ok(result.rows_affected())
 }
 
+async fn migrate_issue_codes_to_uppercase(pool: &SqlitePool) -> Result<u64, AppError> {
+    let issues = sqlx::query_as::<_, IssueCodeRow>("SELECT code, name FROM issues")
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+
+    let mut groups: BTreeMap<String, Vec<IssueCodeRow>> = BTreeMap::new();
+    for issue in issues {
+        if let Some(canonical) = canonical_issue_code(&issue.code) {
+            groups.entry(canonical).or_default().push(issue);
+        }
+    }
+
+    let mut migrated = 0u64;
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    for (canonical, group) in groups {
+        if group.len() == 1 && group[0].code == canonical {
+            continue;
+        }
+
+        let name = group
+            .iter()
+            .find(|issue| issue.code == canonical)
+            .or_else(|| group.first())
+            .map(|issue| issue.name.as_str())
+            .unwrap_or(canonical.as_str());
+
+        sqlx::query(
+            r#"
+            INSERT INTO issues (code, name)
+            VALUES (?, ?)
+            ON CONFLICT (code) DO NOTHING
+            "#,
+        )
+        .bind(&canonical)
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+        for issue in &group {
+            let result = sqlx::query("UPDATE bundles SET issue_code = ? WHERE issue_code = ?")
+                .bind(&canonical)
+                .bind(&issue.code)
+                .execute(&mut *tx)
+                .await
+                .map_err(AppError::Database)?;
+            migrated = migrated.saturating_add(result.rows_affected());
+
+            if issue.code != canonical {
+                sqlx::query("DELETE FROM issues WHERE code = ?")
+                    .bind(&issue.code)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(AppError::Database)?;
+                migrated = migrated.saturating_add(1);
+            }
+        }
+    }
+    tx.commit().await.map_err(AppError::Database)?;
+
+    Ok(migrated)
+}
+
+fn canonical_issue_code(value: &str) -> Option<String> {
+    let code = value.trim().to_uppercase();
+    if code.is_empty() || code.len() > 64 {
+        return None;
+    }
+    if !code
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(code)
+}
+
 #[derive(FromRow)]
 struct ExpiredBundle {
     id: String,
     hash: String,
+}
+
+#[derive(FromRow)]
+struct IssueCodeRow {
+    code: String,
+    name: String,
 }
 
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {

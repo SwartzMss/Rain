@@ -33,6 +33,20 @@ export function normalizeIssueCode(value: string): string {
 
 const encodePathSegment = (value: string) => encodeURIComponent(value);
 
+function parseErrorResponse(text: string, status: number): string {
+  let message = text;
+  try {
+    const payload = JSON.parse(text) as { error?: unknown };
+    if (typeof payload.error === 'string' && payload.error.trim()) {
+      message = payload.error;
+    }
+  } catch {
+    // Keep the original response text when it is not JSON.
+  }
+
+  return message || `请求失败：${status}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = typeof FormData !== 'undefined' && init?.body instanceof FormData;
   const headers = new Headers(init?.headers as HeadersInit);
@@ -58,7 +72,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(text || `Request failed: ${response.status}`);
+    throw new Error(parseErrorResponse(text, response.status));
   }
 
   if (!text) {
@@ -144,7 +158,7 @@ export const rainApi = {
           resolve(JSON.parse(xhr.responseText) as UploadResponse);
           return;
         }
-        reject(new Error(xhr.responseText || `Request failed: ${xhr.status}`));
+        reject(new Error(parseErrorResponse(xhr.responseText, xhr.status)));
       };
       xhr.onerror = () => reject(new Error(normalizeApiError(new Error('upload failed'))));
       xhr.send(formData);

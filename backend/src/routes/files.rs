@@ -21,7 +21,7 @@ use crate::{
     models::files::{FileNode, FileNodeResponse},
 };
 
-use super::helpers::{data_root, load_bundle};
+use super::helpers::{data_root, ensure_bundle_ready, load_bundle};
 
 const MAX_FILE_PREVIEW_BYTES: u64 = 64 * 1024;
 
@@ -63,6 +63,7 @@ pub async fn get_file_node(
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    ensure_bundle_ready(&bundle)?;
     let is_root = file_id.eq_ignore_ascii_case("root");
 
     let node = if is_root {
@@ -110,6 +111,7 @@ pub async fn get_file_content(
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
@@ -151,6 +153,7 @@ pub async fn get_file_lines(
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
@@ -217,6 +220,7 @@ pub async fn download_file(
 ) -> Result<NamedFile, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
@@ -243,6 +247,7 @@ pub async fn delete_file_node(
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;

@@ -125,6 +125,7 @@ struct BundleIdRow {
     hash: String,
     #[allow(dead_code)]
     issue_code: String,
+    status: String,
 }
 
 #[delete("/issues/{issue_id}/bundles/{bundle_hash}")]
@@ -138,7 +139,7 @@ pub async fn delete_issue_bundle(
 
     let bundle: BundleIdRow = sqlx::query_as(
         r#"
-        SELECT id, hash, issue_code
+        SELECT id, hash, issue_code, status
         FROM bundles
         WHERE issue_code = ? AND hash = ?
         LIMIT 1
@@ -150,6 +151,7 @@ pub async fn delete_issue_bundle(
     .await
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("bundle {bundle_hash}")))?;
+    reject_processing_bundle(&bundle)?;
 
     sqlx::query(
         "DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)",
@@ -209,7 +211,7 @@ pub async fn delete_issue(
 
     let bundles: Vec<BundleIdRow> = sqlx::query_as(
         r#"
-        SELECT id, hash, issue_code
+        SELECT id, hash, issue_code, status
         FROM bundles
         WHERE issue_code = ?
         "#,
@@ -228,6 +230,8 @@ pub async fn delete_issue(
         tx.commit().await.map_err(AppError::Database)?;
         return Ok(HttpResponse::NoContent().finish());
     }
+
+    reject_processing_bundles(&bundles)?;
 
     for bundle in &bundles {
         sqlx::query("DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)")
@@ -283,4 +287,25 @@ pub async fn delete_issue(
     }
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+fn reject_processing_bundle(bundle: &BundleIdRow) -> Result<(), AppError> {
+    if bundle.status.eq_ignore_ascii_case("PROCESSING") {
+        return Err(AppError::Conflict(
+            "processing bundle cannot be deleted".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_processing_bundles(bundles: &[BundleIdRow]) -> Result<(), AppError> {
+    if bundles
+        .iter()
+        .any(|bundle| bundle.status.eq_ignore_ascii_case("PROCESSING"))
+    {
+        return Err(AppError::Conflict(
+            "issue with processing bundles cannot be deleted".into(),
+        ));
+    }
+    Ok(())
 }

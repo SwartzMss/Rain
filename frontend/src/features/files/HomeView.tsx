@@ -53,12 +53,13 @@ export function HomeView() {
   } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const selectedLoadHandledRef = useRef(false);
+  const uploadingRef = useRef(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
   const [uploadTask, setUploadTask] = useState<UploadTaskResponse | null>(null);
+  const selectedIssueRef = useRef(selectedIssueCode);
 
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
@@ -70,6 +71,7 @@ export function HomeView() {
 
   useEffect(() => {
     const trimmed = selectedIssueCode.trim();
+    selectedIssueRef.current = trimmed;
     if (trimmed) {
       localStorage.setItem(LAST_ISSUE_STORAGE_KEY, trimmed);
     } else {
@@ -139,10 +141,6 @@ export function HomeView() {
       setBundlesError(null);
       return;
     }
-    if (selectedLoadHandledRef.current) {
-      selectedLoadHandledRef.current = false;
-      return;
-    }
     setBundleFiles({});
     loadBundles(currentIssueCode).catch(() => undefined);
   }, [currentIssueCode, loadBundles]);
@@ -173,7 +171,9 @@ export function HomeView() {
         if (cancelled) return;
         setUploadTask(task);
         loadIssues().catch(() => undefined);
-        loadBundles(task.issue_code).catch(() => undefined);
+        if (selectedIssueRef.current === task.issue_code) {
+          loadBundles(task.issue_code).catch(() => undefined);
+        }
         if (task.status !== 'READY' && task.status !== 'FAILED') {
           timer = window.setTimeout(poll, 1500);
         }
@@ -194,30 +194,15 @@ export function HomeView() {
     };
   }, [uploadSuccess?.task_id, loadIssues, loadBundles]);
 
-  const openIssue = async (value: string) => {
-    let code: string;
+  const openIssue = (value: string) => {
     try {
-      code = normalizeIssueCode(value);
-    } catch (error) {
-      setIssueError(normalizeApiError(error));
-      return;
-    }
-    setIssueLoading(true);
-    setIssueError(null);
-    try {
-      const data = await rainApi.fetchIssueBundles(code);
-      setBundles(data.log_bundles);
-      setBundleFiles({});
-      setBundlesError(null);
-      selectedLoadHandledRef.current = true;
+      const code = normalizeIssueCode(value);
+      setIssueError(null);
       setSelectedIssueCode(code);
       setIssueDraftCode(code);
       navigate(`/issue/${encodeURIComponent(code)}`);
     } catch (error) {
-      const message = normalizeApiError(error);
-      setIssueError(message === '未找到 Issue' ? '未找到 Issue，请先上传日志' : message);
-    } finally {
-      setIssueLoading(false);
+      setIssueError(normalizeApiError(error));
     }
   };
 
@@ -289,6 +274,9 @@ export function HomeView() {
   };
 
   const performUpload = async (files: File[]) => {
+    if (uploadingRef.current) {
+      return;
+    }
     if (!issueDraftCode.trim()) {
       setUploadError('请输入 Issue ID');
       return;
@@ -304,6 +292,7 @@ export function HomeView() {
       setUploadError('请至少选择一个文件');
       return;
     }
+    uploadingRef.current = true;
     setUploading(true);
     setUploadProgress(0);
     setUploadError(null);
@@ -327,6 +316,7 @@ export function HomeView() {
       setUploadError(normalizeApiError(error));
       setUploadSuccess(null);
     } finally {
+      uploadingRef.current = false;
       setUploading(false);
       setUploadProgress(0);
     }
@@ -359,7 +349,7 @@ export function HomeView() {
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
-                    openIssue(issueSearchText).catch(() => undefined);
+                    openIssue(issueSearchText);
                   }
                 }}
               />
@@ -393,16 +383,11 @@ export function HomeView() {
                     >
                       <button
                         type="button"
-                        onClick={() => {
-                          setSelectedIssueCode(item.code);
-                          setIssueDraftCode(item.code);
-                        }}
-                        onDoubleClick={() => openIssue(item.code).catch(() => undefined)}
+                        onClick={() => openIssue(item.code)}
                         className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left"
                         disabled={issueLoading}
                       >
                         <span className="truncate font-semibold text-white">{item.code}</span>
-                        <span className="shrink-0 text-[10px] text-slate-500">双击打开</span>
                       </button>
                       <button
                         type="button"
@@ -453,7 +438,9 @@ export function HomeView() {
                   type="file"
                   multiple
                   className="hidden"
+                  disabled={uploading}
                   onChange={(event) => {
+                    if (uploadingRef.current) return;
                     const files = event.target.files;
                     if (files && files.length > 0) {
                       performUpload(Array.from(files)).catch(() => undefined);
@@ -464,8 +451,13 @@ export function HomeView() {
                   }}
                 />
                 <div
-                  className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-6 text-center text-sm text-slate-200 transition hover:border-brand-500 hover:bg-slate-900/70 cursor-pointer"
-                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-6 text-center text-sm text-slate-200 transition hover:border-brand-500 hover:bg-slate-900/70 cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+                  aria-disabled={uploading}
+                  onClick={() => {
+                    if (!uploadingRef.current) {
+                      fileInputRef.current?.click();
+                    }
+                  }}
                   onDragOver={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -473,6 +465,7 @@ export function HomeView() {
                   onDrop={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
+                    if (uploadingRef.current) return;
                     if (event.dataTransfer?.files?.length) {
                       performUpload(Array.from(event.dataTransfer.files)).catch(() => undefined);
                     }

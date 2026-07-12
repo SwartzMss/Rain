@@ -10,7 +10,7 @@ use crate::{
 
 use super::issues::normalize_issue_code;
 
-use super::helpers::load_bundle;
+use super::helpers::{ensure_bundle_ready, load_bundle};
 
 const DEFAULT_LOG_RESULTS: i64 = 50;
 const MAX_LOG_RESULTS: i64 = 100;
@@ -39,6 +39,7 @@ pub async fn search_logs(
     }
 
     let bundle = load_bundle(&state.pool, &bundle_hash).await?;
+    ensure_bundle_ready(&bundle)?;
     let fts_query = build_fts_query(search_term);
     let timeline = term.timeline.and_then(|value| {
         let trimmed = value.trim().to_string();
@@ -180,6 +181,7 @@ pub async fn search_issue_logs(
         JOIN files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND b.issue_code = ?
+          AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
         "#,
     )
@@ -206,6 +208,7 @@ pub async fn search_issue_logs(
         JOIN files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND b.issue_code = ?
+          AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
         ORDER BY ls.line_offset NULLS FIRST, ls.id
         LIMIT ? OFFSET ?
