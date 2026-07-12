@@ -1,236 +1,179 @@
 # Rain
 
-Rain 是一个面向开发者的日志查看 Web 应用，提供上传、解析、搜索本地日志/压缩包的能力，帮助快速定位问题。当前目标是完成文件上传和多视图浏览的 MVP，后续会迭代实时推送与权限控制。
+Rain 是一个本地日志包浏览与检索工具。当前版本用于把 `.log`、`.txt` 或 `.zip` 上传到一个 Issue 下，浏览解压后的文件树，预览文本内容，并按关键词搜索日志行。
 
-## 功能概览
+默认使用 SQLite，本地启动不需要安装 PostgreSQL 或其他数据库服务。
 
-- **多格式上传**：支持 `.txt`、`.log`、`.zip`、`.tar.gz` 等文件类型，单次上传允许多个文件。
-- **Files View**：展示上传历史及压缩包内部结构，按层级浏览，支持惰性展开嵌套压缩包。
-- **Logs View**：聚合所有纯文本日志，提供关键词搜索和文本预览。
-- **压缩包处理**：支持 `.zip`、`.tar.gz` 解压，自动识别编码格式，记录解析状态。
-- **安全限制**：对单文件大小、展开总字节数、递归深度设定硬限制，避免 Zip Bomb。
-- **扩展计划**：WebSocket 实时推送、日志过滤器、用户认证在 roadmap 中排队。
+## 快速启动
 
-## 架构与实现摘要
+### 依赖
 
-| 层级 | 说明 |
-| --- | --- |
-| 前端 | React + Vite + TailwindCSS，单页应用，提供 Files / Logs 两个主视图；通过 REST API 交互。 |
-| 后端 | Rust + Actix-Web，负责上传、压缩解析、文本索引、API；内置 Actix WebSocket 支持，未来可用于实时流。 |
-| 存储 | 文件内容保存在 `data/uploads/<uuid>` 目录；解析出的元数据、索引信息统一写入 PostgreSQL。 |
-| 搜索 | PostgreSQL 使用 `tsvector`/GIN 构建倒排索引，支持关键词搜索并返回命中片段供前端展示。 |
+- Node.js 20+
+- Rust 1.75+
 
-### 数据流
+### 1. 配置后端
 
-1. 前端通过 `/api/uploads` 上传文件；后端对每个文件生成 UUID 并落盘。
-2. 后端同步解析文本文件，异步处理压缩包首层目录，记录结构信息。
-3. 前端请求 `/api/files` 获取 Files View 树状数据；点击目录时再调用 `/api/files/{id}/children` 触发惰性展开。
-4. Logs View 请求 `/api/logs/search?q=<keyword>`，由后端返回匹配的文件段落。
-
-## 前后端 API 设计
-
-围绕“上传 → 解析 → 浏览 → 搜索 → 埋点”这条主流程，前端会调用以下 REST 接口与后端交互，示例中的 `bundleId` 使用 `lp1yp7` 这一演示值（每次上传都会生成不同的 ID）。
-
-### 上传与案件上下文
-
-- `POST /api/uploads`：多文件上传，返回每个文件的 `uploadId` 与初始解析状态。
-- `GET /api/uploads/{uploadId}`：轮询单次上传的任务进度、错误详情。
-- `GET /api/issues/{issueId}` / `GET /api/analysissuite/{owner}/{caseId}`：查询某个案件下的 log bundle 列表。示例响应：
-
-```json
-{
-  "name": "CN013",
-  "log_bundles": [
-    { "hash": "qqmzk6", "name": "0608.zip", "status": { "upload_status": "READY" } },
-    { "hash": "lp1yp7", "name": "0704.zip", "status": { "upload_status": "READY" } }
-  ]
-}
-```
-
-### 文件浏览（Files View）
-
-- `GET /api/files/v1/{bundleId}/files/{fileId}/metadata?include_rain_metadata=true`：返回文件/目录的基础信息、扩展元数据。
-- `GET /api/files/v1/{bundleId}/files/{fileId}`：实际文件内容或子节点数据（如 `GET .../lp1yp7/files/490`）。
-- `GET /api/files/v1/{bundleId}/search?path=...`：按路径快速查找 `fileId`。
-- `POST /api/v2/file_browser_stats/{bundleId}/FileBrowser_fileselect`：记录用户展开/选择行为，便于之后分析。
-
-### 日志视图（Logs View）
-
-- `GET /api/log/v2/{bundleId}/_info`：提供可选时间线与默认值，样例：
-
-```json
-{
-  "timelines": [
-    { "name": "all", "label": "All files", "status": "uploaded" },
-    { "name": "runtime", "label": "Runtime", "status": "uploaded" },
-    { "name": "pm_4_startup", "label": "PM 4 Startup", "status": "uploaded" }
-  ],
-  "default": "runtime"
-}
-```
-
-- `GET /api/log/v2/{bundleId}/search?q=...&timeline=...`：关键词搜索命中片段。
-- `GET /api/log/v2/{bundleId}/streams/{timeline}?from=...&size=...`：流式按时间线加载日志内容。
-
-### 埋点与统计
-
-- `POST https://rain-umami.rain-dev.dyn.nesc.net/api/send`：前端页面埋点上报，其中 `cache`、`sessionId`、`visitId` 来自服务端响应：
-
-```json
-{
-  "cache": ".eyJ3ZWJzaXRlSWQiOiI2OTRjMjcyOS02YjAwLTQyNTQtYmEzNC1kNGE5ZmIzYzYwMzMiLCJzZXNzaW9uSWQiOiIzOTEwNTFjZC0xNjgxLTUyNTUtOTVkMy0zM2QyMzU4MTk3NDAiLCJ2aXNpdElkIjoiODkzMjFlMGQtNDJiNi01ODMwLTg4ZjAtODg4ZTkyODU0M2M1IiwiaWF0IjoxNzY1NTA5MzI4fQ.Bob5N1gFJ6kIzaEi_T0_-0UKCFYrwnaNdhe4pVfbT8w",
-  "sessionId": "391051cd--5255-95d3-33d235819740",
-  "visitId": "-42b6-5830-88f0-888e928543c5"
-}
-```
-
-- `POST /api/file_browser_stats/...` 等埋点接口用于记录 Files View 的交互；后续也可扩展日志筛选、搜索等事件。
-
-## 数据库设计
-
-采用 PostgreSQL 存储结构化信息，文件内容则保留在磁盘/对象存储中，仅在表中记录路径和校验信息，核心表如下：
-
-| 表 | 关键字段 | 说明 |
-| --- | --- | --- |
-| `projects` | `id (uuid)`, `code`, `name`, `description`, `owner`, `archived`, `created_at` | 项目/问题单目录（如 `CN013`），所有 bundle 隶属于某个项目。 |
-| `bundles` | `id (uuid)`, `project_id`, `name`, `status`, `upload_user`, `size_bytes`, `file_count`, `error_msg`, `raw_path`, `created_at`, `finished_at` | 一次上传与解析的整体信息，`id` 类似 `lp1yp7`，与解析任务状态挂钩。 |
-| `files` | `id (bigserial)`, `bundle_id`, `parent_id`, `name`, `path`, `size_bytes`, `mime_type`, `is_dir`, `timeline`, `compression_level`, `status`, `checksum`, `storage_path`, `created_at` | 解析出的文件树节点，`parent_id` 形成层级，`storage_path` 指向解压后的文件。 |
-| `file_metadata` | `file_id`, `meta jsonb` | 存放需要额外返回的雨量元数据（编码、解析策略等），供 `?include_rain_metadata=true` 使用。 |
-| `timelines` | `id`, `bundle_id`, `name`, `label`, `status`, `owner`, `order_index`, `is_default` | `GET /api/log/v2/{bundle}/_info` 的数据来源。 |
-| `log_segments` | `id`, `bundle_id`, `file_id`, `timeline`, `offset`, `length`, `content`, `tsv tsvector` | 日志全文索引，每行一段文本；`tsvector` 建 GIN 索引以支持搜索。 |
-| `events_file_browser`（可选） | `id`, `bundle_id`, `file_id`, `event_type`, `payload jsonb`, `session_id`, `occurred_at` | 保存 Files View 埋点数据，便于行为分析。 |
-
-> 如需细分上传请求，可额外保留 `uploads` 表（记录原始上传信息）并与 `bundles` 关联。权限/多租户场景可引入 `orgs`、`permissions` 等扩展表。
-
-解析线程负责在解压完毕后批量写入 `files`、`timelines`、`log_segments`，并更新 `bundles.status`；大文件仍以文件系统路径的形式暴露，由 API 在请求时读取返回。
-
-## 设计路线图（Design Roadmap）
-
-结合现阶段需求，按优先级划分的建设顺序如下：
-
-1. **项目与权限框架**：实现 `projects` / `bundles` 基础 CRUD、鉴权模型，确保上传与浏览都需绑定项目。
-2. **上传与解析管线**：后端完成多文件上传接口、磁盘落盘、异步解压/解析线程、状态轮询/WebSocket 推送。
-3. **PostgreSQL 架构优化**：完善迁移脚本与 DAO 层，覆盖 `bundles`、`files`、`timelines`、`log_segments` 等表并补充索引/分区策略。
-4. **Files View API**：实现文件树增量加载、`metadata`/`content` 接口、路径搜索、文件导出，并接入 FileBrowser 埋点。
-5. **Logs View 流程**：构建时间线生成器、日志全文检索接口、流式拉取 API，支持按 timeline/关键词过滤。
-6. **监控与埋点**：完善 Umami 上报、FileBrowser 行为统计、解析任务 metrics（Prometheus/Grafana）。
-7. **高级特性**：目录导出再压缩、权限细粒度控制（角色/组织）、对象存储支持、实时推送/协作等迭代需求。
-
-## 技术栈
-
-- **前端**：React 18、Vite、TailwindCSS、TypeScript。
-- **后端**：Rust 1.75+、Actix-Web、Tokio、`zip`、`flate2`、`tar`、`walkdir`、`sqlx`（PostgreSQL 驱动）。
-- **工具**：pnpm 或 npm、Cargo、PostgreSQL 15+、`psql`/pgAdmin。
-
-## 安装与运行
-
-### 前置依赖
-
-- Node.js 20+（推荐配合 pnpm）
-- Rust 1.75+ 与 Cargo
-- PostgreSQL 15+（含客户端工具）
-
-### 0. 数据库准备
-
-1. 确保本地 PostgreSQL 已启动，并准备好可用数据库（下文以 `rain` 为例，可按需替换）。
-2. 在 `backend/.env` 写入数据库与数据目录配置，示例：
-   ```dotenv
-   DATABASE_URL=postgres://<user>:<password>@localhost:5432/rain
-   RAIN_DATA_ROOT=../data/uploads
-   RAIN_LOG_DIR=../log
-   ```
-   可直接复制 `backend/.env.example` 再根据环境调整；`.env` 会在后端启动时加载。
-   如果需要强制重建库表，可将 `RESET_DB=true` 写入 `.env`，服务在启动时会清空并重新创建所有表，默认为 `false`。
-
-### 1. 克隆仓库
+复制环境变量示例：
 
 ```bash
-git clone https://github.com/your-username/rain.git
-cd rain
+cd backend
+cp .env.example .env
 ```
 
-### 2. 启动前端
+默认配置如下，通常可以直接使用：
 
-```bash
-cd frontend
-npm install
-npm run dev  # 默认 http://localhost:5173
+```dotenv
+DATABASE_URL=sqlite://../data/rain.db
+RAIN_DATA_ROOT=../data/uploads
+RAIN_LOG_DIR=../log
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8080
+RESET_DB=false
 ```
 
-环境变量：
-
-- `VITE_API_BASE_URL`：后端 API 地址，默认 `http://localhost:8080`.
-
-### 3. 启动后端
+### 2. 启动后端
 
 ```bash
 cd backend
 cargo run
 ```
 
-默认监听 `http://localhost:8080`，上传文件保存在 `data/uploads` 目录，可通过 `RAIN_DATA_ROOT` 修改；运行前请在 `backend/.env` 配置 `DATABASE_URL`，否则无法连接 PostgreSQL。服务会在启动时自动检测并创建缺失的数据库表。
+后端默认地址：`http://localhost:8080`
 
-### 4. 访问应用
+健康检查：
 
-浏览器打开 `http://localhost:5173`，前端会将请求代理到后端 API。
+```bash
+curl http://localhost:8080/healthz
+```
 
-> Docker 镜像暂不提供，待 MVP 稳定后再补充。
+### 3. 启动前端
 
-## 调试指南
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-1. 复制环境变量：
-   ```bash
-   cp backend/.env.example backend/.env
-   ```
-   按需调整 `DATABASE_URL`、`RAIN_DATA_ROOT`、`RAIN_LOG_DIR` 等值。
-2. 启动后端并观察日志：
-   ```bash
-   cd backend
-   cargo run
-   tail -f ../log/backend.log  # 所有 tracing 日志写入仓库根目录的 log/
-   ```
-   可通过 `curl http://localhost:8080/healthz` 验证服务启动情况。
-3. 启动前端：
-   ```bash
-   cd frontend
-   npm run dev
-   ```
-   访问 `http://localhost:5173` 即可实时调试，接口请求会转发至 `VITE_API_BASE_URL`。
+前端默认地址：`http://localhost:5173`
 
-## 运行时策略
+如果前端和后端不是同源部署，在 `frontend/.env` 中设置：
 
-- **惰性展开**：默认只解析压缩包第一层；当用户展开某个目录时，后端才继续解压，并在解析完成前返回“loading”状态。
-- **大小限制**：单文件 50 MB，单次上传总量 200 MB，展开后的累计大小上限 500 MB；超限时直接拒绝。
-- **递归深度**：最多 5 层嵌套，再深将提示用户手动拆包。
-- **索引更新**：文本文件解析完即写入 PostgreSQL `tsvector` 索引；压缩包中文件在惰性展开后再索引。
-- **日志输出**：后端通过 `tracing` 将运行日志写入 `log/backend.log`，方便与前端/数据库调试联动。
+```dotenv
+VITE_API_BASE_URL=http://localhost:8080
+```
 
-## Roadmap
+## 使用流程
 
-1. WebSocket 实时推送最新日志。
-2. 日志过滤器：时间、级别、关键词组合过滤。
-3. 用户认证与权限管理，多租户隔离。
-4. 对象存储适配（S3/MinIO），支持集群部署。
-5. Docker Compose / K8s 部署模版。
+1. 打开 `http://localhost:5173`。
+2. 在首页输入或选择一个 Issue ID，例如 `CN013`。
+3. 拖拽或点击上传 `.log`、`.txt`、`.zip` 文件。
+4. 双击 Issue 打开文件浏览页。
+5. 在左侧文件树选择文件，右侧会显示文本预览。
+6. 在搜索框输入关键词，可搜索当前 Issue 下已索引的文本日志。
 
-## 贡献指南
+## 当前支持
 
-1. Fork 仓库并创建 `feature/<topic>` 分支。
-2. 提交前运行：
-   ```bash
-   cd frontend && npm test && npm run lint
-   cd backend && cargo fmt && cargo clippy && cargo test
-   ```
-3. 提交 PR 时附带变更描述、截图/日志。
-4. 遵循 MIT 许可证。
+- Issue 列表、打开、删除。
+- 多文件上传。
+- `.log`、`.txt` 等文本文件索引。
+- `.zip` 同步解压并写入文件树。
+- 文件树浏览。
+- 文本文件 64 KB 预览。
+- Issue 范围和 bundle 范围关键词搜索。
+- 删除 Issue、Bundle、单个文件节点。
 
-## License
+## 当前限制
 
-MIT License（详见 `LICENSE` 文件）。
+- 暂不支持 `.tar.gz`、`.rar`、`.7z` 解压。
+- ZIP 上传时同步解压，尚未做后台任务和进度轮询。
+- 尚未实现完整 Zip Bomb 防护。
+- 搜索目前使用 SQLite `LIKE`，大数据量后应切换到 SQLite FTS5。
+- timeline 目前固定为 `all`。
+- AI 分析能力尚未接入。
 
-## Open Issues
+## 数据位置
 
-1. **对象存储**：当前仅使用本地磁盘；若要云端部署，需要评估 S3/MinIO 接入和多节点一致性策略。
-2. **Zip Bomb 防护实现细节**：需要明确如何检测压缩比、如何提前中断解压。
-3. **搜索增强**：是否支持正则、模糊匹配和命中高亮仍待定义。
-4. **日志编码**：目前假设 UTF-8；多语言日志的编码识别策略需要补充。
+默认数据都在仓库根目录下的 `data/`，该目录已被 `.gitignore` 忽略：
+
+- SQLite 数据库：`data/rain.db`
+- 上传和解压文件：`data/uploads/`
+- 后端运行日志：`log/backend.log`
+
+如果想清空本地数据，可以停止服务后删除 `data/`，或临时设置：
+
+```dotenv
+RESET_DB=true
+```
+
+注意：`RESET_DB=true` 会重建表，并清空配置的数据目录，仅适合本地调试。
+
+## 常用命令
+
+后端检查：
+
+```bash
+cd backend
+cargo fmt --check
+cargo check
+```
+
+前端构建：
+
+```bash
+cd frontend
+npm run build
+```
+
+查看后端日志：
+
+```bash
+tail -f log/backend.log
+```
+
+Windows PowerShell 可用：
+
+```powershell
+Get-Content log\backend.log -Wait
+```
+
+## API 摘要
+
+### Issues / Bundles
+
+- `GET /api/issues`
+- `GET /api/issues/{issueCode}`
+- `DELETE /api/issues/{issueCode}`
+- `DELETE /api/issues/{issueCode}/bundles/{bundleHash}`
+
+### Upload
+
+- `POST /api/uploads`
+
+Multipart 字段：
+
+- `issue_code`
+- `files`
+
+### Files
+
+- `GET /api/files/v1/{bundleId}/files/root`
+- `GET /api/files/v1/{bundleId}/files/{fileId}`
+- `GET /api/files/v1/{bundleId}/files/{fileId}/content`
+- `DELETE /api/files/v1/{bundleId}/files/{fileId}`
+
+### Search
+
+- `GET /api/log/v2/{bundleId}/search?q=keyword`
+- `GET /api/issues/{issueCode}/search?q=keyword`
+
+## 后续方向
+
+短期优先级：
+
+1. 异步解析任务、进度状态、失败重试。
+2. ZIP 安全限制：总大小、文件数、深度、超时、压缩比。
+3. SQLite FTS5 全文检索。
+4. 结构化日志事件提取。
+5. 带日志引用的 AI 分析。
+
+数据库细节见 [doc/DB.md](doc/DB.md)。

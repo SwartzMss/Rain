@@ -63,15 +63,18 @@ pub async fn search_logs(
     let total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM log_segments ls
-        WHERE ls.bundle_id = $1
-          AND ls.content ILIKE $2
-          AND ($3::text IS NULL OR ls.timeline = $3)
-          AND ($4::text IS NULL OR f.path ILIKE $4)
+        JOIN files f ON f.id = ls.file_id
+        WHERE ls.bundle_id = ?
+          AND ls.content LIKE ?
+          AND (? IS NULL OR ls.timeline = ?)
+          AND (? IS NULL OR f.path LIKE ?)
         "#,
     )
-    .bind(bundle.id)
+    .bind(&bundle.id)
     .bind(&like_pattern)
     .bind(&timeline)
+    .bind(&timeline)
+    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .fetch_one(&state.pool)
     .await
@@ -82,17 +85,19 @@ pub async fn search_logs(
         SELECT ls.file_id, f.path, ls.timeline, ls.line_offset AS offset, ls.content
         FROM log_segments ls
         JOIN files f ON f.id = ls.file_id
-        WHERE ls.bundle_id = $1
-          AND ls.content ILIKE $2
-          AND ($3::text IS NULL OR ls.timeline = $3)
-          AND ($4::text IS NULL OR f.path ILIKE $4)
+        WHERE ls.bundle_id = ?
+          AND ls.content LIKE ?
+          AND (? IS NULL OR ls.timeline = ?)
+          AND (? IS NULL OR f.path LIKE ?)
         ORDER BY ls.line_offset NULLS FIRST, ls.id
-        LIMIT $5 OFFSET $6
+        LIMIT ? OFFSET ?
         "#,
     )
-    .bind(bundle.id)
+    .bind(&bundle.id)
     .bind(&like_pattern)
     .bind(&timeline)
+    .bind(&timeline)
+    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(size)
     .bind(from)
@@ -162,13 +167,14 @@ pub async fn search_issue_logs(
         SELECT COUNT(*) FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
-        WHERE b.issue_code = $1
-          AND ls.content ILIKE $2
-          AND ($3::text IS NULL OR f.path ILIKE $3)
+        WHERE b.issue_code = ?
+          AND ls.content LIKE ?
+          AND (? IS NULL OR f.path LIKE ?)
         "#,
     )
     .bind(&issue_code)
     .bind(&like_pattern)
+    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .fetch_one(&state.pool)
     .await
@@ -184,15 +190,16 @@ pub async fn search_issue_logs(
         FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
-        WHERE b.issue_code = $1
-          AND ls.content ILIKE $2
-          AND ($3::text IS NULL OR f.path ILIKE $3)
+        WHERE b.issue_code = ?
+          AND ls.content LIKE ?
+          AND (? IS NULL OR f.path LIKE ?)
         ORDER BY ls.line_offset NULLS FIRST, ls.id
-        LIMIT $4 OFFSET $5
+        LIMIT ? OFFSET ?
         "#,
     )
     .bind(&issue_code)
     .bind(&like_pattern)
+    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(size)
     .bind(from)

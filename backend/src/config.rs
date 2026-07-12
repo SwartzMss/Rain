@@ -7,7 +7,6 @@ pub struct AppConfig {
     pub host: String,
     pub port: u16,
     pub database_url: String,
-    pub database_schema: String,
     pub data_root: PathBuf,
     pub log_dir: PathBuf,
     pub reset_db: bool,
@@ -23,10 +22,8 @@ impl AppConfig {
             .parse()
             .map_err(|err| AppError::Config(format!("invalid SERVER_PORT: {err}")))?;
 
-        let database_url = env::var("DATABASE_URL")
-            .map_err(|_| AppError::Config("missing DATABASE_URL".into()))?;
-
-        let database_schema = env::var("DATABASE_SCHEMA").unwrap_or_else(|_| "Rain".into());
+        let database_url =
+            env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://../data/rain.db".into());
 
         let data_root =
             PathBuf::from(env::var("RAIN_DATA_ROOT").unwrap_or_else(|_| "./data/uploads".into()));
@@ -42,7 +39,6 @@ impl AppConfig {
             host,
             port,
             database_url,
-            database_schema,
             data_root,
             log_dir,
             reset_db,

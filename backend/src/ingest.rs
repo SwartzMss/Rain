@@ -5,7 +5,6 @@ use std::{
 };
 use tokio::io::AsyncReadExt;
 use tokio::{fs, task};
-use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::error::AppError;
@@ -18,8 +17,8 @@ const MAX_LINES_MEDIUM: usize = 10_000;
 const MAX_LINES_LARGE: usize = 2_000;
 
 pub struct ProcessFileOptions<'a> {
-    pub pool: &'a sqlx::PgPool,
-    pub bundle_id: Uuid,
+    pub pool: &'a sqlx::SqlitePool,
+    pub bundle_id: &'a str,
     pub bundle_hash: &'a str,
     pub data_root: &'a Path,
     pub file_name: &'a str,
@@ -112,8 +111,8 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
 }
 
 async fn ingest_directory(
-    pool: &sqlx::PgPool,
-    bundle_id: Uuid,
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
     parent_id: i64,
     dir_path: &Path,
     relative_root: &str,
@@ -184,8 +183,8 @@ async fn ingest_directory(
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_file_record(
-    pool: &sqlx::PgPool,
-    bundle_id: Uuid,
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
     parent_id: Option<i64>,
     name: &str,
     path: &str,
@@ -199,7 +198,7 @@ async fn insert_file_record(
         INSERT INTO files (
             bundle_id, parent_id, name, path, is_dir, size_bytes, mime_type, status, meta
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         "#,
     )
@@ -211,7 +210,7 @@ async fn insert_file_record(
     .bind(size_bytes)
     .bind(mime_type)
     .bind(Some("READY"))
-    .bind(meta)
+    .bind(meta.map(|value| value.to_string()))
     .fetch_one(pool)
     .await
     .map_err(AppError::Database)?;
@@ -220,8 +219,8 @@ async fn insert_file_record(
 }
 
 async fn ingest_text_file(
-    pool: &sqlx::PgPool,
-    bundle_id: Uuid,
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
     file_id: i64,
     disk_path: &Path,
     size_bytes: u64,
@@ -244,7 +243,7 @@ async fn ingest_text_file(
         if trimmed.is_empty() {
             continue;
         }
-        // Postgres rejects strings containing null bytes, so strip them from ingested content.
+        // SQLite text values should not contain embedded null bytes in this app.
         let cleaned = trimmed.replace('\0', "");
         if cleaned.is_empty() {
             continue;
@@ -252,7 +251,7 @@ async fn ingest_text_file(
         sqlx::query(
             r#"
             INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset)
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES (?, ?, ?, ?, ?)
             "#,
         )
         .bind(bundle_id)

@@ -2,7 +2,6 @@ use actix_web::{HttpResponse, delete, get, web};
 use serde::Deserialize;
 use sqlx::FromRow;
 use tokio::fs;
-use uuid::Uuid;
 
 use crate::{
     AppState,
@@ -38,7 +37,7 @@ pub async fn get_issue_bundles(
 ) -> Result<HttpResponse, AppError> {
     let issue_code = path.into_inner();
     let issue =
-        sqlx::query_as::<_, IssueRow>("SELECT code, name FROM issues WHERE code = $1 LIMIT 1")
+        sqlx::query_as::<_, IssueRow>("SELECT code, name FROM issues WHERE code = ? LIMIT 1")
             .bind(&issue_code)
             .fetch_optional(&state.pool)
             .await
@@ -46,7 +45,7 @@ pub async fn get_issue_bundles(
             .ok_or_else(|| AppError::NotFound(format!("issue {issue_code}")))?;
 
     let rows = sqlx::query_as::<_, BundleRow>(
-        "SELECT hash, name, status::text AS status FROM bundles WHERE issue_code = $1 ORDER BY created_at DESC",
+        "SELECT hash, name, status FROM bundles WHERE issue_code = ? ORDER BY created_at DESC",
     )
     .bind(&issue.code)
     .fetch_all(&state.pool)
@@ -70,14 +69,15 @@ pub async fn get_issue_bundles(
     Ok(HttpResponse::Ok().json(response))
 }
 
-pub async fn ensure_issue(pool: &sqlx::PgPool, code: &str) -> Result<(), AppError> {
+pub async fn ensure_issue(pool: &sqlx::SqlitePool, code: &str) -> Result<(), AppError> {
     sqlx::query(
         r#"
         INSERT INTO issues (code, name)
-        VALUES ($1, $1)
+        VALUES (?, ?)
         ON CONFLICT (code) DO NOTHING
         "#,
     )
+    .bind(code)
     .bind(code)
     .execute(pool)
     .await
@@ -100,7 +100,7 @@ struct BundleRow {
 
 #[derive(FromRow)]
 struct BundleIdRow {
-    id: Uuid,
+    id: String,
     hash: String,
     #[allow(dead_code)]
     issue_code: String,
@@ -118,7 +118,7 @@ pub async fn delete_issue_bundle(
         r#"
         SELECT id, hash, issue_code
         FROM bundles
-        WHERE issue_code = $1 AND hash = $2
+        WHERE issue_code = ? AND hash = ?
         LIMIT 1
         "#,
     )
@@ -129,20 +129,20 @@ pub async fn delete_issue_bundle(
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("bundle {bundle_hash}")))?;
 
-    sqlx::query("DELETE FROM log_segments WHERE bundle_id = $1")
-        .bind(bundle.id)
+    sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
+        .bind(&bundle.id)
         .execute(&mut *tx)
         .await
         .map_err(AppError::Database)?;
 
-    sqlx::query("DELETE FROM files WHERE bundle_id = $1")
-        .bind(bundle.id)
+    sqlx::query("DELETE FROM files WHERE bundle_id = ?")
+        .bind(&bundle.id)
         .execute(&mut *tx)
         .await
         .map_err(AppError::Database)?;
 
-    sqlx::query("DELETE FROM bundles WHERE id = $1")
-        .bind(bundle.id)
+    sqlx::query("DELETE FROM bundles WHERE id = ?")
+        .bind(&bundle.id)
         .execute(&mut *tx)
         .await
         .map_err(AppError::Database)?;
@@ -169,7 +169,7 @@ pub async fn delete_issue(
         r#"
         SELECT id, hash, issue_code
         FROM bundles
-        WHERE issue_code = $1
+        WHERE issue_code = ?
         "#,
     )
     .bind(&issue_code)
@@ -178,7 +178,7 @@ pub async fn delete_issue(
     .map_err(AppError::Database)?;
 
     if bundles.is_empty() {
-        sqlx::query("DELETE FROM issues WHERE code = $1")
+        sqlx::query("DELETE FROM issues WHERE code = ?")
             .bind(&issue_code)
             .execute(&mut *tx)
             .await
@@ -188,26 +188,26 @@ pub async fn delete_issue(
     }
 
     for bundle in &bundles {
-        sqlx::query("DELETE FROM log_segments WHERE bundle_id = $1")
-            .bind(bundle.id)
+        sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
+            .bind(&bundle.id)
             .execute(&mut *tx)
             .await
             .map_err(AppError::Database)?;
 
-        sqlx::query("DELETE FROM files WHERE bundle_id = $1")
-            .bind(bundle.id)
+        sqlx::query("DELETE FROM files WHERE bundle_id = ?")
+            .bind(&bundle.id)
             .execute(&mut *tx)
             .await
             .map_err(AppError::Database)?;
 
-        sqlx::query("DELETE FROM bundles WHERE id = $1")
-            .bind(bundle.id)
+        sqlx::query("DELETE FROM bundles WHERE id = ?")
+            .bind(&bundle.id)
             .execute(&mut *tx)
             .await
             .map_err(AppError::Database)?;
     }
 
-    sqlx::query("DELETE FROM issues WHERE code = $1")
+    sqlx::query("DELETE FROM issues WHERE code = ?")
         .bind(&issue_code)
         .execute(&mut *tx)
         .await

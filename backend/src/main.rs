@@ -12,13 +12,13 @@ use actix_web::{App, HttpServer, middleware::Logger, web};
 use config::AppConfig;
 use db::{init_pool, prepare_schema};
 use routes::register;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tracing::info;
 use tracing_appender::rolling;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 pub struct AppState {
-    pub pool: PgPool,
+    pub pool: SqlitePool,
     pub data_root: PathBuf,
 }
 
@@ -42,9 +42,8 @@ async fn main() -> std::io::Result<()> {
         .with(fmt::layer().with_ansi(false).with_writer(file_writer))
         .init();
 
-    let pool = init_pool(&config.database_url, &config.database_schema)
-        .expect("failed to init postgres pool");
-    prepare_schema(&pool, config.reset_db, &config.database_schema)
+    let pool = init_pool(&config.database_url).expect("failed to init sqlite pool");
+    prepare_schema(&pool, config.reset_db)
         .await
         .expect("failed to prepare database schema");
 

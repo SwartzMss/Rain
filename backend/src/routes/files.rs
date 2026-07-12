@@ -51,7 +51,7 @@ pub async fn get_file_node(
         let parsed_id = file_id
             .parse::<i64>()
             .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-        let record = fetch_file(&state.pool, bundle.id, parsed_id).await?;
+        let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
         to_file_node(record)
     };
 
@@ -64,7 +64,7 @@ pub async fn get_file_node(
                 .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?,
         )
     };
-    let children_records = fetch_children(&state.pool, bundle.id, parent_id).await?;
+    let children_records = fetch_children(&state.pool, &bundle.id, parent_id).await?;
     let children = children_records.into_iter().map(to_file_node).collect();
 
     Ok(HttpResponse::Ok().json(FileNodeResponse { node, children }))
@@ -80,7 +80,7 @@ pub async fn get_file_content(
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-    let record = fetch_file(&state.pool, bundle.id, parsed_id).await?;
+    let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
     if record.is_dir {
         return Err(AppError::BadRequest("cannot read directory content".into()));
     }
@@ -120,7 +120,7 @@ pub async fn delete_file_node(
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-    let record = fetch_file(&state.pool, bundle.id, parsed_id).await?;
+    let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
     let base_path = record.path.trim_end_matches('/').to_string();
     let child_like = format!("{}/%", base_path);
     let extracted_root = format!("{}_extracted", base_path);
@@ -132,17 +132,17 @@ pub async fn delete_file_node(
         r#"
         SELECT id
         FROM files
-        WHERE bundle_id = $1
+        WHERE bundle_id = ?
           AND (
-                id = $2
-             OR path = $3
-             OR path LIKE $4
-             OR path = $5
-             OR path LIKE $6
+                id = ?
+             OR path = ?
+             OR path LIKE ?
+             OR path = ?
+             OR path LIKE ?
           )
         "#,
     )
-    .bind(bundle.id)
+    .bind(&bundle.id)
     .bind(parsed_id)
     .bind(&base_path)
     .bind(&child_like)
@@ -152,9 +152,9 @@ pub async fn delete_file_node(
     .await
     .map_err(AppError::Database)?;
 
-    if !file_ids.is_empty() {
-        sqlx::query("DELETE FROM log_segments WHERE file_id = ANY($1)")
-            .bind(&file_ids)
+    for file_id in &file_ids {
+        sqlx::query("DELETE FROM log_segments WHERE file_id = ?")
+            .bind(file_id)
             .execute(&mut *tx)
             .await
             .map_err(AppError::Database)?;
@@ -163,17 +163,17 @@ pub async fn delete_file_node(
     sqlx::query(
         r#"
         DELETE FROM files
-        WHERE bundle_id = $1
+        WHERE bundle_id = ?
           AND (
-                id = $2
-             OR path = $3
-             OR path LIKE $4
-             OR path = $5
-             OR path LIKE $6
+                id = ?
+             OR path = ?
+             OR path LIKE ?
+             OR path = ?
+             OR path LIKE ?
           )
         "#,
     )
-    .bind(bundle.id)
+    .bind(&bundle.id)
     .bind(parsed_id)
     .bind(&base_path)
     .bind(&child_like)
@@ -213,19 +213,19 @@ pub struct FileRow {
     pub size_bytes: Option<i64>,
     pub mime_type: Option<String>,
     pub status: Option<String>,
-    pub meta: Option<serde_json::Value>,
+    pub meta: Option<String>,
 }
 
 pub async fn fetch_file(
-    pool: &sqlx::PgPool,
-    bundle_id: uuid::Uuid,
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
     file_id: i64,
 ) -> Result<FileRow, AppError> {
     sqlx::query_as::<_, FileRow>(
         r#"
-        SELECT id, name, path, is_dir, size_bytes, mime_type, status::text AS status, meta
+        SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
         FROM files
-        WHERE bundle_id = $1 AND id = $2
+        WHERE bundle_id = ? AND id = ?
         LIMIT 1
         "#,
     )
@@ -238,16 +238,16 @@ pub async fn fetch_file(
 }
 
 pub async fn fetch_children(
-    pool: &sqlx::PgPool,
-    bundle_id: uuid::Uuid,
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
     parent_id: Option<i64>,
 ) -> Result<Vec<FileRow>, AppError> {
     if let Some(parent) = parent_id {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, mime_type, status::text AS status, meta
+            SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
             FROM files
-            WHERE bundle_id = $1 AND parent_id = $2
+            WHERE bundle_id = ? AND parent_id = ?
             ORDER BY is_dir DESC, name ASC
             "#,
         )
@@ -258,9 +258,9 @@ pub async fn fetch_children(
     } else {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, mime_type, status::text AS status, meta
+            SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
             FROM files
-            WHERE bundle_id = $1 AND parent_id IS NULL
+            WHERE bundle_id = ? AND parent_id IS NULL
             ORDER BY is_dir DESC, name ASC
             "#,
         )
@@ -272,6 +272,10 @@ pub async fn fetch_children(
 }
 
 pub fn to_file_node(record: FileRow) -> FileNode {
+    let meta = record
+        .meta
+        .as_deref()
+        .and_then(|value| serde_json::from_str(value).ok());
     FileNode {
         id: record.id.to_string(),
         name: record.name,
@@ -280,7 +284,7 @@ pub fn to_file_node(record: FileRow) -> FileNode {
         size_bytes: record.size_bytes.map(|value| value as u64),
         mime_type: record.mime_type,
         status: record.status,
-        meta: record.meta,
+        meta,
     }
 }
 
@@ -290,6 +294,8 @@ pub fn resolve_file_path(
 ) -> Result<PathBuf, AppError> {
     let meta_path = record
         .meta
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
         .as_ref()
         .and_then(|meta| meta.get("storage_path"))
         .and_then(|value| value.as_str())

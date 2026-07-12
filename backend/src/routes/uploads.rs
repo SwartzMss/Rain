@@ -77,25 +77,27 @@ pub async fn upload_logs(
 
     let total_bytes: i64 = files.iter().map(|file| file.bytes.len() as i64).sum();
 
-    let bundle_id: Uuid = sqlx::query_scalar(
+    let bundle_id = Uuid::new_v4().simple().to_string();
+
+    sqlx::query(
         r#"
-        INSERT INTO bundles (issue_code, hash, name, status, size_bytes)
-        VALUES ($1, $2, $3, 'READY', $4)
-        RETURNING id
+        INSERT INTO bundles (id, issue_code, hash, name, status, size_bytes)
+        VALUES (?, ?, ?, ?, 'READY', ?)
         "#,
     )
+    .bind(&bundle_id)
     .bind(&issue_code)
     .bind(&bundle_hash)
     .bind(&bundle_name)
     .bind(Some(total_bytes))
-    .fetch_one(&state.pool)
+    .execute(&state.pool)
     .await
     .map_err(AppError::Database)?;
 
     for uploaded in &files {
         process_uploaded_file(ProcessFileOptions {
             pool: &state.pool,
-            bundle_id,
+            bundle_id: &bundle_id,
             bundle_hash: &bundle_hash,
             data_root: &state.data_root,
             file_name: &uploaded.sanitized_name,

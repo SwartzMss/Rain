@@ -1,17 +1,16 @@
 use sqlx::FromRow;
-use uuid::Uuid;
 
 use crate::{AppState, error::AppError};
 
 #[derive(FromRow)]
 pub struct BundleRow {
-    pub id: Uuid,
+    pub id: String,
     pub hash: String,
     pub name: String,
 }
 
-pub async fn load_bundle(pool: &sqlx::PgPool, hash: &str) -> Result<BundleRow, AppError> {
-    sqlx::query_as::<_, BundleRow>("SELECT id, hash, name FROM bundles WHERE hash = $1 LIMIT 1")
+pub async fn load_bundle(pool: &sqlx::SqlitePool, hash: &str) -> Result<BundleRow, AppError> {
+    sqlx::query_as::<_, BundleRow>("SELECT id, hash, name FROM bundles WHERE hash = ? LIMIT 1")
         .bind(hash)
         .fetch_optional(pool)
         .await
