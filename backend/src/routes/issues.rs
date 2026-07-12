@@ -129,6 +129,12 @@ pub async fn delete_issue_bundle(
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("bundle {bundle_hash}")))?;
 
+    sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
+        .bind(&bundle.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
     sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
         .bind(&bundle.id)
         .execute(&mut *tx)
@@ -194,6 +200,12 @@ pub async fn delete_issue(
     }
 
     for bundle in &bundles {
+        sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
+            .bind(&bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
         sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
             .bind(&bundle.id)
             .execute(&mut *tx)

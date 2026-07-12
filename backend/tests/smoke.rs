@@ -21,10 +21,14 @@ async fn upload_search_tree_and_delete_issue() {
     db::prepare_schema(&pool, true)
         .await
         .expect("prepare schema");
+    let app_pool = pool.clone();
 
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(AppState { pool, data_root }))
+            .app_data(web::Data::new(AppState {
+                pool: app_pool,
+                data_root,
+            }))
             .configure(routes::register),
     )
     .await;
@@ -62,7 +66,15 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(search["total"], 1);
-    assert_eq!(search["hits"][0]["snippet"], "ERROR smoke works");
+    assert!(
+        search["hits"][0]["snippet"]
+            .as_str()
+            .expect("snippet")
+            .contains("ERROR smoke works")
+    );
+    assert_eq!(search["hits"][0]["line_number"], 0);
+    assert_eq!(search["hits"][0]["line_end"], 1);
+    assert_eq!(search["hits"][0]["chunk_index"], 0);
 
     let gz_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let gz_bytes = gzip_bytes("INFO gzip\nERROR compressed smoke works\n");
@@ -95,9 +107,11 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(gz_search["total"], 1);
-    assert_eq!(
-        gz_search["hits"][0]["snippet"],
-        "ERROR compressed smoke works"
+    assert!(
+        gz_search["hits"][0]["snippet"]
+            .as_str()
+            .expect("gzip snippet")
+            .contains("ERROR compressed smoke works")
     );
 
     let tar_boundary = format!("rain-{}", Uuid::new_v4().simple());
@@ -131,7 +145,24 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(tar_search["total"], 1);
-    assert_eq!(tar_search["hits"][0]["snippet"], "ERROR targz smoke works");
+    assert!(
+        tar_search["hits"][0]["snippet"]
+            .as_str()
+            .expect("tar snippet")
+            .contains("ERROR targz smoke works")
+    );
+
+    let parsed_events: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM log_events
+        WHERE level = 'ERROR' AND message LIKE '%smoke works%'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count parsed log events");
+    assert_eq!(parsed_events, 3);
 
     let tree: Value = test::call_and_read_body_json(
         &app,

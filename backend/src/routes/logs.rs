@@ -11,7 +11,6 @@ use crate::{
 use super::helpers::load_bundle;
 
 const MAX_LOG_RESULTS: i64 = 1000;
-const LINES_PER_CHUNK: i64 = 200;
 
 #[derive(Deserialize)]
 struct LogQuery {
@@ -83,7 +82,13 @@ pub async fn search_logs(
 
     let rows = sqlx::query_as::<_, LogRow>(
         r#"
-        SELECT ls.file_id, f.path, ls.timeline, ls.line_offset AS offset, ls.content
+        SELECT ls.file_id,
+               f.path,
+               ls.timeline,
+               ls.line_offset AS offset,
+               ls.line_end,
+               ls.chunk_index,
+               ls.content
         FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN files f ON f.id = ls.file_id
@@ -116,9 +121,9 @@ pub async fn search_logs(
             snippet: row.content,
             timeline: row.timeline,
             offset: row.offset,
-            line_end: row.offset.map(|offset| offset + LINES_PER_CHUNK - 1),
+            line_end: row.line_end,
             line_number: row.offset,
-            chunk_index: row.offset.map(|offset| offset / LINES_PER_CHUNK),
+            chunk_index: row.chunk_index,
         })
         .collect();
 
@@ -188,6 +193,8 @@ pub async fn search_issue_logs(
         SELECT ls.file_id,
                f.path,
                ls.line_offset AS offset,
+               ls.line_end,
+               ls.chunk_index,
                ls.content,
                b.hash as bundle_hash
         FROM log_segments ls
@@ -220,9 +227,9 @@ pub async fn search_issue_logs(
             snippet: row.content,
             timeline: None,
             offset: row.offset,
-            line_end: row.offset.map(|offset| offset + LINES_PER_CHUNK - 1),
+            line_end: row.line_end,
             line_number: row.offset,
-            chunk_index: row.offset.map(|offset| offset / LINES_PER_CHUNK),
+            chunk_index: row.chunk_index,
         })
         .collect();
 
@@ -238,6 +245,8 @@ struct LogRow {
     path: String,
     timeline: Option<String>,
     offset: Option<i64>,
+    line_end: Option<i64>,
+    chunk_index: Option<i64>,
     content: String,
 }
 
@@ -246,6 +255,8 @@ struct IssueLogRow {
     file_id: i64,
     path: String,
     offset: Option<i64>,
+    line_end: Option<i64>,
+    chunk_index: Option<i64>,
     content: String,
     bundle_hash: String,
 }

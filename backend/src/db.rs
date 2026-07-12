@@ -30,6 +30,7 @@ pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppErr
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
         "DROP TABLE IF EXISTS log_segments_fts",
+        "DROP TABLE IF EXISTS log_events",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
         "DROP TABLE IF EXISTS bundles",
@@ -91,6 +92,25 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             timeline TEXT,
             content TEXT NOT NULL,
             line_offset INTEGER,
+            line_end INTEGER,
+            chunk_index INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS log_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bundle_id TEXT NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+            file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
+            segment_id INTEGER REFERENCES log_segments(id) ON DELETE CASCADE,
+            line_number INTEGER,
+            timestamp TEXT,
+            level TEXT,
+            component TEXT,
+            message TEXT NOT NULL,
+            raw TEXT NOT NULL,
+            parser_name TEXT NOT NULL,
+            parser_confidence REAL NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
@@ -116,10 +136,45 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_files_bundle ON files (bundle_id)",
         "CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)",
         "CREATE INDEX IF NOT EXISTS idx_logs_bundle_timeline ON log_segments (bundle_id, timeline)",
+        "CREATE INDEX IF NOT EXISTS idx_logs_file_chunk ON log_segments (file_id, chunk_index)",
+        "CREATE INDEX IF NOT EXISTS idx_events_bundle_level ON log_events (bundle_id, level)",
+        "CREATE INDEX IF NOT EXISTS idx_events_file_line ON log_events (file_id, line_number)",
     ];
 
     for statement in statements {
         sqlx::query(statement)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+
+    ensure_log_segment_column(pool, "line_end", "INTEGER").await?;
+    ensure_log_segment_column(pool, "chunk_index", "INTEGER").await?;
+
+    Ok(())
+}
+
+async fn ensure_log_segment_column(
+    pool: &SqlitePool,
+    column: &str,
+    definition: &str,
+) -> Result<(), AppError> {
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pragma_table_info('log_segments')
+            WHERE name = ?
+        )
+        "#,
+    )
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    if !exists {
+        let statement = format!("ALTER TABLE log_segments ADD COLUMN {column} {definition}");
+        sqlx::query(&statement)
             .execute(pool)
             .await
             .map_err(AppError::Database)?;

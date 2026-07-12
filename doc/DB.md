@@ -5,7 +5,8 @@
 ## 设计取舍
 
 - SQLite 适合当前本地 MVP：部署简单、无需单独数据库服务、方便重新启动项目。
-- 当前搜索使用 SQLite FTS5，启动时会回填尚未进入 FTS 索引的历史 `log_segments`。
+- 当前搜索使用 SQLite FTS5，文本日志按 chunk 建索引，启动时会回填尚未进入 FTS 索引的历史 `log_segments`。
+- 上传解析使用流式读取和事务批量写入，避免大文件一次性读入内存和逐行零散提交。
 - 当前 `meta` 以 JSON 字符串存储在 TEXT 列中；后续如要对象存储或多节点部署，关键存储路径应提升为明确列。
 - 生产化前建议引入迁移工具，不要长期依赖启动时建表。
 
@@ -49,10 +50,28 @@
 - `bundle_id` TEXT：关联 `bundles.id`，级联删除。
 - `file_id` INTEGER：关联 `files.id`，级联删除。
 - `timeline` TEXT：时间轴标签，当前固定为 `all`。
-- `content` TEXT：日志行内容（去空行/截断后）。
-- `line_offset` INTEGER：原始行号，从 0 开始。
+- `content` TEXT：日志 chunk 内容，通常最多 200 行，已去空行和空字节。
+- `line_offset` INTEGER：chunk 起始原始行号，从 0 开始。
+- `line_end` INTEGER：chunk 结束原始行号，从 0 开始。
+- `chunk_index` INTEGER：文件内 chunk 序号，从 0 开始。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
-- 索引：`idx_logs_bundle_timeline`；全文检索走 `log_segments_fts`。
+- 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`；全文检索走 `log_segments_fts`。
+
+## 表：log_events
+
+- `id` INTEGER PK AUTOINCREMENT。
+- `bundle_id` TEXT：关联 `bundles.id`，级联删除。
+- `file_id` INTEGER：关联 `files.id`，级联删除。
+- `segment_id` INTEGER：关联 `log_segments.id`，级联删除。
+- `line_number` INTEGER：事件所在原始行号，从 0 开始。
+- `timestamp` TEXT：基础解析出的时间戳，可为空。
+- `level` TEXT：基础解析出的日志级别，如 `INFO`、`WARN`、`ERROR`。
+- `component` TEXT：基础解析出的组件名，可为空。
+- `message` TEXT：去掉时间戳/级别/组件后的消息。
+- `raw` TEXT：原始日志行。
+- `parser_name` TEXT：解析器名称，当前为 `basic-log-line`。
+- `parser_confidence` REAL：基础置信度，供后续 AI/规则层判断可靠性。
+- 索引：`idx_events_bundle_level`、`idx_events_file_line`。
 
 ## 表：log_segments_fts
 
@@ -67,7 +86,8 @@
 
 - Issue -> 多个 Bundle：同一个 Issue 可多次上传，每次形成一个 Bundle。
 - Bundle -> Files：单文件上传会形成一个顶层 file 节点；`.zip`、`.tar.gz`、`.tgz`、`.gz` 上传会形成原始压缩包节点和一个 `{archive_name}_extracted` 解压目录。
-- Files -> Log Segments：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会按行写入 `log_segments` 供搜索；非文本文件仅保留 `files` 记录。
+- Files -> Log Segments：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会流式读取并按 chunk 写入 `log_segments` 供搜索；非文本文件仅保留 `files` 记录。
+- Log Segments -> Log Events：基础解析器会从日志行中提取 timestamp/level/component/message，写入 `log_events`，为后续聚合和 AI 分析准备。
 
 ## 上传流程
 
@@ -79,12 +99,13 @@ flowchart TD
     C --> E[创建 Bundle 记录]
     D --> E
     E --> F[文件落盘]
-    F --> G{是否 ZIP?}
+    F --> G{是否支持的压缩包?}
     G -->|是| H[同步解压为目录树]
     G -->|否| I[单一文件节点]
     H --> J[写 files 树]
     I --> J
     J --> K{文本类?}
-    K -->|是| L[逐行写 log_segments]
+    K -->|是| L[流式读取并按 chunk 写 log_segments/FTS]
     K -->|否| M[仅 files 记录]
+    L --> N[基础解析写 log_events]
 ```

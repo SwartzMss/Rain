@@ -5,7 +5,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::{fs, task};
 use walkdir::WalkDir;
 
@@ -17,11 +17,15 @@ const MAX_READ_BYTES: u64 = 25 * 1024 * 1024; // avoid loading huge files into m
 const MAX_LINES_SMALL: usize = 50_000;
 const MAX_LINES_MEDIUM: usize = 10_000;
 const MAX_LINES_LARGE: usize = 2_000;
+const LOG_CHUNK_LINES: usize = 200;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_ARCHIVE_DEPTH: usize = 5;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_ARCHIVE_EXTRACTED_BYTES: u64 = 500 * 1024 * 1024;
 const MAX_ARCHIVE_COMPRESSION_RATIO: u64 = 100;
+const LOG_LEVELS: [&str; 7] = [
+    "TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "FATAL",
+];
 
 pub struct ProcessFileOptions<'a> {
     pub pool: &'a sqlx::SqlitePool,
@@ -233,62 +237,300 @@ async fn ingest_text_file(
     size_bytes: u64,
 ) -> Result<(), AppError> {
     let file = fs::File::open(disk_path).await.map_err(io_error)?;
-    let mut buffer = Vec::new();
     let max_read = size_bytes.min(MAX_READ_BYTES);
-    let mut limited = file.take(max_read);
-    limited.read_to_end(&mut buffer).await.map_err(io_error)?;
-
-    let content = String::from_utf8_lossy(&buffer);
+    let limited = file.take(max_read);
+    let mut reader = BufReader::new(limited);
     let mut inserted = 0usize;
     let line_limit = compute_line_limit(size_bytes);
+    let mut line_number = 0i64;
+    let mut bytes_read = 0u64;
+    let mut chunk_index = 0i64;
+    let mut chunk = LogChunk::new(chunk_index);
+    let mut line = String::new();
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
-    for (index, line) in content.lines().enumerate() {
-        if inserted >= line_limit {
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).await.map_err(io_error)?;
+        if read == 0 {
             break;
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // SQLite text values should not contain embedded null bytes in this app.
-        let cleaned = trimmed.replace('\0', "");
-        if cleaned.is_empty() {
-            continue;
-        }
-        let segment_id = sqlx::query_scalar::<_, i64>(
-            r#"
-            INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset)
-            VALUES (?, ?, ?, ?, ?)
-            RETURNING id
-            "#,
-        )
-        .bind(bundle_id)
-        .bind(file_id)
-        .bind(Some("all".to_string()))
-        .bind(&cleaned)
-        .bind(Some(index as i64))
-        .fetch_one(pool)
-        .await
-        .map_err(AppError::Database)?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
-            VALUES (?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&cleaned)
-        .bind(segment_id)
-        .bind(bundle_id)
-        .bind(file_id)
-        .bind(Some("all".to_string()))
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
+        bytes_read = bytes_read.saturating_add(read as u64);
+        if bytes_read > max_read || inserted >= line_limit {
+            break;
+        }
+
+        let cleaned = clean_log_line(&line);
+        if cleaned.is_empty() {
+            line_number += 1;
+            continue;
+        }
+
+        chunk.push(line_number, cleaned);
         inserted += 1;
+
+        if chunk.len() >= LOG_CHUNK_LINES {
+            flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+            chunk_index += 1;
+            chunk = LogChunk::new(chunk_index);
+        }
+
+        line_number += 1;
+    }
+
+    if !chunk.is_empty() {
+        flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+    }
+
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(())
+}
+
+struct LogChunk {
+    chunk_index: i64,
+    line_start: Option<i64>,
+    line_end: Option<i64>,
+    lines: Vec<LogLine>,
+}
+
+struct LogLine {
+    number: i64,
+    content: String,
+}
+
+struct ParsedLogEvent {
+    timestamp: Option<String>,
+    level: Option<String>,
+    component: Option<String>,
+    message: String,
+    parser_confidence: f64,
+}
+
+impl LogChunk {
+    fn new(chunk_index: i64) -> Self {
+        Self {
+            chunk_index,
+            line_start: None,
+            line_end: None,
+            lines: Vec::with_capacity(LOG_CHUNK_LINES),
+        }
+    }
+
+    fn push(&mut self, line_number: i64, content: String) {
+        if self.line_start.is_none() {
+            self.line_start = Some(line_number);
+        }
+        self.line_end = Some(line_number);
+        self.lines.push(LogLine {
+            number: line_number,
+            content,
+        });
+    }
+
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    fn content(&self) -> String {
+        self.lines
+            .iter()
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+async fn flush_log_chunk(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bundle_id: &str,
+    file_id: i64,
+    chunk: &LogChunk,
+) -> Result<(), AppError> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+
+    let content = chunk.content();
+    let timeline = Some("all".to_string());
+    let segment_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO log_segments (
+            bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(file_id)
+    .bind(&timeline)
+    .bind(&content)
+    .bind(chunk.line_start)
+    .bind(chunk.line_end)
+    .bind(Some(chunk.chunk_index))
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
+        VALUES (?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&content)
+    .bind(segment_id)
+    .bind(bundle_id)
+    .bind(file_id)
+    .bind(&timeline)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    for line in &chunk.lines {
+        if let Some(event) = parse_log_event(&line.content) {
+            sqlx::query(
+                r#"
+                INSERT INTO log_events (
+                    bundle_id, file_id, segment_id, line_number, timestamp, level,
+                    component, message, raw, parser_name, parser_confidence
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(bundle_id)
+            .bind(file_id)
+            .bind(segment_id)
+            .bind(line.number)
+            .bind(event.timestamp)
+            .bind(event.level)
+            .bind(event.component)
+            .bind(event.message)
+            .bind(&line.content)
+            .bind("basic-log-line")
+            .bind(event.parser_confidence)
+            .execute(&mut **tx)
+            .await
+            .map_err(AppError::Database)?;
+        }
     }
 
     Ok(())
+}
+
+fn clean_log_line(line: &str) -> String {
+    // SQLite text values should not contain embedded null bytes in this app.
+    line.trim_end_matches(['\r', '\n']).trim().replace('\0', "")
+}
+
+fn parse_log_event(line: &str) -> Option<ParsedLogEvent> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (timestamp, after_timestamp, timestamp_confidence) = split_timestamp(trimmed);
+    let (level, after_level) = split_level(after_timestamp);
+    if timestamp.is_none() && level.is_none() {
+        return None;
+    }
+
+    let (component, message) = split_component(after_level.trim());
+    let parser_confidence = timestamp_confidence
+        + if level.is_some() { 0.35 } else { 0.0 }
+        + if component.is_some() { 0.10 } else { 0.0 };
+
+    Some(ParsedLogEvent {
+        timestamp: timestamp.map(str::to_string),
+        level: level.map(str::to_string),
+        component: component.map(str::to_string),
+        message: if message.is_empty() {
+            trimmed.to_string()
+        } else {
+            message.to_string()
+        },
+        parser_confidence: parser_confidence.min(0.95),
+    })
+}
+
+fn split_timestamp(line: &str) -> (Option<&str>, &str, f64) {
+    if let Some((first, rest)) = line.split_once(' ')
+        && looks_like_timestamp(first)
+    {
+        return (Some(first), rest, 0.45);
+    }
+
+    if line.len() >= 19 {
+        let candidate = &line[..19];
+        if looks_like_timestamp(candidate) {
+            return (Some(candidate), line[19..].trim_start(), 0.45);
+        }
+    }
+
+    (None, line, 0.0)
+}
+
+fn split_level(line: &str) -> (Option<&str>, &str) {
+    let trimmed = line.trim_start_matches([' ', '[']);
+    for level in LOG_LEVELS {
+        if let Some(rest) = trimmed.strip_prefix(level) {
+            let rest = rest.trim_start_matches([']', ':', '-', ' ']);
+            return (Some(if level == "WARNING" { "WARN" } else { level }), rest);
+        }
+    }
+    (None, line)
+}
+
+fn split_component(line: &str) -> (Option<&str>, &str) {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        let component = rest[..end].trim();
+        let message = rest[end + 1..].trim_start_matches([':', '-', ' ']).trim();
+        if !component.is_empty() {
+            return (Some(component), message);
+        }
+    }
+
+    if let Some((component, message)) = trimmed.split_once(':') {
+        let component = component.trim();
+        if !component.is_empty()
+            && component.len() <= 64
+            && component
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+        {
+            return (Some(component), message.trim());
+        }
+    }
+
+    (None, trimmed)
+}
+
+fn looks_like_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+    {
+        return true;
+    }
+
+    bytes.len() >= 8
+        && bytes[2] == b':'
+        && bytes[5] == b':'
+        && bytes[..2].iter().all(u8::is_ascii_digit)
+        && bytes[3..5].iter().all(u8::is_ascii_digit)
+        && bytes[6..8].iter().all(u8::is_ascii_digit)
 }
 
 async fn extract_archive(name: &str, src: &Path, dest: &Path) -> Result<(), AppError> {
