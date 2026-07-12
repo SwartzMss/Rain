@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { normalizeApiError, normalizeIssueCode, rainApi } from '../../api/client';
 import type {
@@ -6,25 +6,57 @@ import type {
   IssueBundlesResponse,
   IssueSummary,
   UploadResponse,
+  UploadStatus,
   UploadSummary,
   UploadTaskResponse
 } from '../../api/types';
 
 const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
 
-const formatBytes = (bytes: number) => {
-  if (!bytes) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** exponent;
-  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
-};
-
 type BundleFileState = {
   files: FileNode[];
   loading: boolean;
   loaded: boolean;
   error: string | null;
+};
+
+type FileRow = {
+  key: string;
+  bundleHash: string;
+  bundleName: string;
+  file?: FileNode;
+  name: string;
+  status: UploadStatus;
+  sizeBytes?: number;
+  lineCount?: number | null;
+};
+
+const formatBytes = (bytes?: number | null) => {
+  if (!bytes) return '-';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** exponent;
+  return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
+};
+
+const statusLabel = (status: UploadStatus) => {
+  if (status === 'READY') return '已完成';
+  if (status === 'FAILED') return '失败';
+  return '处理中';
+};
+
+const statusClass = (status: UploadStatus) => {
+  if (status === 'READY') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
+  if (status === 'FAILED') return 'border-rose-500/40 bg-rose-500/10 text-rose-300';
+  return 'border-sky-500/40 bg-sky-500/10 text-sky-300';
+};
+
+const getFileLabel = (file: FileNode) =>
+  typeof file.meta?.original_name === 'string' ? (file.meta.original_name as string) : file.name;
+
+const getLineCount = (file?: FileNode) => {
+  const value = file?.meta?.line_count;
+  return typeof value === 'number' ? value : null;
 };
 
 export function HomeView() {
@@ -45,10 +77,8 @@ export function HomeView() {
   const [bundles, setBundles] = useState<UploadSummary[]>([]);
   const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
-  const [deletingBundle, setDeletingBundle] = useState<string | null>(null);
   const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
-  const [deletingFileKey, setDeletingFileKey] = useState<string | null>(null);
-  const currentIssueCode = selectedIssueCode.trim();
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
     message: string;
     onConfirm: () => Promise<void> | void;
@@ -57,16 +87,57 @@ export function HomeView() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadingRef = useRef(false);
+  const selectedIssueRef = useRef(selectedIssueCode);
+  const bundleRequestIdRef = useRef(0);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
   const [uploadTask, setUploadTask] = useState<UploadTaskResponse | null>(null);
-  const selectedIssueRef = useRef(selectedIssueCode);
-  const bundleRequestIdRef = useRef(0);
-  const hasActiveUploadTask =
-    uploadTask?.status === 'PROCESSING' || uploadTask?.status === 'PENDING';
-  const uploadDisabled = !selectedIssueCode || uploading || hasActiveUploadTask;
+
+  const currentIssueCode = selectedIssueCode.trim();
+  const selectedIssue = issues.find((issue) => issue.code === currentIssueCode) ?? null;
+  const activeTask =
+    uploadTask?.status === 'PROCESSING' || uploadTask?.status === 'PENDING' ? uploadTask : null;
+  const uploadDisabled = !currentIssueCode || uploading || !!activeTask;
+
+  const filteredIssues = useMemo(() => {
+    const filter = issueSearchText.trim().toLowerCase();
+    if (!filter) return issues;
+    return issues.filter(
+      (issue) =>
+        issue.code.toLowerCase().includes(filter) || issue.name.toLowerCase().includes(filter)
+    );
+  }, [issueSearchText, issues]);
+
+  const fileRows = useMemo<FileRow[]>(() => {
+    return bundles.flatMap<FileRow>((bundle) => {
+      const status = bundle.status.upload_status;
+      const state = bundleFiles[bundle.hash];
+      if (status !== 'READY') {
+        return [
+          {
+            key: bundle.hash,
+            bundleHash: bundle.hash,
+            bundleName: bundle.name || bundle.hash,
+            name: bundle.name || bundle.hash,
+            status
+          }
+        ];
+      }
+
+      return (state?.files ?? []).map((file) => ({
+        key: `${bundle.hash}:${file.id}`,
+        bundleHash: bundle.hash,
+        bundleName: bundle.name || bundle.hash,
+        file,
+        name: getFileLabel(file),
+        status,
+        sizeBytes: file.size_bytes,
+        lineCount: getLineCount(file)
+      }));
+    });
+  }, [bundleFiles, bundles]);
 
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
@@ -80,21 +151,19 @@ export function HomeView() {
   }, []);
 
   useEffect(() => {
-    const trimmed = selectedIssueCode.trim();
-    selectedIssueRef.current = trimmed;
-    if (trimmed) {
-      localStorage.setItem(LAST_ISSUE_STORAGE_KEY, trimmed);
+    selectedIssueRef.current = currentIssueCode;
+    if (currentIssueCode) {
+      localStorage.setItem(LAST_ISSUE_STORAGE_KEY, currentIssueCode);
     } else {
       localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
     }
-  }, [selectedIssueCode]);
+  }, [currentIssueCode]);
 
   const loadIssues = useCallback(async () => {
     setIssuesLoading(true);
     setIssuesError(null);
     try {
-      const data = await rainApi.fetchIssues();
-      setIssues(data);
+      setIssues(await rainApi.fetchIssues());
     } catch (error) {
       setIssuesError(normalizeApiError(error));
     } finally {
@@ -102,55 +171,81 @@ export function HomeView() {
     }
   }, []);
 
-  const loadBundles = useCallback(
-    async (code: string) => {
-      const trimmed = code.trim();
-      const requestId = ++bundleRequestIdRef.current;
-      if (!trimmed) {
-        setBundles([]);
-        setBundlesError(null);
-        setBundlesLoading(false);
+  const loadBundles = useCallback(async (code: string) => {
+    const trimmed = code.trim();
+    const requestId = ++bundleRequestIdRef.current;
+    if (!trimmed) {
+      setBundles([]);
+      setBundleFiles({});
+      setBundlesError(null);
+      setBundlesLoading(false);
+      return;
+    }
+
+    setBundlesLoading(true);
+    setBundlesError(null);
+    try {
+      const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
+      if (requestId !== bundleRequestIdRef.current || selectedIssueRef.current !== trimmed) {
         return;
       }
-      setBundlesLoading(true);
-      setBundlesError(null);
-      try {
-        const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
-        if (requestId !== bundleRequestIdRef.current || selectedIssueRef.current !== trimmed) {
-          return;
+      setBundles(data.log_bundles);
+      setBundleFiles((prev) => {
+        const validHashes = new Set(data.log_bundles.map((bundle) => bundle.hash));
+        return Object.fromEntries(Object.entries(prev).filter(([hash]) => validHashes.has(hash)));
+      });
+    } catch (error) {
+      if (requestId !== bundleRequestIdRef.current) return;
+      const message = normalizeApiError(error);
+      if (/not found|404/i.test(message)) {
+        setBundles([]);
+        setBundleFiles({});
+        setBundlesError('Issue 不存在或已被删除');
+        if (selectedIssueRef.current === trimmed) {
+          setSelectedIssueCode('');
+          localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
         }
-        setBundles(data.log_bundles);
-        setBundleFiles((prev) => {
-          const validHashes = new Set(data.log_bundles.map((item) => item.hash));
-          return Object.fromEntries(
-            Object.entries(prev).filter(([hash]) => validHashes.has(hash))
-          );
-        });
-      } catch (error) {
-        if (requestId !== bundleRequestIdRef.current) {
-          return;
-        }
-        const message = normalizeApiError(error);
-        if (/not found|404/i.test(message)) {
-          setBundles([]);
-          setBundleFiles({});
-          setBundlesError('Issue 不存在或已被删除');
-          if (selectedIssueRef.current === trimmed) {
-            setSelectedIssueCode('');
-            localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
-          }
-          throw new Error('未找到 Issue');
-        } else {
-          setBundlesError(normalizeApiError(error));
-          setBundles([]);
-          throw error;
-        }
-      } finally {
+        return;
+      }
+      setBundles([]);
+      setBundlesError(message);
+    } finally {
+      if (requestId === bundleRequestIdRef.current) {
         setBundlesLoading(false);
       }
-    },
-    []
-  );
+    }
+  }, []);
+
+  const loadBundleFiles = useCallback(async (hash: string) => {
+    setBundleFiles((prev) => ({
+      ...prev,
+      [hash]: {
+        files: prev[hash]?.files ?? [],
+        loading: true,
+        loaded: prev[hash]?.loaded ?? false,
+        error: null
+      }
+    }));
+
+    try {
+      const response = await rainApi.fetchFileNode(hash, 'root');
+      const files = (response.children ?? []).filter((child) => child.meta?.kind === 'uploaded_file');
+      setBundleFiles((prev) => ({
+        ...prev,
+        [hash]: { files, loading: false, loaded: true, error: null }
+      }));
+    } catch (error) {
+      setBundleFiles((prev) => ({
+        ...prev,
+        [hash]: {
+          files: prev[hash]?.files ?? [],
+          loading: false,
+          loaded: true,
+          error: normalizeApiError(error)
+        }
+      }));
+    }
+  }, []);
 
   useEffect(() => {
     loadIssues().catch(() => undefined);
@@ -168,13 +263,20 @@ export function HomeView() {
   }, [currentIssueCode, loadBundles]);
 
   useEffect(() => {
-    if (!currentIssueCode) return;
-    const hasProcessingBundle = bundles.some(
-      (bundle) => bundle.status?.upload_status === 'PROCESSING'
-    );
-    if (!hasProcessingBundle) return;
-    if (uploadTask?.task_id) return;
+    for (const bundle of bundles) {
+      if (bundle.status.upload_status !== 'READY') continue;
+      const state = bundleFiles[bundle.hash];
+      if (!state?.loaded && !state?.loading) {
+        loadBundleFiles(bundle.hash).catch(() => undefined);
+      }
+    }
+  }, [bundleFiles, bundles, loadBundleFiles]);
 
+  useEffect(() => {
+    if (!currentIssueCode) return;
+    if (uploadTask?.task_id) return;
+    const hasProcessing = bundles.some((bundle) => bundle.status.upload_status === 'PROCESSING');
+    if (!hasProcessing) return;
     const timer = window.setTimeout(() => {
       loadBundles(currentIssueCode).catch(() => undefined);
     }, 1500);
@@ -188,7 +290,6 @@ export function HomeView() {
 
     let cancelled = false;
     let timer: number | undefined;
-
     const poll = async () => {
       try {
         const task = await rainApi.fetchUploadTask(taskId);
@@ -208,16 +309,12 @@ export function HomeView() {
         }
       }
     };
-
     poll().catch(() => undefined);
-
     return () => {
       cancelled = true;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
+      if (timer) window.clearTimeout(timer);
     };
-  }, [uploadTask?.task_id, uploadTask?.status, loadIssues, loadBundles]);
+  }, [loadBundles, loadIssues, uploadTask?.status, uploadTask?.task_id]);
 
   const selectIssue = (value: string) => {
     try {
@@ -227,6 +324,13 @@ export function HomeView() {
     } catch (error) {
       setIssueError(normalizeApiError(error));
     }
+  };
+
+  const closeCreateDialog = () => {
+    setCreateDialogOpen(false);
+    setCreateIssueError(null);
+    setNewIssueCode('');
+    setNewIssueName('');
   };
 
   const handleCreateIssue = async () => {
@@ -250,10 +354,7 @@ export function HomeView() {
       setIssueSearchText('');
       setBundles([]);
       setBundleFiles({});
-      setNewIssueCode('');
-      setNewIssueName('');
-      setCreateDialogOpen(false);
-      localStorage.setItem(LAST_ISSUE_STORAGE_KEY, issue.code);
+      closeCreateDialog();
     } catch (error) {
       setCreateIssueError(normalizeApiError(error));
     } finally {
@@ -261,93 +362,21 @@ export function HomeView() {
     }
   };
 
-  const closeCreateDialog = () => {
-    setCreateDialogOpen(false);
-    setCreateIssueError(null);
-    setNewIssueCode('');
-    setNewIssueName('');
-  };
-
-  const loadBundleFiles = useCallback(async (hash: string) => {
-    setBundleFiles((prev) => ({
-      ...prev,
-      [hash]: {
-        files: prev[hash]?.files ?? [],
-        loading: true,
-        loaded: prev[hash]?.loaded ?? false,
-        error: null
-      }
-    }));
-    try {
-      const response = await rainApi.fetchFileNode(hash, 'root');
-      const filtered = (response.children ?? []).filter((child) => child.meta?.kind === 'uploaded_file');
-      setBundleFiles((prev) => ({
-        ...prev,
-        [hash]: { files: filtered, loading: false, loaded: true, error: null }
-      }));
-    } catch (error) {
-      setBundleFiles((prev) => ({
-        ...prev,
-        [hash]: {
-          files: prev[hash]?.files ?? [],
-          loading: false,
-          loaded: true,
-          error: normalizeApiError(error)
-        }
-      }));
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!bundles.length) return;
-    bundles.forEach((bundle) => {
-      if (bundle.status?.upload_status !== 'READY') return;
-      const existing = bundleFiles[bundle.hash];
-      if (!existing?.loaded && !existing?.loading) {
-        loadBundleFiles(bundle.hash).catch(() => undefined);
-      }
-    });
-  }, [bundles, bundleFiles, loadBundleFiles]);
-
-  const handleDeleteIssue = async (code: string) => {
-    setConfirmDialog({
-      message: `确定删除 Issue ${code} 及其上传吗？此操作不可恢复。`,
-      onConfirm: async () => {
-        setDeletingIssue(code);
-        try {
-          await rainApi.deleteIssue(code);
-          if (selectedIssueCode.trim() === code) {
-            setSelectedIssueCode('');
-            setBundles([]);
-            setBundleFiles({});
-            setBundlesError(null);
-          }
-          loadIssues().catch(() => undefined);
-        } catch (error) {
-          setIssuesError(normalizeApiError(error));
-        } finally {
-          setDeletingIssue(null);
-        }
-      }
-    });
-  };
-
   const performUpload = async (files: File[]) => {
-    if (uploadingRef.current) {
-      return;
-    }
-    if (hasActiveUploadTask) {
+    if (uploadingRef.current) return;
+    if (activeTask) {
       setUploadError('当前上传任务仍在后台解析，请等待完成后再上传');
       return;
     }
-    if (!selectedIssueCode) {
+    if (!currentIssueCode) {
       setUploadError('请先选择或创建 Issue');
       return;
     }
-    if (!files || files.length === 0) {
+    if (files.length === 0) {
       setUploadError('请至少选择一个文件');
       return;
     }
+
     uploadingRef.current = true;
     setUploading(true);
     setUploadProgress(0);
@@ -355,7 +384,7 @@ export function HomeView() {
     setUploadSuccess(null);
     setUploadTask(null);
     try {
-      const response = await rainApi.uploadLogs(selectedIssueCode, files, setUploadProgress);
+      const response = await rainApi.uploadLogs(currentIssueCode, files, setUploadProgress);
       setUploadSuccess(response);
       setUploadTask({
         task_id: response.task_id,
@@ -365,308 +394,366 @@ export function HomeView() {
         progress_percent: response.status === 'READY' ? 100 : 0,
         total_bytes: response.total_bytes
       });
-      await loadBundles(selectedIssueCode);
+      await loadBundles(currentIssueCode);
       await loadIssues();
     } catch (error) {
       setUploadError(normalizeApiError(error));
-      setUploadSuccess(null);
     } finally {
       uploadingRef.current = false;
       setUploading(false);
       setUploadProgress(0);
     }
   };
-  const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
+
+  const deleteIssue = (code: string) => {
+    setConfirmDialog({
+      message: `确定删除 Issue ${code} 及其上传吗？此操作不可恢复。`,
+      onConfirm: async () => {
+        setDeletingIssue(code);
+        try {
+          await rainApi.deleteIssue(code);
+          if (currentIssueCode === code) {
+            setSelectedIssueCode('');
+            setBundles([]);
+            setBundleFiles({});
+          }
+          await loadIssues();
+        } catch (error) {
+          setIssuesError(normalizeApiError(error));
+        } finally {
+          setDeletingIssue(null);
+        }
+      }
+    });
+  };
+
+  const deleteRow = (row: FileRow) => {
+    const target = row.file ? `文件 ${row.name}` : `日志包 ${row.name}`;
+    setConfirmDialog({
+      message: `确定删除${target}吗？此操作不可恢复。`,
+      onConfirm: async () => {
+        setDeletingKey(row.key);
+        try {
+          if (row.file) {
+            await rainApi.deleteFile(row.bundleHash, String(row.file.id));
+            await loadBundleFiles(row.bundleHash);
+          } else {
+            await rainApi.deleteBundle(currentIssueCode, row.bundleHash);
+            await loadBundles(currentIssueCode);
+          }
+          await loadIssues();
+        } catch (error) {
+          setBundlesError(normalizeApiError(error));
+        } finally {
+          setDeletingKey(null);
+        }
+      }
+    });
+  };
+
+  const handleUpload = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    // no-op: upload is triggered by drop or file selection
   };
 
   return (
-    <div className="min-h-screen space-y-6 pb-6 flex flex-col text-sm md:text-base">
-      <section className="panel space-y-4 h-full flex-1 flex flex-col">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-xs sm:text-sm uppercase tracking-[0.2em] text-brand-500">Issue 操作</p>
-          </div>
+    <div className="grid min-h-[calc(100vh-88px)] gap-5 lg:grid-cols-[315px_minmax(0,1fr)]">
+      <aside className="flex min-h-[680px] flex-col rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-xl font-semibold text-white">Issues</h2>
+          <button
+            type="button"
+            className="rounded border border-sky-500/60 px-3 py-2 text-sm font-semibold text-sky-300 transition hover:bg-sky-500/10"
+            onClick={() => setCreateDialogOpen(true)}
+          >
+            + 新建 Issue
+          </button>
         </div>
 
-        <div className="grid items-stretch gap-4 lg:grid-cols-3 flex-1">
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4 h-full flex flex-col">
-            <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm md:text-base">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <h4 className="text-sm sm:text-base font-semibold text-white">Issue 列表</h4>
-                <button
-                  type="button"
-                  className="rounded border border-brand-500/50 px-3 py-1 text-xs font-semibold text-brand-100 transition hover:bg-brand-500/10"
-                  onClick={() => {
-                    setCreateDialogOpen(true);
-                    setCreateIssueError(null);
-                  }}
-                >
-                  + 新建 Issue
-                </button>
-              </div>
-              <input
-                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none text-sm md:text-base"
-                placeholder="输入 Issue ID，例如 CN013"
-                value={issueSearchText}
-                onChange={(event) => setIssueSearchText(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    selectIssue(issueSearchText);
-                  }
-                }}
-              />
-              {issueError ? <p className="text-sm text-rose-300">{issueError}</p> : null}
-              {issuesError ? (
-                <div className="flex items-center justify-between gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
-                  <span>{issuesError}</span>
-                  <button
-                    type="button"
-                    className="shrink-0 rounded border border-rose-400/50 px-2 py-1 text-[11px] font-semibold text-rose-100 transition hover:bg-rose-500/10 disabled:opacity-60"
-                    onClick={() => {
-                      loadIssues().catch(() => undefined);
-                    }}
-                    disabled={issuesLoading}
-                  >
-                    {issuesLoading ? '连接中...' : '重新连接'}
-                  </button>
-                </div>
-              ) : null}
-              <div className="max-h-56 space-y-1 overflow-y-auto text-sm">
-                {issues
-                  .filter((item) => {
-                    const filter = issueSearchText.trim().toLowerCase();
-                    if (!filter) return true;
-                    return item.code.toLowerCase().includes(filter) || item.name.toLowerCase().includes(filter);
-                  })
-                  .map((item) => (
-                    <div
-                      key={item.code}
-                      className="flex w-full items-center gap-2 rounded-lg border border-transparent px-3 py-2 transition hover:border-slate-700 hover:bg-slate-900/70"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => selectIssue(item.code)}
-                        className="flex min-w-0 flex-1 flex-col text-left"
-                      >
-                        <span className="truncate font-semibold text-white">{item.code}</span>
-                        <span className="text-[10px] text-slate-500">{item.bundle_count} 个上传包</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => navigate(`/issue/${encodeURIComponent(item.code)}`)}
-                        className="shrink-0 rounded border border-slate-600 px-2 py-1 text-[11px] text-slate-200 transition hover:bg-slate-800"
-                      >
-                        查看
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          handleDeleteIssue(item.code).catch(() => undefined);
-                        }}
-                        className="shrink-0 rounded border border-rose-500/50 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
-                        disabled={deletingIssue === item.code}
-                      >
-                        {deletingIssue === item.code ? '删除中...' : '删除'}
-                      </button>
-                    </div>
-                  ))}
+        <div className="relative">
+          <input
+            className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 pr-10 text-sm text-white outline-none transition focus:border-sky-500"
+            placeholder="搜索 Issue ID..."
+            value={issueSearchText}
+            onChange={(event) => setIssueSearchText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                selectIssue(issueSearchText);
+              }
+            }}
+          />
+          <span className="absolute right-3 top-2.5 text-slate-500">⌕</span>
+        </div>
+
+        {issueError ? <p className="mt-2 text-xs text-rose-300">{issueError}</p> : null}
+        {issuesError ? (
+          <div className="mt-3 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
+            <p>{issuesError}</p>
+            <button
+              type="button"
+              className="mt-2 rounded border border-rose-400/50 px-2 py-1 text-rose-100 disabled:opacity-60"
+              onClick={() => loadIssues().catch(() => undefined)}
+              disabled={issuesLoading}
+            >
+              {issuesLoading ? '连接中...' : '重新连接'}
+            </button>
+          </div>
+        ) : null}
+
+        <div className="mt-5 flex-1 space-y-2 overflow-y-auto">
+          {filteredIssues.map((issue) => {
+            const active = issue.code === currentIssueCode;
+            return (
+              <button
+                key={issue.code}
+                type="button"
+                className={[
+                  'flex w-full items-center justify-between rounded-lg px-3 py-3 text-left transition',
+                  active ? 'bg-sky-500/20 text-white' : 'text-slate-200 hover:bg-slate-800/80'
+                ].join(' ')}
+                onClick={() => selectIssue(issue.code)}
+              >
+                <span className="min-w-0 truncate font-semibold">{issue.code}</span>
+                <span className="rounded-full bg-sky-500/20 px-2 py-0.5 text-xs text-sky-300">
+                  {issue.bundle_count}
+                </span>
+              </button>
+            );
+          })}
+          {!filteredIssues.length ? (
+            <p className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-sm text-slate-500">
+              暂无 Issue
+            </p>
+          ) : null}
+        </div>
+      </aside>
+
+      <section className="min-w-0 space-y-4">
+        <div className="rounded-lg border border-slate-800 bg-slate-900/70">
+          <div className="flex flex-col gap-4 border-b border-slate-800 p-5 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h2 className="text-3xl font-semibold text-white">
+                {currentIssueCode || '请选择 Issue'}
+              </h2>
+              <div className="mt-3 flex flex-wrap gap-5 text-sm text-slate-400">
+                {selectedIssue?.name && selectedIssue.name !== currentIssueCode ? (
+                  <span>{selectedIssue.name}</span>
+                ) : null}
+                <span>{bundles.length} 个日志包</span>
+                <span>{fileRows.length} 个文件项</span>
+                {bundlesLoading ? <span>正在刷新...</span> : null}
               </div>
             </div>
+            {currentIssueCode ? (
+              <button
+                type="button"
+                className="rounded-lg border border-rose-500/60 px-4 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/10 disabled:opacity-60"
+                disabled={deletingIssue === currentIssueCode}
+                onClick={() => deleteIssue(currentIssueCode)}
+              >
+                删除 Issue
+              </button>
+            ) : null}
           </div>
 
-          <div className="space-y-4 lg:col-span-2 h-full flex flex-col">
-            <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4 w-full">
-              {uploadSuccess ? (
-                <div className="rounded-lg border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
-                  <p className="font-semibold">上传已接收</p>
-                  <p>Issue：{uploadSuccess.issue_code}</p>
-                  <p>任务：{uploadSuccess.task_id}</p>
-                  <p>文件 {uploadSuccess.file_count} 个 · 共 {(uploadSuccess.total_bytes / 1024).toFixed(1)} KB</p>
-                  <p>
-                    后台状态：
-                    {uploadTask?.status === 'READY'
-                      ? '解析完成'
-                      : uploadTask?.status === 'FAILED'
-                        ? '解析失败'
-                        : '解析中'}
-                  </p>
+          <form onSubmit={handleUpload} className="space-y-4 p-5">
+            <h3 className="text-lg font-semibold text-white">上传日志</h3>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              disabled={uploadDisabled}
+              onChange={(event) => {
+                if (uploadDisabled || uploadingRef.current) return;
+                const files = event.target.files;
+                if (files?.length) {
+                  performUpload(Array.from(files)).catch(() => undefined);
+                }
+                if (fileInputRef.current) {
+                  fileInputRef.current.value = '';
+                }
+              }}
+            />
+            <div
+              className="flex min-h-28 items-center justify-between gap-4 rounded-lg border border-dashed border-slate-700 bg-slate-950/40 px-6 py-5 text-sm transition aria-disabled:opacity-60"
+              aria-disabled={uploadDisabled}
+              onClick={() => {
+                if (!uploadDisabled && !uploadingRef.current) {
+                  fileInputRef.current?.click();
+                }
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (uploadDisabled || uploadingRef.current) return;
+                if (event.dataTransfer.files.length) {
+                  performUpload(Array.from(event.dataTransfer.files)).catch(() => undefined);
+                }
+              }}
+            >
+              <div className="flex min-w-0 items-center gap-4">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-sky-500/60 text-2xl text-sky-300">
+                  ↑
                 </div>
-              ) : null}
-              <h3 className="text-sm font-semibold text-white">上传日志</h3>
-              {selectedIssueCode ? (
-                <p className="text-sm text-slate-300">
-                  当前上传到：<strong className="text-white">{selectedIssueCode}</strong>
-                </p>
-              ) : (
-                <p className="text-sm text-slate-400">请先选择或创建一个 Issue</p>
-              )}
-              <div className="space-y-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  className="hidden"
-                  disabled={uploadDisabled}
-                  onChange={(event) => {
-                    if (uploadingRef.current) return;
-                    if (uploadDisabled) return;
-                    const files = event.target.files;
-                    if (files && files.length > 0) {
-                      performUpload(Array.from(files)).catch(() => undefined);
-                    }
-                    if (fileInputRef.current) {
-                      fileInputRef.current.value = '';
-                    }
-                  }}
-                />
-                <div
-                  className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-6 text-center text-sm text-slate-200 transition hover:border-brand-500 hover:bg-slate-900/70 cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
-                  aria-disabled={uploadDisabled}
-                  onClick={() => {
-                    if (!uploadDisabled && !uploadingRef.current) {
-                      fileInputRef.current?.click();
-                    }
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (uploadDisabled) return;
-                    if (uploadingRef.current) return;
-                    if (event.dataTransfer?.files?.length) {
-                      performUpload(Array.from(event.dataTransfer.files)).catch(() => undefined);
-                    }
-                  }}
-                >
+                <div>
                   <p className="font-semibold text-white">
-                    {uploading ? '上传中...' : hasActiveUploadTask ? '后台解析中...' : '拖拽文件到这里上传'}
+                    {!currentIssueCode
+                      ? '先选择或新建 Issue'
+                      : uploading
+                        ? '正在上传文件'
+                        : activeTask
+                          ? '后台解析中'
+                          : '拖拽日志文件到这里，或点击选择文件'}
                   </p>
-                  <p className="text-xs text-slate-400">支持日志或压缩包，点击也可选择文件</p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    支持 .log、.txt、.zip、.tar.gz、.tgz、.gz，单个文件最大 512 MB
+                  </p>
                 </div>
-                {uploading ? (
-                  <div className="space-y-1">
-                    <div className="h-2 overflow-hidden rounded bg-slate-800">
-                      <div
-                        className="h-full bg-brand-500 transition-all"
-                        style={{ width: `${uploadProgress}%` }}
-                      />
-                    </div>
-                    <p className="text-xs text-slate-400">
-                      {uploadProgress < 100 ? `上传 ${uploadProgress}%` : '上传完成，正在解析...'}
-                    </p>
-                  </div>
-                ) : null}
               </div>
-              {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
-            </form>
+              <button
+                type="button"
+                className="shrink-0 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 disabled:opacity-60"
+                disabled={uploadDisabled}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!uploadDisabled) fileInputRef.current?.click();
+                }}
+              >
+                选择文件
+              </button>
+            </div>
 
-            {currentIssueCode ? (
-              <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4 flex-1 flex flex-col">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-white">当前文件</h3>
+            {uploading ? (
+              <div className="grid gap-3 text-sm text-slate-300 md:grid-cols-[1fr_auto] md:items-center">
+                <div>
+                  <div className="h-2 overflow-hidden rounded bg-slate-800">
+                    <div className="h-full bg-sky-500" style={{ width: `${uploadProgress}%` }} />
+                  </div>
                 </div>
-              {bundlesError ? <p className="text-xs text-rose-300">{bundlesError}</p> : null}
-              <div className="space-y-2 text-sm text-slate-200">
-                {(() => {
-                  const allFiles = bundles.flatMap((bundle) =>
-                    (bundleFiles[bundle.hash]?.files ?? []).map((file) => ({
-                      bundleHash: bundle.hash,
-                      file
-                    }))
-                  );
-                  const anyLoading =
-                    bundlesLoading ||
-                    bundles.some((bundle) => bundleFiles[bundle.hash]?.loading);
-                  const anyError =
-                    bundlesError ||
-                    bundles.find((bundle) => bundleFiles[bundle.hash]?.error)?.hash;
+                <span>{uploadProgress < 100 ? `上传 ${uploadProgress}%` : '上传完成，正在解析...'}</span>
+              </div>
+            ) : null}
+            {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
+          </form>
+        </div>
 
-                  if (anyLoading && allFiles.length === 0) {
-                    return <p className="text-xs text-slate-500">文件加载中...</p>;
-                  }
-                  if (allFiles.length === 0) {
-                    if (bundles.some((bundle) => bundle.status?.upload_status === 'PROCESSING')) {
-                      return <p className="text-xs text-slate-500">后台解析中...</p>;
-                    }
-                    return <p className="text-xs text-slate-500">暂无文件</p>;
-                  }
+        {uploadSuccess || activeTask ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+            <h3 className="mb-3 text-lg font-semibold text-white">上传任务</h3>
+            <div className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-950/30 p-4 md:flex-row md:items-center md:justify-between">
+              <div className="min-w-0">
+                <p className="truncate font-semibold text-white">
+                  {uploadSuccess?.bundle_hash ?? uploadTask?.bundle_hash}
+                </p>
+                <p className="mt-1 text-sm text-slate-400">
+                  {uploadTask?.status === 'READY'
+                    ? '解析完成'
+                    : uploadTask?.status === 'FAILED'
+                      ? '处理失败'
+                      : '正在建立搜索索引...'}
+                </p>
+              </div>
+              <span className={`rounded-full border px-3 py-1 text-xs ${statusClass(uploadTask?.status ?? 'PROCESSING')}`}>
+                {statusLabel(uploadTask?.status ?? 'PROCESSING')}
+              </span>
+              <div className="text-sm text-slate-300">{formatBytes(uploadTask?.total_bytes ?? uploadSuccess?.total_bytes)}</div>
+              <button
+                type="button"
+                className="rounded border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
+                onClick={() => {
+                  if (currentIssueCode) navigate(`/issue/${encodeURIComponent(currentIssueCode)}`);
+                }}
+                disabled={!currentIssueCode}
+              >
+                查看进度
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h3 className="text-lg font-semibold text-white">文件列表</h3>
+            {bundlesError ? <span className="text-sm text-rose-300">{bundlesError}</span> : null}
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-slate-800">
+            <table className="min-w-full divide-y divide-slate-800 text-sm">
+              <thead className="bg-slate-950/40 text-left text-xs uppercase text-slate-400">
+                <tr>
+                  <th className="px-4 py-3 font-medium">文件名</th>
+                  <th className="px-4 py-3 font-medium">状态</th>
+                  <th className="px-4 py-3 font-medium">大小</th>
+                  <th className="px-4 py-3 font-medium">行数</th>
+                  <th className="px-4 py-3 font-medium">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800 text-slate-200">
+                {fileRows.map((row) => {
+                  const deleting = deletingKey === row.key;
                   return (
-                    <ul className="space-y-1 text-sm md:text-base text-slate-300">
-                      {allFiles.map(({ bundleHash, file }) => {
-                        const label =
-                          typeof file.meta?.original_name === 'string'
-                            ? (file.meta.original_name as string)
-                            : file.name;
-                        const key = `${bundleHash}:${file.id}`;
-                        const deleting = deletingFileKey === key || deletingBundle === bundleHash;
-                        return (
-                          <li key={`${bundleHash}:${file.id}`} className="flex items-center gap-2">
-                            <span className="truncate">
-                              {label} ({((file.size_bytes ?? 0) / 1024).toFixed(1)} KB)
-                            </span>
+                    <tr key={row.key}>
+                      <td className="max-w-[360px] truncate px-4 py-3">
+                        <span className="mr-2 text-slate-500">□</span>
+                        {row.name}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`rounded-full border px-2 py-1 text-xs ${statusClass(row.status)}`}>
+                          {statusLabel(row.status)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">{formatBytes(row.sizeBytes)}</td>
+                      <td className="px-4 py-3">
+                        {row.lineCount !== null && row.lineCount !== undefined
+                          ? row.lineCount.toLocaleString()
+                          : '-'}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3">
+                        {row.status === 'READY' && row.file ? (
+                          <>
                             <button
                               type="button"
-                              className="ml-auto rounded border border-rose-500/40 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-500/10 disabled:opacity-60"
-                              disabled={deleting}
-                              onClick={() => {
-                                setConfirmDialog({
-                                  message: `确定删除文件 ${label} 吗？此操作不可恢复。`,
-                                  onConfirm: async () => {
-                                    setDeletingFileKey(key);
-                                    try {
-                                      await rainApi.deleteFile(bundleHash, String(file.id));
-                                      await loadBundleFiles(bundleHash);
-                                      if (currentIssueCode) {
-                                        await loadBundles(currentIssueCode);
-                                      }
-                                    } catch (err) {
-                                      setBundleFiles((prev) => ({
-                                        ...prev,
-                                        [bundleHash]: {
-                                          files: prev[bundleHash]?.files ?? [],
-                                          loading: false,
-                                          loaded: true,
-                                          error: normalizeApiError(err)
-                                        }
-                                      }));
-                                    } finally {
-                                      setDeletingFileKey(null);
-                                    }
-                                  }
-                                });
-                              }}
+                              className="mr-4 text-sky-300 hover:text-sky-200"
+                              onClick={() => navigate(`/issue/${encodeURIComponent(currentIssueCode)}`)}
                             >
-                              {deleting ? '删除中...' : '删除'}
+                              查看
                             </button>
-                          </li>
-                        );
-                      })}
-                      {anyLoading ? <p className="text-xs text-slate-500">文件加载中...</p> : null}
-                      {anyError && !bundlesError
-                        ? (
-                          <p className="text-xs text-rose-300">
-                            {bundles
-                              .map((bundle) => bundleFiles[bundle.hash]?.error)
-                              .find((msg) => msg)}
-                          </p>
-                        )
-                        : null}
-                    </ul>
+                            <a
+                              className="mr-4 text-sky-300 hover:text-sky-200"
+                              href={rainApi.fileDownloadUrl(row.bundleHash, String(row.file.id))}
+                            >
+                              下载
+                            </a>
+                          </>
+                        ) : null}
+                        {row.status === 'PROCESSING' ? (
+                          <span className="mr-4 text-slate-500">等待完成</span>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="text-rose-300 hover:text-rose-200 disabled:text-slate-600"
+                          disabled={deleting || row.status === 'PROCESSING'}
+                          onClick={() => deleteRow(row)}
+                        >
+                          {deleting ? '删除中...' : row.status === 'FAILED' ? '删除' : '删除'}
+                        </button>
+                      </td>
+                    </tr>
                   );
-                })()}
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-400">
-              请选择一个 Issue，或新建 Issue 后上传日志。
-            </div>
-          )}
+                })}
+                {!fileRows.length ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-10 text-center text-slate-500">
+                      {currentIssueCode ? '暂无文件' : '请选择一个 Issue'}
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -675,48 +762,42 @@ export function HomeView() {
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              closeCreateDialog();
-            }
+            if (event.target === event.currentTarget) closeCreateDialog();
           }}
         >
           <form
-            className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900/95 p-5 shadow-2xl"
+            className="w-full max-w-md rounded-lg border border-slate-800 bg-slate-900 p-5 shadow-2xl"
             onSubmit={(event) => {
               event.preventDefault();
               handleCreateIssue().catch(() => undefined);
             }}
             onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                closeCreateDialog();
-              }
+              if (event.key === 'Escape') closeCreateDialog();
             }}
           >
-            <h3 className="text-sm font-semibold text-white">新建 Issue</h3>
-            <div className="mt-4 space-y-3">
-              <label className="block text-sm text-slate-300">
-                Issue ID
-                <input
-                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                  value={newIssueCode}
-                  onChange={(event) => setNewIssueCode(event.target.value)}
-                  placeholder="例如 CN014"
-                />
-              </label>
-              <label className="block text-sm text-slate-300">
-                名称（可选）
-                <input
-                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                  value={newIssueName}
-                  onChange={(event) => setNewIssueName(event.target.value)}
-                />
-              </label>
-              {createIssueError ? <p className="text-sm text-rose-300">{createIssueError}</p> : null}
-            </div>
-            <div className="mt-5 flex justify-end gap-3 text-sm">
+            <h3 className="text-lg font-semibold text-white">新建 Issue</h3>
+            <label className="mt-4 block text-sm text-slate-300">
+              Issue ID
+              <input
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white outline-none focus:border-sky-500"
+                value={newIssueCode}
+                onChange={(event) => setNewIssueCode(event.target.value)}
+                placeholder="例如 CN014"
+              />
+            </label>
+            <label className="mt-3 block text-sm text-slate-300">
+              名称（可选）
+              <input
+                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white outline-none focus:border-sky-500"
+                value={newIssueName}
+                onChange={(event) => setNewIssueName(event.target.value)}
+              />
+            </label>
+            {createIssueError ? <p className="mt-3 text-sm text-rose-300">{createIssueError}</p> : null}
+            <div className="mt-5 flex justify-end gap-3">
               <button
                 type="button"
-                className="rounded-lg border border-slate-700 px-4 py-2 text-slate-200 hover:border-slate-500"
+                className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200"
                 onClick={closeCreateDialog}
                 disabled={creatingIssue}
               >
@@ -724,7 +805,7 @@ export function HomeView() {
               </button>
               <button
                 type="submit"
-                className="rounded-lg bg-brand-500 px-4 py-2 font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
+                className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
                 disabled={creatingIssue}
               >
                 {creatingIssue ? '创建中...' : '创建'}
@@ -736,12 +817,12 @@ export function HomeView() {
 
       {confirmDialog ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
-          <div className="w-full max-w-sm rounded-xl border border-slate-800 bg-slate-900/90 p-5 shadow-2xl">
+          <div className="w-full max-w-sm rounded-lg border border-slate-800 bg-slate-900 p-5 shadow-2xl">
             <p className="text-sm text-slate-200">{confirmDialog.message}</p>
-            <div className="mt-4 flex items-center justify-end gap-3 text-sm">
+            <div className="mt-4 flex justify-end gap-3">
               <button
                 type="button"
-                className="rounded-lg border border-slate-700 px-4 py-2 text-slate-200 hover:border-slate-500"
+                className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200"
                 onClick={() => setConfirmDialog(null)}
                 disabled={!!confirmDialog.busy}
               >
@@ -749,7 +830,8 @@ export function HomeView() {
               </button>
               <button
                 type="button"
-                className="rounded-lg bg-rose-500 px-4 py-2 font-semibold text-slate-900 transition hover:bg-rose-400 disabled:opacity-60"
+                className="rounded-lg bg-rose-500 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={!!confirmDialog.busy}
                 onClick={async () => {
                   if (!confirmDialog) return;
                   setConfirmDialog((prev) => (prev ? { ...prev, busy: true } : prev));
@@ -759,7 +841,6 @@ export function HomeView() {
                     setConfirmDialog(null);
                   }
                 }}
-                disabled={!!confirmDialog.busy}
               >
                 {confirmDialog.busy ? '处理中...' : '确定删除'}
               </button>

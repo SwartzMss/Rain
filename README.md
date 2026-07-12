@@ -72,12 +72,14 @@ npm run dev
 VITE_API_BASE_URL=http://localhost:8080
 ```
 
-## 构建单 EXE
+## 构建发布包
 
-当前不需要 nginx、systemd、证书或反向代理。Windows 可以直接运行一键构建脚本：
+当前不需要 nginx、systemd、证书或反向代理。前端页面会在后端编译时嵌入到可执行文件中，发布时不需要复制 `frontend/dist`。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
+Windows:
+
+```bat
+build-windows.bat
 ```
 
 产物：
@@ -86,7 +88,18 @@ powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
 release\Rain.exe
 ```
 
-这个 EXE 已内置前端页面，不需要随包复制 `frontend/dist`。
+Linux/macOS:
+
+```bash
+chmod +x ./build-linux.sh
+./build-linux.sh
+```
+
+产物：
+
+```text
+release/rain
+```
 
 手动构建时仍然需要先构建前端，再编译后端：
 
@@ -110,10 +123,10 @@ Windows:
 Linux/macOS:
 
 ```bash
-./target/release/backend
+./backend/target/release/backend
 ```
 
-发布时只需要复制 `release\Rain.exe`。运行前可在同目录准备 `.env`，或直接依赖默认值。默认会使用：
+发布时只需要复制对应平台的单文件可执行程序。运行前可在同目录准备 `.env`，或直接依赖默认值。默认会使用：
 
 - SQLite 数据库：`./data/rain.db`
 - 上传目录：`./data/uploads`

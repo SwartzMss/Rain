@@ -684,6 +684,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
     )
     .await;
     assert_eq!(upload.status(), StatusCode::ACCEPTED);
+    wait_for_issue_ready(&pool, "NEW001").await;
 
     sqlx::query("UPDATE bundles SET created_at = datetime('now', '-2 days') WHERE issue_code = ?")
         .bind("NEW001")
