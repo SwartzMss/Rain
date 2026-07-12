@@ -29,6 +29,7 @@ pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppErr
 
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
+        "DROP TABLE IF EXISTS log_segments_fts",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
         "DROP TABLE IF EXISTS bundles",
@@ -93,12 +94,28 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS log_segments_fts USING fts5(
+            content,
+            segment_id UNINDEXED,
+            bundle_id UNINDEXED,
+            file_id UNINDEXED,
+            timeline UNINDEXED
+        )
+        "#,
+        r#"
+        INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
+        SELECT ls.content, ls.id, ls.bundle_id, ls.file_id, ls.timeline
+        FROM log_segments ls
+        WHERE NOT EXISTS (
+            SELECT 1 FROM log_segments_fts fts WHERE fts.segment_id = ls.id
+        )
+        "#,
         "CREATE INDEX IF NOT EXISTS idx_bundles_issue ON bundles (issue_code, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_files_parent ON files (parent_id)",
         "CREATE INDEX IF NOT EXISTS idx_files_bundle ON files (bundle_id)",
         "CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)",
         "CREATE INDEX IF NOT EXISTS idx_logs_bundle_timeline ON log_segments (bundle_id, timeline)",
-        "CREATE INDEX IF NOT EXISTS idx_logs_content ON log_segments (content)",
     ];
 
     for statement in statements {

@@ -1,6 +1,8 @@
+use flate2::read::GzDecoder;
 use std::{
     collections::HashMap,
-    io,
+    fs::File as StdFile,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 use tokio::io::AsyncReadExt;
@@ -15,6 +17,11 @@ const MAX_READ_BYTES: u64 = 25 * 1024 * 1024; // avoid loading huge files into m
 const MAX_LINES_SMALL: usize = 50_000;
 const MAX_LINES_MEDIUM: usize = 10_000;
 const MAX_LINES_LARGE: usize = 2_000;
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+const MAX_ARCHIVE_DEPTH: usize = 5;
+const MAX_ARCHIVE_ENTRY_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_ARCHIVE_EXTRACTED_BYTES: u64 = 500 * 1024 * 1024;
+const MAX_ARCHIVE_COMPRESSION_RATIO: u64 = 100;
 
 pub struct ProcessFileOptions<'a> {
     pub pool: &'a sqlx::SqlitePool,
@@ -70,12 +77,12 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes).await?;
     }
 
-    if is_zip_file(file_name) {
+    if is_supported_archive(file_name) {
         let extracted_dir_name = format!("{file_name}_extracted");
         let extracted_dir = bundle_dir.join(&extracted_dir_name);
         fs::create_dir_all(&extracted_dir).await.map_err(io_error)?;
 
-        extract_zip_archive(&disk_path, &extracted_dir).await?;
+        extract_archive(file_name, &disk_path, &extracted_dir).await?;
 
         let extracted_relative_path = format!("/{bundle_hash}/{extracted_dir_name}");
         let dir_meta = serde_json::json!({
@@ -248,17 +255,33 @@ async fn ingest_text_file(
         if cleaned.is_empty() {
             continue;
         }
-        sqlx::query(
+        let segment_id = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset)
             VALUES (?, ?, ?, ?, ?)
+            RETURNING id
             "#,
         )
         .bind(bundle_id)
         .bind(file_id)
         .bind(Some("all".to_string()))
-        .bind(cleaned)
+        .bind(&cleaned)
         .bind(Some(index as i64))
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
+            VALUES (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&cleaned)
+        .bind(segment_id)
+        .bind(bundle_id)
+        .bind(file_id)
+        .bind(Some("all".to_string()))
         .execute(pool)
         .await
         .map_err(AppError::Database)?;
@@ -266,6 +289,20 @@ async fn ingest_text_file(
     }
 
     Ok(())
+}
+
+async fn extract_archive(name: &str, src: &Path, dest: &Path) -> Result<(), AppError> {
+    if is_zip_file(name) {
+        extract_zip_archive(src, dest).await
+    } else if is_tar_gz_file(name) {
+        extract_tar_gz_archive(src, dest).await
+    } else if is_gzip_file(name) {
+        extract_gzip_file(name, src, dest).await
+    } else {
+        Err(AppError::BadRequest(format!(
+            "unsupported archive type: {name}"
+        )))
+    }
 }
 
 async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
@@ -276,11 +313,50 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
         let mut archive =
             zip::ZipArchive::new(file).map_err(|err| AppError::BadRequest(err.to_string()))?;
 
+        if archive.len() > MAX_ARCHIVE_ENTRIES {
+            return Err(AppError::BadRequest(format!(
+                "zip has too many entries; max {MAX_ARCHIVE_ENTRIES}"
+            )));
+        }
+
+        let mut total_uncompressed = 0u64;
         for i in 0..archive.len() {
             let mut entry = archive
                 .by_index(i)
                 .map_err(|err| AppError::BadRequest(err.to_string()))?;
-            let entry_path = sanitize_zip_path(entry.name());
+            let entry_path = sanitize_archive_path(Path::new(entry.name()));
+            if entry_path.as_os_str().is_empty() {
+                continue;
+            }
+
+            let depth = entry_path.components().count();
+            if depth > MAX_ARCHIVE_DEPTH {
+                return Err(AppError::BadRequest(format!(
+                    "zip entry is too deep: {}",
+                    entry.name()
+                )));
+            }
+
+            let uncompressed_size = entry.size();
+            if !entry.is_dir() && uncompressed_size > MAX_ARCHIVE_ENTRY_BYTES {
+                return Err(AppError::BadRequest(format!(
+                    "zip entry is too large: {}",
+                    entry.name()
+                )));
+            }
+
+            total_uncompressed = total_uncompressed
+                .checked_add(uncompressed_size)
+                .ok_or_else(|| AppError::BadRequest("zip extracted size overflow".into()))?;
+            if total_uncompressed > MAX_ARCHIVE_EXTRACTED_BYTES {
+                return Err(AppError::BadRequest(format!(
+                    "zip extracted content is too large; max {} MB",
+                    MAX_ARCHIVE_EXTRACTED_BYTES / 1024 / 1024
+                )));
+            }
+
+            validate_zip_ratio(entry.name(), uncompressed_size, entry.compressed_size())?;
+
             let out_path = dest_path.join(entry_path);
 
             if entry.is_dir() {
@@ -290,7 +366,13 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
                     std::fs::create_dir_all(parent).map_err(io_error)?;
                 }
                 let mut outfile = std::fs::File::create(&out_path).map_err(io_error)?;
-                std::io::copy(&mut entry, &mut outfile).map_err(io_error)?;
+                let copied = std::io::copy(&mut entry, &mut outfile).map_err(io_error)?;
+                if copied != uncompressed_size {
+                    return Err(AppError::BadRequest(format!(
+                        "zip entry size mismatch: {}",
+                        entry.name()
+                    )));
+                }
             }
         }
         Ok(())
@@ -301,9 +383,177 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn sanitize_zip_path(name: &str) -> PathBuf {
+async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
+    let src_path = src.to_path_buf();
+    let dest_path = dest.to_path_buf();
+    task::spawn_blocking(move || -> Result<(), AppError> {
+        let compressed_size = std::fs::metadata(&src_path).map_err(io_error)?.len().max(1);
+        let file = StdFile::open(&src_path).map_err(io_error)?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        let mut total_uncompressed = 0u64;
+        let mut entries_count = 0usize;
+
+        for entry_result in archive.entries().map_err(io_error)? {
+            entries_count += 1;
+            if entries_count > MAX_ARCHIVE_ENTRIES {
+                return Err(AppError::BadRequest(format!(
+                    "tar.gz has too many entries; max {MAX_ARCHIVE_ENTRIES}"
+                )));
+            }
+
+            let mut entry = entry_result.map_err(io_error)?;
+            let raw_path = entry.path().map_err(io_error)?.into_owned();
+            let entry_path = sanitize_archive_path(&raw_path);
+            if entry_path.as_os_str().is_empty() {
+                continue;
+            }
+
+            let depth = entry_path.components().count();
+            if depth > MAX_ARCHIVE_DEPTH {
+                return Err(AppError::BadRequest(format!(
+                    "tar.gz entry is too deep: {}",
+                    raw_path.display()
+                )));
+            }
+
+            let entry_size = entry.header().size().map_err(io_error)?;
+            if entry_size > MAX_ARCHIVE_ENTRY_BYTES {
+                return Err(AppError::BadRequest(format!(
+                    "tar.gz entry is too large: {}",
+                    raw_path.display()
+                )));
+            }
+
+            total_uncompressed = total_uncompressed
+                .checked_add(entry_size)
+                .ok_or_else(|| AppError::BadRequest("tar.gz extracted size overflow".into()))?;
+            if total_uncompressed > MAX_ARCHIVE_EXTRACTED_BYTES {
+                return Err(AppError::BadRequest(format!(
+                    "tar.gz extracted content is too large; max {} MB",
+                    MAX_ARCHIVE_EXTRACTED_BYTES / 1024 / 1024
+                )));
+            }
+            validate_archive_ratio(
+                &raw_path.display().to_string(),
+                total_uncompressed,
+                compressed_size,
+            )?;
+
+            let out_path = dest_path.join(entry_path);
+            if entry.header().entry_type().is_dir() {
+                std::fs::create_dir_all(&out_path).map_err(io_error)?;
+            } else if entry.header().entry_type().is_file() {
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(io_error)?;
+                }
+                let mut outfile = StdFile::create(&out_path).map_err(io_error)?;
+                let copied = std::io::copy(&mut entry, &mut outfile).map_err(io_error)?;
+                if copied != entry_size {
+                    return Err(AppError::BadRequest(format!(
+                        "tar.gz entry size mismatch: {}",
+                        raw_path.display()
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|err| io_error(io::Error::other(err.to_string())))??;
+
+    Ok(())
+}
+
+async fn extract_gzip_file(name: &str, src: &Path, dest: &Path) -> Result<(), AppError> {
+    let src_path = src.to_path_buf();
+    let dest_path = dest.to_path_buf();
+    let output_name = gzip_output_name(name);
+    task::spawn_blocking(move || -> Result<(), AppError> {
+        let compressed_size = std::fs::metadata(&src_path).map_err(io_error)?.len().max(1);
+        let file = StdFile::open(&src_path).map_err(io_error)?;
+        let mut decoder = GzDecoder::new(file);
+        std::fs::create_dir_all(&dest_path).map_err(io_error)?;
+        let out_path = dest_path.join(output_name);
+        let mut outfile = StdFile::create(&out_path).map_err(io_error)?;
+        let copied = copy_with_limit(&mut decoder, &mut outfile, MAX_ARCHIVE_ENTRY_BYTES)?;
+        if copied > MAX_ARCHIVE_EXTRACTED_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "gzip extracted content is too large; max {} MB",
+                MAX_ARCHIVE_EXTRACTED_BYTES / 1024 / 1024
+            )));
+        }
+        validate_archive_ratio("gzip file", copied, compressed_size)?;
+        Ok(())
+    })
+    .await
+    .map_err(|err| io_error(io::Error::other(err.to_string())))??;
+
+    Ok(())
+}
+
+fn copy_with_limit<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    limit: u64,
+) -> Result<u64, AppError> {
+    let mut buffer = [0u8; 16 * 1024];
+    let mut total = 0u64;
+    loop {
+        let read = reader.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| AppError::BadRequest("gzip extracted size overflow".into()))?;
+        if total > limit {
+            return Err(AppError::BadRequest(format!(
+                "gzip entry is too large; max {} MB",
+                limit / 1024 / 1024
+            )));
+        }
+        writer.write_all(&buffer[..read]).map_err(io_error)?;
+    }
+    Ok(total)
+}
+
+fn validate_zip_ratio(
+    name: &str,
+    uncompressed_size: u64,
+    compressed_size: u64,
+) -> Result<(), AppError> {
+    validate_archive_ratio(name, uncompressed_size, compressed_size)
+}
+
+fn validate_archive_ratio(
+    name: &str,
+    uncompressed_size: u64,
+    compressed_size: u64,
+) -> Result<(), AppError> {
+    if uncompressed_size == 0 {
+        return Ok(());
+    }
+
+    if compressed_size == 0 {
+        return Err(AppError::BadRequest(format!(
+            "zip entry has invalid compressed size: {name}"
+        )));
+    }
+
+    if uncompressed_size / compressed_size > MAX_ARCHIVE_COMPRESSION_RATIO {
+        return Err(AppError::BadRequest(format!(
+            "archive compression ratio is too high: {name}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn sanitize_archive_path(path: &Path) -> PathBuf {
     let mut sanitized = PathBuf::new();
-    for component in Path::new(name).components() {
+    for component in path.components() {
         if let std::path::Component::Normal(os_str) = component
             && let Some(segment) = os_str.to_str()
         {
@@ -357,6 +607,43 @@ fn is_zip_file(name: &str) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("zip"))
         .unwrap_or(false)
+}
+
+fn is_tar_gz_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
+}
+
+fn is_gzip_file(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".gz") && !is_tar_gz_file(name)
+}
+
+fn is_supported_archive(name: &str) -> bool {
+    is_zip_file(name) || is_tar_gz_file(name) || is_gzip_file(name)
+}
+
+fn gzip_output_name(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let stripped = if lower.ends_with(".gz") {
+        &name[..name.len().saturating_sub(3)]
+    } else {
+        name
+    };
+    let sanitized = stripped
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "decompressed".into()
+    } else {
+        sanitized
+    }
 }
 
 fn io_error(err: std::io::Error) -> AppError {

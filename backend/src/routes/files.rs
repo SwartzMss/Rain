@@ -153,6 +153,12 @@ pub async fn delete_file_node(
     .map_err(AppError::Database)?;
 
     for file_id in &file_ids {
+        sqlx::query("DELETE FROM log_segments_fts WHERE file_id = ?")
+            .bind(file_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
         sqlx::query("DELETE FROM log_segments WHERE file_id = ?")
             .bind(file_id)
             .execute(&mut *tx)

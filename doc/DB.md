@@ -5,7 +5,7 @@
 ## 设计取舍
 
 - SQLite 适合当前本地 MVP：部署简单、无需单独数据库服务、方便重新启动项目。
-- 当前搜索使用 `LIKE`；后续日志量增加后，建议引入 SQLite FTS5。
+- 当前搜索使用 SQLite FTS5，启动时会回填尚未进入 FTS 索引的历史 `log_segments`。
 - 当前 `meta` 以 JSON 字符串存储在 TEXT 列中；后续如要对象存储或多节点部署，关键存储路径应提升为明确列。
 - 生产化前建议引入迁移工具，不要长期依赖启动时建表。
 
@@ -52,12 +52,21 @@
 - `content` TEXT：日志行内容（去空行/截断后）。
 - `line_offset` INTEGER：原始行号，从 0 开始。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
-- 索引：`idx_logs_bundle_timeline`、`idx_logs_content`。
+- 索引：`idx_logs_bundle_timeline`；全文检索走 `log_segments_fts`。
+
+## 表：log_segments_fts
+
+- SQLite FTS5 虚表。
+- `content`：全文检索内容。
+- `segment_id` UNINDEXED：关联 `log_segments.id`。
+- `bundle_id` UNINDEXED：用于 bundle 范围过滤。
+- `file_id` UNINDEXED：用于文件删除时清理索引。
+- `timeline` UNINDEXED：预留 timeline 过滤。
 
 ## 关系与典型上传
 
 - Issue -> 多个 Bundle：同一个 Issue 可多次上传，每次形成一个 Bundle。
-- Bundle -> Files：单文件上传会形成一个顶层 file 节点；ZIP 上传会形成原始 ZIP 节点和一个 `{zip_name}_extracted` 解压目录。
+- Bundle -> Files：单文件上传会形成一个顶层 file 节点；`.zip`、`.tar.gz`、`.tgz`、`.gz` 上传会形成原始压缩包节点和一个 `{archive_name}_extracted` 解压目录。
 - Files -> Log Segments：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会按行写入 `log_segments` 供搜索；非文本文件仅保留 `files` 记录。
 
 ## 上传流程

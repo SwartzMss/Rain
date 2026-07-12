@@ -26,19 +26,30 @@ cp .env.example .env
 DATABASE_URL=sqlite://../data/rain.db
 RAIN_DATA_ROOT=../data/uploads
 RAIN_LOG_DIR=../log
+RAIN_STATIC_ROOT=../frontend/dist
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8080
 RESET_DB=false
 ```
 
-### 2. 启动后端
+### 2. 构建前端
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+构建产物会写入 `frontend/dist`，后端默认会托管这个目录。
+
+### 3. 启动后端
 
 ```bash
 cd backend
 cargo run
 ```
 
-后端默认地址：`http://localhost:8080`
+打开 `http://localhost:8080` 即可使用应用。
 
 健康检查：
 
@@ -46,7 +57,7 @@ cargo run
 curl http://localhost:8080/healthz
 ```
 
-### 3. 启动前端
+### 开发前端
 
 ```bash
 cd frontend
@@ -54,9 +65,9 @@ npm install
 npm run dev
 ```
 
-前端默认地址：`http://localhost:5173`
+开发时也可以继续使用 Vite dev server：`http://localhost:5173`。
 
-如果前端和后端不是同源部署，在 `frontend/.env` 中设置：
+如果使用 Vite dev server，在 `frontend/.env` 中设置：
 
 ```dotenv
 VITE_API_BASE_URL=http://localhost:8080
@@ -64,7 +75,13 @@ VITE_API_BASE_URL=http://localhost:8080
 
 ## 直接运行 EXE
 
-当前不需要 nginx、systemd、证书或反向代理。后端可以直接编译成可执行文件运行：
+当前不需要 nginx、systemd、证书或反向代理。先构建前端，再构建后端可执行文件：
+
+```bash
+cd frontend
+npm install
+npm run build
+```
 
 ```bash
 cd backend
@@ -87,18 +104,14 @@ Linux/macOS:
 
 - SQLite 数据库：`../data/rain.db`
 - 上传目录：`./data/uploads`
+- 前端静态目录：`../frontend/dist`
 - 后端端口：`8080`
 
-前端当前仍按 Vite 应用运行：
-
-```bash
-cd frontend
-npm run dev
-```
+启动后访问 `http://localhost:8080`。
 
 ## 使用流程
 
-1. 打开 `http://localhost:5173`。
+1. 打开 `http://localhost:8080`。
 2. 在首页输入或选择一个 Issue ID，例如 `CN013`。
 3. 拖拽或点击上传 `.log`、`.txt`、`.zip` 文件。
 4. 双击 Issue 打开文件浏览页。
@@ -110,7 +123,10 @@ npm run dev
 - Issue 列表、打开、删除。
 - 多文件上传。
 - `.log`、`.txt` 等文本文件索引。
-- `.zip` 同步解压并写入文件树。
+- `.zip`、`.tar.gz`、`.tgz` 同步解压并写入文件树。
+- `.gz` 单文件解压、索引和预览。
+- 上传安全限制：单文件 50 MB、单次 200 MB、最多 100 个文件。
+- ZIP 基础防护：最多 10000 个条目、最多 500 MB 解压内容、最多 5 层路径深度、单条目 100 MB、压缩比上限 100:1。
 - 文件树浏览。
 - 文本文件 64 KB 预览。
 - Issue 范围和 bundle 范围关键词搜索。
@@ -118,10 +134,10 @@ npm run dev
 
 ## 当前限制
 
-- 暂不支持 `.tar.gz`、`.rar`、`.7z` 解压。
-- ZIP 上传时同步解压，尚未做后台任务和进度轮询。
-- 尚未实现完整 Zip Bomb 防护。
-- 搜索目前使用 SQLite `LIKE`，大数据量后应切换到 SQLite FTS5。
+- 暂不支持 `.rar`、`.7z` 解压。
+- 压缩包上传时同步解压，尚未做后台任务和进度轮询。
+- `.zip`、`.tar.gz`、`.tgz`、`.gz` 已有基础大小和结构限制，但还没有后台任务超时/取消机制。
+- 搜索使用 SQLite FTS5。
 - timeline 目前固定为 `all`。
 - AI 分析能力尚未接入。
 
@@ -149,6 +165,7 @@ RESET_DB=true
 cd backend
 cargo fmt --check
 cargo check
+cargo test
 ```
 
 前端构建：
@@ -213,8 +230,7 @@ Multipart 字段：
 
 1. 异步解析任务、进度状态、失败重试。
 2. ZIP 安全限制：总大小、文件数、深度、超时、压缩比。
-3. SQLite FTS5 全文检索。
-4. 结构化日志事件提取。
-5. 带日志引用的 AI 分析。
+3. 结构化日志事件提取。
+4. 带日志引用的 AI 分析。
 
 数据库细节见 [doc/DB.md](doc/DB.md)。

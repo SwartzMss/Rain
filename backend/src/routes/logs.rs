@@ -37,7 +37,7 @@ pub async fn search_logs(
     }
 
     let bundle = load_bundle(&state.pool, &bundle_hash).await?;
-    let like_pattern = format!("%{}%", search_term);
+    let fts_query = build_fts_query(search_term);
     let timeline = term.timeline.and_then(|value| {
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
@@ -63,15 +63,16 @@ pub async fn search_logs(
     let total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM log_segments ls
+        JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN files f ON f.id = ls.file_id
-        WHERE ls.bundle_id = ?
-          AND ls.content LIKE ?
+        WHERE log_segments_fts MATCH ?
+          AND ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
         "#,
     )
+    .bind(&fts_query)
     .bind(&bundle.id)
-    .bind(&like_pattern)
     .bind(&timeline)
     .bind(&timeline)
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
@@ -84,17 +85,18 @@ pub async fn search_logs(
         r#"
         SELECT ls.file_id, f.path, ls.timeline, ls.line_offset AS offset, ls.content
         FROM log_segments ls
+        JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN files f ON f.id = ls.file_id
-        WHERE ls.bundle_id = ?
-          AND ls.content LIKE ?
+        WHERE log_segments_fts MATCH ?
+          AND ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
         ORDER BY ls.line_offset NULLS FIRST, ls.id
         LIMIT ? OFFSET ?
         "#,
     )
+    .bind(&fts_query)
     .bind(&bundle.id)
-    .bind(&like_pattern)
     .bind(&timeline)
     .bind(&timeline)
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
@@ -147,7 +149,7 @@ pub async fn search_issue_logs(
         return Err(AppError::BadRequest("query parameter q is required".into()));
     }
 
-    let like_pattern = format!("%{}%", search_term);
+    let fts_query = build_fts_query(search_term);
     let path_like = term.path_like.and_then(|value| {
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
@@ -165,15 +167,16 @@ pub async fn search_issue_logs(
     let total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM log_segments ls
+        JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
-        WHERE b.issue_code = ?
-          AND ls.content LIKE ?
+        WHERE log_segments_fts MATCH ?
+          AND b.issue_code = ?
           AND (? IS NULL OR f.path LIKE ?)
         "#,
     )
+    .bind(&fts_query)
     .bind(&issue_code)
-    .bind(&like_pattern)
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .fetch_one(&state.pool)
@@ -188,17 +191,18 @@ pub async fn search_issue_logs(
                ls.content,
                b.hash as bundle_hash
         FROM log_segments ls
+        JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
-        WHERE b.issue_code = ?
-          AND ls.content LIKE ?
+        WHERE log_segments_fts MATCH ?
+          AND b.issue_code = ?
           AND (? IS NULL OR f.path LIKE ?)
         ORDER BY ls.line_offset NULLS FIRST, ls.id
         LIMIT ? OFFSET ?
         "#,
     )
+    .bind(&fts_query)
     .bind(&issue_code)
-    .bind(&like_pattern)
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(size)
@@ -244,4 +248,12 @@ struct IssueLogRow {
     offset: Option<i64>,
     content: String,
     bundle_hash: String,
+}
+
+fn build_fts_query(search_term: &str) -> String {
+    search_term
+        .split_whitespace()
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }

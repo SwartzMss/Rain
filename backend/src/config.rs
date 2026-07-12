@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub database_url: String,
     pub data_root: PathBuf,
     pub log_dir: PathBuf,
+    pub static_root: PathBuf,
     pub reset_db: bool,
 }
 
@@ -30,6 +31,10 @@ impl AppConfig {
 
         let log_dir = PathBuf::from(env::var("RAIN_LOG_DIR").unwrap_or_else(|_| "../log".into()));
 
+        let static_root = PathBuf::from(
+            env::var("RAIN_STATIC_ROOT").unwrap_or_else(|_| "../frontend/dist".into()),
+        );
+
         let reset_db = env::var("RESET_DB")
             .unwrap_or_else(|_| "false".into())
             .parse::<bool>()
@@ -41,6 +46,7 @@ impl AppConfig {
             database_url,
             data_root,
             log_dir,
+            static_root,
             reset_db,
         })
     }
