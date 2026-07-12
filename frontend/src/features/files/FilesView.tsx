@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { rainApi } from '../../api/client';
-import type { FileContentResponse, FileNode, IssueLogSearchHit } from '../../api/types';
+import type { FileLinesResponse, FileNode, IssueLogSearchHit } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
 
 type TreeNode = Omit<FileNode, 'id' | 'children'> & {
@@ -14,6 +14,7 @@ type TreeNode = Omit<FileNode, 'id' | 'children'> & {
 };
 
 const archivePattern = /\.(zip|tar|gz|tgz|rar|7z)$/i;
+const LINE_PAGE_SIZE = 200;
 const isArchiveNode = (node?: { name: string }) => (node?.name ? archivePattern.test(node.name) : false);
 
 const formatSize = (bytes?: number) => {
@@ -68,7 +69,8 @@ export function BundleView(props?: BundleViewProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
-  const [fileContent, setFileContent] = useState<FileContentResponse | null>(null);
+  const [fileLines, setFileLines] = useState<FileLinesResponse | null>(null);
+  const [lineStart, setLineStart] = useState(0);
   const [fileContentLoading, setFileContentLoading] = useState(false);
   const [fileContentError, setFileContentError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -78,7 +80,7 @@ export function BundleView(props?: BundleViewProps) {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchMode, setSearchMode] = useState<'log' | 'detailed'>('log');
   const [targetLine, setTargetLine] = useState<number | null>(null);
-  const contentRef = useRef<HTMLPreElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   const formatHitPath = (raw: string) => {
     const parts = raw.replace(/^\//, '').split('/');
@@ -276,10 +278,12 @@ export function BundleView(props?: BundleViewProps) {
   }, [issueCode, refreshKey]);
 
   const handleNodeClick = async (nodeId: string, line?: number | null) => {
-    if (typeof line === 'number' && line > 0) {
+    if (typeof line === 'number' && line >= 0) {
       setTargetLine(line);
+      setLineStart(Math.max(0, line - 20));
     } else {
       setTargetLine(null);
+      setLineStart(0);
     }
     setSearchResults([]);
     setSearchError(null);
@@ -318,7 +322,7 @@ export function BundleView(props?: BundleViewProps) {
   const activeNodeLabel = selectedNode?.name || '未选择文件';
 
   useEffect(() => {
-    setFileContent(null);
+    setFileLines(null);
     setFileContentError(null);
     if (!selectedNode || selectedNode.is_dir) return;
     const bundleForContent = selectedNode.bundleId || bundleId;
@@ -327,9 +331,12 @@ export function BundleView(props?: BundleViewProps) {
     const fetchContent = async () => {
       setFileContentLoading(true);
       try {
-        const content = await rainApi.fetchFileContent(bundleForContent, selectedNode.rawId);
+        const content = await rainApi.fetchFileLines(bundleForContent, selectedNode.rawId, {
+          start: lineStart,
+          limit: LINE_PAGE_SIZE
+        });
         if (!ignore) {
-          setFileContent(content);
+          setFileLines(content);
         }
       } catch (error) {
         if (!ignore) {
@@ -345,7 +352,7 @@ export function BundleView(props?: BundleViewProps) {
     return () => {
       ignore = true;
     };
-  }, [bundleId, selectedNode?.id, selectedNode?.is_dir]);
+  }, [bundleId, selectedNode?.id, selectedNode?.is_dir, lineStart]);
 
   useEffect(() => {
     if (!selectedNode) return;
@@ -396,13 +403,15 @@ export function BundleView(props?: BundleViewProps) {
   useEffect(() => {
     if (!contentRef.current) return;
     if (targetLine === null || targetLine === undefined) return;
-    if (!fileContent) return;
+    if (!fileLines) return;
     const pre = contentRef.current;
     const lineHeightPx = 20;
-    const lines = fileContent.preview.split('\n');
-    const clampedIndex = Math.min(Math.max(targetLine - 1, 0), Math.max(lines.length - 1, 0));
+    const clampedIndex = Math.min(
+      Math.max(targetLine - (fileLines.start ?? 0), 0),
+      Math.max(fileLines.lines.length - 1, 0)
+    );
     pre.scrollTop = Math.max(0, clampedIndex * lineHeightPx);
-  }, [fileContent, targetLine]);
+  }, [fileLines, targetLine]);
 
   const renderTreeNode = (nodeId: string, depth = 0): JSX.Element | null => {
     const node = treeNodes[nodeId];
@@ -565,7 +574,7 @@ export function BundleView(props?: BundleViewProps) {
                             {formatHitPath(hit.path)}{' '}
                             <span className="text-slate-500">
                               {hit.line_number !== null && hit.line_number !== undefined
-                                ? `行 ${hit.line_number}${hit.line_end ? ` - ${hit.line_end}` : ''}`
+                                ? `行 ${hit.line_number + 1}${hit.line_end ? ` - ${hit.line_end + 1}` : ''}`
                                 : '行号未知'}
                             </span>
                           </p>
@@ -584,32 +593,56 @@ export function BundleView(props?: BundleViewProps) {
                   <p className="text-sm text-slate-500">读取中...</p>
                 ) : fileContentError ? (
                   <p className="text-sm text-rose-300">{fileContentError}</p>
-                ) : fileContent ? (
+                ) : fileLines ? (
                   <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+                      <button
+                        type="button"
+                        className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
+                        disabled={lineStart <= 0 || fileContentLoading}
+                        onClick={() => setLineStart(Math.max(0, lineStart - LINE_PAGE_SIZE))}
+                      >
+                        上一页
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
+                        disabled={!fileLines.next_start || fileContentLoading}
+                        onClick={() => setLineStart(fileLines.next_start ?? lineStart + LINE_PAGE_SIZE)}
+                      >
+                        下一页
+                      </button>
+                      <span>
+                        行 {fileLines.start + 1}
+                        {fileLines.lines.length > 0 ? ` - ${fileLines.start + fileLines.lines.length}` : ''}
+                        {fileLines.line_count ? ` / ${fileLines.line_count}` : ''}
+                      </span>
+                      <a
+                        className="ml-auto rounded border border-slate-700 px-3 py-1 text-slate-200 hover:border-slate-500"
+                        href={rainApi.fileDownloadUrl(selectedNode.bundleId || bundleId, selectedNode.rawId)}
+                      >
+                        下载原文件
+                      </a>
+                    </div>
                     <div
-                      ref={contentRef as React.RefObject<HTMLDivElement>}
+                      ref={contentRef}
                       className="h-[70vh] overflow-auto rounded bg-slate-950/70 p-3 text-xs leading-5 text-slate-100"
                     >
                       <div className="grid grid-cols-[auto_1fr] gap-3 font-mono">
                         <div className="select-none text-right text-slate-500">
-                          {fileContent.preview
-                            .split('\n')
-                            .map((_, idx) => (
-                              <div key={idx}>{idx + 1}</div>
-                            ))}
+                          {fileLines.lines.map((line) => (
+                            <div key={line.line_number}>{line.line_number + 1}</div>
+                          ))}
                         </div>
                         <div>
-                          {fileContent.preview.split('\n').map((line, idx) => (
-                            <div key={idx} className="whitespace-pre">
-                              {line}
+                          {fileLines.lines.map((line) => (
+                            <div key={line.line_number} className="whitespace-pre">
+                              {line.content}
                             </div>
                           ))}
                         </div>
                       </div>
                     </div>
-                    {fileContent.truncated ? (
-                      <p className="text-xs text-amber-300">已截断预览（最多 64KB）。</p>
-                    ) : null}
                   </div>
                 ) : (
                   <p className="text-sm text-slate-500">选择文件即可加载内容。</p>

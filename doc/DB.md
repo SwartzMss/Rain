@@ -37,6 +37,7 @@
 - `path` TEXT：bundle 内路径，如 `/{bundle_hash}/{file_name}`。
 - `is_dir` INTEGER：是否目录，按 bool 读写。
 - `size_bytes` INTEGER：文件大小，目录为 NULL。
+- `line_count` INTEGER：文本文件行数，用于分页展示。
 - `mime_type` TEXT：MIME。
 - `status` TEXT：状态标签（预留）。
 - `meta` TEXT：JSON 字符串，存储 `storage_path`、原始文件名等元数据。
@@ -73,6 +74,14 @@
 - `parser_confidence` REAL：基础置信度，供后续 AI/规则层判断可靠性。
 - 索引：`idx_events_bundle_level`、`idx_events_file_line`。
 
+## 表：log_line_offsets
+
+- `file_id` INTEGER：关联 `files.id`，级联删除。
+- `line_number` INTEGER：采样行号，从 0 开始。
+- `byte_offset` INTEGER：该行在原始文件中的字节偏移。
+- 主键：`(file_id, line_number)`。
+- 用途：分页读取时先跳到最近采样点，再顺序读取目标页，避免每次从文件开头数行。
+
 ## 表：log_segments_fts
 
 - SQLite FTS5 虚表。
@@ -87,6 +96,7 @@
 - Issue -> 多个 Bundle：同一个 Issue 可多次上传，每次形成一个 Bundle。
 - Bundle -> Files：单文件上传会形成一个顶层 file 节点；`.zip`、`.tar.gz`、`.tgz`、`.gz` 上传会形成原始压缩包节点和一个 `{archive_name}_extracted` 解压目录。
 - Files -> Log Segments：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会流式读取并按 chunk 写入 `log_segments` 供搜索；非文本文件仅保留 `files` 记录。
+- Files -> Line Offsets：文本类文件会每 1000 行记录一次 byte offset，用于 `/lines` 分页读取。
 - Log Segments -> Log Events：基础解析器会从日志行中提取 timestamp/level/component/message，写入 `log_events`，为后续聚合和 AI 分析准备。
 
 ## 上传流程
@@ -105,7 +115,8 @@ flowchart TD
     H --> J[写 files 树]
     I --> J
     J --> K{文本类?}
-    K -->|是| L[流式读取并按 chunk 写 log_segments/FTS]
+    K -->|是| L[流式读取并写 line offsets]
     K -->|否| M[仅 files 记录]
-    L --> N[基础解析写 log_events]
+    L --> N[按 chunk 写 log_segments/FTS]
+    N --> O[基础解析写 log_events]
 ```

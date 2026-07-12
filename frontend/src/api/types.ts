@@ -67,6 +67,21 @@ export interface FileContentResponse {
   truncated: boolean;
 }
 
+export interface FileLine {
+  line_number: number;
+  content: string;
+}
+
+export interface FileLinesResponse {
+  path: string;
+  size_bytes?: number;
+  line_count?: number | null;
+  start: number;
+  limit: number;
+  next_start?: number | null;
+  lines: FileLine[];
+}
+
 export interface IssueLogSearchHit {
   file_id: string | number;
   path: string;

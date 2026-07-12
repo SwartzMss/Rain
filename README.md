@@ -125,17 +125,19 @@ Linux/macOS:
 - `.log`、`.txt` 等文本文件索引。
 - `.zip`、`.tar.gz`、`.tgz` 同步解压并写入文件树。
 - `.gz` 单文件解压、索引和预览。
-- 上传安全限制：单文件 50 MB、单次 200 MB、最多 100 个文件。
+- 上传安全限制：单文件 512 MB、单次 2 GB、最多 100 个文件。
 - ZIP 基础防护：最多 10000 个条目、最多 500 MB 解压内容、最多 5 层路径深度、单条目 100 MB、压缩比上限 100:1。
 - 文件树浏览。
-- 文本文件 64 KB 预览。
+- 文本文件分页读取，后端按行偏移索引快速跳转。
 - Issue 范围和 bundle 范围关键词搜索。
+- 原始文件下载。
 - 删除 Issue、Bundle、单个文件节点。
+- 可选过期清理：设置 `RAIN_RETENTION_DAYS` 后启动时清理过期上传。
 
 ## 当前限制
 
 - 暂不支持 `.rar`、`.7z` 解压。
-- 压缩包上传时同步解压，尚未做后台任务和进度轮询。
+- 上传传输有前端进度；压缩包解压和索引仍是同步处理，尚未做后台任务和进度轮询。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 已有基础大小和结构限制，但还没有后台任务超时/取消机制。
 - 搜索使用 SQLite FTS5，并按日志 chunk 建索引。
 - timeline 目前固定为 `all`。
@@ -217,6 +219,8 @@ Multipart 字段：
 - `GET /api/files/v1/{bundleId}/files/root`
 - `GET /api/files/v1/{bundleId}/files/{fileId}`
 - `GET /api/files/v1/{bundleId}/files/{fileId}/content`
+- `GET /api/files/v1/{bundleId}/files/{fileId}/lines?start=0&limit=200`
+- `GET /api/files/v1/{bundleId}/files/{fileId}/download`
 - `DELETE /api/files/v1/{bundleId}/files/{fileId}`
 
 ### Search
@@ -230,7 +234,8 @@ Multipart 字段：
 
 1. 异步解析任务、进度状态、失败重试。
 2. 结构化事件查询 API，例如按 level、component、时间范围过滤。
-3. 更完整的日志 parser 规则和多行异常合并。
-4. 带日志引用的 AI 分析。
+3. 搜索任务取消、后台搜索和并发限制。
+4. 更完整的日志 parser 规则和多行异常合并。
+5. 带日志引用的 AI 分析。
 
 数据库细节见 [doc/DB.md](doc/DB.md)。

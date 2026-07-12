@@ -6,7 +6,7 @@ use actix_web::{App, HttpServer, middleware::Logger, web};
 use backend::{
     AppState,
     config::AppConfig,
-    db::{init_pool, prepare_schema},
+    db::{cleanup_expired_bundles, init_pool, prepare_schema},
     routes::register,
 };
 use tracing::info;
@@ -52,6 +52,15 @@ async fn main() -> std::io::Result<()> {
             let _ = fs::remove_dir_all(&config.data_root);
         }
         fs::create_dir_all(&config.data_root).expect("failed to recreate data root");
+    }
+
+    if let Some(retention_days) = config.retention_days {
+        let removed = cleanup_expired_bundles(&pool, &config.data_root, retention_days)
+            .await
+            .expect("failed to cleanup expired bundles");
+        if removed > 0 {
+            info!(retention_days, removed, "cleaned up expired log bundles");
+        }
     }
 
     info!(

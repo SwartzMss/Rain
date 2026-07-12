@@ -1,7 +1,7 @@
 use std::{path::Path, str::FromStr};
 
 use sqlx::{
-    SqlitePool,
+    FromRow, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 
@@ -27,10 +27,104 @@ pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppErr
     create_schema(pool).await
 }
 
+pub async fn cleanup_expired_bundles(
+    pool: &SqlitePool,
+    data_root: &Path,
+    retention_days: u64,
+) -> Result<u64, AppError> {
+    let cutoff = format!("-{retention_days} days");
+    let bundles = sqlx::query_as::<_, ExpiredBundle>(
+        r#"
+        SELECT id, hash
+        FROM bundles
+        WHERE datetime(created_at) < datetime('now', ?)
+        "#,
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    if bundles.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    for bundle in &bundles {
+        sqlx::query(
+            "DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)",
+        )
+        .bind(&bundle.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+        sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
+            .bind(&bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
+        sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
+            .bind(&bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
+        sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
+            .bind(&bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
+        sqlx::query("DELETE FROM files WHERE bundle_id = ?")
+            .bind(&bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
+        sqlx::query("DELETE FROM bundles WHERE id = ?")
+            .bind(&bundle.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+    }
+
+    sqlx::query(
+        r#"
+        DELETE FROM issues
+        WHERE NOT EXISTS (
+            SELECT 1 FROM bundles WHERE bundles.issue_code = issues.code
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    tx.commit().await.map_err(AppError::Database)?;
+
+    for bundle in &bundles {
+        let bundle_dir = data_root.join(&bundle.hash);
+        if tokio::fs::metadata(&bundle_dir).await.is_ok() {
+            let _ = tokio::fs::remove_dir_all(&bundle_dir).await;
+        }
+    }
+
+    Ok(bundles.len() as u64)
+}
+
+#[derive(FromRow)]
+struct ExpiredBundle {
+    id: String,
+    hash: String,
+}
+
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
         "DROP TABLE IF EXISTS log_segments_fts",
         "DROP TABLE IF EXISTS log_events",
+        "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
         "DROP TABLE IF EXISTS bundles",
@@ -77,6 +171,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             path TEXT NOT NULL,
             is_dir INTEGER NOT NULL,
             size_bytes INTEGER,
+            line_count INTEGER,
             mime_type TEXT,
             status TEXT,
             meta TEXT,
@@ -115,6 +210,14 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         )
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS log_line_offsets (
+            file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+            line_number INTEGER NOT NULL,
+            byte_offset INTEGER NOT NULL,
+            PRIMARY KEY (file_id, line_number)
+        )
+        "#,
+        r#"
         CREATE VIRTUAL TABLE IF NOT EXISTS log_segments_fts USING fts5(
             content,
             segment_id UNINDEXED,
@@ -139,6 +242,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_logs_file_chunk ON log_segments (file_id, chunk_index)",
         "CREATE INDEX IF NOT EXISTS idx_events_bundle_level ON log_events (bundle_id, level)",
         "CREATE INDEX IF NOT EXISTS idx_events_file_line ON log_events (file_id, line_number)",
+        "CREATE INDEX IF NOT EXISTS idx_line_offsets_file_line ON log_line_offsets (file_id, line_number)",
     ];
 
     for statement in statements {
@@ -150,6 +254,35 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
 
     ensure_log_segment_column(pool, "line_end", "INTEGER").await?;
     ensure_log_segment_column(pool, "chunk_index", "INTEGER").await?;
+    ensure_table_column(pool, "files", "line_count", "INTEGER").await?;
+
+    Ok(())
+}
+
+async fn ensure_table_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), AppError> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+    let exists = rows.iter().any(|row| {
+        use sqlx::Row;
+        row.try_get::<String, _>("name")
+            .map(|name| name == column)
+            .unwrap_or(false)
+    });
+
+    if !exists {
+        let statement = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+        sqlx::query(&statement)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
 
     Ok(())
 }
@@ -159,28 +292,7 @@ async fn ensure_log_segment_column(
     column: &str,
     definition: &str,
 ) -> Result<(), AppError> {
-    let exists: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM pragma_table_info('log_segments')
-            WHERE name = ?
-        )
-        "#,
-    )
-    .bind(column)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    if !exists {
-        let statement = format!("ALTER TABLE log_segments ADD COLUMN {column} {definition}");
-        sqlx::query(&statement)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
-    }
-
-    Ok(())
+    ensure_table_column(pool, "log_segments", column, definition).await
 }
 
 fn ensure_sqlite_parent(database_url: &str) -> Result<(), AppError> {

@@ -1,10 +1,18 @@
 use std::path::PathBuf;
 
-use actix_web::{HttpResponse, delete, get, web};
-use serde::Deserialize;
+use actix_files::NamedFile;
+use actix_web::{
+    HttpResponse, delete, get,
+    http::header::{ContentDisposition, DispositionParam, DispositionType},
+    web,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::FromRow;
-use tokio::{fs::File, io::AsyncReadExt};
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader},
+};
 
 use crate::{
     AppState,
@@ -20,6 +28,29 @@ const MAX_FILE_PREVIEW_BYTES: u64 = 64 * 1024;
 struct FilePath {
     bundle_id: String,
     file_id: String,
+}
+
+#[derive(Deserialize)]
+struct LinesQuery {
+    start: Option<i64>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct FileLinesResponse {
+    path: String,
+    size_bytes: Option<i64>,
+    line_count: Option<i64>,
+    start: i64,
+    limit: i64,
+    next_start: Option<i64>,
+    lines: Vec<FileLine>,
+}
+
+#[derive(Serialize)]
+struct FileLine {
+    line_number: i64,
+    content: String,
 }
 
 // scoped under /api in routes::register
@@ -110,6 +141,96 @@ pub async fn get_file_content(
     })))
 }
 
+#[get("/files/v1/{bundle_id}/files/{file_id}/lines")]
+pub async fn get_file_lines(
+    params: web::Path<FilePath>,
+    query: web::Query<LinesQuery>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let FilePath { bundle_id, file_id } = params.into_inner();
+    let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    let parsed_id = file_id
+        .parse::<i64>()
+        .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
+    let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
+    if record.is_dir {
+        return Err(AppError::BadRequest("cannot read directory content".into()));
+    }
+
+    let start = query.start.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let (base_line, byte_offset) = nearest_line_offset(&state.pool, record.id, start).await?;
+    let disk_path = resolve_file_path(&record, &data_root(&state))?;
+
+    let mut file = File::open(&disk_path).await.map_err(AppError::Io)?;
+    file.seek(std::io::SeekFrom::Start(byte_offset as u64))
+        .await
+        .map_err(AppError::Io)?;
+    let mut reader = BufReader::new(file);
+    let mut current_line = base_line;
+    let end_line = start.saturating_add(limit);
+    let mut lines = Vec::new();
+    let mut buffer = String::new();
+
+    while current_line < end_line {
+        buffer.clear();
+        let read = reader.read_line(&mut buffer).await.map_err(AppError::Io)?;
+        if read == 0 {
+            break;
+        }
+
+        if current_line >= start {
+            lines.push(FileLine {
+                line_number: current_line,
+                content: buffer.trim_end_matches(['\r', '\n']).to_string(),
+            });
+        }
+        current_line += 1;
+    }
+
+    let next_start = if lines.len() as i64 == limit {
+        Some(start + limit)
+    } else {
+        None
+    };
+
+    Ok(HttpResponse::Ok().json(FileLinesResponse {
+        path: record.path,
+        size_bytes: record.size_bytes,
+        line_count: record.line_count,
+        start,
+        limit,
+        next_start,
+        lines,
+    }))
+}
+
+#[get("/files/v1/{bundle_id}/files/{file_id}/download")]
+pub async fn download_file(
+    params: web::Path<FilePath>,
+    state: web::Data<AppState>,
+) -> Result<NamedFile, AppError> {
+    let FilePath { bundle_id, file_id } = params.into_inner();
+    let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    let parsed_id = file_id
+        .parse::<i64>()
+        .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
+    let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
+    if record.is_dir {
+        return Err(AppError::BadRequest("cannot download directory".into()));
+    }
+
+    let disk_path = resolve_file_path(&record, &data_root(&state))?;
+    let named = NamedFile::open_async(disk_path)
+        .await
+        .map_err(AppError::Io)?
+        .set_content_disposition(ContentDisposition {
+            disposition: DispositionType::Attachment,
+            parameters: vec![DispositionParam::Filename(record.name)],
+        });
+    Ok(named)
+}
+
 #[delete("/files/v1/{bundle_id}/files/{file_id}")]
 pub async fn delete_file_node(
     params: web::Path<FilePath>,
@@ -153,6 +274,12 @@ pub async fn delete_file_node(
     .map_err(AppError::Database)?;
 
     for file_id in &file_ids {
+        sqlx::query("DELETE FROM log_line_offsets WHERE file_id = ?")
+            .bind(file_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+
         sqlx::query("DELETE FROM log_events WHERE file_id = ?")
             .bind(file_id)
             .execute(&mut *tx)
@@ -223,6 +350,7 @@ pub struct FileRow {
     pub path: String,
     pub is_dir: bool,
     pub size_bytes: Option<i64>,
+    pub line_count: Option<i64>,
     pub mime_type: Option<String>,
     pub status: Option<String>,
     pub meta: Option<String>,
@@ -235,7 +363,7 @@ pub async fn fetch_file(
 ) -> Result<FileRow, AppError> {
     sqlx::query_as::<_, FileRow>(
         r#"
-        SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
+        SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
         FROM files
         WHERE bundle_id = ? AND id = ?
         LIMIT 1
@@ -257,7 +385,7 @@ pub async fn fetch_children(
     if let Some(parent) = parent_id {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
+            SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
             FROM files
             WHERE bundle_id = ? AND parent_id = ?
             ORDER BY is_dir DESC, name ASC
@@ -270,7 +398,7 @@ pub async fn fetch_children(
     } else {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, mime_type, status, meta
+            SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
             FROM files
             WHERE bundle_id = ? AND parent_id IS NULL
             ORDER BY is_dir DESC, name ASC
@@ -296,8 +424,53 @@ pub fn to_file_node(record: FileRow) -> FileNode {
         size_bytes: record.size_bytes.map(|value| value as u64),
         mime_type: record.mime_type,
         status: record.status,
-        meta,
+        meta: append_line_count_meta(meta, record.line_count),
     }
+}
+
+async fn nearest_line_offset(
+    pool: &sqlx::SqlitePool,
+    file_id: i64,
+    start: i64,
+) -> Result<(i64, i64), AppError> {
+    let row = sqlx::query_as::<_, LineOffsetRow>(
+        r#"
+        SELECT line_number, byte_offset
+        FROM log_line_offsets
+        WHERE file_id = ? AND line_number <= ?
+        ORDER BY line_number DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(file_id)
+    .bind(start)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(row
+        .map(|row| (row.line_number, row.byte_offset))
+        .unwrap_or((0, 0)))
+}
+
+#[derive(FromRow)]
+struct LineOffsetRow {
+    line_number: i64,
+    byte_offset: i64,
+}
+
+fn append_line_count_meta(
+    meta: Option<serde_json::Value>,
+    line_count: Option<i64>,
+) -> Option<serde_json::Value> {
+    let Some(line_count) = line_count else {
+        return meta;
+    };
+    let mut value = meta.unwrap_or_else(|| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("line_count".to_string(), json!(line_count));
+    }
+    Some(value)
 }
 
 pub fn resolve_file_path(

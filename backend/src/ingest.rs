@@ -5,7 +5,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::{fs, task};
 use walkdir::WalkDir;
 
@@ -18,6 +18,7 @@ const MAX_LINES_SMALL: usize = 50_000;
 const MAX_LINES_MEDIUM: usize = 10_000;
 const MAX_LINES_LARGE: usize = 2_000;
 const LOG_CHUNK_LINES: usize = 200;
+const LINE_OFFSET_INTERVAL: i64 = 1000;
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_ARCHIVE_DEPTH: usize = 5;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 100 * 1024 * 1024;
@@ -35,7 +36,8 @@ pub struct ProcessFileOptions<'a> {
     pub file_name: &'a str,
     pub original_name: &'a str,
     pub content_type: Option<&'a str>,
-    pub bytes: &'a [u8],
+    pub source_path: &'a Path,
+    pub size_bytes: u64,
 }
 
 pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<(), AppError> {
@@ -47,15 +49,15 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         file_name,
         original_name,
         content_type,
-        bytes,
+        source_path,
+        size_bytes,
     } = options;
 
     let bundle_dir = data_root.join(bundle_hash);
     fs::create_dir_all(&bundle_dir).await.map_err(io_error)?;
 
     let disk_path = bundle_dir.join(file_name);
-    fs::write(&disk_path, bytes).await.map_err(io_error)?;
-    let size_bytes = bytes.len() as u64;
+    move_or_copy_file(source_path, &disk_path).await?;
 
     let relative_path = format!("/{bundle_hash}/{file_name}");
     let meta = serde_json::json!({
@@ -71,7 +73,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         file_name,
         &relative_path,
         false,
-        Some(bytes.len() as i64),
+        Some(size_bytes as i64),
         content_type,
         Some(meta),
     )
@@ -229,6 +231,17 @@ async fn insert_file_record(
     Ok(record_id)
 }
 
+async fn move_or_copy_file(source: &Path, destination: &Path) -> Result<(), AppError> {
+    match fs::rename(source, destination).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(source, destination).await.map_err(io_error)?;
+            let _ = fs::remove_file(source).await;
+            Ok(())
+        }
+    }
+}
+
 async fn ingest_text_file(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
@@ -238,42 +251,41 @@ async fn ingest_text_file(
 ) -> Result<(), AppError> {
     let file = fs::File::open(disk_path).await.map_err(io_error)?;
     let max_read = size_bytes.min(MAX_READ_BYTES);
-    let limited = file.take(max_read);
-    let mut reader = BufReader::new(limited);
+    let mut reader = BufReader::new(file);
     let mut inserted = 0usize;
     let line_limit = compute_line_limit(size_bytes);
     let mut line_number = 0i64;
-    let mut bytes_read = 0u64;
+    let mut bytes_scanned = 0u64;
     let mut chunk_index = 0i64;
     let mut chunk = LogChunk::new(chunk_index);
     let mut line = String::new();
+    let mut offsets = Vec::new();
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
     loop {
         line.clear();
+        let line_offset = bytes_scanned;
         let read = reader.read_line(&mut line).await.map_err(io_error)?;
         if read == 0 {
             break;
         }
 
-        bytes_read = bytes_read.saturating_add(read as u64);
-        if bytes_read > max_read || inserted >= line_limit {
-            break;
+        if line_number % LINE_OFFSET_INTERVAL == 0 {
+            offsets.push((line_number, line_offset as i64));
         }
+        bytes_scanned = bytes_scanned.saturating_add(read as u64);
 
         let cleaned = clean_log_line(&line);
-        if cleaned.is_empty() {
-            line_number += 1;
-            continue;
-        }
+        let should_index = bytes_scanned <= max_read && inserted < line_limit;
+        if should_index && !cleaned.is_empty() {
+            chunk.push(line_number, cleaned);
+            inserted += 1;
 
-        chunk.push(line_number, cleaned);
-        inserted += 1;
-
-        if chunk.len() >= LOG_CHUNK_LINES {
-            flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
-            chunk_index += 1;
-            chunk = LogChunk::new(chunk_index);
+            if chunk.len() >= LOG_CHUNK_LINES {
+                flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+                chunk_index += 1;
+                chunk = LogChunk::new(chunk_index);
+            }
         }
 
         line_number += 1;
@@ -282,6 +294,34 @@ async fn ingest_text_file(
     if !chunk.is_empty() {
         flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
     }
+
+    sqlx::query("DELETE FROM log_line_offsets WHERE file_id = ?")
+        .bind(file_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    for (line_number, byte_offset) in offsets {
+        sqlx::query(
+            r#"
+            INSERT INTO log_line_offsets (file_id, line_number, byte_offset)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(file_id)
+        .bind(line_number)
+        .bind(byte_offset)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+    }
+
+    sqlx::query("UPDATE files SET line_count = ? WHERE id = ?")
+        .bind(line_number)
+        .bind(file_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
 
     tx.commit().await.map_err(AppError::Database)?;
     Ok(())

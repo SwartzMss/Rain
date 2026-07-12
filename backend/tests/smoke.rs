@@ -173,6 +173,32 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     assert_eq!(tree["children"].as_array().expect("children").len(), 1);
     assert_eq!(tree["children"][0]["meta"]["kind"], "uploaded_file");
+    assert_eq!(tree["children"][0]["meta"]["line_count"], 2);
+    let app_file_id = tree["children"][0]["id"].as_str().expect("file id");
+
+    let lines: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{bundle_hash}/files/{app_file_id}/lines?start=1&limit=1"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(lines["line_count"], 2);
+    assert_eq!(lines["lines"][0]["line_number"], 1);
+    assert_eq!(lines["lines"][0]["content"], "ERROR smoke works");
+
+    let download = test::call_and_read_body(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{bundle_hash}/files/{app_file_id}/download"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(download, "INFO boot\nERROR smoke works\n");
 
     let delete_response = test::call_service(
         &app,

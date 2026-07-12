@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub log_dir: PathBuf,
     pub static_root: PathBuf,
     pub reset_db: bool,
+    pub retention_days: Option<u64>,
 }
 
 impl AppConfig {
@@ -40,6 +41,16 @@ impl AppConfig {
             .parse::<bool>()
             .map_err(|err| AppError::Config(format!("invalid RESET_DB: {err}")))?;
 
+        let retention_days = match env::var("RAIN_RETENTION_DAYS") {
+            Ok(value) if !value.trim().is_empty() => {
+                let days = value.parse::<u64>().map_err(|err| {
+                    AppError::Config(format!("invalid RAIN_RETENTION_DAYS: {err}"))
+                })?;
+                if days == 0 { None } else { Some(days) }
+            }
+            _ => None,
+        };
+
         Ok(Self {
             host,
             port,
@@ -48,6 +59,7 @@ impl AppConfig {
             log_dir,
             static_root,
             reset_db,
+            retention_days,
         })
     }
 }

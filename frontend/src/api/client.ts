@@ -1,5 +1,6 @@
 import type {
   FileContentResponse,
+  FileLinesResponse,
   FileNodeResponse,
   IssueBundlesResponse,
   IssueLogSearchResponse,
@@ -53,6 +54,16 @@ export const rainApi = {
   fetchFileContent(bundleId: string, fileId: string) {
     return request<FileContentResponse>(`/api/files/v1/${bundleId}/files/${fileId}/content`);
   },
+  fetchFileLines(bundleId: string, fileId: string, options?: { start?: number; limit?: number }) {
+    const params = new URLSearchParams();
+    if (typeof options?.start === 'number') params.set('start', String(options.start));
+    if (typeof options?.limit === 'number') params.set('limit', String(options.limit));
+    const query = params.toString();
+    return request<FileLinesResponse>(`/api/files/v1/${bundleId}/files/${fileId}/lines${query ? `?${query}` : ''}`);
+  },
+  fileDownloadUrl(bundleId: string, fileId: string) {
+    return `${API_BASE_URL}/api/files/v1/${bundleId}/files/${fileId}/download`;
+  },
   deleteFile(bundleId: string, fileId: string) {
     return request<void>(`/api/files/v1/${bundleId}/files/${fileId}`, { method: 'DELETE' });
   },
@@ -77,13 +88,36 @@ export const rainApi = {
     if (typeof options?.size === 'number') params.set('size', String(options.size));
     return request<IssueLogSearchResponse>(`/api/issues/${issueCode}/search?${params.toString()}`);
   },
-  uploadLogs(issueCode: string, files: File[]) {
+  uploadLogs(issueCode: string, files: File[], onProgress?: (percent: number) => void) {
     const formData = new FormData();
     formData.append('issue_code', issueCode);
     files.forEach((file) => formData.append('files', file, file.name));
-    return request<UploadResponse>(`/api/uploads`, {
-      method: 'POST',
-      body: formData
+
+    if (!onProgress) {
+      return request<UploadResponse>(`/api/uploads`, {
+        method: 'POST',
+        body: formData
+      });
+    }
+
+    return new Promise<UploadResponse>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_BASE_URL}/api/uploads`);
+      xhr.setRequestHeader('Accept', 'application/json');
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText) as UploadResponse);
+          return;
+        }
+        reject(new Error(xhr.responseText || `Request failed: ${xhr.status}`));
+      };
+      xhr.onerror = () => reject(new Error('upload failed'));
+      xhr.send(formData);
     });
   }
 };

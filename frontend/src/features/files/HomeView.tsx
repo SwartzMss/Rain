@@ -40,6 +40,7 @@ export function HomeView() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
 
@@ -206,10 +207,11 @@ export function HomeView() {
       return;
     }
     setUploading(true);
+    setUploadProgress(0);
     setUploadError(null);
     setUploadSuccess(null);
     try {
-      const response = await rainApi.uploadLogs(uploadIssueId.trim(), files);
+      const response = await rainApi.uploadLogs(uploadIssueId.trim(), files, setUploadProgress);
       setUploadSuccess(response);
       setUploadIssueId(response.issue_code);
       setIssueId(response.issue_code);
@@ -220,6 +222,7 @@ export function HomeView() {
       setUploadSuccess(null);
     } finally {
       setUploading(false);
+      setUploadProgress(0);
     }
   };
   const handleUpload = async (event: FormEvent<HTMLFormElement>) => {
@@ -349,6 +352,19 @@ export function HomeView() {
                   <p className="font-semibold text-white">{uploading ? '上传中...' : '拖拽文件到这里上传'}</p>
                   <p className="text-xs text-slate-400">支持日志或压缩包，点击也可选择文件</p>
                 </div>
+                {uploading ? (
+                  <div className="space-y-1">
+                    <div className="h-2 overflow-hidden rounded bg-slate-800">
+                      <div
+                        className="h-full bg-brand-500 transition-all"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      {uploadProgress < 100 ? `上传 ${uploadProgress}%` : '上传完成，正在解析...'}
+                    </p>
+                  </div>
+                ) : null}
               </div>
               {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
             </form>
