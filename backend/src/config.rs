@@ -20,7 +20,7 @@ impl AppConfig {
 
         let host = env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".into());
         let port: u16 = env::var("SERVER_PORT")
-            .unwrap_or_else(|_| "8080".into())
+            .unwrap_or_else(|_| "8078".into())
             .parse()
             .map_err(|err| AppError::Config(format!("invalid SERVER_PORT: {err}")))?;
 

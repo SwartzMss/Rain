@@ -20,12 +20,19 @@ const formatBytes = (bytes: number) => {
   return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
 };
 
+type BundleFileState = {
+  files: FileNode[];
+  loading: boolean;
+  loaded: boolean;
+  error: string | null;
+};
+
 export function HomeView() {
   const navigate = useNavigate();
 
-  const [issueId, setIssueId] = useState('');
-  const [issueFilter, setIssueFilter] = useState('');
-  const [uploadIssueId, setUploadIssueId] = useState('');
+  const [selectedIssueCode, setSelectedIssueCode] = useState('');
+  const [issueSearchText, setIssueSearchText] = useState('');
+  const [issueDraftCode, setIssueDraftCode] = useState('');
   const [issueLoading, setIssueLoading] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
   const [issues, setIssues] = useState<IssueSummary[]>([]);
@@ -36,9 +43,9 @@ export function HomeView() {
   const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [deletingBundle, setDeletingBundle] = useState<string | null>(null);
-  const [bundleFiles, setBundleFiles] = useState<Record<string, { files: FileNode[]; loading: boolean; error: string | null }>>({});
+  const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
   const [deletingFileKey, setDeletingFileKey] = useState<string | null>(null);
-  const currentIssueCode = uploadIssueId.trim();
+  const currentIssueCode = selectedIssueCode.trim();
   const [confirmDialog, setConfirmDialog] = useState<{
     message: string;
     onConfirm: () => Promise<void> | void;
@@ -46,6 +53,7 @@ export function HomeView() {
   } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedLoadHandledRef = useRef(false);
   const [uploading, setUploading] = useState(false);
   const [creatingIssue, setCreatingIssue] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -56,18 +64,19 @@ export function HomeView() {
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
     if (stored) {
-      setIssueId(stored);
+      setSelectedIssueCode(stored);
+      setIssueDraftCode(stored);
     }
   }, []);
 
   useEffect(() => {
-    const trimmed = issueId.trim();
+    const trimmed = selectedIssueCode.trim();
     if (trimmed) {
       localStorage.setItem(LAST_ISSUE_STORAGE_KEY, trimmed);
     } else {
       localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
     }
-  }, [issueId]);
+  }, [selectedIssueCode]);
 
   const loadIssues = useCallback(async () => {
     setIssuesLoading(true);
@@ -87,29 +96,26 @@ export function HomeView() {
       const trimmed = code.trim();
       if (!trimmed) {
         setBundles([]);
-        setBundleFiles({});
         setBundlesError(null);
         setBundlesLoading(false);
         return;
       }
       setBundlesLoading(true);
       setBundlesError(null);
-      setBundleFiles({});
       try {
         const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
         setBundles(data.log_bundles);
+        setBundleFiles((prev) => {
+          const validHashes = new Set(data.log_bundles.map((item) => item.hash));
+          return Object.fromEntries(
+            Object.entries(prev).filter(([hash]) => validHashes.has(hash))
+          );
+        });
       } catch (error) {
         const message = (error as Error).message || '';
         if (/not found|404/i.test(message)) {
           setBundles([]);
           setBundlesError(null);
-          if (issueId.trim() === trimmed) {
-            setIssueId('');
-            localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
-          }
-          if (uploadIssueId.trim() === trimmed) {
-            setUploadIssueId('');
-          }
           throw new Error('未找到 Issue');
         } else {
           setBundlesError(message || '加载上传列表失败');
@@ -120,7 +126,7 @@ export function HomeView() {
         setBundlesLoading(false);
       }
     },
-    [issueId, uploadIssueId]
+    []
   );
 
   useEffect(() => {
@@ -134,6 +140,11 @@ export function HomeView() {
       setBundlesError(null);
       return;
     }
+    if (selectedLoadHandledRef.current) {
+      selectedLoadHandledRef.current = false;
+      return;
+    }
+    setBundleFiles({});
     loadBundles(currentIssueCode).catch(() => undefined);
   }, [currentIssueCode, loadBundles]);
 
@@ -151,29 +162,38 @@ export function HomeView() {
   }, [bundles, currentIssueCode, loadBundles]);
 
   useEffect(() => {
-    if (!uploadSuccess?.task_id) return;
-    if (uploadTask?.status === 'READY' || uploadTask?.status === 'FAILED') return;
+    const taskId = uploadSuccess?.task_id;
+    if (!taskId) return;
 
     let cancelled = false;
-    const timer = window.setTimeout(async () => {
+    let timer: number | undefined;
+
+    const poll = async () => {
       try {
-        const task = await rainApi.fetchUploadTask(uploadSuccess.task_id);
+        const task = await rainApi.fetchUploadTask(taskId);
         if (cancelled) return;
         setUploadTask(task);
         loadIssues().catch(() => undefined);
         loadBundles(task.issue_code).catch(() => undefined);
+        if (task.status !== 'READY' && task.status !== 'FAILED') {
+          timer = window.setTimeout(poll, 1500);
+        }
       } catch (error) {
         if (!cancelled) {
           setUploadError((error as Error).message || '查询上传任务失败');
         }
       }
-    }, 1500);
+    };
+
+    poll().catch(() => undefined);
 
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      if (timer) {
+        window.clearTimeout(timer);
+      }
     };
-  }, [uploadSuccess?.task_id, uploadTask?.status, loadIssues, loadBundles]);
+  }, [uploadSuccess?.task_id, loadIssues, loadBundles]);
 
   const openIssue = async (value: string) => {
     const trimmed = value.trim();
@@ -181,9 +201,13 @@ export function HomeView() {
     setIssueLoading(true);
     setIssueError(null);
     try {
-      await loadBundles(trimmed);
-      setIssueId(trimmed);
-      setUploadIssueId(trimmed);
+      const data = await rainApi.fetchIssueBundles(trimmed);
+      setBundles(data.log_bundles);
+      setBundleFiles({});
+      setBundlesError(null);
+      selectedLoadHandledRef.current = true;
+      setSelectedIssueCode(trimmed);
+      setIssueDraftCode(trimmed);
       navigate(`/issue/${trimmed}`);
     } catch (error) {
       const message = (error as Error).message || '查询失败';
@@ -194,7 +218,7 @@ export function HomeView() {
   };
 
   const handleCreateIssue = async () => {
-    const code = uploadIssueId.trim();
+    const code = issueDraftCode.trim();
     if (!code) {
       setUploadError('请输入 Issue ID');
       return;
@@ -206,11 +230,10 @@ export function HomeView() {
     setUploadTask(null);
     try {
       const issue = await rainApi.createIssue({ code });
-      setUploadIssueId(issue.code);
-      setIssueId(issue.code);
-      setIssueFilter(issue.code);
+      setIssueDraftCode(issue.code);
+      setSelectedIssueCode(issue.code);
+      setIssueSearchText(issue.code);
       await loadIssues();
-      await loadBundles(issue.code);
     } catch (error) {
       setUploadError((error as Error).message || '创建 Issue 失败');
     } finally {
@@ -218,36 +241,42 @@ export function HomeView() {
     }
   };
 
-  const loadBundleFiles = async (hash: string) => {
+  const loadBundleFiles = useCallback(async (hash: string) => {
     setBundleFiles((prev) => ({
       ...prev,
-      [hash]: { files: prev[hash]?.files ?? [], loading: true, error: null }
+      [hash]: {
+        files: prev[hash]?.files ?? [],
+        loading: true,
+        loaded: prev[hash]?.loaded ?? false,
+        error: null
+      }
     }));
     try {
       const response = await rainApi.fetchFileNode(hash, 'root');
       const filtered = (response.children ?? []).filter((child) => child.meta?.kind === 'uploaded_file');
       setBundleFiles((prev) => ({
         ...prev,
-        [hash]: { files: filtered, loading: false, error: null }
+        [hash]: { files: filtered, loading: false, loaded: true, error: null }
       }));
     } catch (error) {
       setBundleFiles((prev) => ({
         ...prev,
-        [hash]: { files: [], loading: false, error: (error as Error).message || '加载文件失败' }
+        [hash]: {
+          files: prev[hash]?.files ?? [],
+          loading: false,
+          loaded: true,
+          error: (error as Error).message || '加载文件失败'
+        }
       }));
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (!bundles.length) return;
     bundles.forEach((bundle) => {
+      if (bundle.status?.upload_status !== 'READY') return;
       const existing = bundleFiles[bundle.hash];
-      const shouldLoad =
-        !existing ||
-        (bundle.status?.upload_status === 'READY' &&
-          !existing.loading &&
-          existing.files.length === 0);
-      if (shouldLoad) {
+      if (!existing?.loaded && !existing?.loading) {
         loadBundleFiles(bundle.hash).catch(() => undefined);
       }
     });
@@ -260,9 +289,9 @@ export function HomeView() {
         setDeletingIssue(code);
         try {
           await rainApi.deleteIssue(code);
-          setIssueId('');
-          setIssueFilter('');
-          setUploadIssueId('');
+          setSelectedIssueCode('');
+          setIssueSearchText('');
+          setIssueDraftCode('');
           setBundles([]);
           setBundleFiles({});
           setBundlesError(null);
@@ -277,7 +306,7 @@ export function HomeView() {
   };
 
   const performUpload = async (files: File[]) => {
-    if (!uploadIssueId.trim()) {
+    if (!issueDraftCode.trim()) {
       setUploadError('请输入 Issue ID');
       return;
     }
@@ -291,7 +320,7 @@ export function HomeView() {
     setUploadSuccess(null);
     setUploadTask(null);
     try {
-      const response = await rainApi.uploadLogs(uploadIssueId.trim(), files, setUploadProgress);
+      const response = await rainApi.uploadLogs(issueDraftCode.trim(), files, setUploadProgress);
       setUploadSuccess(response);
       setUploadTask({
         task_id: response.task_id,
@@ -301,10 +330,9 @@ export function HomeView() {
         progress_percent: response.status === 'READY' ? 100 : 0,
         total_bytes: response.total_bytes
       });
-      setUploadIssueId(response.issue_code);
-      setIssueId(response.issue_code);
+      setIssueDraftCode(response.issue_code);
+      setSelectedIssueCode(response.issue_code);
       loadIssues().catch(() => undefined);
-      loadBundles(response.issue_code).catch(() => undefined);
     } catch (error) {
       setUploadError((error as Error).message || '上传失败');
       setUploadSuccess(null);
@@ -336,12 +364,12 @@ export function HomeView() {
               <input
                 className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none text-sm md:text-base"
                 placeholder="输入 Issue ID，例如 CN013"
-                value={issueFilter}
-                onChange={(event) => setIssueFilter(event.target.value)}
+                value={issueSearchText}
+                onChange={(event) => setIssueSearchText(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
-                    openIssue(issueFilter).catch(() => undefined);
+                    openIssue(issueSearchText).catch(() => undefined);
                   }
                 }}
               />
@@ -350,7 +378,7 @@ export function HomeView() {
               <div className="max-h-56 space-y-1 overflow-y-auto text-sm">
                 {issues
                   .filter((item) => {
-                    const filter = issueFilter.trim().toLowerCase();
+                    const filter = issueSearchText.trim().toLowerCase();
                     if (!filter) return true;
                     return item.code.toLowerCase().includes(filter) || item.name.toLowerCase().includes(filter);
                   })
@@ -359,9 +387,8 @@ export function HomeView() {
                       key={item.code}
                       type="button"
                       onClick={() => {
-                        setIssueId(item.code);
-                        setUploadIssueId(item.code);
-                        loadBundles(item.code).catch(() => undefined);
+                        setSelectedIssueCode(item.code);
+                        setIssueDraftCode(item.code);
                       }}
                       onDoubleClick={() => openIssue(item.code).catch(() => undefined)}
                       className="flex w-full items-center justify-between rounded-lg border border-transparent px-3 py-2 text-left transition hover:border-slate-700 hover:bg-slate-900/70"
@@ -412,8 +439,8 @@ export function HomeView() {
                 <div className="mt-1 flex flex-col gap-2 sm:flex-row">
                   <input
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                    value={uploadIssueId}
-                    onChange={(event) => setUploadIssueId(event.target.value)}
+                    value={issueDraftCode}
+                    onChange={(event) => setIssueDraftCode(event.target.value)}
                   />
                   <button
                     type="button"
@@ -421,7 +448,7 @@ export function HomeView() {
                     onClick={() => {
                       handleCreateIssue().catch(() => undefined);
                     }}
-                    disabled={creatingIssue || !uploadIssueId.trim()}
+                    disabled={creatingIssue || !issueDraftCode.trim()}
                   >
                     {creatingIssue ? '创建中...' : '创建 Issue'}
                   </button>
@@ -543,6 +570,7 @@ export function HomeView() {
                                         [bundleHash]: {
                                           files: prev[bundleHash]?.files ?? [],
                                           loading: false,
+                                          loaded: true,
                                           error: (err as Error).message || '删除文件失败'
                                         }
                                       }));
