@@ -62,6 +62,40 @@ npm run dev
 VITE_API_BASE_URL=http://localhost:8080
 ```
 
+## 直接运行 EXE
+
+当前不需要 nginx、systemd、证书或反向代理。后端可以直接编译成可执行文件运行：
+
+```bash
+cd backend
+cargo build --release
+```
+
+Windows:
+
+```powershell
+.\target\release\backend.exe
+```
+
+Linux/macOS:
+
+```bash
+./target/release/backend
+```
+
+运行前可在同目录准备 `.env`，或直接依赖默认值。默认会使用：
+
+- SQLite 数据库：`../data/rain.db`
+- 上传目录：`./data/uploads`
+- 后端端口：`8080`
+
+前端当前仍按 Vite 应用运行：
+
+```bash
+cd frontend
+npm run dev
+```
+
 ## 使用流程
 
 1. 打开 `http://localhost:5173`。
@@ -122,6 +156,13 @@ cargo check
 ```bash
 cd frontend
 npm run build
+```
+
+构建后端 EXE：
+
+```bash
+cd backend
+cargo build --release
 ```
 
 查看后端日志：
