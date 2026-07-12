@@ -112,9 +112,9 @@ Linux/macOS:
 ## 使用流程
 
 1. 打开 `http://localhost:8080`。
-2. 在首页输入或选择一个 Issue ID，例如 `CN013`。
-3. 拖拽或点击上传 `.log`、`.txt`、`.zip` 文件。
-4. 双击 Issue 打开文件浏览页。
+2. 新建或选择一个 Issue，例如 `CN013`。
+3. 在选中的 Issue 下拖拽或点击上传 `.log`、`.txt`、`.zip` 文件。
+4. 点击 Issue 的“查看”打开文件浏览页。
 5. 在左侧文件树选择文件，右侧会显示文本预览。
 6. 在搜索框输入关键词，可搜索当前 Issue 下已索引的文本日志。
 
@@ -204,18 +204,18 @@ Get-Content (Join-Path log "$((Get-Date).ToString('yyyy-MM-dd')).backend.log") -
 ### Issues / Bundles
 
 - `GET /api/issues`
+- `POST /api/issues`
 - `GET /api/issues/{issueCode}`
 - `DELETE /api/issues/{issueCode}`
 - `DELETE /api/issues/{issueCode}/bundles/{bundleHash}`
 
 ### Upload
 
-- `POST /api/uploads`：返回 `202 Accepted`，响应包含 `task_id`、`bundle_hash` 和初始 `PROCESSING` 状态。
+- `POST /api/issues/{issueCode}/uploads`：返回 `202 Accepted`，响应包含 `task_id`、`bundle_hash` 和初始 `PROCESSING` 状态。
 - `GET /api/uploads/{taskId}`：查询后台解压/索引任务状态。
 
 Multipart 字段：
 
-- `issue_code`
 - `files`
 
 ### Files

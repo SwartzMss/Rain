@@ -27,12 +27,15 @@ static PROCESSING_PERMITS: Lazy<Semaphore> =
     Lazy::new(|| Semaphore::new(MAX_CONCURRENT_PROCESSING_TASKS));
 
 // scoped under /api in routes::register, so use relative path
-#[post("/uploads")]
+#[post("/issues/{issue_code}/uploads")]
 pub async fn upload_logs(
     state: web::Data<AppState>,
+    path: web::Path<String>,
     mut payload: Multipart,
 ) -> Result<HttpResponse, AppError> {
-    let mut issue_code_field: Option<String> = None;
+    let issue_code = normalize_issue_code(&path.into_inner())?;
+    require_issue_exists(&state.pool, &issue_code).await?;
+
     let mut files: Vec<UploadedFile> = Vec::new();
     let upload_id = Uuid::new_v4().simple().to_string();
     let temp_dir = state.data_root.join(".tmp").join(&upload_id);
@@ -49,8 +52,7 @@ pub async fn upload_logs(
 
         match field_name.as_str() {
             "issue_code" => {
-                let value = collect_text_field(&mut field).await?;
-                issue_code_field = Some(value);
+                collect_text_field(&mut field).await?;
             }
             "files" => {
                 let filename = content_disposition
@@ -112,18 +114,6 @@ pub async fn upload_logs(
         }
     }
 
-    let issue_code = issue_code_field
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("issue_code is required".into()))
-        .and_then(normalize_issue_code);
-    let issue_code = match issue_code {
-        Ok(issue_code) => issue_code,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&temp_dir).await;
-            return Err(error);
-        }
-    };
-
     if files.is_empty() {
         let _ = fs::remove_dir_all(&temp_dir).await;
         return Err(AppError::BadRequest("no files provided".into()));
@@ -131,11 +121,6 @@ pub async fn upload_logs(
 
     let bundle_hash = Uuid::new_v4().simple().to_string();
     let bundle_name = format!("bundle-{bundle_hash}");
-
-    if let Err(error) = require_issue_exists(&state.pool, &issue_code).await {
-        let _ = fs::remove_dir_all(&temp_dir).await;
-        return Err(error);
-    }
 
     let bundle_id = Uuid::new_v4().simple().to_string();
 

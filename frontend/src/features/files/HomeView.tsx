@@ -63,6 +63,7 @@ export function HomeView() {
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
   const [uploadTask, setUploadTask] = useState<UploadTaskResponse | null>(null);
   const selectedIssueRef = useRef(selectedIssueCode);
+  const bundleRequestIdRef = useRef(0);
 
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
@@ -101,6 +102,7 @@ export function HomeView() {
   const loadBundles = useCallback(
     async (code: string) => {
       const trimmed = code.trim();
+      const requestId = ++bundleRequestIdRef.current;
       if (!trimmed) {
         setBundles([]);
         setBundlesError(null);
@@ -111,6 +113,9 @@ export function HomeView() {
       setBundlesError(null);
       try {
         const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
+        if (requestId !== bundleRequestIdRef.current || selectedIssueRef.current !== trimmed) {
+          return;
+        }
         setBundles(data.log_bundles);
         setBundleFiles((prev) => {
           const validHashes = new Set(data.log_bundles.map((item) => item.hash));
@@ -119,6 +124,9 @@ export function HomeView() {
           );
         });
       } catch (error) {
+        if (requestId !== bundleRequestIdRef.current) {
+          return;
+        }
         const message = normalizeApiError(error);
         if (/not found|404/i.test(message)) {
           setBundles([]);
@@ -162,12 +170,13 @@ export function HomeView() {
       (bundle) => bundle.status?.upload_status === 'PROCESSING'
     );
     if (!hasProcessingBundle) return;
+    if (uploadTask?.task_id) return;
 
     const timer = window.setTimeout(() => {
       loadBundles(currentIssueCode).catch(() => undefined);
     }, 1500);
     return () => window.clearTimeout(timer);
-  }, [bundles, currentIssueCode, loadBundles]);
+  }, [bundles, currentIssueCode, loadBundles, uploadTask?.task_id]);
 
   useEffect(() => {
     const taskId = uploadTask?.task_id;
@@ -235,6 +244,7 @@ export function HomeView() {
       });
       setIssues((prev) => [issue, ...prev.filter((item) => item.code !== issue.code)]);
       setSelectedIssueCode(issue.code);
+      setIssueSearchText('');
       setBundles([]);
       setBundleFiles({});
       setNewIssueCode('');
@@ -246,6 +256,13 @@ export function HomeView() {
     } finally {
       setCreatingIssue(false);
     }
+  };
+
+  const closeCreateDialog = () => {
+    setCreateDialogOpen(false);
+    setCreateIssueError(null);
+    setNewIssueCode('');
+    setNewIssueName('');
   };
 
   const loadBundleFiles = useCallback(async (hash: string) => {
@@ -485,7 +502,7 @@ export function HomeView() {
                   type="file"
                   multiple
                   className="hidden"
-                  disabled={uploading}
+                  disabled={!selectedIssueCode || uploading}
                   onChange={(event) => {
                     if (uploadingRef.current) return;
                     if (!selectedIssueCode) return;
@@ -646,8 +663,26 @@ export function HomeView() {
       </section>
 
       {createDialogOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900/95 p-5 shadow-2xl">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeCreateDialog();
+            }
+          }}
+        >
+          <form
+            className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900/95 p-5 shadow-2xl"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleCreateIssue().catch(() => undefined);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                closeCreateDialog();
+              }
+            }}
+          >
             <h3 className="text-sm font-semibold text-white">新建 Issue</h3>
             <div className="mt-4 space-y-3">
               <label className="block text-sm text-slate-300">
@@ -673,26 +708,20 @@ export function HomeView() {
               <button
                 type="button"
                 className="rounded-lg border border-slate-700 px-4 py-2 text-slate-200 hover:border-slate-500"
-                onClick={() => {
-                  setCreateDialogOpen(false);
-                  setCreateIssueError(null);
-                }}
+                onClick={closeCreateDialog}
                 disabled={creatingIssue}
               >
                 取消
               </button>
               <button
-                type="button"
+                type="submit"
                 className="rounded-lg bg-brand-500 px-4 py-2 font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60"
-                onClick={() => {
-                  handleCreateIssue().catch(() => undefined);
-                }}
                 disabled={creatingIssue}
               >
                 {creatingIssue ? '创建中...' : '创建'}
               </button>
             </div>
-          </div>
+          </form>
         </div>
       ) : null}
 

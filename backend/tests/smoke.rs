@@ -58,7 +58,7 @@ async fn upload_search_tree_and_delete_issue() {
     let upload_response = test::call_service(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/SMOKE/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={boundary}"),
@@ -116,7 +116,7 @@ async fn upload_search_tree_and_delete_issue() {
     let gz_upload: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/GZIP/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={gz_boundary}"),
@@ -155,7 +155,7 @@ async fn upload_search_tree_and_delete_issue() {
     let tar_upload: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/TARGZ/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={tar_boundary}"),
@@ -197,7 +197,7 @@ async fn upload_search_tree_and_delete_issue() {
     let delete_dir_upload: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/DIRDELETE/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={delete_dir_boundary}"),
@@ -288,7 +288,7 @@ async fn upload_search_tree_and_delete_issue() {
     let failed_upload: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/FAILEDCASE/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={failed_boundary}"),
@@ -376,7 +376,7 @@ async fn upload_search_tree_and_delete_issue() {
     let large_upload: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/LARGE/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={large_boundary}"),
@@ -414,7 +414,7 @@ async fn upload_search_tree_and_delete_issue() {
     let bad_utf8_upload: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/BADUTF8/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={bad_utf8_boundary}"),
@@ -447,7 +447,7 @@ async fn upload_search_tree_and_delete_issue() {
     let long_line_upload: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/LONGLINE/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={long_line_boundary}"),
@@ -499,7 +499,7 @@ async fn upload_search_tree_and_delete_issue() {
     let collision_upload: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/COLLISION/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={collision_boundary}"),
@@ -608,6 +608,20 @@ async fn issue_creation_and_upload_require_existing_issue() {
     .await;
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
 
+    let unicode_name = "中".repeat(128);
+    let unicode = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues")
+            .set_json(serde_json::json!({
+                "code": "unicode",
+                "name": unicode_name
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(unicode.status(), StatusCode::CREATED);
+
     let issues: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get().uri("/api/issues").to_request(),
@@ -631,7 +645,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
     let missing_upload = test::call_service(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/MISSING/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={missing_boundary}"),
@@ -641,6 +655,14 @@ async fn issue_creation_and_upload_require_existing_issue() {
     )
     .await;
     assert_eq!(missing_upload.status(), StatusCode::NOT_FOUND);
+    let temp_root = data_root.join(".tmp");
+    assert!(
+        !temp_root.exists()
+            || fs::read_dir(&temp_root)
+                .expect("read temp root")
+                .next()
+                .is_none()
+    );
 
     let upload_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let upload_body = multipart_body(
@@ -652,7 +674,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
     let upload = test::call_service(
         &app,
         test::TestRequest::post()
-            .uri("/api/uploads")
+            .uri("/api/issues/NEW001/uploads")
             .insert_header((
                 "content-type",
                 format!("multipart/form-data; boundary={upload_boundary}"),

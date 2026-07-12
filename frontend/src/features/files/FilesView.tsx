@@ -238,7 +238,6 @@ export function BundleView(props?: BundleViewProps) {
         }
       }
 
-      const expandedAll = new Set<string>();
       const collectedRoots: string[] = [];
       let first: string | null = null;
 
@@ -256,17 +255,6 @@ export function BundleView(props?: BundleViewProps) {
             return next;
           });
 
-          const queue = result.children.filter((child) => child.is_dir || isArchiveNode(child));
-          while (queue.length > 0) {
-            const current = queue.shift()!;
-            const res = await loadNode(bundle.hash, current.rawId, current.parentId);
-            if (res?.node && (res.node.is_dir || isArchiveNode(res.node))) {
-              res.children
-                .filter((child) => child.is_dir || isArchiveNode(child))
-                .forEach((child) => queue.push(child));
-            }
-          }
-
           collectedRoots.push(result.node.id);
           if (!first) {
             first = result.node.childrenIds[0] ?? result.node.id;
@@ -277,7 +265,7 @@ export function BundleView(props?: BundleViewProps) {
       }
 
       if (!ignore) {
-        setExpandedNodes(expandedAll);
+        setExpandedNodes(new Set());
         setRootIds(collectedRoots);
         setSelectedNodeId((prev) => prev || first);
       }

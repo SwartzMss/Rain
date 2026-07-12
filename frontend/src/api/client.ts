@@ -143,12 +143,14 @@ export const rainApi = {
     return request<UploadTaskResponse>(`/api/uploads/${encodePathSegment(taskId)}`);
   },
   uploadLogs(issueCode: string, files: File[], onProgress?: (percent: number) => void) {
+    const normalizedIssueCode = normalizeIssueCode(issueCode);
     const formData = new FormData();
-    formData.append('issue_code', normalizeIssueCode(issueCode));
+    formData.append('issue_code', normalizedIssueCode);
     files.forEach((file) => formData.append('files', file, file.name));
+    const path = `/api/issues/${encodePathSegment(normalizedIssueCode)}/uploads`;
 
     if (!onProgress) {
-      return request<UploadResponse>(`/api/uploads`, {
+      return request<UploadResponse>(path, {
         method: 'POST',
         body: formData
       });
@@ -156,7 +158,8 @@ export const rainApi = {
 
     return new Promise<UploadResponse>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `${API_BASE_URL}/api/uploads`);
+      xhr.open('POST', `${API_BASE_URL}${path}`);
+      xhr.timeout = 30 * 60 * 1000;
       xhr.setRequestHeader('Accept', 'application/json');
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) {
@@ -164,13 +167,20 @@ export const rainApi = {
         }
       };
       xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText) as UploadResponse);
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(new Error(parseErrorResponse(xhr.responseText, xhr.status)));
           return;
         }
-        reject(new Error(parseErrorResponse(xhr.responseText, xhr.status)));
+
+        try {
+          resolve(JSON.parse(xhr.responseText) as UploadResponse);
+        } catch {
+          reject(new Error('服务器返回了无法解析的上传响应'));
+        }
       };
       xhr.onerror = () => reject(new Error(normalizeApiError(new Error('upload failed'))));
+      xhr.ontimeout = () => reject(new Error('上传超时'));
+      xhr.onabort = () => reject(new Error('上传已取消'));
       xhr.send(formData);
     });
   }

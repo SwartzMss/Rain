@@ -71,7 +71,7 @@ pub async fn create_issue(
         .unwrap_or(&code)
         .to_owned();
 
-    if name.len() > ISSUE_NAME_MAX_LEN {
+    if name.chars().count() > ISSUE_NAME_MAX_LEN {
         return Err(AppError::BadRequest(
             "issue name must not exceed 128 characters".into(),
         ));
