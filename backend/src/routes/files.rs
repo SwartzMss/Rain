@@ -11,12 +11,13 @@ use serde_json::json;
 use sqlx::FromRow;
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader},
+    io::{AsyncReadExt, AsyncSeekExt, BufReader},
 };
 
 use crate::{
     AppState,
     error::AppError,
+    ingest::{MAX_LINE_BYTES, decode_log_line, read_line_bytes_limited},
     models::files::{FileNode, FileNodeResponse},
 };
 
@@ -51,6 +52,7 @@ struct FileLinesResponse {
 struct FileLine {
     line_number: i64,
     content: String,
+    truncated: bool,
 }
 
 // scoped under /api in routes::register
@@ -170,19 +172,22 @@ pub async fn get_file_lines(
     let mut current_line = base_line;
     let end_line = start.saturating_add(limit);
     let mut lines = Vec::new();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
 
     while current_line < end_line {
-        buffer.clear();
-        let read = reader.read_line(&mut buffer).await.map_err(AppError::Io)?;
-        if read == 0 {
+        let Some((_read, truncated)) =
+            read_line_bytes_limited(&mut reader, &mut buffer, MAX_LINE_BYTES)
+                .await
+                .map_err(AppError::Io)?
+        else {
             break;
-        }
+        };
 
         if current_line >= start {
             lines.push(FileLine {
                 line_number: current_line,
-                content: buffer.trim_end_matches(['\r', '\n']).to_string(),
+                content: decode_log_line(&buffer, truncated),
+                truncated,
             });
         }
         current_line += 1;
@@ -241,37 +246,21 @@ pub async fn delete_file_node(
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-    let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
-    let base_path = record.path.trim_end_matches('/').to_string();
-    let child_like = format!("{}/%", base_path);
-    let extracted_root = format!("{}_extracted", base_path);
-    let extracted_like = format!("{extracted_root}/%");
+    let _record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
 
     let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
 
-    let file_ids: Vec<i64> = sqlx::query_scalar(
-        r#"
-        SELECT id
-        FROM files
-        WHERE bundle_id = ?
-          AND (
-                id = ?
-             OR path = ?
-             OR path LIKE ?
-             OR path = ?
-             OR path LIKE ?
-          )
-        "#,
-    )
-    .bind(&bundle.id)
-    .bind(parsed_id)
-    .bind(&base_path)
-    .bind(&child_like)
-    .bind(&extracted_root)
-    .bind(&extracted_like)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
+    let mut file_ids = fetch_subtree_ids(&mut tx, &bundle.id, parsed_id).await?;
+    let extracted_root_ids = fetch_extracted_child_ids(&mut tx, &bundle.id, parsed_id).await?;
+    for extracted_root_id in extracted_root_ids {
+        for id in fetch_subtree_ids(&mut tx, &bundle.id, extracted_root_id).await? {
+            if !file_ids.contains(&id) {
+                file_ids.push(id);
+            }
+        }
+    }
+
+    let disk_paths = fetch_storage_paths_for_ids(&mut tx, &bundle.id, &file_ids).await?;
 
     for file_id in &file_ids {
         sqlx::query("DELETE FROM log_line_offsets WHERE file_id = ?")
@@ -299,48 +288,138 @@ pub async fn delete_file_node(
             .map_err(AppError::Database)?;
     }
 
-    sqlx::query(
-        r#"
-        DELETE FROM files
-        WHERE bundle_id = ?
-          AND (
-                id = ?
-             OR path = ?
-             OR path LIKE ?
-             OR path = ?
-             OR path LIKE ?
-          )
-        "#,
-    )
-    .bind(&bundle.id)
-    .bind(parsed_id)
-    .bind(&base_path)
-    .bind(&child_like)
-    .bind(&extracted_root)
-    .bind(&extracted_like)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
+    for file_id in &file_ids {
+        sqlx::query("DELETE FROM files WHERE bundle_id = ? AND id = ?")
+            .bind(&bundle.id)
+            .bind(file_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+    }
 
     tx.commit().await.map_err(AppError::Database)?;
 
-    let data_root = data_root(&state);
-    let main_path = data_root.join(base_path.trim_start_matches('/'));
-    let extracted_path = data_root.join(extracted_root.trim_start_matches('/'));
-
-    if record.is_dir {
-        if tokio::fs::metadata(&main_path).await.is_ok() {
-            let _ = tokio::fs::remove_dir_all(&main_path).await;
+    for disk_path in disk_paths {
+        if tokio::fs::metadata(&disk_path).await.is_ok() {
+            if disk_path.is_dir() {
+                let _ = tokio::fs::remove_dir_all(&disk_path).await;
+            } else {
+                let _ = tokio::fs::remove_file(&disk_path).await;
+            }
         }
-    } else if tokio::fs::metadata(&main_path).await.is_ok() {
-        let _ = tokio::fs::remove_file(&main_path).await;
-    }
-
-    if tokio::fs::metadata(&extracted_path).await.is_ok() {
-        let _ = tokio::fs::remove_dir_all(&extracted_path).await;
     }
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+async fn fetch_subtree_ids(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bundle_id: &str,
+    root_id: i64,
+) -> Result<Vec<i64>, AppError> {
+    sqlx::query_scalar(
+        r#"
+        WITH RECURSIVE subtree(id) AS (
+            SELECT id
+            FROM files
+            WHERE bundle_id = ? AND id = ?
+
+            UNION ALL
+
+            SELECT f.id
+            FROM files f
+            JOIN subtree s ON f.parent_id = s.id
+            WHERE f.bundle_id = ?
+        )
+        SELECT id FROM subtree
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(root_id)
+    .bind(bundle_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AppError::Database)
+}
+
+async fn fetch_extracted_child_ids(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bundle_id: &str,
+    parent_id: i64,
+) -> Result<Vec<i64>, AppError> {
+    let rows = sqlx::query_as::<_, FileRow>(
+        r#"
+        SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
+        FROM files
+        WHERE bundle_id = ? AND parent_id = ?
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(parent_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|row| row.is_dir && meta_kind(&row.meta).as_deref() == Some("extracted_dir"))
+        .map(|row| row.id)
+        .collect())
+}
+
+async fn fetch_storage_paths_for_ids(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bundle_id: &str,
+    file_ids: &[i64],
+) -> Result<Vec<PathBuf>, AppError> {
+    let mut paths = Vec::new();
+    for file_id in file_ids {
+        let row = sqlx::query_as::<_, FileRow>(
+            r#"
+            SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
+            FROM files
+            WHERE bundle_id = ? AND id = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(bundle_id)
+        .bind(file_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(AppError::Database)?;
+
+        if let Some(row) = row
+            && let Some(path) = storage_path_from_meta(&row.meta)
+        {
+            paths.push(path);
+        }
+    }
+
+    paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    paths.dedup();
+    Ok(paths)
+}
+
+fn meta_kind(meta: &Option<String>) -> Option<String> {
+    meta.as_deref()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .and_then(|value| {
+            value
+                .get("kind")
+                .and_then(|kind| kind.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn storage_path_from_meta(meta: &Option<String>) -> Option<PathBuf> {
+    meta.as_deref()
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .and_then(|value| {
+            value
+                .get("storage_path")
+                .and_then(|path| path.as_str())
+                .map(PathBuf::from)
+        })
 }
 
 #[derive(FromRow)]

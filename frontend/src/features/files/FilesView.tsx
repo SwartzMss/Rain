@@ -184,7 +184,7 @@ export function BundleView(props?: BundleViewProps) {
     setSearchLoading(true);
     setSearchError(null);
     try {
-      const response = await rainApi.searchIssueLogs(issue, keyword, { size: 500 });
+      const response = await rainApi.searchIssueLogs(issue, keyword, { size: 50 });
       setSearchResults(response.hits);
     } catch (error) {
       setSearchResults([]);

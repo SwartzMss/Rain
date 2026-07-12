@@ -1,6 +1,6 @@
 # Rain
 
-Rain 是一个本地日志包浏览与检索工具。当前版本用于把 `.log`、`.txt` 或 `.zip` 上传到一个 Issue 下，浏览解压后的文件树，预览文本内容，并按关键词搜索日志行。
+Rain 是一个本地日志包浏览与检索工具。当前版本用于把 `.log`、`.txt` 或 `.zip` 上传到一个 Issue 下，浏览解压后的文件树，分页查看文本内容，并按关键词搜索日志。
 
 默认使用 SQLite，本地启动不需要安装 PostgreSQL 或其他数据库服务。
 
@@ -123,13 +123,14 @@ Linux/macOS:
 - Issue 列表、打开、删除。
 - 多文件上传。
 - `.log`、`.txt` 等文本文件索引。
-- `.zip`、`.tar.gz`、`.tgz` 同步解压并写入文件树。
-- `.gz` 单文件解压、索引和预览。
+- `.zip`、`.tar.gz`、`.tgz` 后台解压并写入文件树。
+- `.gz` 单文件后台解压、索引和分页查看。
 - 上传安全限制：单文件 512 MB、单次 2 GB、最多 100 个文件。
 - ZIP 基础防护：最多 10000 个条目、最多 500 MB 解压内容、最多 5 层路径深度、单条目 100 MB、压缩比上限 100:1。
 - 文件树浏览。
 - 文本文件分页读取，后端按行偏移索引快速跳转。
-- Issue 范围和 bundle 范围关键词搜索。
+- 单行超过 1 MB 时索引和分页展示会截断该行，并标记 `[line truncated]`。
+- Issue 范围和 bundle 范围关键词搜索，文本文件会完整建立 SQLite FTS5 chunk 索引；搜索结果返回命中附近摘要，默认 50 条、最多 100 条。
 - 原始文件下载。
 - 删除 Issue、Bundle、单个文件节点。
 - 可选过期清理：设置 `RAIN_RETENTION_DAYS` 后启动时清理过期上传。
@@ -137,9 +138,11 @@ Linux/macOS:
 ## 当前限制
 
 - 暂不支持 `.rar`、`.7z` 解压。
-- 上传传输有前端进度；压缩包解压和索引仍是同步处理，尚未做后台任务和进度轮询。
+- 上传传输有前端进度；解压和索引在后台任务执行，当前有 `PROCESSING/READY/FAILED` 状态轮询，没有细粒度解析百分比。
+- 后台处理先在 `.tmp/{task_id}/staging` 中完成；成功后移动到正式目录，失败会清理半成品文件和索引，只保留失败任务状态。
+- SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务最多 2 个并发。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 已有基础大小和结构限制，但还没有后台任务超时/取消机制。
-- 搜索使用 SQLite FTS5，并按日志 chunk 建索引。
+- 搜索使用 SQLite FTS5，并按日志 chunk 建完整索引。
 - timeline 目前固定为 `all`。
 - 已有基础结构化日志事件提取，事件查询和 AI 分析能力尚未接入。
 
@@ -149,7 +152,7 @@ Linux/macOS:
 
 - SQLite 数据库：`data/rain.db`
 - 上传和解压文件：`data/uploads/`
-- 后端运行日志：`log/backend.log`
+- 后端运行日志：`log/YYYY-MM-DD.backend.log`（按天轮转）
 
 如果想清空本地数据，可以停止服务后删除 `data/`，或临时设置：
 
@@ -187,13 +190,13 @@ cargo build --release
 查看后端日志：
 
 ```bash
-tail -f log/backend.log
+tail -f log/$(date +%F).backend.log
 ```
 
 Windows PowerShell 可用：
 
 ```powershell
-Get-Content log\backend.log -Wait
+Get-Content (Join-Path log "$((Get-Date).ToString('yyyy-MM-dd')).backend.log") -Wait
 ```
 
 ## API 摘要
@@ -207,7 +210,8 @@ Get-Content log\backend.log -Wait
 
 ### Upload
 
-- `POST /api/uploads`
+- `POST /api/uploads`：返回 `202 Accepted`，响应包含 `task_id`、`bundle_hash` 和初始 `PROCESSING` 状态。
+- `GET /api/uploads/{taskId}`：查询后台解压/索引任务状态。
 
 Multipart 字段：
 
@@ -232,7 +236,7 @@ Multipart 字段：
 
 短期优先级：
 
-1. 异步解析任务、进度状态、失败重试。
+1. 解析任务细粒度进度、取消和失败重试。
 2. 结构化事件查询 API，例如按 level、component、时间范围过滤。
 3. 搜索任务取消、后台搜索和并发限制。
 4. 更完整的日志 parser 规则和多行异常合并。

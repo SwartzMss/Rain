@@ -28,7 +28,7 @@ async fn main() -> std::io::Result<()> {
     let config = AppConfig::from_env().expect("failed to load config");
 
     fs::create_dir_all(&config.log_dir).expect("failed to create log directory");
-    let file_appender = rolling::never(&config.log_dir, "backend.log");
+    let file_appender = rolling::daily(&config.log_dir, "backend.log");
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
     let _guard = guard;
 

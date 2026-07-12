@@ -1,14 +1,18 @@
 use actix_multipart::{Field, Multipart};
-use actix_web::{HttpResponse, post, web};
+use actix_web::{HttpResponse, get, http::StatusCode, post, web};
 use futures_util::TryStreamExt;
+use once_cell::sync::Lazy;
 use serde::Serialize;
+use tokio::sync::Semaphore;
 use tokio::{fs, io::AsyncWriteExt};
+use tracing::error;
 use uuid::Uuid;
 
 use crate::{
     AppState,
     error::AppError,
     ingest::{ProcessFileOptions, process_uploaded_file},
+    models::issues::UploadStatus,
 };
 
 use super::issues::ensure_issue;
@@ -17,6 +21,10 @@ const MAX_UPLOAD_FILES: usize = 100;
 const MAX_UPLOAD_FILE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_TEXT_FIELD_BYTES: usize = 64 * 1024;
+const MAX_CONCURRENT_PROCESSING_TASKS: usize = 2;
+
+static PROCESSING_PERMITS: Lazy<Semaphore> =
+    Lazy::new(|| Semaphore::new(MAX_CONCURRENT_PROCESSING_TASKS));
 
 // scoped under /api in routes::register, so use relative path
 #[post("/uploads")]
@@ -51,8 +59,9 @@ pub async fn upload_logs(
                     .unwrap_or_else(|| "upload.log".into());
 
                 let content_type = field.content_type().map(|mime| mime.to_string());
-                let sanitized = sanitize_filename(&filename);
-                let temp_name = format!("{}-{sanitized}", files.len());
+                let display_name = sanitize_filename(&filename);
+                let storage_name = unique_storage_name(&filename);
+                let temp_name = format!("{}-{storage_name}", files.len());
                 let temp_path = temp_dir.join(temp_name);
                 let size_bytes = match collect_file_field(
                     &mut field,
@@ -86,7 +95,8 @@ pub async fn upload_logs(
                     }
                     files.push(UploadedFile {
                         original_name: filename,
-                        sanitized_name: sanitized,
+                        display_name,
+                        storage_name,
                         temp_path,
                         size_bytes,
                         content_type,
@@ -122,11 +132,14 @@ pub async fn upload_logs(
     let bundle_hash = Uuid::new_v4().simple().to_string();
     let bundle_name = format!("bundle-{bundle_hash}");
 
-    ensure_issue(&state.pool, &issue_code).await?;
+    if let Err(error) = ensure_issue(&state.pool, &issue_code).await {
+        let _ = fs::remove_dir_all(&temp_dir).await;
+        return Err(error);
+    }
 
     let bundle_id = Uuid::new_v4().simple().to_string();
 
-    sqlx::query(
+    let insert_bundle_result = sqlx::query(
         r#"
         INSERT INTO bundles (id, issue_code, hash, name, status, size_bytes)
         VALUES (?, ?, ?, ?, 'PROCESSING', ?)
@@ -139,55 +152,185 @@ pub async fn upload_logs(
     .bind(Some(total_bytes as i64))
     .execute(&state.pool)
     .await
-    .map_err(AppError::Database)?;
-
-    let process_result = async {
-        for uploaded in &files {
-            process_uploaded_file(ProcessFileOptions {
-                pool: &state.pool,
-                bundle_id: &bundle_id,
-                bundle_hash: &bundle_hash,
-                data_root: &state.data_root,
-                file_name: &uploaded.sanitized_name,
-                original_name: &uploaded.original_name,
-                content_type: uploaded.content_type.as_deref(),
-                source_path: &uploaded.temp_path,
-                size_bytes: uploaded.size_bytes,
-            })
-            .await?;
-        }
-        Ok::<(), AppError>(())
-    }
-    .await;
-
-    if let Err(error) = process_result {
-        update_bundle_status(&state.pool, &bundle_id, "FAILED").await?;
+    .map_err(AppError::Database);
+    if let Err(error) = insert_bundle_result {
         let _ = fs::remove_dir_all(&temp_dir).await;
         return Err(error);
     }
 
-    update_bundle_status(&state.pool, &bundle_id, "READY").await?;
-    let _ = fs::remove_dir_all(&temp_dir).await;
+    let file_count = files.len() as u64;
+    let pool = state.pool.clone();
+    let data_root = state.data_root.clone();
+    let staging_root = temp_dir.join("staging");
+    let task_bundle_id = bundle_id.clone();
+    let task_bundle_hash = bundle_hash.clone();
+    tokio::spawn(async move {
+        let _permit = match PROCESSING_PERMITS.acquire().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                error!(
+                    bundle_id = %task_bundle_id,
+                    bundle_hash = %task_bundle_hash,
+                    error = %error,
+                    "failed to acquire upload processing permit"
+                );
+                let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED").await;
+                let _ = fs::remove_dir_all(&temp_dir).await;
+                return;
+            }
+        };
 
-    Ok(HttpResponse::Ok().json(UploadResponse {
-        issue_code,
-        bundle_hash,
-        file_count: files.len() as u64,
-        total_bytes,
-    }))
+        let process_result = async {
+            for uploaded in &files {
+                process_uploaded_file(ProcessFileOptions {
+                    pool: &pool,
+                    bundle_id: &task_bundle_id,
+                    bundle_hash: &task_bundle_hash,
+                    data_root: &staging_root,
+                    storage_name: &uploaded.storage_name,
+                    original_name: &uploaded.original_name,
+                    display_name: &uploaded.display_name,
+                    content_type: uploaded.content_type.as_deref(),
+                    source_path: &uploaded.temp_path,
+                    size_bytes: uploaded.size_bytes,
+                })
+                .await?;
+            }
+
+            let staging_bundle_dir = staging_root.join(&task_bundle_hash);
+            let final_bundle_dir = data_root.join(&task_bundle_hash);
+            if fs::metadata(&final_bundle_dir).await.is_ok() {
+                return Err(AppError::BadRequest(format!(
+                    "bundle directory already exists: {}",
+                    final_bundle_dir.display()
+                )));
+            }
+            if let Some(parent) = final_bundle_dir.parent() {
+                fs::create_dir_all(parent).await.map_err(AppError::Io)?;
+            }
+            fs::rename(&staging_bundle_dir, &final_bundle_dir)
+                .await
+                .map_err(AppError::Io)?;
+            update_bundle_storage_paths(
+                &pool,
+                &task_bundle_id,
+                &staging_bundle_dir,
+                &final_bundle_dir,
+            )
+            .await?;
+            Ok::<(), AppError>(())
+        }
+        .await;
+
+        if let Err(error) = process_result {
+            error!(
+                bundle_id = %task_bundle_id,
+                bundle_hash = %task_bundle_hash,
+                error = %error,
+                "failed to process uploaded log bundle"
+            );
+            let _ = cleanup_failed_bundle_artifacts(
+                &pool,
+                &task_bundle_id,
+                &data_root,
+                &staging_root,
+                &task_bundle_hash,
+            )
+            .await;
+            let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED").await;
+        } else if let Err(error) = update_bundle_status(&pool, &task_bundle_id, "READY").await {
+            error!(
+                bundle_id = %task_bundle_id,
+                bundle_hash = %task_bundle_hash,
+                error = %error,
+                "failed to mark uploaded log bundle ready"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir).await;
+    });
+
+    Ok(
+        HttpResponse::build(StatusCode::ACCEPTED).json(UploadResponse {
+            task_id: bundle_hash.clone(),
+            issue_code,
+            bundle_hash,
+            status: UploadStatus::Processing,
+            file_count,
+            total_bytes,
+        }),
+    )
 }
 
 #[derive(Serialize)]
 struct UploadResponse {
+    task_id: String,
     issue_code: String,
     bundle_hash: String,
+    status: UploadStatus,
     file_count: u64,
+    total_bytes: u64,
+}
+
+#[get("/uploads/{task_id}")]
+pub async fn get_upload_task(
+    path: web::Path<String>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let task_id = path.into_inner();
+    let row = sqlx::query_as::<_, UploadTaskRow>(
+        r#"
+        SELECT issue_code, hash, status, size_bytes
+        FROM bundles
+        WHERE hash = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(&task_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::NotFound(format!("upload task {task_id}")))?;
+
+    let status = UploadStatus::from_db_value(&row.status);
+    let progress_percent = match status {
+        UploadStatus::Ready | UploadStatus::Failed => 100,
+        UploadStatus::Processing => 0,
+        UploadStatus::Pending => 0,
+    };
+
+    Ok(HttpResponse::Ok().json(UploadTaskResponse {
+        task_id: row.hash.clone(),
+        issue_code: row.issue_code,
+        bundle_hash: row.hash,
+        status,
+        progress_percent,
+        total_bytes: row.size_bytes.unwrap_or(0).max(0) as u64,
+    }))
+}
+
+#[derive(sqlx::FromRow)]
+struct UploadTaskRow {
+    issue_code: String,
+    hash: String,
+    status: String,
+    size_bytes: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct UploadTaskResponse {
+    task_id: String,
+    issue_code: String,
+    bundle_hash: String,
+    status: UploadStatus,
+    progress_percent: u8,
     total_bytes: u64,
 }
 
 struct UploadedFile {
     original_name: String,
-    sanitized_name: String,
+    display_name: String,
+    storage_name: String,
     temp_path: std::path::PathBuf,
     size_bytes: u64,
     content_type: Option<String>,
@@ -262,6 +405,121 @@ async fn update_bundle_status(
     Ok(())
 }
 
+async fn update_bundle_storage_paths(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    staging_bundle_dir: &std::path::Path,
+    final_bundle_dir: &std::path::Path,
+) -> Result<(), AppError> {
+    let rows = sqlx::query_as::<_, FileMetaRow>(
+        r#"
+        SELECT id, meta
+        FROM files
+        WHERE bundle_id = ?
+        "#,
+    )
+    .bind(bundle_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    for row in rows {
+        let Some(meta_text) = row.meta else {
+            continue;
+        };
+        let mut meta: serde_json::Value = serde_json::from_str(&meta_text)
+            .map_err(|err| AppError::BadRequest(format!("invalid file metadata: {err}")))?;
+        let Some(storage_path) = meta.get("storage_path").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let current_path = std::path::PathBuf::from(storage_path);
+        if !current_path.starts_with(staging_bundle_dir) {
+            continue;
+        }
+        let relative = current_path
+            .strip_prefix(staging_bundle_dir)
+            .map_err(|err| AppError::BadRequest(format!("invalid staging path: {err}")))?;
+        let final_path = final_bundle_dir.join(relative);
+        if let Some(object) = meta.as_object_mut() {
+            object.insert(
+                "storage_path".to_string(),
+                serde_json::Value::String(final_path.to_string_lossy().to_string()),
+            );
+        }
+        sqlx::query("UPDATE files SET meta = ? WHERE id = ?")
+            .bind(meta.to_string())
+            .bind(row.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+    }
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(())
+}
+
+async fn cleanup_failed_bundle_artifacts(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    data_root: &std::path::Path,
+    staging_root: &std::path::Path,
+    bundle_hash: &str,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+
+    sqlx::query(
+        "DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)",
+    )
+    .bind(bundle_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
+    sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    sqlx::query("DELETE FROM files WHERE bundle_id = ?")
+        .bind(bundle_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+
+    tx.commit().await.map_err(AppError::Database)?;
+
+    let staging_bundle_dir = staging_root.join(bundle_hash);
+    if fs::metadata(&staging_bundle_dir).await.is_ok() {
+        let _ = fs::remove_dir_all(&staging_bundle_dir).await;
+    }
+
+    let final_bundle_dir = data_root.join(bundle_hash);
+    if fs::metadata(&final_bundle_dir).await.is_ok() {
+        let _ = fs::remove_dir_all(&final_bundle_dir).await;
+    }
+
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct FileMetaRow {
+    id: i64,
+    meta: Option<String>,
+}
+
 fn format_bytes(bytes: usize) -> String {
     if bytes >= 1024 * 1024 {
         format!("{} MB", bytes / 1024 / 1024)
@@ -294,4 +552,25 @@ fn sanitize_filename(name: &str) -> String {
     } else {
         sanitized
     }
+}
+
+fn unique_storage_name(original_name: &str) -> String {
+    use std::path::Path;
+
+    let suffix = Path::new(original_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(sanitize_extension)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    format!("{}{}", Uuid::new_v4().simple(), suffix)
+}
+
+fn sanitize_extension(extension: &str) -> String {
+    extension
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(16)
+        .collect()
 }

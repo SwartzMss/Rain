@@ -10,7 +10,8 @@ use crate::{
 
 use super::helpers::load_bundle;
 
-const MAX_LOG_RESULTS: i64 = 1000;
+const DEFAULT_LOG_RESULTS: i64 = 50;
+const MAX_LOG_RESULTS: i64 = 100;
 
 #[derive(Deserialize)]
 struct LogQuery {
@@ -56,7 +57,7 @@ pub async fn search_logs(
     let from = term.from.unwrap_or(0).max(0);
     let size = term
         .size
-        .unwrap_or(MAX_LOG_RESULTS)
+        .unwrap_or(DEFAULT_LOG_RESULTS)
         .clamp(1, MAX_LOG_RESULTS);
 
     let total: i64 = sqlx::query_scalar(
@@ -88,7 +89,7 @@ pub async fn search_logs(
                ls.line_offset AS offset,
                ls.line_end,
                ls.chunk_index,
-               ls.content
+               snippet(log_segments_fts, 0, '', '', ' ... ', 24) AS content
         FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN files f ON f.id = ls.file_id
@@ -166,7 +167,7 @@ pub async fn search_issue_logs(
     let from = term.from.unwrap_or(0).max(0);
     let size = term
         .size
-        .unwrap_or(MAX_LOG_RESULTS)
+        .unwrap_or(DEFAULT_LOG_RESULTS)
         .clamp(1, MAX_LOG_RESULTS);
 
     let total: i64 = sqlx::query_scalar(
@@ -195,7 +196,7 @@ pub async fn search_issue_logs(
                ls.line_offset AS offset,
                ls.line_end,
                ls.chunk_index,
-               ls.content,
+               snippet(log_segments_fts, 0, '', '', ' ... ', 24) AS content,
                b.hash as bundle_hash
         FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id

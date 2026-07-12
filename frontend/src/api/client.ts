@@ -6,7 +6,8 @@ import type {
   IssueLogSearchResponse,
   IssueSummary,
   LogSearchResponse,
-  UploadResponse
+  UploadResponse,
+  UploadTaskResponse
 } from './types';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || window.location.origin).replace(/\/$/, '');
@@ -87,6 +88,9 @@ export const rainApi = {
     if (typeof options?.from === 'number') params.set('from', String(options.from));
     if (typeof options?.size === 'number') params.set('size', String(options.size));
     return request<IssueLogSearchResponse>(`/api/issues/${issueCode}/search?${params.toString()}`);
+  },
+  fetchUploadTask(taskId: string) {
+    return request<UploadTaskResponse>(`/api/uploads/${taskId}`);
   },
   uploadLogs(issueCode: string, files: File[], onProgress?: (percent: number) => void) {
     const formData = new FormData();

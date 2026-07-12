@@ -1,8 +1,8 @@
-use std::{path::Path, str::FromStr};
+use std::{path::Path, str::FromStr, time::Duration};
 
 use sqlx::{
     FromRow, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
 use crate::error::AppError;
@@ -13,7 +13,10 @@ pub fn init_pool(database_url: &str) -> Result<SqlitePool, AppError> {
     let options = SqliteConnectOptions::from_str(database_url)
         .map_err(AppError::Database)?
         .create_if_missing(true)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(30));
 
     Ok(SqlitePoolOptions::new()
         .max_connections(5)

@@ -1,24 +1,21 @@
 use flate2::read::GzDecoder;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File as StdFile,
     io::{self, Read, Write},
     path::{Path, PathBuf},
 };
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::{fs, task};
 use walkdir::WalkDir;
 
 use crate::error::AppError;
 
-const SMALL_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2MB
-const MEDIUM_FILE_BYTES: u64 = 20 * 1024 * 1024; // 20MB
-const MAX_READ_BYTES: u64 = 25 * 1024 * 1024; // avoid loading huge files into memory
-const MAX_LINES_SMALL: usize = 50_000;
-const MAX_LINES_MEDIUM: usize = 10_000;
-const MAX_LINES_LARGE: usize = 2_000;
 const LOG_CHUNK_LINES: usize = 200;
 const LINE_OFFSET_INTERVAL: i64 = 1000;
+const LOG_COMMIT_LINES: i64 = 5000;
+pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+const TRUNCATED_LINE_MARKER: &str = " ... [line truncated]";
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_ARCHIVE_DEPTH: usize = 5;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 100 * 1024 * 1024;
@@ -33,8 +30,9 @@ pub struct ProcessFileOptions<'a> {
     pub bundle_id: &'a str,
     pub bundle_hash: &'a str,
     pub data_root: &'a Path,
-    pub file_name: &'a str,
+    pub storage_name: &'a str,
     pub original_name: &'a str,
+    pub display_name: &'a str,
     pub content_type: Option<&'a str>,
     pub source_path: &'a Path,
     pub size_bytes: u64,
@@ -46,8 +44,9 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         bundle_id,
         bundle_hash,
         data_root,
-        file_name,
+        storage_name,
         original_name,
+        display_name,
         content_type,
         source_path,
         size_bytes,
@@ -56,12 +55,14 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     let bundle_dir = data_root.join(bundle_hash);
     fs::create_dir_all(&bundle_dir).await.map_err(io_error)?;
 
-    let disk_path = bundle_dir.join(file_name);
+    let disk_path = bundle_dir.join(storage_name);
     move_or_copy_file(source_path, &disk_path).await?;
 
-    let relative_path = format!("/{bundle_hash}/{file_name}");
+    let relative_path = format!("/{bundle_hash}/{storage_name}");
     let meta = serde_json::json!({
         "original_name": original_name,
+        "display_name": display_name,
+        "storage_name": storage_name,
         "storage_path": disk_path.to_string_lossy(),
         "kind": "uploaded_file"
     });
@@ -70,7 +71,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         pool,
         bundle_id,
         None,
-        file_name,
+        display_name,
         &relative_path,
         false,
         Some(size_bytes as i64),
@@ -79,20 +80,21 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     )
     .await?;
 
-    if is_text_like(file_name, content_type) {
+    if is_text_like(original_name, content_type) || is_text_like(display_name, content_type) {
         ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes).await?;
     }
 
-    if is_supported_archive(file_name) {
-        let extracted_dir_name = format!("{file_name}_extracted");
+    if is_supported_archive(original_name) || is_supported_archive(display_name) {
+        let extracted_dir_name = format!("{storage_name}_extracted");
         let extracted_dir = bundle_dir.join(&extracted_dir_name);
         fs::create_dir_all(&extracted_dir).await.map_err(io_error)?;
 
-        extract_archive(file_name, &disk_path, &extracted_dir).await?;
+        extract_archive(original_name, &disk_path, &extracted_dir).await?;
 
         let extracted_relative_path = format!("/{bundle_hash}/{extracted_dir_name}");
         let dir_meta = serde_json::json!({
-            "source": file_name,
+            "source": original_name,
+            "storage_name": extracted_dir_name,
             "storage_path": extracted_dir.to_string_lossy(),
             "kind": "extracted_dir"
         });
@@ -101,7 +103,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             pool,
             bundle_id,
             Some(file_id),
-            &extracted_dir_name,
+            &format!("{display_name}_extracted"),
             &extracted_relative_path,
             true,
             None,
@@ -247,39 +249,36 @@ async fn ingest_text_file(
     bundle_id: &str,
     file_id: i64,
     disk_path: &Path,
-    size_bytes: u64,
+    _size_bytes: u64,
 ) -> Result<(), AppError> {
     let file = fs::File::open(disk_path).await.map_err(io_error)?;
-    let max_read = size_bytes.min(MAX_READ_BYTES);
     let mut reader = BufReader::new(file);
-    let mut inserted = 0usize;
-    let line_limit = compute_line_limit(size_bytes);
     let mut line_number = 0i64;
     let mut bytes_scanned = 0u64;
     let mut chunk_index = 0i64;
     let mut chunk = LogChunk::new(chunk_index);
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut offsets = Vec::new();
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
     loop {
-        line.clear();
         let line_offset = bytes_scanned;
-        let read = reader.read_line(&mut line).await.map_err(io_error)?;
-        if read == 0 {
+        let Some((read, truncated)) =
+            read_line_bytes_limited(&mut reader, &mut line, MAX_LINE_BYTES)
+                .await
+                .map_err(io_error)?
+        else {
             break;
-        }
+        };
 
         if line_number % LINE_OFFSET_INTERVAL == 0 {
             offsets.push((line_number, line_offset as i64));
         }
         bytes_scanned = bytes_scanned.saturating_add(read as u64);
 
-        let cleaned = clean_log_line(&line);
-        let should_index = bytes_scanned <= max_read && inserted < line_limit;
-        if should_index && !cleaned.is_empty() {
+        let cleaned = clean_log_line(&line, truncated);
+        if !cleaned.is_empty() {
             chunk.push(line_number, cleaned);
-            inserted += 1;
 
             if chunk.len() >= LOG_CHUNK_LINES {
                 flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
@@ -289,6 +288,15 @@ async fn ingest_text_file(
         }
 
         line_number += 1;
+        if line_number % LOG_COMMIT_LINES == 0 {
+            if !chunk.is_empty() {
+                flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+                chunk_index += 1;
+                chunk = LogChunk::new(chunk_index);
+            }
+            tx.commit().await.map_err(AppError::Database)?;
+            tx = pool.begin().await.map_err(AppError::Database)?;
+        }
     }
 
     if !chunk.is_empty() {
@@ -463,9 +471,65 @@ async fn flush_log_chunk(
     Ok(())
 }
 
-fn clean_log_line(line: &str) -> String {
+fn clean_log_line(line: &[u8], truncated: bool) -> String {
     // SQLite text values should not contain embedded null bytes in this app.
-    line.trim_end_matches(['\r', '\n']).trim().replace('\0', "")
+    decode_log_line(line, truncated).trim().replace('\0', "")
+}
+
+pub async fn read_line_bytes_limited<R>(
+    reader: &mut R,
+    output: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<Option<(usize, bool)>, io::Error>
+where
+    R: AsyncBufRead + Unpin,
+{
+    output.clear();
+    let mut total_read = 0usize;
+    let mut truncated = false;
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if total_read == 0 {
+                Ok(None)
+            } else {
+                Ok(Some((total_read, truncated)))
+            };
+        }
+
+        let newline_pos = available.iter().position(|byte| *byte == b'\n');
+        let consume_len = newline_pos.map_or(available.len(), |pos| pos + 1);
+        let chunk = &available[..consume_len];
+        total_read = total_read.saturating_add(chunk.len());
+
+        let remaining = max_bytes.saturating_sub(output.len());
+        if remaining > 0 {
+            let keep_len = remaining.min(chunk.len());
+            output.extend_from_slice(&chunk[..keep_len]);
+            if keep_len < chunk.len() {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+
+        reader.consume(consume_len);
+
+        if newline_pos.is_some() {
+            return Ok(Some((total_read, truncated)));
+        }
+    }
+}
+
+pub fn decode_log_line(line: &[u8], truncated: bool) -> String {
+    let mut decoded = String::from_utf8_lossy(line)
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    if truncated {
+        decoded.push_str(TRUNCATED_LINE_MARKER);
+    }
+    decoded
 }
 
 fn parse_log_event(line: &str) -> Option<ParsedLogEvent> {
@@ -505,11 +569,14 @@ fn split_timestamp(line: &str) -> (Option<&str>, &str, f64) {
         return (Some(first), rest, 0.45);
     }
 
-    if line.len() >= 19 {
-        let candidate = &line[..19];
-        if looks_like_timestamp(candidate) {
-            return (Some(candidate), line[19..].trim_start(), 0.45);
-        }
+    if let Some(candidate) = line.get(..19)
+        && looks_like_timestamp(candidate)
+    {
+        return (
+            Some(candidate),
+            line.get(19..).unwrap_or("").trim_start(),
+            0.45,
+        );
     }
 
     (None, line, 0.0)
@@ -602,6 +669,7 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
         }
 
         let mut total_uncompressed = 0u64;
+        let mut seen_paths = HashSet::new();
         for i in 0..archive.len() {
             let mut entry = archive
                 .by_index(i)
@@ -640,6 +708,13 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
             validate_zip_ratio(entry.name(), uncompressed_size, entry.compressed_size())?;
 
             let out_path = dest_path.join(entry_path);
+            let normalized_out = normalize_extracted_path(&out_path);
+            if !seen_paths.insert(normalized_out) {
+                return Err(AppError::BadRequest(format!(
+                    "zip contains duplicate normalized path: {}",
+                    entry.name()
+                )));
+            }
 
             if entry.is_dir() {
                 std::fs::create_dir_all(&out_path).map_err(io_error)?;
@@ -675,6 +750,7 @@ async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError>
         let mut archive = tar::Archive::new(decoder);
         let mut total_uncompressed = 0u64;
         let mut entries_count = 0usize;
+        let mut seen_paths = HashSet::new();
 
         for entry_result in archive.entries().map_err(io_error)? {
             entries_count += 1;
@@ -723,6 +799,13 @@ async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError>
             )?;
 
             let out_path = dest_path.join(entry_path);
+            let normalized_out = normalize_extracted_path(&out_path);
+            if !seen_paths.insert(normalized_out) {
+                return Err(AppError::BadRequest(format!(
+                    "tar.gz contains duplicate normalized path: {}",
+                    raw_path.display()
+                )));
+            }
             if entry.header().entry_type().is_dir() {
                 std::fs::create_dir_all(&out_path).map_err(io_error)?;
             } else if entry.header().entry_type().is_file() {
@@ -758,6 +841,12 @@ async fn extract_gzip_file(name: &str, src: &Path, dest: &Path) -> Result<(), Ap
         let mut decoder = GzDecoder::new(file);
         std::fs::create_dir_all(&dest_path).map_err(io_error)?;
         let out_path = dest_path.join(output_name);
+        if out_path.exists() {
+            return Err(AppError::BadRequest(format!(
+                "gzip output path already exists: {}",
+                out_path.display()
+            )));
+        }
         let mut outfile = StdFile::create(&out_path).map_err(io_error)?;
         let copied = copy_with_limit(&mut decoder, &mut outfile, MAX_ARCHIVE_ENTRY_BYTES)?;
         if copied > MAX_ARCHIVE_EXTRACTED_BYTES {
@@ -799,6 +888,13 @@ fn copy_with_limit<R: Read, W: Write>(
         writer.write_all(&buffer[..read]).map_err(io_error)?;
     }
     Ok(total)
+}
+
+fn normalize_extracted_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn validate_zip_ratio(
@@ -907,7 +1003,7 @@ fn is_supported_archive(name: &str) -> bool {
 fn gzip_output_name(name: &str) -> String {
     let lower = name.to_ascii_lowercase();
     let stripped = if lower.ends_with(".gz") {
-        &name[..name.len().saturating_sub(3)]
+        name.get(..name.len().saturating_sub(3)).unwrap_or(name)
     } else {
         name
     };
@@ -928,16 +1024,26 @@ fn gzip_output_name(name: &str) -> String {
     }
 }
 
-fn io_error(err: std::io::Error) -> AppError {
-    AppError::Io(err)
+#[cfg(test)]
+mod tests {
+    use super::{gzip_output_name, split_timestamp};
+
+    #[test]
+    fn split_timestamp_does_not_slice_inside_utf8_character() {
+        let line = "123456789012345678中 ERROR tail";
+        let (timestamp, rest, confidence) = split_timestamp(line);
+
+        assert_eq!(timestamp, None);
+        assert_eq!(rest, line);
+        assert_eq!(confidence, 0.0);
+    }
+
+    #[test]
+    fn gzip_output_name_handles_mixed_case_suffix_with_utf8_name() {
+        assert_eq!(gzip_output_name("构建日志.Gz"), "____");
+    }
 }
 
-fn compute_line_limit(size_bytes: u64) -> usize {
-    if size_bytes <= SMALL_FILE_BYTES {
-        MAX_LINES_SMALL
-    } else if size_bytes <= MEDIUM_FILE_BYTES {
-        MAX_LINES_MEDIUM
-    } else {
-        MAX_LINES_LARGE
-    }
+fn io_error(err: std::io::Error) -> AppError {
+    AppError::Io(err)
 }

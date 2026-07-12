@@ -1,7 +1,14 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { rainApi } from '../../api/client';
-import type { FileNode, IssueBundlesResponse, IssueSummary, UploadResponse, UploadSummary } from '../../api/types';
+import type {
+  FileNode,
+  IssueBundlesResponse,
+  IssueSummary,
+  UploadResponse,
+  UploadSummary,
+  UploadTaskResponse
+} from '../../api/types';
 
 const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
 
@@ -43,6 +50,7 @@ export function HomeView() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
+  const [uploadTask, setUploadTask] = useState<UploadTaskResponse | null>(null);
 
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
@@ -128,6 +136,44 @@ export function HomeView() {
     loadBundles(currentIssueCode).catch(() => undefined);
   }, [currentIssueCode, loadBundles]);
 
+  useEffect(() => {
+    if (!currentIssueCode) return;
+    const hasProcessingBundle = bundles.some(
+      (bundle) => bundle.status?.upload_status === 'PROCESSING'
+    );
+    if (!hasProcessingBundle) return;
+
+    const timer = window.setTimeout(() => {
+      loadBundles(currentIssueCode).catch(() => undefined);
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [bundles, currentIssueCode, loadBundles]);
+
+  useEffect(() => {
+    if (!uploadSuccess?.task_id) return;
+    if (uploadTask?.status === 'READY' || uploadTask?.status === 'FAILED') return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const task = await rainApi.fetchUploadTask(uploadSuccess.task_id);
+        if (cancelled) return;
+        setUploadTask(task);
+        loadIssues().catch(() => undefined);
+        loadBundles(task.issue_code).catch(() => undefined);
+      } catch (error) {
+        if (!cancelled) {
+          setUploadError((error as Error).message || '查询上传任务失败');
+        }
+      }
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [uploadSuccess?.task_id, uploadTask?.status, loadIssues, loadBundles]);
+
   const openIssue = async (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return;
@@ -168,7 +214,13 @@ export function HomeView() {
   useEffect(() => {
     if (!bundles.length) return;
     bundles.forEach((bundle) => {
-      if (!bundleFiles[bundle.hash]) {
+      const existing = bundleFiles[bundle.hash];
+      const shouldLoad =
+        !existing ||
+        (bundle.status?.upload_status === 'READY' &&
+          !existing.loading &&
+          existing.files.length === 0);
+      if (shouldLoad) {
         loadBundleFiles(bundle.hash).catch(() => undefined);
       }
     });
@@ -210,9 +262,18 @@ export function HomeView() {
     setUploadProgress(0);
     setUploadError(null);
     setUploadSuccess(null);
+    setUploadTask(null);
     try {
       const response = await rainApi.uploadLogs(uploadIssueId.trim(), files, setUploadProgress);
       setUploadSuccess(response);
+      setUploadTask({
+        task_id: response.task_id,
+        issue_code: response.issue_code,
+        bundle_hash: response.bundle_hash,
+        status: response.status,
+        progress_percent: response.status === 'READY' ? 100 : 0,
+        total_bytes: response.total_bytes
+      });
       setUploadIssueId(response.issue_code);
       setIssueId(response.issue_code);
       loadIssues().catch(() => undefined);
@@ -304,9 +365,18 @@ export function HomeView() {
             <form onSubmit={handleUpload} className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/70 p-4 w-full">
               {uploadSuccess ? (
                 <div className="rounded-lg border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
-                  <p className="font-semibold">上传成功</p>
+                  <p className="font-semibold">上传已接收</p>
                   <p>Issue：{uploadSuccess.issue_code}</p>
+                  <p>任务：{uploadSuccess.task_id}</p>
                   <p>文件 {uploadSuccess.file_count} 个 · 共 {(uploadSuccess.total_bytes / 1024).toFixed(1)} KB</p>
+                  <p>
+                    后台状态：
+                    {uploadTask?.status === 'READY'
+                      ? '解析完成'
+                      : uploadTask?.status === 'FAILED'
+                        ? '解析失败'
+                        : '解析中'}
+                  </p>
                 </div>
               ) : null}
               <h3 className="text-sm font-semibold text-white">创建 / 上传</h3>
@@ -394,6 +464,9 @@ export function HomeView() {
                     return <p className="text-xs text-slate-500">文件加载中...</p>;
                   }
                   if (allFiles.length === 0) {
+                    if (bundles.some((bundle) => bundle.status?.upload_status === 'PROCESSING')) {
+                      return <p className="text-xs text-slate-500">后台解析中...</p>;
+                    }
                     return <p className="text-xs text-slate-500">暂无文件</p>;
                   }
                   return (

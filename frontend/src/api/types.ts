@@ -53,9 +53,20 @@ export interface LogSearchResponse {
 }
 
 export interface UploadResponse {
+  task_id: string;
   issue_code: string;
   bundle_hash: string;
+  status: UploadStatus;
   file_count: number;
+  total_bytes: number;
+}
+
+export interface UploadTaskResponse {
+  task_id: string;
+  issue_code: string;
+  bundle_hash: string;
+  status: UploadStatus;
+  progress_percent: number;
   total_bytes: number;
 }
 
@@ -70,6 +81,7 @@ export interface FileContentResponse {
 export interface FileLine {
   line_number: number;
   content: string;
+  truncated?: boolean;
 }
 
 export interface FileLinesResponse {

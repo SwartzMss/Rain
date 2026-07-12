@@ -5,8 +5,11 @@
 ## 设计取舍
 
 - SQLite 适合当前本地 MVP：部署简单、无需单独数据库服务、方便重新启动项目。
-- 当前搜索使用 SQLite FTS5，文本日志按 chunk 建索引，启动时会回填尚未进入 FTS 索引的历史 `log_segments`。
-- 上传解析使用流式读取和事务批量写入，避免大文件一次性读入内存和逐行零散提交。
+- SQLite 连接启用 WAL、`synchronous=NORMAL` 和 30 秒 `busy_timeout`，降低读写互相阻塞的概率。
+- 当前搜索使用 SQLite FTS5，文本日志按 chunk 建完整索引，启动时会回填尚未进入 FTS 索引的历史 `log_segments`。
+- 上传请求只负责接收并保存文件；解压、行偏移、FTS 和基础事件解析在 `.tmp/{task_id}/staging` 后台执行。
+- 后台任务全部成功后才移动到正式 bundle 目录并标记 `READY`；失败时清理 staging/正式目录和半成品 file/index/event 记录，仅保留 bundle 的 `FAILED` 状态。
+- 后台解析使用流式读取和事务批量写入，日志索引每 5000 行提交一次，避免大文件一次性读入内存、逐行零散提交和过长写事务。
 - 当前 `meta` 以 JSON 字符串存储在 TEXT 列中；后续如要对象存储或多节点部署，关键存储路径应提升为明确列。
 - 生产化前建议引入迁移工具，不要长期依赖启动时建表。
 
@@ -23,7 +26,7 @@
 - `issue_code` TEXT：关联 `issues.code`，级联删除。
 - `hash` TEXT UNIQUE：bundle 的公开 ID，前端和 API 使用它定位 bundle。
 - `name` TEXT：bundle 显示名（当前为 `bundle-{hash}`）。
-- `status` TEXT：上传/解析状态，当前主要写入 `READY`。
+- `status` TEXT：上传/解析状态，上传后为 `PROCESSING`，后台处理成功后为 `READY`，失败为 `FAILED`。
 - `size_bytes` INTEGER：本次上传总字节数。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 - 索引：`idx_bundles_issue (issue_code, created_at DESC)`。
@@ -97,6 +100,7 @@
 - Bundle -> Files：单文件上传会形成一个顶层 file 节点；`.zip`、`.tar.gz`、`.tgz`、`.gz` 上传会形成原始压缩包节点和一个 `{archive_name}_extracted` 解压目录。
 - Files -> Log Segments：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会流式读取并按 chunk 写入 `log_segments` 供搜索；非文本文件仅保留 `files` 记录。
 - Files -> Line Offsets：文本类文件会每 1000 行记录一次 byte offset，用于 `/lines` 分页读取。
+- 单行读取上限为 1 MB，超过后会丢弃到下一个换行符，并在索引/分页内容中追加 `[line truncated]` 标记。
 - Log Segments -> Log Events：基础解析器会从日志行中提取 timestamp/level/component/message，写入 `log_events`，为后续聚合和 AI 分析准备。
 
 ## 上传流程
@@ -108,15 +112,18 @@ flowchart TD
     B -->|有| D[复用 issues.code]
     C --> E[创建 Bundle 记录]
     D --> E
-    E --> F[文件落盘]
-    F --> G{是否支持的压缩包?}
-    G -->|是| H[同步解压为目录树]
-    G -->|否| I[单一文件节点]
-    H --> J[写 files 树]
-    I --> J
-    J --> K{文本类?}
-    K -->|是| L[流式读取并写 line offsets]
-    K -->|否| M[仅 files 记录]
-    L --> N[按 chunk 写 log_segments/FTS]
-    N --> O[基础解析写 log_events]
+    E --> F[文件流式落盘到临时目录]
+    F --> G[返回 PROCESSING]
+    G --> H[后台任务移动文件到 bundle 目录]
+    H --> I{是否支持的压缩包?}
+    I -->|是| J[解压为目录树]
+    I -->|否| K[单一文件节点]
+    J --> L[写 files 树]
+    K --> L
+    L --> M{文本类?}
+    M -->|是| N[流式读取并写 line offsets]
+    M -->|否| O[仅 files 记录]
+    N --> P[按 chunk 写完整 log_segments/FTS]
+    P --> Q[基础解析写 log_events]
+    Q --> R[Bundle 标记 READY]
 ```
