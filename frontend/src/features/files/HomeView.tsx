@@ -47,6 +47,7 @@ export function HomeView() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [creatingIssue, setCreatingIssue] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
@@ -119,7 +120,7 @@ export function HomeView() {
         setBundlesLoading(false);
       }
     },
-    []
+    [issueId, uploadIssueId]
   );
 
   useEffect(() => {
@@ -185,9 +186,35 @@ export function HomeView() {
       setUploadIssueId(trimmed);
       navigate(`/issue/${trimmed}`);
     } catch (error) {
-      setIssueError((error as Error).message || '查询失败');
+      const message = (error as Error).message || '查询失败';
+      setIssueError(message === '未找到 Issue' ? '未找到 Issue，请先在右侧创建或上传日志' : message);
     } finally {
       setIssueLoading(false);
+    }
+  };
+
+  const handleCreateIssue = async () => {
+    const code = uploadIssueId.trim();
+    if (!code) {
+      setUploadError('请输入 Issue ID');
+      return;
+    }
+
+    setCreatingIssue(true);
+    setUploadError(null);
+    setUploadSuccess(null);
+    setUploadTask(null);
+    try {
+      const issue = await rainApi.createIssue({ code });
+      setUploadIssueId(issue.code);
+      setIssueId(issue.code);
+      setIssueFilter(issue.code);
+      await loadIssues();
+      await loadBundles(issue.code);
+    } catch (error) {
+      setUploadError((error as Error).message || '创建 Issue 失败');
+    } finally {
+      setCreatingIssue(false);
     }
   };
 
@@ -379,14 +406,26 @@ export function HomeView() {
                   </p>
                 </div>
               ) : null}
-              <h3 className="text-sm font-semibold text-white">创建 / 上传</h3>
+              <h3 className="text-sm font-semibold text-white">创建 Issue / 上传日志</h3>
               <label className="block text-sm text-slate-300">
                 Issue ID
-                <input
-                  className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
-                  value={uploadIssueId}
-                  onChange={(event) => setUploadIssueId(event.target.value)}
-                />
+                <div className="mt-1 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+                    value={uploadIssueId}
+                    onChange={(event) => setUploadIssueId(event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="rounded-lg border border-brand-500/60 px-4 py-2 text-sm font-semibold text-brand-100 transition hover:bg-brand-500/10 disabled:opacity-60"
+                    onClick={() => {
+                      handleCreateIssue().catch(() => undefined);
+                    }}
+                    disabled={creatingIssue || !uploadIssueId.trim()}
+                  >
+                    {creatingIssue ? '创建中...' : '创建 Issue'}
+                  </button>
+                </div>
               </label>
               <div className="space-y-2">
                 <input

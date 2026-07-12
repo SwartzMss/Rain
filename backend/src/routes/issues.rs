@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, delete, get, web};
+use actix_web::{HttpResponse, delete, get, post, web};
 use serde::Deserialize;
 use sqlx::FromRow;
 use tokio::fs;
@@ -28,6 +28,49 @@ pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, App
     .map_err(AppError::Database)?;
 
     Ok(HttpResponse::Ok().json(rows))
+}
+
+#[derive(Deserialize)]
+pub struct CreateIssueRequest {
+    code: String,
+    name: Option<String>,
+}
+
+#[post("/issues")]
+pub async fn create_issue(
+    payload: web::Json<CreateIssueRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let code = payload.code.trim();
+    if code.is_empty() {
+        return Err(AppError::BadRequest("issue code is required".into()));
+    }
+
+    let name = payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(code);
+
+    sqlx::query(
+        r#"
+        INSERT INTO issues (code, name)
+        VALUES (?, ?)
+        ON CONFLICT (code) DO UPDATE SET name = excluded.name
+        "#,
+    )
+    .bind(code)
+    .bind(name)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(HttpResponse::Created().json(IssueSummary {
+        code: code.to_owned(),
+        name: name.to_owned(),
+        bundle_count: 0,
+    }))
 }
 
 #[get("/issues/{issue_id}")]

@@ -17,6 +17,7 @@ log/*
 /target/
 /node_modules/
 /data/
+/release/
 .DS_Store
 Thumbs.db
 .env

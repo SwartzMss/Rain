@@ -117,6 +117,15 @@ pub async fn cleanup_expired_bundles(
     Ok(bundles.len() as u64)
 }
 
+pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
+    let result = sqlx::query("UPDATE bundles SET status = 'FAILED' WHERE status = 'PROCESSING'")
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+
+    Ok(result.rows_affected())
+}
+
 #[derive(FromRow)]
 struct ExpiredBundle {
     id: String,

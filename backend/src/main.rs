@@ -6,7 +6,7 @@ use actix_web::{App, HttpServer, middleware::Logger, web};
 use backend::{
     AppState,
     config::AppConfig,
-    db::{cleanup_expired_bundles, init_pool, prepare_schema},
+    db::{cleanup_expired_bundles, fail_stale_processing_bundles, init_pool, prepare_schema},
     routes::register,
 };
 use tracing::info;
@@ -52,6 +52,20 @@ async fn main() -> std::io::Result<()> {
             let _ = fs::remove_dir_all(&config.data_root);
         }
         fs::create_dir_all(&config.data_root).expect("failed to recreate data root");
+    }
+
+    let stale = fail_stale_processing_bundles(&pool)
+        .await
+        .expect("failed to mark stale processing bundles failed");
+    if stale > 0 {
+        info!(stale, "marked stale processing bundles failed");
+    }
+
+    let removed_tmp = cleanup_temp_uploads(&config.data_root)
+        .await
+        .expect("failed to cleanup temp uploads");
+    if removed_tmp > 0 {
+        info!(removed_tmp, "cleaned up stale temp upload directories");
     }
 
     if let Some(retention_days) = config.retention_days {
@@ -111,4 +125,25 @@ async fn main() -> std::io::Result<()> {
     .bind(bind_addr)?
     .run()
     .await
+}
+
+async fn cleanup_temp_uploads(data_root: &std::path::Path) -> std::io::Result<u64> {
+    let temp_root = data_root.join(".tmp");
+    if tokio::fs::metadata(&temp_root).await.is_err() {
+        return Ok(0);
+    }
+
+    let mut removed = 0u64;
+    let mut entries = tokio::fs::read_dir(&temp_root).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if entry.file_type().await?.is_dir() {
+            tokio::fs::remove_dir_all(&path).await?;
+        } else {
+            tokio::fs::remove_file(&path).await?;
+        }
+        removed += 1;
+    }
+
+    Ok(removed)
 }
