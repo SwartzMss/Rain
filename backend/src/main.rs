@@ -1,7 +1,8 @@
-use std::{fs, path::PathBuf};
+mod embedded_frontend;
+
+use std::fs;
 
 use actix_cors::Cors;
-use actix_files::{Files, NamedFile};
 use actix_web::{App, HttpServer, middleware::Logger, web};
 use backend::{
     AppState,
@@ -12,15 +13,6 @@ use backend::{
 use tracing::info;
 use tracing_appender::rolling;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
-
-#[derive(Clone)]
-struct StaticState {
-    root: PathBuf,
-}
-
-async fn spa_index(static_state: web::Data<StaticState>) -> actix_web::Result<NamedFile> {
-    Ok(NamedFile::open(static_state.root.join("index.html"))?)
-}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -80,7 +72,6 @@ async fn main() -> std::io::Result<()> {
     info!(
         host = %config.host,
         port = config.port,
-        static_root = %config.static_root.display(),
         "starting Rain backend"
     );
 
@@ -89,19 +80,6 @@ async fn main() -> std::io::Result<()> {
         pool,
         data_root: config.data_root.clone(),
     });
-    let static_root = config.static_root.clone();
-    let serve_static = static_root.join("index.html").is_file();
-    if serve_static {
-        info!(
-            static_root = %static_root.display(),
-            "serving frontend static files"
-        );
-    } else {
-        info!(
-            static_root = %static_root.display(),
-            "frontend dist not found; serving API only"
-        );
-    }
 
     HttpServer::new(move || {
         App::new()
@@ -109,18 +87,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(Cors::permissive())
             .app_data(shared_state.clone())
             .configure(register)
-            .configure({
-                let static_root = static_root.clone();
-                move |cfg| {
-                    if serve_static {
-                        cfg.app_data(web::Data::new(StaticState {
-                            root: static_root.clone(),
-                        }))
-                        .service(Files::new("/assets", static_root.join("assets")))
-                        .default_service(web::get().to(spa_index));
-                    }
-                }
-            })
+            .default_service(web::get().to(embedded_frontend::serve_frontend))
     })
     .bind(bind_addr)?
     .run()

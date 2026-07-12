@@ -7,15 +7,27 @@ on:
   pull_request:
 
 jobs:
-  backend:
-    name: Backend
+  ci:
+    name: Build and Test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,36 +40,17 @@ jobs:
           workspaces: backend
 
       - name: Format
+        working-directory: backend
         run: cargo fmt --check
 
       - name: Check
+        working-directory: backend
         run: cargo check --locked
 
       - name: Clippy
+        working-directory: backend
         run: cargo clippy --locked -- -D warnings
 
       - name: Test
+        working-directory: backend
         run: cargo test --locked
-
-  frontend:
-    name: Frontend
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install
-        run: npm ci
-
-      - name: Build
-        run: npm run build

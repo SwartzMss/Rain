@@ -1,6 +1,7 @@
 import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { BundleView } from './features/files/FilesView';
 import { HomeView } from './features/files/HomeView';
+import { APP_VERSION } from './version';
 import './App.css';
 
 function App() {
@@ -12,7 +13,12 @@ function App() {
       <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur">
         <div className="mx-auto flex w-full max-w-none flex-col gap-4 px-6 py-6 lg:flex-row lg:items-center lg:justify-between">
           <Link to="/" className="text-white no-underline">
-            <h1 className="text-4xl font-semibold text-white">Rain</h1>
+            <div className="flex flex-wrap items-baseline gap-3">
+              <h1 className="text-4xl font-semibold text-white">Rain</h1>
+              <span className="rounded border border-slate-700 px-2 py-0.5 text-xs font-semibold text-slate-400">
+                {APP_VERSION}
+              </span>
+            </div>
           </Link>
           <div className="flex flex-wrap items-center gap-2" />
         </div>

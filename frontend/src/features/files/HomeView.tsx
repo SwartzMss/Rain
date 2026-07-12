@@ -64,6 +64,9 @@ export function HomeView() {
   const [uploadTask, setUploadTask] = useState<UploadTaskResponse | null>(null);
   const selectedIssueRef = useRef(selectedIssueCode);
   const bundleRequestIdRef = useRef(0);
+  const hasActiveUploadTask =
+    uploadTask?.status === 'PROCESSING' || uploadTask?.status === 'PENDING';
+  const uploadDisabled = !selectedIssueCode || uploading || hasActiveUploadTask;
 
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
@@ -333,6 +336,10 @@ export function HomeView() {
     if (uploadingRef.current) {
       return;
     }
+    if (hasActiveUploadTask) {
+      setUploadError('当前上传任务仍在后台解析，请等待完成后再上传');
+      return;
+    }
     if (!selectedIssueCode) {
       setUploadError('请先选择或创建 Issue');
       return;
@@ -502,10 +509,10 @@ export function HomeView() {
                   type="file"
                   multiple
                   className="hidden"
-                  disabled={!selectedIssueCode || uploading}
+                  disabled={uploadDisabled}
                   onChange={(event) => {
                     if (uploadingRef.current) return;
-                    if (!selectedIssueCode) return;
+                    if (uploadDisabled) return;
                     const files = event.target.files;
                     if (files && files.length > 0) {
                       performUpload(Array.from(files)).catch(() => undefined);
@@ -517,9 +524,9 @@ export function HomeView() {
                 />
                 <div
                   className="w-full rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-6 text-center text-sm text-slate-200 transition hover:border-brand-500 hover:bg-slate-900/70 cursor-pointer aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
-                  aria-disabled={!selectedIssueCode || uploading}
+                  aria-disabled={uploadDisabled}
                   onClick={() => {
-                    if (selectedIssueCode && !uploadingRef.current) {
+                    if (!uploadDisabled && !uploadingRef.current) {
                       fileInputRef.current?.click();
                     }
                   }}
@@ -530,14 +537,16 @@ export function HomeView() {
                   onDrop={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    if (!selectedIssueCode) return;
+                    if (uploadDisabled) return;
                     if (uploadingRef.current) return;
                     if (event.dataTransfer?.files?.length) {
                       performUpload(Array.from(event.dataTransfer.files)).catch(() => undefined);
                     }
                   }}
                 >
-                  <p className="font-semibold text-white">{uploading ? '上传中...' : '拖拽文件到这里上传'}</p>
+                  <p className="font-semibold text-white">
+                    {uploading ? '上传中...' : hasActiveUploadTask ? '后台解析中...' : '拖拽文件到这里上传'}
+                  </p>
                   <p className="text-xs text-slate-400">支持日志或压缩包，点击也可选择文件</p>
                 </div>
                 {uploading ? (

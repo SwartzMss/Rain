@@ -9,7 +9,6 @@ pub struct AppConfig {
     pub database_url: String,
     pub data_root: PathBuf,
     pub log_dir: PathBuf,
-    pub static_root: PathBuf,
     pub reset_db: bool,
     pub retention_days: Option<u64>,
 }
@@ -25,16 +24,12 @@ impl AppConfig {
             .map_err(|err| AppError::Config(format!("invalid SERVER_PORT: {err}")))?;
 
         let database_url =
-            env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://../data/rain.db".into());
+            env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://./data/rain.db".into());
 
         let data_root =
             PathBuf::from(env::var("RAIN_DATA_ROOT").unwrap_or_else(|_| "./data/uploads".into()));
 
-        let log_dir = PathBuf::from(env::var("RAIN_LOG_DIR").unwrap_or_else(|_| "../log".into()));
-
-        let static_root = PathBuf::from(
-            env::var("RAIN_STATIC_ROOT").unwrap_or_else(|_| "../frontend/dist".into()),
-        );
+        let log_dir = PathBuf::from(env::var("RAIN_LOG_DIR").unwrap_or_else(|_| "./log".into()));
 
         let reset_db = env::var("RESET_DB")
             .unwrap_or_else(|_| "false".into())
@@ -57,7 +52,6 @@ impl AppConfig {
             database_url,
             data_root,
             log_dir,
-            static_root,
             reset_db,
             retention_days,
         })

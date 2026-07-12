@@ -23,10 +23,9 @@ cp .env.example .env
 默认配置如下，通常可以直接使用：
 
 ```dotenv
-DATABASE_URL=sqlite://../data/rain.db
-RAIN_DATA_ROOT=../data/uploads
-RAIN_LOG_DIR=../log
-RAIN_STATIC_ROOT=../frontend/dist
+DATABASE_URL=sqlite://./data/rain.db
+RAIN_DATA_ROOT=./data/uploads
+RAIN_LOG_DIR=./log
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8080
 RESET_DB=false
@@ -40,7 +39,7 @@ npm install
 npm run build
 ```
 
-构建产物会写入 `frontend/dist`，后端默认会托管这个目录。
+构建产物会写入 `frontend/dist`。后端编译时会把这个目录嵌入到可执行文件中。
 
 ### 3. 启动后端
 
@@ -73,9 +72,23 @@ npm run dev
 VITE_API_BASE_URL=http://localhost:8080
 ```
 
-## 直接运行 EXE
+## 构建单 EXE
 
-当前不需要 nginx、systemd、证书或反向代理。先构建前端，再构建后端可执行文件：
+当前不需要 nginx、systemd、证书或反向代理。Windows 可以直接运行一键构建脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
+```
+
+产物：
+
+```text
+release\Rain.exe
+```
+
+这个 EXE 已内置前端页面，不需要随包复制 `frontend/dist`。
+
+手动构建时仍然需要先构建前端，再编译后端：
 
 ```bash
 cd frontend
@@ -91,7 +104,7 @@ cargo build --release
 Windows:
 
 ```powershell
-.\target\release\backend.exe
+.\backend\target\release\backend.exe
 ```
 
 Linux/macOS:
@@ -100,14 +113,13 @@ Linux/macOS:
 ./target/release/backend
 ```
 
-运行前可在同目录准备 `.env`，或直接依赖默认值。默认会使用：
+发布时只需要复制 `release\Rain.exe`。运行前可在同目录准备 `.env`，或直接依赖默认值。默认会使用：
 
-- SQLite 数据库：`../data/rain.db`
+- SQLite 数据库：`./data/rain.db`
 - 上传目录：`./data/uploads`
-- 前端静态目录：`../frontend/dist`
 - 后端端口：`8080`
 
-启动后访问 `http://localhost:8080`。
+启动后访问 `http://localhost:8080`。首次运行后会在工作目录附近生成 `data/` 和 `log/`，这是 SQLite、上传文件和运行日志的正常运行时数据。
 
 ## 使用流程
 
