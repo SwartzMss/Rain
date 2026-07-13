@@ -445,6 +445,39 @@ async fn upload_search_tree_and_delete_issue() {
             .contains("ERROR tail failure is searchable")
     );
 
+    let large_tree: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{}/files/root",
+                large_upload["bundle_hash"]
+                    .as_str()
+                    .expect("large bundle hash")
+            ))
+            .to_request(),
+    )
+    .await;
+    let large_file_id = large_tree["children"][0]["id"]
+        .as_str()
+        .expect("large file id");
+    let large_lines: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{}/files/{large_file_id}/lines?start=0&limit=3000",
+                large_upload["bundle_hash"]
+                    .as_str()
+                    .expect("large bundle hash")
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(large_lines["limit"], 3000);
+    assert_eq!(
+        large_lines["lines"].as_array().expect("large lines").len(),
+        2501
+    );
+
     let bad_utf8_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let bad_utf8_body = multipart_body_bytes(
         &bad_utf8_boundary,

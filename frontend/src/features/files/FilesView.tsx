@@ -14,7 +14,7 @@ type TreeNode = Omit<FileNode, 'id' | 'children'> & {
 };
 
 const archivePattern = /\.(zip|tar|gz|tgz|rar|7z)$/i;
-const LINE_PAGE_SIZE = 200;
+const LINE_PAGE_SIZE_OPTIONS = [1000, 3000] as const;
 const isArchiveNode = (node?: { name: string }) => (node?.name ? archivePattern.test(node.name) : false);
 
 const formatSize = (bytes?: number) => {
@@ -115,6 +115,7 @@ export function BundleView(props?: BundleViewProps) {
   const [treeError, setTreeError] = useState<string | null>(null);
   const [fileLines, setFileLines] = useState<FileLinesResponse | null>(null);
   const [lineStart, setLineStart] = useState(0);
+  const [linePageSize, setLinePageSize] = useState<number>(LINE_PAGE_SIZE_OPTIONS[0]);
   const [fileContentLoading, setFileContentLoading] = useState(false);
   const [fileContentError, setFileContentError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -370,7 +371,7 @@ export function BundleView(props?: BundleViewProps) {
   ) => {
     if (typeof line === 'number' && line >= 0) {
       setTargetLine(line);
-      setLineStart(Math.max(0, line - 20));
+      setLineStart(Math.floor(line / linePageSize) * linePageSize);
     } else {
       setTargetLine(null);
       setLineStart(0);
@@ -467,7 +468,7 @@ export function BundleView(props?: BundleViewProps) {
       try {
         const content = await rainApi.fetchFileLines(bundleForContent, selectedNode.rawId, {
           start: lineStart,
-          limit: LINE_PAGE_SIZE
+          limit: linePageSize
         });
         if (!ignore) {
           setFileLines(content);
@@ -486,7 +487,7 @@ export function BundleView(props?: BundleViewProps) {
     return () => {
       ignore = true;
     };
-  }, [bundleId, selectedNode?.id, selectedNode?.is_dir, lineStart]);
+  }, [bundleId, selectedNode?.id, selectedNode?.is_dir, lineStart, linePageSize]);
 
   useEffect(() => {
     if (!selectedNode) return;
@@ -660,21 +661,21 @@ export function BundleView(props?: BundleViewProps) {
                 </button>
               </div>
               <div className="flex flex-col gap-2 text-xs text-slate-300 sm:flex-row sm:items-center sm:gap-3">
-                <span className="whitespace-nowrap">搜索模式</span>
+                <span className="whitespace-nowrap">搜索方式</span>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     className={`rounded border px-3 py-1 ${searchMode === 'log' ? 'border-brand-500 bg-brand-500/20 text-brand-100' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}
                     onClick={() => changeSearchMode('log')}
                   >
-                    日志模式
+                    按文件名
                   </button>
                   <button
                     type="button"
                     className={`rounded border px-3 py-1 ${searchMode === 'detailed' ? 'border-brand-500 bg-brand-500/20 text-brand-100' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}
                     onClick={() => changeSearchMode('detailed')}
                   >
-                    搜索模式
+                    搜日志内容
                   </button>
                 </div>
               </div>
@@ -950,22 +951,6 @@ export function BundleView(props?: BundleViewProps) {
                 ) : fileLines ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-2">
                     <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
-                      <button
-                        type="button"
-                        className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-                        disabled={lineStart <= 0 || fileContentLoading}
-                        onClick={() => setLineStart(Math.max(0, lineStart - LINE_PAGE_SIZE))}
-                      >
-                        上一页
-                      </button>
-                      <button
-                        type="button"
-                        className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-                        disabled={!fileLines.next_start || fileContentLoading}
-                        onClick={() => setLineStart(fileLines.next_start ?? lineStart + LINE_PAGE_SIZE)}
-                      >
-                        下一页
-                      </button>
                       <span>
                         行 {fileLines.start + 1}
                         {fileLines.lines.length > 0 ? ` - ${fileLines.start + fileLines.lines.length}` : ''}
@@ -996,6 +981,46 @@ export function BundleView(props?: BundleViewProps) {
                           ))}
                         </div>
                       </div>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-2 text-xs text-slate-400">
+                      <label className="flex items-center gap-2">
+                        <span>每页</span>
+                        <select
+                          className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200 outline-none focus:border-cyan-500/60"
+                          value={linePageSize}
+                          onChange={(event) => {
+                            setLinePageSize(Number(event.target.value));
+                            setLineStart(0);
+                            setTargetLine(null);
+                          }}
+                        >
+                          {LINE_PAGE_SIZE_OPTIONS.map((size) => (
+                            <option key={size} value={size}>{size} 行</option>
+                          ))}
+                        </select>
+                      </label>
+                      <span className="min-w-[86px] text-center">
+                        第 {Math.floor(fileLines.start / linePageSize) + 1}
+                        {fileLines.line_count
+                          ? ` / ${Math.max(1, Math.ceil(fileLines.line_count / linePageSize))} 页`
+                          : ' 页'}
+                      </span>
+                      <button
+                        type="button"
+                        className="rounded border border-slate-700 px-3 py-1 text-slate-300 hover:border-slate-500 disabled:opacity-50"
+                        disabled={lineStart <= 0 || fileContentLoading}
+                        onClick={() => setLineStart(Math.max(0, lineStart - linePageSize))}
+                      >
+                        上一页
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded border border-slate-700 px-3 py-1 text-slate-300 hover:border-slate-500 disabled:opacity-50"
+                        disabled={!fileLines.next_start || fileContentLoading}
+                        onClick={() => setLineStart(fileLines.next_start ?? lineStart + linePageSize)}
+                      >
+                        下一页
+                      </button>
                     </div>
                   </div>
                 ) : (

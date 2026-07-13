@@ -163,7 +163,7 @@ pub async fn get_file_lines(
     }
 
     let start = query.start.unwrap_or(0).max(0);
-    let limit = query.limit.unwrap_or(200).clamp(1, 1000);
+    let limit = query.limit.unwrap_or(1000).clamp(1, 3000);
     let (base_line, byte_offset) = nearest_line_offset(&state.pool, record.id, start).await?;
     let disk_path = resolve_file_path(&record, &data_root(&state))?;
 
