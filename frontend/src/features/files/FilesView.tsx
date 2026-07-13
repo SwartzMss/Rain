@@ -5,7 +5,7 @@ import type { FileLinesResponse, FileNode, IssueLogSearchHit, LogSearchHit, Uplo
 import type { BundleInfo } from '../../lib/bundles';
 import {
   closeViewerTab,
-  openPreviewTab,
+  openOrActivateTab,
   togglePinnedTab,
   type ViewerTab
 } from './viewerTabs';
@@ -146,10 +146,12 @@ export function BundleView(props?: BundleViewProps) {
   const [viewerTabs, setViewerTabs] = useState<ViewerTab[]>([]);
   const [activeViewerTabId, setActiveViewerTabId] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const viewerInitializedRef = useRef(false);
   const activeViewerTab = viewerTabs.find((tab) => tab.id === activeViewerTabId) ?? null;
 
   const openViewerTab = useCallback((tab: ViewerTab) => {
-    setViewerTabs((current) => openPreviewTab(current, tab));
+    viewerInitializedRef.current = true;
+    setViewerTabs((current) => openOrActivateTab(current, tab));
     setActiveViewerTabId(tab.id);
   }, []);
 
@@ -380,6 +382,7 @@ export function BundleView(props?: BundleViewProps) {
       }
 
       if (!ignore) {
+        viewerInitializedRef.current = false;
         setExpandedNodes(new Set());
         setRootIds(collectedRoots);
         setSelectedNodeId((prev) => prev || first);
@@ -523,7 +526,8 @@ export function BundleView(props?: BundleViewProps) {
   };
 
   useEffect(() => {
-    if (!selectedNode || selectedNode.is_dir || isArchiveNode(selectedNode) || viewerTabs.length > 0) return;
+    if (viewerInitializedRef.current) return;
+    if (!selectedNode || selectedNode.is_dir || isArchiveNode(selectedNode)) return;
     openViewerTab({
       id: `file:${selectedNode.id}`,
       kind: 'file',
@@ -535,7 +539,7 @@ export function BundleView(props?: BundleViewProps) {
       pageSize: linePageSize,
       targetLine
     });
-  }, [linePageSize, lineStart, openViewerTab, selectedNode, targetLine, viewerTabs.length]);
+  }, [linePageSize, lineStart, openViewerTab, selectedNode, targetLine]);
 
   useEffect(() => {
     if (!activeViewerTab || activeViewerTab.kind !== 'file') return;

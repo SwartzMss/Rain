@@ -37,14 +37,12 @@ export type TempViewerTab = ViewerTabBase & {
 
 export type ViewerTab = FileViewerTab | SearchViewerTab | TempViewerTab;
 
-export function openPreviewTab(tabs: ViewerTab[], incoming: ViewerTab): ViewerTab[] {
+export function openOrActivateTab(tabs: ViewerTab[], incoming: ViewerTab): ViewerTab[] {
   const existingIndex = tabs.findIndex((tab) => tab.id === incoming.id);
   if (existingIndex >= 0) {
     return tabs.map((tab, index) => (index === existingIndex ? { ...incoming, pinned: tab.pinned } : tab));
   }
-  const previewIndex = tabs.findIndex((tab) => !tab.pinned);
-  if (previewIndex < 0) return [...tabs, incoming];
-  return tabs.map((tab, index) => (index === previewIndex ? incoming : tab));
+  return [...tabs, incoming];
 }
 
 export function togglePinnedTab(tabs: ViewerTab[], id: string): ViewerTab[] {

@@ -78,3 +78,13 @@
 - [x] Run `npm run build` in `frontend`; expect TypeScript and Vite production build success.
 - [x] Run `cargo fmt --check && cargo test` in `backend`; expect all existing backend tests to pass.
 - [x] Run `git diff --check`; expect no whitespace errors, then review `git status --short` to confirm only scoped files changed.
+
+### Task 6: Preserve multiple tabs and close the last tab
+
+**Files:**
+- Modify: `frontend/src/features/files/viewerTabs.ts`
+- Modify: `frontend/src/features/files/FilesView.tsx`
+
+- [x] Append different file, search, and temporary-result tabs instead of replacing an unpinned tab.
+- [x] Activate an existing tab when the same document is opened again.
+- [x] Gate automatic initial-file opening so closing the final tab does not recreate it.
