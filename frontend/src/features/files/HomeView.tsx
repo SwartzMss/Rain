@@ -545,12 +545,9 @@ export function HomeView() {
                 onClick={() => selectIssue(issue.code)}
                 onDoubleClick={() => navigate(`/issue/${encodeURIComponent(issue.code)}`)}
               >
-                <span className="min-w-0">
+                <span className="min-w-0 flex-1">
                   <span className="block truncate font-semibold">{issue.code}</span>
                   <span className="block text-[10px] font-normal text-slate-500">双击查看日志</span>
-                </span>
-                <span className="rounded-full bg-sky-500/20 px-2 py-0.5 text-xs text-sky-300">
-                  {issue.bundle_count}
                 </span>
               </button>
             );

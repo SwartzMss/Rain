@@ -22,7 +22,10 @@ export type SearchViewerTab = ViewerTabBase & {
   total: number;
   from: number;
   pageSize: number;
-  source: { kind: 'issue'; issueCode: string } | { kind: 'file'; bundleHash: string; fileId: string };
+  source:
+    | { kind: 'issue'; issueCode: string }
+    | { kind: 'file'; bundleHash: string; fileId: string }
+    | { kind: 'temp'; resultId: string };
 };
 
 export type TempViewerTab = ViewerTabBase & {

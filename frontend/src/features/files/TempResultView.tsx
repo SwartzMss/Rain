@@ -16,7 +16,6 @@ export function TempResultView() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     if (!resultId) return;
@@ -75,17 +74,6 @@ export function TempResultView() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
-              <button
-                type="button"
-                className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500"
-                onClick={async () => {
-                  await navigator.clipboard.writeText(window.location.href);
-                  setCopied(true);
-                  window.setTimeout(() => setCopied(false), 1500);
-                }}
-              >
-                {copied ? '已复制' : '复制分享链接'}
-              </button>
               <a
                 className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500"
                 href={rainApi.tempResultDownloadUrl(resultId)}
@@ -122,7 +110,7 @@ export function TempResultView() {
               disabled={creating || !expression.trim()}
               onClick={() => createFromResult().catch(() => undefined)}
             >
-              {creating ? '生成中...' : '生成新的临时文件'}
+              {creating ? '搜索中...' : '搜索'}
             </button>
           </div>
 

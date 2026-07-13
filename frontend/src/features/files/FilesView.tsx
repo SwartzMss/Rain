@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
 import type { FileLinesResponse, FileNode, IssueLogSearchHit, LogSearchHit, UploadSummary } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
@@ -101,7 +101,6 @@ export function BundleView(props?: BundleViewProps) {
   const bundleHash = params.bundleHash || props?.legacyBundleHash || '';
   const issueCodeFromRoute = params.issueCode;
   const location = useLocation();
-  const navigate = useNavigate();
   const locationState = (location.state as { issue?: string; bundleName?: string } | null) ?? (props?.legacyState as
     | { issue?: string; bundleName?: string }
     | null);
@@ -140,7 +139,6 @@ export function BundleView(props?: BundleViewProps) {
   const [fileSearchLoading, setFileSearchLoading] = useState(false);
   const [fileSearchError, setFileSearchError] = useState<string | null>(null);
   const [fileSearchExecuted, setFileSearchExecuted] = useState(false);
-  const [tempResultCreating, setTempResultCreating] = useState(false);
   const [targetLine, setTargetLine] = useState<number | null>(null);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const [viewerTabs, setViewerTabs] = useState<ViewerTab[]>([]);
@@ -415,16 +413,6 @@ export function BundleView(props?: BundleViewProps) {
     }
     return [];
   }, [activeViewerTab]);
-  const visibleActiveSearchResults = useMemo(() => {
-    const keyword = resultFilterText.trim().toLowerCase();
-    if (!keyword) return activeSearchResults;
-    return activeSearchResults.filter((hit) => {
-      const path = hit.path?.toLowerCase() ?? '';
-      const snippet = hit.snippet?.toLowerCase() ?? '';
-      const timeline = hit.timeline?.toLowerCase() ?? '';
-      return path.includes(keyword) || snippet.includes(keyword) || timeline.includes(keyword);
-    });
-  }, [activeSearchResults, resultFilterText]);
 
   const handleNodeClick = async (
     nodeId: string,
@@ -615,64 +603,64 @@ export function BundleView(props?: BundleViewProps) {
     }
   }, [bundleId, fileSearchText, openViewerTab, selectedNode]);
 
-  const createTempResult = useCallback(async () => {
-    const expression = fileSearchText.trim();
-    if (!selectedNode || selectedNode.is_dir || isArchiveNode(selectedNode) || !expression) return;
-    const selectedBundleId = selectedNode.bundleId || bundleId;
-    if (!selectedBundleId) return;
-    setTempResultCreating(true);
-    setFileSearchError(null);
-    try {
-      const result = await rainApi.createTempResult({
-        expression,
-        bundle_hash: selectedBundleId,
-        file_id: selectedNode.rawId
-      });
-      navigate(`/temp-results/${result.id}`);
-    } catch (error) {
-      setFileSearchError(normalizeApiError(error));
-    } finally {
-      setTempResultCreating(false);
-    }
-  }, [bundleId, fileSearchText, navigate, selectedNode]);
+  const searchWithinActiveResults = useCallback(async () => {
+    if (!activeViewerTab || (activeViewerTab.kind !== 'search' && activeViewerTab.kind !== 'temp')) return;
+    const nestedExpression = resultFilterText.trim();
+    if (!nestedExpression) return;
+    const expression = activeViewerTab.kind === 'search'
+      ? `(${activeViewerTab.expression}) AND (${nestedExpression})`
+      : nestedExpression;
+    const source = activeViewerTab.kind === 'search'
+      ? activeViewerTab.source
+      : { kind: 'temp' as const, resultId: activeViewerTab.resultId };
 
-  const createActiveSearchTempResult = useCallback(async () => {
-    if (!activeViewerTab || activeViewerTab.kind !== 'search') return;
-    setTempResultCreating(true);
+    setSearchLoading(true);
     setSearchError(null);
     try {
-      const result = await rainApi.createTempResult(
-        activeViewerTab.source.kind === 'issue'
-          ? { expression: activeViewerTab.expression, issue_code: activeViewerTab.source.issueCode }
-          : {
-              expression: activeViewerTab.expression,
-              bundle_hash: activeViewerTab.source.bundleHash,
-              file_id: activeViewerTab.source.fileId
+      const payload = source.kind === 'issue'
+        ? { expression, issue_code: source.issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] }
+        : source.kind === 'file'
+          ? {
+              expression,
+              bundle_hash: source.bundleHash,
+              file_id: source.fileId,
+              from: 0,
+              size: LINE_PAGE_SIZE_OPTIONS[0]
             }
-      );
-      const content = await rainApi.fetchTempResultLines(result.id, {
-        start: 0,
-        limit: LINE_PAGE_SIZE_OPTIONS[0]
-      });
+          : {
+              expression,
+              source_temp_id: source.resultId,
+              from: 0,
+              size: LINE_PAGE_SIZE_OPTIONS[0]
+            };
+      const response = await rainApi.previewTempResult(payload);
+      const hits = response.lines.map((line) => ({
+        bundle_hash: line.bundle_hash,
+        file_id: line.file_id ?? '',
+        path: line.path,
+        snippet: line.content,
+        line_number: line.line_number
+      }));
+      setResultFilterText('');
       openViewerTab({
-        id: `temp:${result.id}`,
-        kind: 'temp',
-        title: result.name,
-        pinned: true,
+        id: `search:${Date.now()}`,
+        kind: 'search',
+        title: nestedExpression,
+        pinned: false,
         scrollTop: 0,
-        resultId: result.id,
-        expression: result.expression,
-        lines: content.lines.map((line) => line.content),
-        total: content.line_count,
-        from: content.start,
-        pageSize: content.limit
+        expression,
+        hits,
+        total: response.total,
+        from: 0,
+        pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+        source
       });
     } catch (error) {
       setSearchError(normalizeApiError(error));
     } finally {
-      setTempResultCreating(false);
+      setSearchLoading(false);
     }
-  }, [activeViewerTab, openViewerTab]);
+  }, [activeViewerTab, openViewerTab, resultFilterText]);
 
   const loadViewerPage = useCallback(async (tab: ViewerTab, from: number, pageSize: number) => {
     setSearchLoading(true);
@@ -698,13 +686,20 @@ export function BundleView(props?: BundleViewProps) {
       if (tab.kind !== 'search') return;
       const payload = tab.source.kind === 'issue'
         ? { expression: tab.expression, issue_code: tab.source.issueCode, from, size: pageSize }
-        : {
+        : tab.source.kind === 'file'
+          ? {
             expression: tab.expression,
             bundle_hash: tab.source.bundleHash,
             file_id: tab.source.fileId,
             from,
             size: pageSize
-          };
+          }
+          : {
+              expression: tab.expression,
+              source_temp_id: tab.source.resultId,
+              from,
+              size: pageSize
+            };
       const response = await rainApi.previewTempResult(payload);
       const hits = response.lines.map((line) => ({
         bundle_hash: line.bundle_hash,
@@ -845,11 +840,15 @@ export function BundleView(props?: BundleViewProps) {
     const isExpanded = expandedNodes.has(nodeId);
     const isSelected = selectedNodeId === nodeId;
     const canExpand = node.is_dir || isArchiveNode(node);
-    const badgeColor = node.is_dir
-      ? 'border-amber-400/60 text-amber-200'
+    const typeIcon = node.is_dir ? '▣' : isArchiveNode(node) ? 'ZIP' : '□';
+    const iconClass = node.is_dir
+      ? 'text-cyan-300'
       : isArchiveNode(node)
-        ? 'border-brand-400/70 text-brand-200'
-        : 'border-slate-600 text-slate-200';
+        ? 'text-brand-200'
+        : 'text-slate-300';
+    const rowMeta = canExpand
+      ? `${node.childrenIds.length || 0} 子节点`
+      : node.mime_type ?? 'file';
 
     return (
       <div key={nodeId}>
@@ -857,26 +856,27 @@ export function BundleView(props?: BundleViewProps) {
           type="button"
           onClick={() => handleNodeClick(node.id).catch(() => undefined)}
           className={[
-            'flex w-full items-center gap-3 rounded-lg border border-transparent px-2 py-2 text-left text-sm transition',
-            isSelected ? 'border-brand-500/60 bg-slate-800/80 shadow-sm text-white' : 'hover:border-slate-800 hover:bg-slate-900/40'
+            'group flex h-9 w-full items-center gap-2 rounded border border-transparent px-2 text-left text-sm transition',
+            isSelected ? 'border-cyan-500/50 bg-cyan-500/15 text-white shadow-[inset_2px_0_0_rgba(56,189,248,0.75)]' : 'text-slate-300 hover:bg-slate-900/70 hover:text-white'
           ].join(' ')}
-          style={{ paddingLeft: `${depth * 12}px` }}
+          style={{ paddingLeft: `${8 + depth * 16}px` }}
         >
-          <span className={`flex h-7 w-7 items-center justify-center rounded border text-[10px] font-semibold ${badgeColor}`}>
-            {node.is_dir ? 'DIR' : isArchiveNode(node) ? 'ZIP' : 'FILE'}
+          <span className="w-3 shrink-0 text-slate-500">
+            {canExpand ? (isExpanded ? '⌄' : '›') : ''}
           </span>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">{node.name}</p>
-            <p className="text-[10px] uppercase text-slate-500">
-              {canExpand ? `${node.childrenIds.length || 0} 子节点` : node.mime_type ?? 'file'}
-            </p>
+          <span className={`flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-700/80 bg-slate-950/60 text-[10px] font-semibold ${iconClass}`}>
+            {typeIcon}
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-medium leading-4">{node.name}</p>
+            <p className="truncate text-[10px] uppercase leading-3 text-slate-500">{rowMeta}</p>
           </div>
-          <span className="ml-auto text-xs text-slate-500">
+          <span className="ml-2 shrink-0 text-[11px] text-slate-500 group-hover:text-slate-400">
             {canExpand ? (isExpanded ? '收起' : '展开') : formatSize(node.size_bytes)}
           </span>
         </button>
         {canExpand && isExpanded ? (
-          <div className="border-l border-slate-800 pl-3">
+          <div className="ml-4 border-l border-slate-800/80">
             {node.childrenIds.length > 0 ? (
               node.childrenIds.map((childId) => renderTreeNode(childId, depth + 1))
             ) : (
@@ -888,34 +888,41 @@ export function BundleView(props?: BundleViewProps) {
     );
   };
 
+  const tabIcon = (kind: ViewerTab['kind']) => {
+    if (kind === 'file') return '□';
+    if (kind === 'search') return '⌕';
+    return '◈';
+  };
+
+  const activeResultPlaceholder = '在当前结果中搜索...';
+
   return (
     <div className="space-y-5">
-      <section className="panel space-y-4">
+      <section className="panel space-y-4 !p-0">
         {treeError ? <p className="text-sm text-rose-300">{treeError}</p> : null}
 
-        <div className="grid gap-4 lg:grid-cols-[420px_minmax(0,1fr)]">
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-3">
-            <p className="text-xs text-slate-400">Issue: {activeIssueLabel}</p>
-            {nonReadyBundles.length > 0 ? (
-              <div className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
-                {nonReadyBundles.map((bundle) => (
-                  <div key={bundle.hash} className="flex items-center justify-between gap-3">
-                    <span className="truncate">{bundle.name || bundle.hash}</span>
-                    <span className={bundle.status.upload_status === 'FAILED' ? 'text-rose-300' : 'text-amber-200'}>
-                      {bundleStatusLabel(bundle)}
-                    </span>
-                  </div>
-                ))}
+        <div className="grid min-h-[82vh] gap-0 lg:grid-cols-[360px_minmax(0,1fr)]">
+          <div className="flex min-h-0 flex-col border-r border-slate-800/90 bg-slate-950/40">
+            <div className="border-b border-slate-800 px-4 py-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <p className="truncate text-sm font-medium text-slate-200">Issue: {activeIssueLabel}</p>
+                <button
+                  type="button"
+                  className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:border-slate-500 hover:text-white"
+                  title="刷新文件树"
+                  onClick={() => setRefreshKey((key) => key + 1)}
+                >
+                  刷新
+                </button>
               </div>
-            ) : null}
-            <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+              <div className="flex min-h-10 items-center gap-2 rounded border border-slate-700 bg-slate-950/70 px-3 focus-within:border-cyan-500/60">
+                <span className="shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                 <input
-                  className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white focus:border-brand-500 focus:outline-none"
+                  className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
                   placeholder={
                     searchMode === 'log'
-                      ? '按文件名搜索当前 Issue 的日志'
-                      : '例如：(ERROR OR WARN) AND NOT heartbeat'
+                      ? '搜索文件或目录...'
+                      : '搜索日志内容...'
                   }
                   value={searchTerm}
                   onChange={(event) => setSearchTerm(event.target.value)}
@@ -928,46 +935,55 @@ export function BundleView(props?: BundleViewProps) {
                 />
                 <button
                   type="button"
-                  className={`w-full whitespace-nowrap rounded-lg px-4 py-2 text-sm font-semibold transition sm:w-auto ${
-                    searchLoading
-                      ? 'cursor-not-allowed bg-slate-700 text-slate-400'
-                      : 'bg-brand-500 text-slate-900 hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400'
-                  }`}
+                  className="shrink-0 rounded bg-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => runSearch().catch(() => undefined)}
                   disabled={searchLoading || !issueCode || !searchTerm.trim()}
                 >
                   搜索
                 </button>
               </div>
-              <div className="flex flex-col gap-2 text-xs text-slate-300 sm:flex-row sm:items-center sm:gap-3">
-                <span className="whitespace-nowrap">搜索方式</span>
-                <div className="flex flex-wrap gap-2">
+              <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
+                <span className="shrink-0">搜索方式</span>
+                <div className="flex rounded border border-slate-700 bg-slate-950/70 p-0.5">
                   <button
                     type="button"
-                    className={`rounded border px-3 py-1 ${searchMode === 'log' ? 'border-brand-500 bg-brand-500/20 text-brand-100' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}
+                    className={`rounded px-3 py-1 transition ${searchMode === 'log' ? 'bg-cyan-500/15 text-cyan-100' : 'text-slate-400 hover:text-white'}`}
                     onClick={() => changeSearchMode('log')}
                   >
                     按文件名
                   </button>
                   <button
                     type="button"
-                    className={`rounded border px-3 py-1 ${searchMode === 'detailed' ? 'border-brand-500 bg-brand-500/20 text-brand-100' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}
+                    className={`rounded px-3 py-1 transition ${searchMode === 'detailed' ? 'bg-cyan-500/15 text-cyan-100' : 'text-slate-400 hover:text-white'}`}
                     onClick={() => changeSearchMode('detailed')}
                   >
                     搜日志内容
                   </button>
                 </div>
               </div>
-              {searchError ? <p className="text-xs text-rose-300">{searchError}</p> : null}
+              {searchError ? <p className="mt-2 text-xs text-rose-300">{searchError}</p> : null}
             </div>
+            <div className="min-h-0 flex-1 overflow-auto p-3">
+            {nonReadyBundles.length > 0 ? (
+              <div className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
+                {nonReadyBundles.map((bundle) => (
+                  <div key={bundle.hash} className="flex items-center justify-between gap-3">
+                    <span className="truncate">{bundle.name || bundle.hash}</span>
+                    <span className={bundle.status.upload_status === 'FAILED' ? 'text-rose-300' : 'text-amber-200'}>
+                      {bundleStatusLabel(bundle)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {searchMode === 'log' && searchExecuted ? (
               searchLoading && searchResults.length === 0 ? (
                 <p className="py-6 text-center text-sm text-slate-500">正在匹配文件名...</p>
               ) : searchResults.length === 0 ? (
                 <p className="py-6 text-center text-sm text-slate-500">未找到匹配的日志文件。</p>
               ) : (
-                <div className="space-y-2 text-sm text-slate-200">
-                  <p className="text-xs text-slate-500">找到 {searchResults.length} 个日志文件</p>
+                <div className="space-y-1 text-sm text-slate-200">
+                  <p className="px-2 pb-1 text-xs text-slate-500">找到 {searchResults.length} 个日志文件</p>
                   {searchResults.map((hit, index) => {
                     const targetId = hit.bundle_hash ? `${hit.bundle_hash}:${hit.file_id}` : '';
                     const selected = !!targetId && selectedNodeId === targetId;
@@ -975,24 +991,24 @@ export function BundleView(props?: BundleViewProps) {
                       <button
                         key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
                         type="button"
-                        className={`flex w-full items-center gap-3 rounded-lg border px-2 py-2 text-left transition ${
+                        className={`group flex h-10 w-full items-center gap-2 rounded border px-2 text-left transition ${
                           selected
-                            ? 'border-cyan-500/60 bg-slate-800/80 text-white'
-                            : 'border-transparent hover:border-slate-800 hover:bg-slate-900/40'
+                            ? 'border-cyan-500/50 bg-cyan-500/15 text-white shadow-[inset_2px_0_0_rgba(56,189,248,0.75)]'
+                            : 'border-transparent text-slate-300 hover:bg-slate-900/70 hover:text-white'
                         }`}
                         onClick={() => {
                           if (!targetId) return;
                           handleNodeClick(targetId, null, { preserveSearch: true }).catch(() => undefined);
                         }}
                       >
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-slate-600 text-[10px] font-semibold text-slate-200">
-                          FILE
+                        <span className="flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-700/80 bg-slate-950/60 text-[10px] font-semibold text-slate-300">
+                          □
                         </span>
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium">
+                          <p className="truncate text-[13px] font-medium leading-4">
                             {highlightText(hit.snippet, searchTerm)}
                           </p>
-                          <p className="truncate text-[10px] text-slate-500">
+                          <p className="truncate text-[10px] leading-3 text-slate-500">
                             {highlightText(formatHitPath(hit.path), searchTerm)}
                           </p>
                         </div>
@@ -1022,27 +1038,31 @@ export function BundleView(props?: BundleViewProps) {
             ) : (
               <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
             )}
+            </div>
           </div>
 
-          <div className="flex min-h-[80vh] flex-col rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200">
+          <div className="flex min-h-[82vh] flex-col bg-slate-950/20 text-sm text-slate-200">
             {viewerTabs.length > 0 ? (
-              <div className="mb-2 flex min-h-9 items-end gap-1 overflow-x-auto border-b border-slate-800">
+              <div className="flex min-h-12 items-end gap-1 overflow-x-auto border-b border-slate-800 bg-slate-950/50 px-4">
                 {viewerTabs.map((tab) => (
                   <div
                     key={tab.id}
-                    className={`flex max-w-64 shrink-0 items-center gap-1 rounded-t border border-b-0 px-2 py-1.5 text-xs ${
+                    className={`flex h-11 max-w-64 shrink-0 items-center gap-2 border border-b-0 px-3 text-xs transition ${
                       tab.id === activeViewerTabId
-                        ? 'border-slate-600 bg-slate-950 text-white'
-                        : 'border-transparent bg-slate-900 text-slate-400 hover:text-slate-200'
+                        ? 'border-cyan-500/50 bg-slate-900 text-white shadow-[inset_0_1px_0_rgba(56,189,248,0.22)]'
+                        : 'border-transparent bg-transparent text-slate-400 hover:bg-slate-900/60 hover:text-slate-200'
                     }`}
                   >
+                    <span className={tab.kind === 'temp' ? 'text-cyan-300' : tab.kind === 'search' ? 'text-brand-300' : 'text-slate-500'}>
+                      {tabIcon(tab.kind)}
+                    </span>
                     <button
                       type="button"
                       className="min-w-0 flex-1 truncate text-left"
                       title={tab.title}
                       onClick={() => activateViewerTab(tab)}
                     >
-                      {tab.kind === 'search' ? '⌕ ' : ''}{tab.title}
+                      {tab.title}
                     </button>
                     <button
                       type="button"
@@ -1065,15 +1085,15 @@ export function BundleView(props?: BundleViewProps) {
                 ))}
               </div>
             ) : null}
-            <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex min-h-0 flex-1 flex-col p-4">
               <div className="flex min-h-0 flex-1 flex-col gap-2">
                 {activeViewerTab?.kind === 'file' && selectedNode &&
                 !selectedNode.is_dir &&
                 !isArchiveNode(selectedNode) ? (
-                  <div className="flex min-h-11 flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 focus-within:border-cyan-500/60">
+                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-800 bg-slate-950/30 px-4 py-3 focus-within:border-cyan-500/50">
                     <span className="shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                     <input
-                      className="min-w-[180px] flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
+                      className="min-w-[220px] flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
                       placeholder='当前文件表达式，例如：ERROR AND NOT "timeout"'
                       value={fileSearchText}
                       onChange={(event) => setFileSearchText(event.target.value)}
@@ -1088,12 +1108,12 @@ export function BundleView(props?: BundleViewProps) {
                       }}
                     />
                     {fileSearchExecuted ? (
-                      <span className="shrink-0 text-xs text-slate-400">{fileSearchTotal} 条结果</span>
+                      <span className="shrink-0 text-xs text-slate-400">{fileSearchTotal} 个结果</span>
                     ) : null}
                     {fileSearchText ? (
                       <button
                         type="button"
-                        className="shrink-0 text-xs text-slate-400 transition hover:text-white"
+                        className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-400 transition hover:border-slate-700 hover:text-white"
                         onClick={clearFileSearch}
                       >
                         清空
@@ -1101,32 +1121,35 @@ export function BundleView(props?: BundleViewProps) {
                     ) : null}
                     <button
                       type="button"
-                      className="shrink-0 rounded bg-brand-500 px-3 py-1.5 text-xs font-semibold text-slate-950 transition hover:bg-brand-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                      className="shrink-0 rounded border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={fileSearchLoading || !fileSearchText.trim()}
                       onClick={() => runFileSearch(0).catch(() => undefined)}
                     >
                       搜索
                     </button>
-                    <button
-                      type="button"
-                      className="shrink-0 rounded border border-cyan-700/70 px-3 py-1.5 text-xs font-semibold text-cyan-200 transition hover:border-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={tempResultCreating || !fileSearchText.trim()}
-                      onClick={() => createTempResult().catch(() => undefined)}
+                    <a
+                      className="shrink-0 rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-500 hover:text-white"
+                      href={rainApi.fileDownloadUrl(selectedNode.bundleId || bundleId, selectedNode.rawId)}
                     >
-                      {tempResultCreating ? '生成中...' : '生成临时文件'}
-                    </button>
+                      下载
+                    </a>
                   </div>
                 ) : null}
 
                 {(activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp') && activeSearchResults.length > 0 ? (
-                  <div className="flex min-h-11 flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 focus-within:border-cyan-500/60">
+                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-800 bg-slate-950/30 px-4 py-3 focus-within:border-cyan-500/50">
                     <span className="shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                     <input
-                      className="min-w-[180px] flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
-                      placeholder="在当前结果中搜索..."
+                      className="min-w-[220px] flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
+                      placeholder={activeResultPlaceholder}
                       value={resultFilterText}
                       onChange={(event) => setResultFilterText(event.target.value)}
                       onKeyDown={(event) => {
+                        if (event.key === 'Enter' && resultFilterText.trim()) {
+                          event.preventDefault();
+                          searchWithinActiveResults().catch(() => undefined);
+                          return;
+                        }
                         if (event.key === 'Escape') {
                           event.preventDefault();
                           setResultFilterText('');
@@ -1134,45 +1157,33 @@ export function BundleView(props?: BundleViewProps) {
                       }}
                     />
                     <span className="shrink-0 text-xs text-slate-400">
-                      {resultFilterText.trim()
-                        ? `本页已筛选 ${visibleActiveSearchResults.length} / ${activeSearchResults.length} 条`
-                        : `${activeViewerTab.total} 条结果`}
+                      {`${activeViewerTab.total} 条结果`}
                     </span>
                     {resultFilterText ? (
                       <button
                         type="button"
-                        className="shrink-0 text-xs text-slate-400 transition hover:text-white"
+                        className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-400 transition hover:border-slate-700 hover:text-white"
                         onClick={() => setResultFilterText('')}
                       >
                         清空
                       </button>
                     ) : null}
-                    {activeViewerTab.kind === 'search' ? (
-                      <button
-                        type="button"
-                        className="shrink-0 text-xs text-cyan-300 transition hover:text-cyan-100 disabled:opacity-50"
-                        disabled={tempResultCreating}
-                        onClick={() => createActiveSearchTempResult().catch(() => undefined)}
+                    <button
+                      type="button"
+                      className="shrink-0 rounded border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={searchLoading || !resultFilterText.trim()}
+                      onClick={() => searchWithinActiveResults().catch(() => undefined)}
+                    >
+                      搜索
+                    </button>
+                    {activeViewerTab.kind === 'temp' ? (
+                      <a
+                        className="shrink-0 rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-500 hover:text-white"
+                        href={rainApi.tempResultDownloadUrl(activeViewerTab.resultId)}
                       >
-                        {tempResultCreating ? '生成中...' : '生成临时文件'}
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          className="shrink-0 text-xs text-slate-400 transition hover:text-white"
-                          onClick={() => navigator.clipboard.writeText(`${window.location.origin}/temp-results/${activeViewerTab.resultId}`)}
-                        >
-                          复制分享链接
-                        </button>
-                        <a
-                          className="shrink-0 text-xs text-cyan-300 transition hover:text-cyan-100"
-                          href={rainApi.tempResultDownloadUrl(activeViewerTab.resultId)}
-                        >
-                          下载
-                        </a>
-                      </>
-                    )}
+                        下载
+                      </a>
+                    ) : null}
                   </div>
                 ) : null}
 
@@ -1241,21 +1252,28 @@ export function BundleView(props?: BundleViewProps) {
                     <p className="py-8 text-center text-sm text-slate-500">正在搜索...</p>
                   ) : activeSearchResults.length === 0 ? (
                     <p className="py-8 text-center text-sm text-slate-500">未搜索到相关日志。</p>
-                  ) : visibleActiveSearchResults.length === 0 && resultFilterText.trim() ? (
-                    <p className="py-8 text-center text-sm text-slate-500">
-                      当前结果中没有包含「{resultFilterText.trim()}」的内容。
-                    </p>
                   ) : (
                     <div className="flex min-h-0 flex-1 flex-col gap-2">
                       <div
                         ref={contentRef}
-                        className="min-h-[70vh] flex-1 overflow-auto rounded bg-slate-950/70 p-3 font-mono text-xs leading-5 text-slate-100"
+                        className="min-h-[70vh] flex-1 overflow-auto rounded border border-slate-800 bg-slate-950/70 p-3 font-mono text-xs leading-5 text-slate-100"
                       >
-                        {visibleActiveSearchResults.map((hit, index) => (
-                          <div key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`} className="whitespace-pre">
-                            {highlightText(hit.snippet, resultFilterText)}
+                        <div className="grid grid-cols-[auto_1fr] gap-3">
+                          <div className="select-none text-right text-slate-600">
+                            {activeSearchResults.map((hit, index) => (
+                              <div key={`line:${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`}>
+                                {(hit.line_number ?? activeViewerTab.from + index) + 1}
+                              </div>
+                            ))}
                           </div>
-                        ))}
+                          <div>
+                            {activeSearchResults.map((hit, index) => (
+                              <div key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`} className="whitespace-pre">
+                                {highlightText(hit.snippet, resultFilterText)}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                       <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-2 text-xs text-slate-400">
                         <label className="flex items-center gap-2">
@@ -1305,17 +1323,9 @@ export function BundleView(props?: BundleViewProps) {
                   <p className="text-sm text-rose-300">{fileContentError}</p>
                 ) : fileLines ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-2">
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
-                      <a
-                        className="ml-auto rounded border border-slate-700 px-3 py-1 text-slate-200 hover:border-slate-500"
-                        href={rainApi.fileDownloadUrl(selectedNode.bundleId || bundleId, selectedNode.rawId)}
-                      >
-                        下载原文件
-                      </a>
-                    </div>
                     <div
                       ref={contentRef}
-                      className="min-h-[70vh] flex-1 overflow-auto rounded bg-slate-950/70 p-3 text-xs leading-5 text-slate-100"
+                      className="min-h-[70vh] flex-1 overflow-auto rounded border border-slate-800 bg-slate-950/70 p-3 text-xs leading-5 text-slate-100"
                     >
                       <div className="grid grid-cols-[auto_1fr] gap-3 font-mono">
                         <div className="select-none text-right text-slate-500">
