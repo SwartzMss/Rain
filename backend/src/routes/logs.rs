@@ -140,9 +140,19 @@ pub async fn search_logs(
 #[derive(Deserialize)]
 struct IssueLogQuery {
     q: String,
+    #[serde(default)]
+    mode: IssueSearchMode,
     path_like: Option<String>,
     from: Option<i64>,
     size: Option<i64>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum IssueSearchMode {
+    Filename,
+    #[default]
+    Content,
 }
 
 #[get("/issues/{issue_code}/search")]
@@ -156,6 +166,11 @@ pub async fn search_issue_logs(
     let search_term = term.q.trim();
     if search_term.is_empty() {
         return Err(AppError::BadRequest("query parameter q is required".into()));
+    }
+
+    if matches!(term.mode, IssueSearchMode::Filename) {
+        return search_issue_files(&state.pool, &issue_code, search_term, term.from, term.size)
+            .await;
     }
 
     let fts_query = build_fts_query(search_term);
@@ -245,6 +260,92 @@ pub async fn search_issue_logs(
     }))
 }
 
+async fn search_issue_files(
+    pool: &sqlx::SqlitePool,
+    issue_code: &str,
+    search_term: &str,
+    from: Option<i64>,
+    size: Option<i64>,
+) -> Result<HttpResponse, AppError> {
+    let from = from.unwrap_or(0).max(0);
+    let size = size
+        .unwrap_or(DEFAULT_LOG_RESULTS)
+        .clamp(1, MAX_LOG_RESULTS);
+    let pattern = format!("%{}%", escape_like_pattern(search_term));
+
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM files f
+        JOIN bundles b ON b.id = f.bundle_id
+        WHERE b.issue_code = ?
+          AND b.status = 'READY'
+          AND f.is_dir = 0
+          AND (
+            f.name LIKE ? ESCAPE '\' COLLATE NOCASE
+            OR f.path LIKE ? ESCAPE '\' COLLATE NOCASE
+          )
+        "#,
+    )
+    .bind(issue_code)
+    .bind(&pattern)
+    .bind(&pattern)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let rows = sqlx::query_as::<_, IssueFileSearchRow>(
+        r#"
+        SELECT f.id AS file_id,
+               f.name,
+               CASE WHEN f.parent_id IS NULL THEN f.name ELSE f.path END AS path,
+               b.hash AS bundle_hash
+        FROM files f
+        JOIN bundles b ON b.id = f.bundle_id
+        WHERE b.issue_code = ?
+          AND b.status = 'READY'
+          AND f.is_dir = 0
+          AND (
+            f.name LIKE ? ESCAPE '\' COLLATE NOCASE
+            OR f.path LIKE ? ESCAPE '\' COLLATE NOCASE
+          )
+        ORDER BY CASE WHEN f.name = ? COLLATE NOCASE THEN 0 ELSE 1 END,
+                 f.name COLLATE NOCASE,
+                 f.path COLLATE NOCASE
+        LIMIT ? OFFSET ?
+        "#,
+    )
+    .bind(issue_code)
+    .bind(&pattern)
+    .bind(&pattern)
+    .bind(search_term)
+    .bind(size)
+    .bind(from)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let hits = rows
+        .into_iter()
+        .map(|row| LogSearchHit {
+            file_id: row.file_id.to_string(),
+            path: row.path,
+            bundle_hash: Some(row.bundle_hash),
+            snippet: row.name,
+            timeline: None,
+            offset: None,
+            line_end: None,
+            line_number: None,
+            chunk_index: None,
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(LogSearchResponse {
+        total: total.max(0) as u64,
+        hits,
+    }))
+}
+
 #[derive(FromRow)]
 struct LogRow {
     file_id: i64,
@@ -265,6 +366,21 @@ struct IssueLogRow {
     chunk_index: Option<i64>,
     content: String,
     bundle_hash: String,
+}
+
+#[derive(FromRow)]
+struct IssueFileSearchRow {
+    file_id: i64,
+    name: String,
+    path: String,
+    bundle_hash: String,
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn build_fts_query(search_term: &str) -> String {

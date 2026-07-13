@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
 import type { FileLinesResponse, FileNode, IssueLogSearchHit, UploadSummary } from '../../api/types';
@@ -51,6 +51,40 @@ const bundleStatusLabel = (bundle: UploadSummary) => {
   return bundle.status.upload_status;
 };
 
+function highlightText(text: string, keyword: string): React.ReactNode {
+  const normalizedKeyword = keyword.trim();
+  if (!normalizedKeyword) return text;
+
+  const lowerText = text.toLowerCase();
+  const lowerKeyword = normalizedKeyword.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let start = 0;
+  let matchIndex = lowerText.indexOf(lowerKeyword, start);
+
+  while (matchIndex !== -1) {
+    if (matchIndex > start) {
+      parts.push(text.slice(start, matchIndex));
+    }
+    const end = matchIndex + normalizedKeyword.length;
+    parts.push(
+      <mark
+        key={`${matchIndex}-${end}`}
+        className="rounded bg-cyan-400/20 px-0.5 text-cyan-100"
+      >
+        {text.slice(matchIndex, end)}
+      </mark>
+    );
+    start = end;
+    matchIndex = lowerText.indexOf(lowerKeyword, start);
+  }
+
+  if (start < text.length) {
+    parts.push(text.slice(start));
+  }
+
+  return parts;
+}
+
 type BundleViewProps = {
   legacyBundleHash?: string;
   legacyState?: unknown;
@@ -88,7 +122,9 @@ export function BundleView(props?: BundleViewProps) {
   const [searchResults, setSearchResults] = useState<IssueLogSearchHit[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchExecuted, setSearchExecuted] = useState(false);
   const [searchMode, setSearchMode] = useState<'log' | 'detailed'>('log');
+  const [resultFilterText, setResultFilterText] = useState('');
   const [targetLine, setTargetLine] = useState<number | null>(null);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -190,12 +226,19 @@ export function BundleView(props?: BundleViewProps) {
     if (!issue || !keyword) {
       setSearchResults([]);
       setSearchError(null);
+      setSearchExecuted(false);
+      setResultFilterText('');
       return;
     }
     setSearchLoading(true);
     setSearchError(null);
+    setSearchExecuted(true);
+    setResultFilterText('');
     try {
-      const response = await rainApi.searchIssueLogs(issue, keyword, { size: 50 });
+      const response = await rainApi.searchIssueLogs(issue, keyword, {
+        mode: searchMode === 'log' ? 'filename' : 'content',
+        size: 50
+      });
       setSearchResults(response.hits);
     } catch (error) {
       setSearchResults([]);
@@ -203,7 +246,16 @@ export function BundleView(props?: BundleViewProps) {
     } finally {
       setSearchLoading(false);
     }
-  }, [issueCode, searchTerm]);
+  }, [issueCode, searchMode, searchTerm]);
+
+  const changeSearchMode = (mode: 'log' | 'detailed') => {
+    if (mode === searchMode) return;
+    setSearchMode(mode);
+    setSearchResults([]);
+    setSearchError(null);
+    setSearchExecuted(false);
+    setResultFilterText('');
+  };
 
   useEffect(() => {
     const issueCode = issueCodeFromRoute || locationState?.issue || '';
@@ -281,7 +333,22 @@ export function BundleView(props?: BundleViewProps) {
   useEffect(() => {
     setSearchResults([]);
     setSearchError(null);
+    setSearchExecuted(false);
+    setResultFilterText('');
   }, [issueCode, refreshKey]);
+
+  const currentFilteredResults = searchResults;
+  const visibleSearchResults = useMemo(() => {
+    const keyword = resultFilterText.trim().toLowerCase();
+    if (!keyword) return currentFilteredResults;
+
+    return currentFilteredResults.filter((hit) => {
+      const path = hit.path?.toLowerCase() ?? '';
+      const snippet = hit.snippet?.toLowerCase() ?? '';
+      const timeline = hit.timeline?.toLowerCase() ?? '';
+      return path.includes(keyword) || snippet.includes(keyword) || timeline.includes(keyword);
+    });
+  }, [currentFilteredResults, resultFilterText]);
 
   const handleNodeClick = async (nodeId: string, line?: number | null) => {
     if (typeof line === 'number' && line >= 0) {
@@ -293,6 +360,8 @@ export function BundleView(props?: BundleViewProps) {
     }
     setSearchResults([]);
     setSearchError(null);
+    setSearchExecuted(false);
+    setResultFilterText('');
     let node: TreeNode | null = treeNodes[nodeId] ?? null;
     const [prefBundle, rawFromId] = nodeId.includes(':') ? nodeId.split(/:(.+)/) : [bundleId, nodeId];
     const bundleForNode = node?.bundleId || prefBundle || bundleId;
@@ -504,7 +573,11 @@ export function BundleView(props?: BundleViewProps) {
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
                 <input
                   className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white focus:border-brand-500 focus:outline-none"
-                  placeholder="在当前 Issue 的所有文件内搜索内容"
+                  placeholder={
+                    searchMode === 'log'
+                      ? '按文件名搜索当前 Issue 的日志'
+                      : '在当前 Issue 的所有文件内搜索内容'
+                  }
                   value={searchTerm}
                   onChange={(event) => setSearchTerm(event.target.value)}
                   onKeyDown={(event) => {
@@ -533,14 +606,14 @@ export function BundleView(props?: BundleViewProps) {
                   <button
                     type="button"
                     className={`rounded border px-3 py-1 ${searchMode === 'log' ? 'border-brand-500 bg-brand-500/20 text-brand-100' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}
-                    onClick={() => setSearchMode('log')}
+                    onClick={() => changeSearchMode('log')}
                   >
                     日志模式
                   </button>
                   <button
                     type="button"
                     className={`rounded border px-3 py-1 ${searchMode === 'detailed' ? 'border-brand-500 bg-brand-500/20 text-brand-100' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}
-                    onClick={() => setSearchMode('detailed')}
+                    onClick={() => changeSearchMode('detailed')}
                   >
                     搜索模式
                   </button>
@@ -574,39 +647,125 @@ export function BundleView(props?: BundleViewProps) {
           <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200 min-h-[80vh]">
             <div className="space-y-4">
               <div className="space-y-2">
-                {searchResults.length > 0 ? (
-                  searchMode === 'log' ? (
-                    <pre className="whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-xs text-slate-100">
-                      {searchResults.map((hit) => hit.snippet).join('\n')}
-                    </pre>
+                {searchExecuted && currentFilteredResults.length > 0 ? (
+                  <div className="flex min-h-11 flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 focus-within:border-cyan-500/60">
+                    <span className="shrink-0 text-slate-500" aria-hidden="true">⌕</span>
+                    <input
+                      className="min-w-[180px] flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
+                      placeholder="在当前结果中搜索..."
+                      value={resultFilterText}
+                      onChange={(event) => setResultFilterText(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault();
+                          setResultFilterText('');
+                        }
+                      }}
+                    />
+                    <span className="shrink-0 text-xs text-slate-400">
+                      {resultFilterText.trim()
+                        ? `已筛选 ${visibleSearchResults.length} / ${currentFilteredResults.length} 条`
+                        : `${currentFilteredResults.length} 条结果`}
+                    </span>
+                    {resultFilterText ? (
+                      <button
+                        type="button"
+                        className="shrink-0 text-xs text-slate-400 transition hover:text-white"
+                        onClick={() => setResultFilterText('')}
+                      >
+                        清空
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {searchExecuted ? (
+                  searchLoading && currentFilteredResults.length === 0 ? (
+                    <p className="py-8 text-center text-sm text-slate-500">正在搜索...</p>
+                  ) : currentFilteredResults.length === 0 ? (
+                    <p className="py-8 text-center text-sm text-slate-500">未搜索到相关日志。</p>
+                  ) : visibleSearchResults.length === 0 && resultFilterText.trim() ? (
+                    <p className="py-8 text-center text-sm text-slate-500">
+                      当前结果中没有包含「{resultFilterText.trim()}」的内容。
+                    </p>
+                  ) : searchMode === 'log' ? (
+                    <ul className="space-y-2">
+                      {visibleSearchResults.map((hit, index) => {
+                        const targetId = hit.bundle_hash
+                          ? `${hit.bundle_hash}:${hit.file_id}`
+                          : '';
+                        const selected = !!targetId && selectedNodeId === targetId;
+                        return (
+                          <li
+                            key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
+                            className={`cursor-pointer space-y-1 rounded-lg border bg-slate-950/70 p-3 transition ${
+                              selected
+                                ? 'border-cyan-500/60'
+                                : 'border-slate-800 hover:border-slate-700'
+                            }`}
+                            onClick={() => {
+                              if (!targetId) return;
+                              setSelectedNodeId(targetId);
+                              handleNodeClick(targetId, null).catch(() => undefined);
+                            }}
+                          >
+                            <p className="truncate font-mono text-xs text-slate-100">
+                              {highlightText(hit.snippet, resultFilterText)}
+                            </p>
+                            <p className="truncate text-[11px] text-slate-500">
+                              {highlightText(formatHitPath(hit.path), resultFilterText)}
+                            </p>
+                          </li>
+                        );
+                      })}
+                    </ul>
                   ) : (
                     <ul className="space-y-2">
-                      {searchResults.map((hit, index) => (
-                        <li
-                          key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
-                          className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/70 p-3 cursor-pointer"
-                          onDoubleClick={() => {
-                            if (!hit.bundle_hash) return;
-                            const targetId = `${hit.bundle_hash}:${hit.file_id}`;
-                            setSelectedNodeId(targetId);
-                            handleNodeClick(targetId, hit.line_number ?? null).catch(() => undefined);
-                          }}
-                        >
-                          <p className="text-[11px] text-slate-400">
-                            {formatHitPath(hit.path)}{' '}
-                            <span className="text-slate-500">
-                              {hit.line_number !== null && hit.line_number !== undefined
-                                ? `行 ${hit.line_number + 1}${hit.line_end ? ` - ${hit.line_end + 1}` : ''}`
-                                : '行号未知'}
-                            </span>
-                          </p>
-                          <pre className="whitespace-pre-wrap text-xs text-slate-100">{hit.snippet}</pre>
-                        </li>
-                      ))}
+                      {visibleSearchResults.map((hit, index) => {
+                        const targetId = hit.bundle_hash
+                          ? `${hit.bundle_hash}:${hit.file_id}`
+                          : '';
+                        const selected = !!targetId && selectedNodeId === targetId;
+                        return (
+                          <li
+                            key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
+                            className={`cursor-pointer space-y-2 rounded-lg border bg-slate-950/70 p-3 transition ${
+                              selected
+                                ? 'border-cyan-500/60'
+                                : 'border-slate-800 hover:border-slate-700'
+                            }`}
+                            onClick={() => {
+                              if (!targetId) return;
+                              setSelectedNodeId(targetId);
+                              handleNodeClick(targetId, hit.line_number ?? null).catch(() => undefined);
+                            }}
+                          >
+                            <div className="flex min-w-0 items-center justify-between gap-3 text-[11px]">
+                              <p className="min-w-0 truncate text-slate-400">
+                                {highlightText(formatHitPath(hit.path), resultFilterText)}
+                              </p>
+                              <span className="shrink-0 text-slate-500">
+                                {hit.line_number !== null && hit.line_number !== undefined
+                                  ? `行 ${hit.line_number + 1}${
+                                      hit.line_end !== null && hit.line_end !== undefined
+                                        ? ` - ${hit.line_end + 1}`
+                                        : ''
+                                    }`
+                                  : '行号未知'}
+                              </span>
+                            </div>
+                            <pre className="truncate font-mono text-xs text-slate-100">
+                              {highlightText(hit.snippet, resultFilterText)}
+                            </pre>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )
                 ) : !selectedNode ? (
-                  <p className="text-sm text-slate-500">请选择一个文件查看内容。</p>
+                  <p className="py-8 text-center text-sm text-slate-500">
+                    输入关键词搜索当前 Issue 的日志。
+                  </p>
                 ) : isArchiveNode(selectedNode) ? (
                   <p className="text-sm text-slate-500">压缩包请在左侧展开查看内部文件。</p>
                 ) : selectedNode.is_dir ? (

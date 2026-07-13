@@ -109,6 +109,7 @@ export interface IssueLogSearchHit {
   path: string;
   bundle_hash?: string;
   snippet: string;
+  timeline?: string;
   line_end?: number | null;
   line_number?: number | null;
 }

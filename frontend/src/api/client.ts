@@ -132,8 +132,9 @@ export const rainApi = {
     if (typeof options?.size === 'number') params.set('size', String(options.size));
     return request<LogSearchResponse>(`/api/log/v2/${encodePathSegment(bundleId)}/search?${params.toString()}`);
   },
-  searchIssueLogs(issueCode: string, query: string, options?: { path_like?: string; from?: number; size?: number }) {
+  searchIssueLogs(issueCode: string, query: string, options?: { mode?: 'filename' | 'content'; path_like?: string; from?: number; size?: number }) {
     const params = new URLSearchParams({ q: query });
+    if (options?.mode) params.set('mode', options.mode);
     if (options?.path_like) params.set('path_like', options.path_like);
     if (typeof options?.from === 'number') params.set('from', String(options.from));
     if (typeof options?.size === 'number') params.set('size', String(options.size));

@@ -95,10 +95,21 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     assert_eq!(completed_task["stage"], "READY");
 
+    let filename_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/SMOKE/search?q=app.log&mode=filename&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(filename_search["total"], 1);
+    assert_eq!(filename_search["hits"][0]["path"], "app.log");
+    assert_eq!(filename_search["hits"][0]["line_number"], Value::Null);
+
     let search: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()
-            .uri("/api/issues/SMOKE/search?q=smoke&size=10")
+            .uri("/api/issues/SMOKE/search?q=smoke&mode=content&size=10")
             .to_request(),
     )
     .await;
