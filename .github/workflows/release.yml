@@ -20,7 +20,7 @@ jobs:
             os: windows-latest
             artifact_name: Rain-windows-x64
             asset_path: release/Rain.exe
-            build_command: build-windows.bat
+            build_command: .\build-windows.bat
           - name: linux-x64
             os: ubuntu-latest
             artifact_name: rain-linux-x64
