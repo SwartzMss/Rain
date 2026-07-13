@@ -17,7 +17,7 @@ const LOG_COMMIT_LINES: i64 = 5000;
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 const TRUNCATED_LINE_MARKER: &str = " ... [line truncated]";
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
-const MAX_ARCHIVE_DEPTH: usize = 5;
+const MAX_ARCHIVE_DEPTH: usize = 16;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_ARCHIVE_EXTRACTED_BYTES: u64 = 500 * 1024 * 1024;
 const MAX_ARCHIVE_COMPRESSION_RATIO: u64 = 100;
@@ -81,6 +81,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     .await?;
 
     if is_text_like(original_name, content_type) || is_text_like(display_name, content_type) {
+        update_process_stage(pool, bundle_id, "INDEXING").await?;
         ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes).await?;
     }
 
@@ -89,6 +90,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         let extracted_dir = bundle_dir.join(&extracted_dir_name);
         fs::create_dir_all(&extracted_dir).await.map_err(io_error)?;
 
+        update_process_stage(pool, bundle_id, "EXTRACTING").await?;
         extract_archive(original_name, &disk_path, &extracted_dir).await?;
 
         let extracted_relative_path = format!("/{bundle_hash}/{extracted_dir_name}");
@@ -112,6 +114,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         )
         .await?;
 
+        update_process_stage(pool, bundle_id, "INDEXING").await?;
         ingest_directory(
             pool,
             bundle_id,
@@ -122,6 +125,20 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         .await?;
     }
 
+    Ok(())
+}
+
+async fn update_process_stage(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    stage: &str,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE bundles SET process_stage = ? WHERE id = ?")
+        .bind(stage)
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
     Ok(())
 }
 
@@ -679,7 +696,11 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
                 continue;
             }
 
-            let depth = entry_path.components().count();
+            let depth = if entry.is_dir() {
+                entry_path.components().count()
+            } else {
+                archive_parent_depth(&entry_path)
+            };
             if depth > MAX_ARCHIVE_DEPTH {
                 return Err(AppError::BadRequest(format!(
                     "zip entry is too deep: {}",
@@ -767,7 +788,11 @@ async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError>
                 continue;
             }
 
-            let depth = entry_path.components().count();
+            let depth = if entry.header().entry_type().is_dir() {
+                entry_path.components().count()
+            } else {
+                archive_parent_depth(&entry_path)
+            };
             if depth > MAX_ARCHIVE_DEPTH {
                 return Err(AppError::BadRequest(format!(
                     "tar.gz entry is too deep: {}",
@@ -895,6 +920,12 @@ fn normalize_extracted_path(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn archive_parent_depth(path: &Path) -> usize {
+    path.parent()
+        .map(|parent| parent.components().count())
+        .unwrap_or(0)
 }
 
 fn validate_zip_ratio(
@@ -1026,7 +1057,24 @@ fn gzip_output_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{gzip_output_name, split_timestamp};
+    use std::path::Path;
+
+    use super::{archive_parent_depth, gzip_output_name, split_timestamp};
+
+    #[test]
+    fn archive_depth_counts_only_parent_directories() {
+        let path =
+            Path::new("org/jetbrains/kotlin/gradle/dsl/HasConfigurableKotlinCompilerOptions.kt");
+
+        assert_eq!(archive_parent_depth(path), 5);
+    }
+
+    #[test]
+    fn archive_depth_supports_sixteen_parent_directories() {
+        let path = Path::new("01/02/03/04/05/06/07/08/09/10/11/12/13/14/15/16/file.log");
+
+        assert_eq!(archive_parent_depth(path), 16);
+    }
 
     #[test]
     fn split_timestamp_does_not_slice_inside_utf8_character() {

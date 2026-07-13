@@ -16,7 +16,6 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    dotenvy::dotenv().ok();
     let config = AppConfig::from_env().expect("failed to load config");
 
     fs::create_dir_all(&config.log_dir).expect("failed to create log directory");

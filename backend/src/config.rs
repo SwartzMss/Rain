@@ -2,6 +2,22 @@ use std::{env, path::PathBuf};
 
 use crate::error::AppError;
 
+fn dotenv_path_for_executable(executable: &std::path::Path) -> Option<PathBuf> {
+    executable.parent().map(|directory| directory.join(".env"))
+}
+
+fn load_dotenv() {
+    if let Ok(executable) = env::current_exe()
+        && let Some(path) = dotenv_path_for_executable(&executable)
+        && path.is_file()
+    {
+        dotenvy::from_path(path).ok();
+        return;
+    }
+
+    dotenvy::dotenv().ok();
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub host: String,
@@ -15,7 +31,7 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, AppError> {
-        dotenvy::dotenv().ok();
+        load_dotenv();
 
         let host = env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".into());
         let port: u16 = env::var("SERVER_PORT")
@@ -55,5 +71,22 @@ impl AppConfig {
             reset_db,
             retention_days,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::dotenv_path_for_executable;
+
+    #[test]
+    fn resolves_dotenv_next_to_executable() {
+        let executable = Path::new("/opt/rain/Rain.exe");
+
+        assert_eq!(
+            dotenv_path_for_executable(executable),
+            Some(Path::new("/opt/rain/.env").to_path_buf())
+        );
     }
 }

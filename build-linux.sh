@@ -21,8 +21,10 @@ cargo build --release --locked
 
 mkdir -p "$ROOT/release"
 cp "$ROOT/backend/target/release/backend" "$ROOT/release/rain"
+cp "$ROOT/backend/.env.example" "$ROOT/release/.env"
 chmod +x "$ROOT/release/rain"
 
 echo
-echo "Build completed:"
+echo "Build completed. Keep both files together:"
 echo "$ROOT/release/rain"
+echo "$ROOT/release/.env"

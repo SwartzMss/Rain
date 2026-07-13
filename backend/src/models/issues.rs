@@ -10,11 +10,23 @@ pub enum UploadStatus {
     Pending,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum UploadStage {
+    Pending,
+    Extracting,
+    Indexing,
+    Ready,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadSummary {
     pub hash: String,
     pub name: String,
     pub status: UploadStatusWrapper,
+    pub stage: UploadStage,
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +58,22 @@ impl UploadStatus {
             UploadStatus::Failed
         } else {
             UploadStatus::Pending
+        }
+    }
+}
+
+impl UploadStage {
+    pub fn from_db_value(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("EXTRACTING") {
+            Self::Extracting
+        } else if value.eq_ignore_ascii_case("INDEXING") {
+            Self::Indexing
+        } else if value.eq_ignore_ascii_case("READY") {
+            Self::Ready
+        } else if value.eq_ignore_ascii_case("FAILED") {
+            Self::Failed
+        } else {
+            Self::Pending
         }
     }
 }

@@ -23,7 +23,9 @@ popd
 
 if not exist "%ROOT%\release" mkdir "%ROOT%\release"
 copy /Y "%ROOT%\backend\target\release\backend.exe" "%ROOT%\release\Rain.exe" >nul || exit /b 1
+copy /Y "%ROOT%\backend\.env.example" "%ROOT%\release\.env" >nul || exit /b 1
 
 echo.
-echo Build completed:
+echo Build completed. Keep both files together:
 echo %ROOT%\release\Rain.exe
+echo %ROOT%\release\.env

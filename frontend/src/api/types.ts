@@ -1,4 +1,5 @@
 export type UploadStatus = 'READY' | 'PROCESSING' | 'FAILED' | 'PENDING';
+export type UploadStage = 'PENDING' | 'EXTRACTING' | 'INDEXING' | 'READY' | 'FAILED';
 
 export interface UploadSummary {
   hash: string;
@@ -7,6 +8,8 @@ export interface UploadSummary {
     upload_status: UploadStatus;
     [key: string]: unknown;
   };
+  stage: UploadStage;
+  size_bytes?: number | null;
 }
 
 export interface IssueBundlesResponse {
@@ -62,6 +65,7 @@ export interface UploadResponse {
   issue_code: string;
   bundle_hash: string;
   status: UploadStatus;
+  stage: UploadStage;
   file_count: number;
   total_bytes: number;
 }
@@ -71,6 +75,7 @@ export interface UploadTaskResponse {
   issue_code: string;
   bundle_hash: string;
   status: UploadStatus;
+  stage: UploadStage;
   progress_percent: number;
   total_bytes: number;
 }

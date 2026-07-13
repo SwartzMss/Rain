@@ -8,11 +8,11 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-800 bg-slate-950/90 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-none items-center justify-between gap-4 px-6 py-4">
+        <div className="mx-auto flex w-full max-w-none items-center justify-between gap-3 px-5 py-3">
           <Link to="/" className="text-white no-underline">
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="text-2xl text-sky-400">☁</span>
-              <h1 className="text-2xl font-semibold text-white">Rain</h1>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="text-xl text-sky-400">☁</span>
+              <h1 className="text-xl font-semibold text-white">Rain</h1>
               <span className="rounded border border-slate-700 px-2 py-0.5 text-xs font-semibold text-slate-400">
                 {APP_VERSION}
               </span>
@@ -25,7 +25,7 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-none px-6 py-6">
+      <main className="mx-auto w-full max-w-none px-5 py-5">
         <Routes>
           <Route path="/" element={<HomeView />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />

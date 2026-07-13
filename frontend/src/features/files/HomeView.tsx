@@ -5,7 +5,7 @@ import type {
   FileNode,
   IssueBundlesResponse,
   IssueSummary,
-  UploadResponse,
+  UploadStage,
   UploadStatus,
   UploadSummary,
   UploadTaskResponse
@@ -27,8 +27,9 @@ type FileRow = {
   file?: FileNode;
   name: string;
   status: UploadStatus;
+  stage: UploadStage | 'UPLOADING';
+  progressPercent?: number;
   sizeBytes?: number;
-  lineCount?: number | null;
 };
 
 const formatBytes = (bytes?: number | null) => {
@@ -39,25 +40,23 @@ const formatBytes = (bytes?: number | null) => {
   return `${value.toFixed(value >= 10 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
 };
 
-const statusLabel = (status: UploadStatus) => {
-  if (status === 'READY') return '已完成';
-  if (status === 'FAILED') return '失败';
-  return '处理中';
+const stageLabel = (stage: FileRow['stage'], progressPercent?: number) => {
+  if (stage === 'UPLOADING') return `上传中 ${progressPercent ?? 0}%`;
+  if (stage === 'PENDING') return '等待处理';
+  if (stage === 'EXTRACTING') return '解压中';
+  if (stage === 'INDEXING') return '建立索引';
+  if (stage === 'READY') return '已完成';
+  return '失败';
 };
 
-const statusClass = (status: UploadStatus) => {
-  if (status === 'READY') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
-  if (status === 'FAILED') return 'border-rose-500/40 bg-rose-500/10 text-rose-300';
+const stageClass = (stage: FileRow['stage']) => {
+  if (stage === 'READY') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
+  if (stage === 'FAILED') return 'border-rose-500/40 bg-rose-500/10 text-rose-300';
   return 'border-sky-500/40 bg-sky-500/10 text-sky-300';
 };
 
 const getFileLabel = (file: FileNode) =>
   typeof file.meta?.original_name === 'string' ? (file.meta.original_name as string) : file.name;
-
-const getLineCount = (file?: FileNode) => {
-  const value = file?.meta?.line_count;
-  return typeof value === 'number' ? value : null;
-};
 
 export function HomeView() {
   const navigate = useNavigate();
@@ -70,7 +69,6 @@ export function HomeView() {
   const [issuesError, setIssuesError] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newIssueCode, setNewIssueCode] = useState('');
-  const [newIssueName, setNewIssueName] = useState('');
   const [creatingIssue, setCreatingIssue] = useState(false);
   const [createIssueError, setCreateIssueError] = useState<string | null>(null);
   const [deletingIssue, setDeletingIssue] = useState<string | null>(null);
@@ -92,8 +90,8 @@ export function HomeView() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadSuccess, setUploadSuccess] = useState<UploadResponse | null>(null);
   const [uploadTask, setUploadTask] = useState<UploadTaskResponse | null>(null);
+  const [uploadSelection, setUploadSelection] = useState<{ name: string; sizeBytes: number } | null>(null);
 
   const currentIssueCode = selectedIssueCode.trim();
   const selectedIssue = issues.find((issue) => issue.code === currentIssueCode) ?? null;
@@ -111,8 +109,10 @@ export function HomeView() {
   }, [issueSearchText, issues]);
 
   const fileRows = useMemo<FileRow[]>(() => {
-    return bundles.flatMap<FileRow>((bundle) => {
+    const rows = bundles.flatMap<FileRow>((bundle) => {
       const status = bundle.status.upload_status;
+      const currentTask = uploadTask?.bundle_hash === bundle.hash ? uploadTask : null;
+      const stage = currentTask?.stage ?? bundle.stage;
       const state = bundleFiles[bundle.hash];
       if (status !== 'READY') {
         return [
@@ -121,7 +121,9 @@ export function HomeView() {
             bundleHash: bundle.hash,
             bundleName: bundle.name || bundle.hash,
             name: bundle.name || bundle.hash,
-            status
+            status,
+            stage,
+            sizeBytes: currentTask?.total_bytes ?? bundle.size_bytes ?? undefined
           }
         ];
       }
@@ -133,11 +135,30 @@ export function HomeView() {
         file,
         name: getFileLabel(file),
         status,
-        sizeBytes: file.size_bytes,
-        lineCount: getLineCount(file)
+        stage: 'READY',
+        sizeBytes: file.size_bytes
       }));
     });
-  }, [bundleFiles, bundles]);
+    if (uploading && uploadSelection) {
+      rows.unshift({
+        key: 'uploading',
+        bundleHash: '',
+        bundleName: uploadSelection.name,
+        name: uploadSelection.name,
+        status: 'PROCESSING',
+        stage: 'UPLOADING',
+        progressPercent: uploadProgress,
+        sizeBytes: uploadSelection.sizeBytes
+      });
+    }
+    return rows;
+  }, [bundleFiles, bundles, uploadProgress, uploadSelection, uploadTask, uploading]);
+  const availableFileCount = fileRows.filter(
+    (row) => row.status === 'READY' && !!row.file
+  ).length;
+  const failedTaskCount = bundles.filter(
+    (bundle) => bundle.status.upload_status === 'FAILED'
+  ).length;
 
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
@@ -279,7 +300,7 @@ export function HomeView() {
     if (!hasProcessing) return;
     const timer = window.setTimeout(() => {
       loadBundles(currentIssueCode).catch(() => undefined);
-    }, 1500);
+    }, 3000);
     return () => window.clearTimeout(timer);
   }, [bundles, currentIssueCode, loadBundles, uploadTask?.task_id]);
 
@@ -291,6 +312,10 @@ export function HomeView() {
     let cancelled = false;
     let timer: number | undefined;
     const poll = async () => {
+      if (document.hidden) {
+        timer = window.setTimeout(poll, 3000);
+        return;
+      }
       try {
         const task = await rainApi.fetchUploadTask(taskId);
         if (cancelled) return;
@@ -302,10 +327,11 @@ export function HomeView() {
           await loadIssues();
           return;
         }
-        timer = window.setTimeout(poll, 1500);
+        timer = window.setTimeout(poll, 3000);
       } catch (error) {
         if (!cancelled) {
           setUploadError(normalizeApiError(error));
+          timer = window.setTimeout(poll, 5000);
         }
       }
     };
@@ -330,7 +356,6 @@ export function HomeView() {
     setCreateDialogOpen(false);
     setCreateIssueError(null);
     setNewIssueCode('');
-    setNewIssueName('');
   };
 
   const handleCreateIssue = async () => {
@@ -346,8 +371,7 @@ export function HomeView() {
     setCreateIssueError(null);
     try {
       const issue = await rainApi.createIssue({
-        code,
-        name: newIssueName.trim() || undefined
+        code
       });
       setIssues((prev) => [issue, ...prev.filter((item) => item.code !== issue.code)]);
       setSelectedIssueCode(issue.code);
@@ -381,16 +405,19 @@ export function HomeView() {
     setUploading(true);
     setUploadProgress(0);
     setUploadError(null);
-    setUploadSuccess(null);
     setUploadTask(null);
+    setUploadSelection({
+      name: files.length === 1 ? files[0].name : `${files[0].name} 等 ${files.length} 个文件`,
+      sizeBytes: files.reduce((total, file) => total + file.size, 0)
+    });
     try {
       const response = await rainApi.uploadLogs(currentIssueCode, files, setUploadProgress);
-      setUploadSuccess(response);
       setUploadTask({
         task_id: response.task_id,
         issue_code: response.issue_code,
         bundle_hash: response.bundle_hash,
         status: response.status,
+        stage: response.stage,
         progress_percent: response.status === 'READY' ? 100 : 0,
         total_bytes: response.total_bytes
       });
@@ -402,6 +429,7 @@ export function HomeView() {
       uploadingRef.current = false;
       setUploading(false);
       setUploadProgress(0);
+      setUploadSelection(null);
     }
   };
 
@@ -456,10 +484,10 @@ export function HomeView() {
   };
 
   return (
-    <div className="grid min-h-[calc(100vh-88px)] gap-5 lg:grid-cols-[315px_minmax(0,1fr)]">
+    <div className="grid min-h-[calc(100vh-72px)] gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
       <aside className="flex min-h-[680px] flex-col rounded-lg border border-slate-800 bg-slate-900/70 p-4">
         <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-xl font-semibold text-white">Issues</h2>
+          <h2 className="text-lg font-semibold text-white">Issues</h2>
           <button
             type="button"
             className="rounded border border-sky-500/60 px-3 py-2 text-sm font-semibold text-sky-300 transition hover:bg-sky-500/10"
@@ -507,13 +535,18 @@ export function HomeView() {
               <button
                 key={issue.code}
                 type="button"
+                title="双击查看 Issue 日志"
                 className={[
-                  'flex w-full items-center justify-between rounded-lg px-3 py-3 text-left transition',
+                  'flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition',
                   active ? 'bg-sky-500/20 text-white' : 'text-slate-200 hover:bg-slate-800/80'
                 ].join(' ')}
                 onClick={() => selectIssue(issue.code)}
+                onDoubleClick={() => navigate(`/issue/${encodeURIComponent(issue.code)}`)}
               >
-                <span className="min-w-0 truncate font-semibold">{issue.code}</span>
+                <span className="min-w-0">
+                  <span className="block truncate font-semibold">{issue.code}</span>
+                  <span className="block text-[10px] font-normal text-slate-500">双击查看日志</span>
+                </span>
                 <span className="rounded-full bg-sky-500/20 px-2 py-0.5 text-xs text-sky-300">
                   {issue.bundle_count}
                 </span>
@@ -530,9 +563,9 @@ export function HomeView() {
 
       <section className="min-w-0 space-y-4">
         <div className="rounded-lg border border-slate-800 bg-slate-900/70">
-          <div className="flex flex-col gap-4 border-b border-slate-800 p-5 md:flex-row md:items-start md:justify-between">
+          <div className="flex flex-col gap-3 border-b border-slate-800 p-4 md:flex-row md:items-start md:justify-between">
             <div>
-              <h2 className="text-3xl font-semibold text-white">
+              <h2 className="text-2xl font-semibold text-white">
                 {currentIssueCode || '请选择 Issue'}
               </h2>
               <div className="mt-3 flex flex-wrap gap-5 text-sm text-slate-400">
@@ -540,7 +573,8 @@ export function HomeView() {
                   <span>{selectedIssue.name}</span>
                 ) : null}
                 <span>{bundles.length} 个日志包</span>
-                <span>{fileRows.length} 个文件项</span>
+                <span>{availableFileCount} 个可用文件</span>
+                <span>{failedTaskCount} 个失败任务</span>
                 {bundlesLoading ? <span>正在刷新...</span> : null}
               </div>
             </div>
@@ -556,7 +590,7 @@ export function HomeView() {
             ) : null}
           </div>
 
-          <form onSubmit={handleUpload} className="space-y-4 p-5">
+          <form onSubmit={handleUpload} className="space-y-3 p-4">
             <h3 className="text-lg font-semibold text-white">上传日志</h3>
             <input
               ref={fileInputRef}
@@ -576,7 +610,7 @@ export function HomeView() {
               }}
             />
             <div
-              className="flex min-h-28 items-center justify-between gap-4 rounded-lg border border-dashed border-slate-700 bg-slate-950/40 px-6 py-5 text-sm transition aria-disabled:opacity-60"
+              className="flex min-h-24 items-center justify-between gap-4 rounded-lg border border-dashed border-slate-700 bg-slate-950/40 px-5 py-4 text-sm transition aria-disabled:opacity-60"
               aria-disabled={uploadDisabled}
               onClick={() => {
                 if (!uploadDisabled && !uploadingRef.current) {
@@ -597,7 +631,7 @@ export function HomeView() {
               }}
             >
               <div className="flex min-w-0 items-center gap-4">
-                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-sky-500/60 text-2xl text-sky-300">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-sky-500/60 text-xl text-sky-300">
                   ↑
                 </div>
                 <div>
@@ -642,40 +676,6 @@ export function HomeView() {
           </form>
         </div>
 
-        {uploadSuccess || activeTask ? (
-          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
-            <h3 className="mb-3 text-lg font-semibold text-white">上传任务</h3>
-            <div className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-950/30 p-4 md:flex-row md:items-center md:justify-between">
-              <div className="min-w-0">
-                <p className="truncate font-semibold text-white">
-                  {uploadSuccess?.bundle_hash ?? uploadTask?.bundle_hash}
-                </p>
-                <p className="mt-1 text-sm text-slate-400">
-                  {uploadTask?.status === 'READY'
-                    ? '解析完成'
-                    : uploadTask?.status === 'FAILED'
-                      ? '处理失败'
-                      : '正在建立搜索索引...'}
-                </p>
-              </div>
-              <span className={`rounded-full border px-3 py-1 text-xs ${statusClass(uploadTask?.status ?? 'PROCESSING')}`}>
-                {statusLabel(uploadTask?.status ?? 'PROCESSING')}
-              </span>
-              <div className="text-sm text-slate-300">{formatBytes(uploadTask?.total_bytes ?? uploadSuccess?.total_bytes)}</div>
-              <button
-                type="button"
-                className="rounded border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
-                onClick={() => {
-                  if (currentIssueCode) navigate(`/issue/${encodeURIComponent(currentIssueCode)}`);
-                }}
-                disabled={!currentIssueCode}
-              >
-                查看进度
-              </button>
-            </div>
-          </div>
-        ) : null}
-
         <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
           <div className="mb-4 flex items-center justify-between gap-3">
             <h3 className="text-lg font-semibold text-white">文件列表</h3>
@@ -685,11 +685,10 @@ export function HomeView() {
             <table className="min-w-full divide-y divide-slate-800 text-sm">
               <thead className="bg-slate-950/40 text-left text-xs uppercase text-slate-400">
                 <tr>
-                  <th className="px-4 py-3 font-medium">文件名</th>
-                  <th className="px-4 py-3 font-medium">状态</th>
-                  <th className="px-4 py-3 font-medium">大小</th>
-                  <th className="px-4 py-3 font-medium">行数</th>
-                  <th className="px-4 py-3 font-medium">操作</th>
+                  <th className="px-4 py-2.5 font-medium">文件名</th>
+                  <th className="px-4 py-2.5 font-medium">状态</th>
+                  <th className="px-4 py-2.5 font-medium">大小</th>
+                  <th className="px-4 py-2.5 font-medium">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800 text-slate-200">
@@ -702,52 +701,40 @@ export function HomeView() {
                         {row.name}
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`rounded-full border px-2 py-1 text-xs ${statusClass(row.status)}`}>
-                          {statusLabel(row.status)}
+                        <span className={`rounded-full border px-2 py-1 text-xs ${stageClass(row.stage)}`}>
+                          {stageLabel(row.stage, row.progressPercent)}
                         </span>
                       </td>
                       <td className="px-4 py-3">{formatBytes(row.sizeBytes)}</td>
-                      <td className="px-4 py-3">
-                        {row.lineCount !== null && row.lineCount !== undefined
-                          ? row.lineCount.toLocaleString()
-                          : '-'}
-                      </td>
                       <td className="whitespace-nowrap px-4 py-3">
                         {row.status === 'READY' && row.file ? (
-                          <>
-                            <button
-                              type="button"
-                              className="mr-4 text-sky-300 hover:text-sky-200"
-                              onClick={() => navigate(`/issue/${encodeURIComponent(currentIssueCode)}`)}
-                            >
-                              查看
-                            </button>
-                            <a
-                              className="mr-4 text-sky-300 hover:text-sky-200"
-                              href={rainApi.fileDownloadUrl(row.bundleHash, String(row.file.id))}
-                            >
-                              下载
-                            </a>
-                          </>
+                          <a
+                            className="mr-4 text-sky-300 hover:text-sky-200"
+                            href={rainApi.fileDownloadUrl(row.bundleHash, String(row.file.id))}
+                          >
+                            下载
+                          </a>
                         ) : null}
-                        {row.status === 'PROCESSING' ? (
+                        {row.status === 'PROCESSING' || row.status === 'PENDING' ? (
                           <span className="mr-4 text-slate-500">等待完成</span>
                         ) : null}
-                        <button
-                          type="button"
-                          className="text-rose-300 hover:text-rose-200 disabled:text-slate-600"
-                          disabled={deleting || row.status === 'PROCESSING'}
-                          onClick={() => deleteRow(row)}
-                        >
-                          {deleting ? '删除中...' : row.status === 'FAILED' ? '删除' : '删除'}
-                        </button>
+                        {row.stage !== 'UPLOADING' ? (
+                          <button
+                            type="button"
+                            className="text-rose-300 hover:text-rose-200 disabled:text-slate-600"
+                            disabled={deleting || row.status === 'PROCESSING' || row.status === 'PENDING'}
+                            onClick={() => deleteRow(row)}
+                          >
+                            {deleting ? '删除中...' : '删除'}
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
                   );
                 })}
                 {!fileRows.length ? (
                   <tr>
-                    <td colSpan={5} className="px-4 py-10 text-center text-slate-500">
+                    <td colSpan={4} className="px-4 py-10 text-center text-slate-500">
                       {currentIssueCode ? '暂无文件' : '请选择一个 Issue'}
                     </td>
                   </tr>
@@ -783,14 +770,6 @@ export function HomeView() {
                 value={newIssueCode}
                 onChange={(event) => setNewIssueCode(event.target.value)}
                 placeholder="例如 CN014"
-              />
-            </label>
-            <label className="mt-3 block text-sm text-slate-300">
-              名称（可选）
-              <input
-                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white outline-none focus:border-sky-500"
-                value={newIssueName}
-                onChange={(event) => setNewIssueName(event.target.value)}
               />
             </label>
             {createIssueError ? <p className="mt-3 text-sm text-rose-300">{createIssueError}</p> : null}

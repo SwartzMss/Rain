@@ -481,11 +481,11 @@ export function BundleView(props?: BundleViewProps) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <section className="panel space-y-4">
         {treeError ? <p className="text-sm text-rose-300">{treeError}</p> : null}
 
-        <div className="grid gap-4 lg:grid-cols-[460px_minmax(0,1fr)]">
+        <div className="grid gap-4 lg:grid-cols-[420px_minmax(0,1fr)]">
           <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-3">
             <p className="text-xs text-slate-400">Issue: {activeIssueLabel}</p>
             {nonReadyBundles.length > 0 ? (
@@ -516,11 +516,15 @@ export function BundleView(props?: BundleViewProps) {
                 />
                 <button
                   type="button"
-                  className="rounded-lg bg-brand-500 px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-brand-700 disabled:opacity-60 whitespace-nowrap sm:w-auto w-full"
+                  className={`w-full whitespace-nowrap rounded-lg px-4 py-2 text-sm font-semibold transition sm:w-auto ${
+                    searchLoading
+                      ? 'cursor-not-allowed bg-slate-700 text-slate-400'
+                      : 'bg-brand-500 text-slate-900 hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400'
+                  }`}
                   onClick={() => runSearch().catch(() => undefined)}
                   disabled={searchLoading || !issueCode || !searchTerm.trim()}
                 >
-                  {searchLoading ? '搜索中...' : '搜索'}
+                  搜索
                 </button>
               </div>
               <div className="flex flex-col gap-2 text-xs text-slate-300 sm:flex-row sm:items-center sm:gap-3">

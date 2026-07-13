@@ -86,6 +86,7 @@ build-windows.bat
 
 ```text
 release\Rain.exe
+release\.env
 ```
 
 Linux/macOS:
@@ -99,6 +100,7 @@ chmod +x ./build-linux.sh
 
 ```text
 release/rain
+release/.env
 ```
 
 手动构建时仍然需要先构建前端，再编译后端：
@@ -126,7 +128,9 @@ Linux/macOS:
 ./backend/target/release/backend
 ```
 
-发布时只需要复制对应平台的单文件可执行程序。运行前可在同目录准备 `.env`，或直接依赖默认值。默认会使用：
+发布包包含可执行程序和外置 `.env` 配置文件：Windows 为 ZIP，Linux 为 tar.gz。解压后应保持两个文件位于同一目录；修改 `.env` 后重启 Rain 即可改变端口、数据库和数据目录等设置，不需要重新编译。程序会优先读取可执行文件同目录的 `.env`，因此从其他工作目录启动也能找到配置；已设置的系统环境变量优先级高于 `.env`。
+
+默认配置会使用：
 
 - SQLite 数据库：`./data/rain.db`
 - 上传目录：`./data/uploads`

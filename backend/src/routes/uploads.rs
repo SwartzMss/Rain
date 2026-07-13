@@ -12,7 +12,7 @@ use crate::{
     AppState,
     error::AppError,
     ingest::{ProcessFileOptions, process_uploaded_file},
-    models::issues::UploadStatus,
+    models::issues::{UploadStage, UploadStatus},
 };
 
 use super::issues::{normalize_issue_code, require_issue_exists};
@@ -120,14 +120,18 @@ pub async fn upload_logs(
     }
 
     let bundle_hash = Uuid::new_v4().simple().to_string();
-    let bundle_name = format!("bundle-{bundle_hash}");
+    let bundle_name = if files.len() == 1 {
+        files[0].display_name.clone()
+    } else {
+        format!("{} 等 {} 个文件", files[0].display_name, files.len())
+    };
 
     let bundle_id = Uuid::new_v4().simple().to_string();
 
     let insert_bundle_result = sqlx::query(
         r#"
-        INSERT INTO bundles (id, issue_code, hash, name, status, size_bytes)
-        VALUES (?, ?, ?, ?, 'PROCESSING', ?)
+        INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, size_bytes)
+        VALUES (?, ?, ?, ?, 'PROCESSING', 'PENDING', ?)
         "#,
     )
     .bind(&bundle_id)
@@ -159,7 +163,7 @@ pub async fn upload_logs(
                     error = %error,
                     "failed to acquire upload processing permit"
                 );
-                let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED").await;
+                let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED", "FAILED").await;
                 let _ = fs::remove_dir_all(&temp_dir).await;
                 return;
             }
@@ -222,7 +226,7 @@ pub async fn upload_logs(
                 &task_bundle_hash,
             )
             .await;
-            let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED").await;
+            let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED", "FAILED").await;
         }
 
         let _ = fs::remove_dir_all(&temp_dir).await;
@@ -234,6 +238,7 @@ pub async fn upload_logs(
             issue_code,
             bundle_hash,
             status: UploadStatus::Processing,
+            stage: UploadStage::Pending,
             file_count,
             total_bytes,
         }),
@@ -246,6 +251,7 @@ struct UploadResponse {
     issue_code: String,
     bundle_hash: String,
     status: UploadStatus,
+    stage: UploadStage,
     file_count: u64,
     total_bytes: u64,
 }
@@ -258,7 +264,7 @@ pub async fn get_upload_task(
     let task_id = path.into_inner();
     let row = sqlx::query_as::<_, UploadTaskRow>(
         r#"
-        SELECT issue_code, hash, status, size_bytes
+        SELECT issue_code, hash, status, process_stage, size_bytes
         FROM bundles
         WHERE hash = ?
         LIMIT 1
@@ -282,6 +288,7 @@ pub async fn get_upload_task(
         issue_code: row.issue_code,
         bundle_hash: row.hash,
         status,
+        stage: UploadStage::from_db_value(&row.process_stage),
         progress_percent,
         total_bytes: row.size_bytes.unwrap_or(0).max(0) as u64,
     }))
@@ -292,6 +299,7 @@ struct UploadTaskRow {
     issue_code: String,
     hash: String,
     status: String,
+    process_stage: String,
     size_bytes: Option<i64>,
 }
 
@@ -301,6 +309,7 @@ struct UploadTaskResponse {
     issue_code: String,
     bundle_hash: String,
     status: UploadStatus,
+    stage: UploadStage,
     progress_percent: u8,
     total_bytes: u64,
 }
@@ -373,9 +382,11 @@ async fn update_bundle_status(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
     status: &str,
+    stage: &str,
 ) -> Result<(), AppError> {
-    sqlx::query("UPDATE bundles SET status = ? WHERE id = ?")
+    sqlx::query("UPDATE bundles SET status = ?, process_stage = ? WHERE id = ?")
         .bind(status)
+        .bind(stage)
         .bind(bundle_id)
         .execute(pool)
         .await
@@ -406,7 +417,7 @@ async fn finalize_bundle_ready_with_retry(
         }
     }
 
-    let _ = update_bundle_status(pool, bundle_id, "FAILED").await;
+    let _ = update_bundle_status(pool, bundle_id, "FAILED", "FAILED").await;
     Err(last_error.unwrap_or_else(|| AppError::Database(sqlx::Error::RowNotFound)))
 }
 
@@ -459,7 +470,7 @@ async fn finalize_bundle_ready(
             .await
             .map_err(AppError::Database)?;
     }
-    sqlx::query("UPDATE bundles SET status = 'READY' WHERE id = ?")
+    sqlx::query("UPDATE bundles SET status = 'READY', process_stage = 'READY' WHERE id = ?")
         .bind(bundle_id)
         .execute(&mut *tx)
         .await

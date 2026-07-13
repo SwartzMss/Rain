@@ -19,12 +19,10 @@ jobs:
           - name: windows-x64
             os: windows-latest
             artifact_name: Rain-windows-x64
-            asset_path: release/Rain.exe
             build_command: .\build-windows.bat
           - name: linux-x64
             os: ubuntu-latest
             artifact_name: rain-linux-x64
-            asset_path: release/rain
             build_command: bash ./build-linux.sh
 
     steps:
@@ -50,7 +48,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.asset_path }}
+          path: release/
+          include-hidden-files: true
           if-no-files-found: error
 
   publish:
@@ -66,9 +65,11 @@ jobs:
       - name: Prepare assets
         run: |
           mkdir -p dist
-          cp artifacts/Rain-windows-x64/Rain.exe dist/Rain-windows-x64.exe
-          cp artifacts/rain-linux-x64/rain dist/rain-linux-x64
-          chmod +x dist/rain-linux-x64
+          cd artifacts/Rain-windows-x64
+          zip ../../dist/Rain-windows-x64.zip Rain.exe .env
+          cd ../rain-linux-x64
+          chmod +x rain
+          tar -czf ../../dist/rain-linux-x64.tar.gz rain .env
 
       - name: Create release
         uses: softprops/action-gh-release@v2

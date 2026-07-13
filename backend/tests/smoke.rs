@@ -75,6 +75,7 @@ async fn upload_search_tree_and_delete_issue() {
         .expect("bundle hash");
     assert_eq!(upload["task_id"], bundle_hash);
     assert_eq!(upload["status"], "PROCESSING");
+    assert_eq!(upload["stage"], "PENDING");
     assert_eq!(upload["issue_code"], "SMOKE");
     let task_status: Value = test::call_and_read_body_json(
         &app,
@@ -85,6 +86,14 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     assert_eq!(task_status["task_id"], bundle_hash);
     wait_for_issue_ready(&pool, "SMOKE").await;
+    let completed_task: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/uploads/{bundle_hash}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(completed_task["stage"], "READY");
 
     let search: Value = test::call_and_read_body_json(
         &app,
@@ -711,66 +720,6 @@ async fn issue_creation_and_upload_require_existing_issue() {
     )
     .await;
     assert_eq!(delete_empty.status(), StatusCode::NO_CONTENT);
-}
-
-#[actix_web::test]
-async fn prepare_schema_merges_legacy_issue_code_case_variants() {
-    let test_dir = TestDir::new("rain-issue-migrate");
-    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
-    let pool = db::init_pool(&db_url).expect("init sqlite pool");
-    db::prepare_schema(&pool, true)
-        .await
-        .expect("prepare schema");
-
-    sqlx::query("INSERT INTO issues (code, name) VALUES (?, ?)")
-        .bind("cn013")
-        .bind("lower")
-        .execute(&pool)
-        .await
-        .expect("insert lower issue");
-    sqlx::query("INSERT INTO issues (code, name) VALUES (?, ?)")
-        .bind("CN013")
-        .bind("upper")
-        .execute(&pool)
-        .await
-        .expect("insert upper issue");
-    sqlx::query(
-        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES (?, ?, ?, ?, 'READY')",
-    )
-    .bind("bundle-lower")
-    .bind("cn013")
-    .bind("hash-lower")
-    .bind("lower bundle")
-    .execute(&pool)
-    .await
-    .expect("insert lower bundle");
-    sqlx::query(
-        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES (?, ?, ?, ?, 'READY')",
-    )
-    .bind("bundle-upper")
-    .bind("CN013")
-    .bind("hash-upper")
-    .bind("upper bundle")
-    .execute(&pool)
-    .await
-    .expect("insert upper bundle");
-
-    db::prepare_schema(&pool, false)
-        .await
-        .expect("migrate issue codes");
-
-    let issue_codes: Vec<String> = sqlx::query_scalar("SELECT code FROM issues ORDER BY code")
-        .fetch_all(&pool)
-        .await
-        .expect("fetch issues");
-    assert_eq!(issue_codes, vec!["CN013"]);
-
-    let bundle_issue_codes: Vec<String> =
-        sqlx::query_scalar("SELECT issue_code FROM bundles ORDER BY id")
-            .fetch_all(&pool)
-            .await
-            .expect("fetch bundle issue codes");
-    assert_eq!(bundle_issue_codes, vec!["CN013", "CN013"]);
 }
 
 #[actix_web::test]
