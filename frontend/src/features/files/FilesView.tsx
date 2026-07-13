@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
 import type { FileLinesResponse, FileNode, IssueLogSearchHit, LogSearchHit, UploadSummary } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
@@ -95,6 +95,7 @@ export function BundleView(props?: BundleViewProps) {
   const bundleHash = params.bundleHash || props?.legacyBundleHash || '';
   const issueCodeFromRoute = params.issueCode;
   const location = useLocation();
+  const navigate = useNavigate();
   const locationState = (location.state as { issue?: string; bundleName?: string } | null) ?? (props?.legacyState as
     | { issue?: string; bundleName?: string }
     | null);
@@ -133,6 +134,7 @@ export function BundleView(props?: BundleViewProps) {
   const [fileSearchLoading, setFileSearchLoading] = useState(false);
   const [fileSearchError, setFileSearchError] = useState<string | null>(null);
   const [fileSearchExecuted, setFileSearchExecuted] = useState(false);
+  const [tempResultCreating, setTempResultCreating] = useState(false);
   const [targetLine, setTargetLine] = useState<number | null>(null);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -249,11 +251,27 @@ export function BundleView(props?: BundleViewProps) {
     setFileSearchError(null);
     setFileSearchExecuted(false);
     try {
-      const response = await rainApi.searchIssueLogs(issue, keyword, {
-        mode: searchMode === 'log' ? 'filename' : 'content',
-        size: 50
-      });
-      setSearchResults(response.hits);
+      if (searchMode === 'log') {
+        const response = await rainApi.searchIssueLogs(issue, keyword, {
+          mode: 'filename',
+          size: 50
+        });
+        setSearchResults(response.hits);
+      } else {
+        const response = await rainApi.previewTempResult({
+          expression: keyword,
+          issue_code: issue,
+          from: 0,
+          size: 50
+        });
+        setSearchResults(response.lines.map((line) => ({
+          bundle_hash: line.bundle_hash,
+          file_id: line.file_id ?? '',
+          path: line.path,
+          snippet: line.content,
+          line_number: line.line_number
+        })));
+      }
     } catch (error) {
       setSearchResults([]);
       setSearchError(normalizeApiError(error));
@@ -432,12 +450,20 @@ export function BundleView(props?: BundleViewProps) {
     setFileSearchError(null);
     setFileSearchExecuted(true);
     try {
-      const response = await rainApi.searchLogs(selectedBundleId, keyword, {
+      const response = await rainApi.previewTempResult({
+        expression: keyword,
+        bundle_hash: selectedBundleId,
         file_id: selectedNode.rawId,
         from,
         size: 50
       });
-      setFileSearchResults(response.hits);
+      setFileSearchResults(response.lines.map((line) => ({
+        file_id: selectedNode.rawId,
+        path: selectedNode.path,
+        snippet: line.content,
+        line_number: line.line_number,
+        offset: line.line_number
+      })));
       setFileSearchTotal(response.total);
       setFileSearchFrom(from);
     } catch (error) {
@@ -448,6 +474,45 @@ export function BundleView(props?: BundleViewProps) {
       setFileSearchLoading(false);
     }
   }, [bundleId, fileSearchText, selectedNode]);
+
+  const createTempResult = useCallback(async () => {
+    const expression = fileSearchText.trim();
+    if (!selectedNode || selectedNode.is_dir || isArchiveNode(selectedNode) || !expression) return;
+    const selectedBundleId = selectedNode.bundleId || bundleId;
+    if (!selectedBundleId) return;
+    setTempResultCreating(true);
+    setFileSearchError(null);
+    try {
+      const result = await rainApi.createTempResult({
+        expression,
+        bundle_hash: selectedBundleId,
+        file_id: selectedNode.rawId
+      });
+      navigate(`/temp-results/${result.id}`);
+    } catch (error) {
+      setFileSearchError(normalizeApiError(error));
+    } finally {
+      setTempResultCreating(false);
+    }
+  }, [bundleId, fileSearchText, navigate, selectedNode]);
+
+  const createIssueTempResult = useCallback(async () => {
+    const expression = searchTerm.trim();
+    if (!issueCode || !expression) return;
+    setTempResultCreating(true);
+    setSearchError(null);
+    try {
+      const result = await rainApi.createTempResult({
+        expression,
+        issue_code: issueCode
+      });
+      navigate(`/temp-results/${result.id}`);
+    } catch (error) {
+      setSearchError(normalizeApiError(error));
+    } finally {
+      setTempResultCreating(false);
+    }
+  }, [issueCode, navigate, searchTerm]);
 
   const activeIssueLabel = activeBundle.issue || '未知 Issue';
   const activeNodeLabel = selectedNode?.name || '未选择文件';
@@ -636,7 +701,7 @@ export function BundleView(props?: BundleViewProps) {
                   placeholder={
                     searchMode === 'log'
                       ? '按文件名搜索当前 Issue 的日志'
-                      : '在当前 Issue 的所有文件内搜索内容'
+                      : '例如：(ERROR OR WARN) AND NOT heartbeat'
                   }
                   value={searchTerm}
                   onChange={(event) => setSearchTerm(event.target.value)}
@@ -756,7 +821,7 @@ export function BundleView(props?: BundleViewProps) {
                     <span className="shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                     <input
                       className="min-w-[180px] flex-1 bg-transparent text-sm text-white outline-none placeholder:text-slate-500"
-                      placeholder="搜索当前文件的全部日志..."
+                      placeholder='当前文件表达式，例如：ERROR AND NOT "timeout"'
                       value={fileSearchText}
                       onChange={(event) => setFileSearchText(event.target.value)}
                       onKeyDown={(event) => {
@@ -788,6 +853,14 @@ export function BundleView(props?: BundleViewProps) {
                       onClick={() => runFileSearch(0).catch(() => undefined)}
                     >
                       搜索
+                    </button>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded border border-cyan-700/70 px-3 py-1.5 text-xs font-semibold text-cyan-200 transition hover:border-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={tempResultCreating || !fileSearchText.trim()}
+                      onClick={() => createTempResult().catch(() => undefined)}
+                    >
+                      {tempResultCreating ? '生成中...' : '生成临时文件'}
                     </button>
                   </div>
                 ) : null}
@@ -821,6 +894,14 @@ export function BundleView(props?: BundleViewProps) {
                         清空
                       </button>
                     ) : null}
+                    <button
+                      type="button"
+                      className="shrink-0 text-xs text-cyan-300 transition hover:text-cyan-100 disabled:opacity-50"
+                      disabled={tempResultCreating || !searchTerm.trim()}
+                      onClick={() => createIssueTempResult().catch(() => undefined)}
+                    >
+                      {tempResultCreating ? '生成中...' : '生成临时文件'}
+                    </button>
                   </div>
                 ) : null}
 

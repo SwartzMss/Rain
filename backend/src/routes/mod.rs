@@ -5,6 +5,7 @@ mod health;
 mod helpers;
 mod issues;
 mod logs;
+mod temp_results;
 mod uploads;
 
 pub fn register(cfg: &mut web::ServiceConfig) {
@@ -22,6 +23,12 @@ pub fn register(cfg: &mut web::ServiceConfig) {
             .service(files::delete_file_node)
             .service(logs::search_issue_logs)
             .service(logs::search_logs)
+            .service(temp_results::create_temp_result)
+            .service(temp_results::preview_temp_result)
+            .service(temp_results::get_temp_result)
+            .service(temp_results::get_temp_result_lines)
+            .service(temp_results::download_temp_result)
+            .service(temp_results::delete_temp_result)
             .service(uploads::upload_logs)
             .service(uploads::get_upload_task),
     );

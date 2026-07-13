@@ -7,6 +7,9 @@ import type {
   IssueLogSearchResponse,
   IssueSummary,
   LogSearchResponse,
+  TempResultInfo,
+  TempResultLinesResponse,
+  TempResultPreviewResponse,
   UploadResponse,
   UploadTaskResponse
 } from './types';
@@ -140,6 +143,34 @@ export const rainApi = {
     if (typeof options?.from === 'number') params.set('from', String(options.from));
     if (typeof options?.size === 'number') params.set('size', String(options.size));
     return request<IssueLogSearchResponse>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/search?${params.toString()}`);
+  },
+  createTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string }) {
+    return request<TempResultInfo>('/api/temp-results', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }) {
+    return request<TempResultPreviewResponse>('/api/temp-results/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  fetchTempResult(id: string) {
+    return request<TempResultInfo>(`/api/temp-results/${encodePathSegment(id)}`);
+  },
+  fetchTempResultLines(id: string, options?: { start?: number; limit?: number }) {
+    const params = new URLSearchParams();
+    if (typeof options?.start === 'number') params.set('start', String(options.start));
+    if (typeof options?.limit === 'number') params.set('limit', String(options.limit));
+    const query = params.toString();
+    return request<TempResultLinesResponse>(`/api/temp-results/${encodePathSegment(id)}/lines${query ? `?${query}` : ''}`);
+  },
+  tempResultDownloadUrl(id: string) {
+    return `${API_BASE_URL}/api/temp-results/${encodePathSegment(id)}/download`;
+  },
+  deleteTempResult(id: string) {
+    return request<void>(`/api/temp-results/${encodePathSegment(id)}`, { method: 'DELETE' });
   },
   fetchUploadTask(taskId: string) {
     return request<UploadTaskResponse>(`/api/uploads/${encodePathSegment(taskId)}`);

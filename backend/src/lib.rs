@@ -2,6 +2,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod ingest;
+pub mod log_expression;
 pub mod models;
 pub mod routes;
 

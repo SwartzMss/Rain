@@ -126,6 +126,7 @@ struct ExpiredBundle {
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
         "DROP TABLE IF EXISTS log_segments_fts",
+        "DROP TABLE IF EXISTS temp_results",
         "DROP TABLE IF EXISTS log_events",
         "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
@@ -222,6 +223,19 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         )
         "#,
         r#"
+        CREATE TABLE IF NOT EXISTS temp_results (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            expression TEXT NOT NULL,
+            source_label TEXT NOT NULL,
+            storage_path TEXT NOT NULL,
+            line_count INTEGER NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        )
+        "#,
+        r#"
         CREATE VIRTUAL TABLE IF NOT EXISTS log_segments_fts USING fts5(
             content,
             segment_id UNINDEXED,
@@ -247,6 +261,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_events_bundle_level ON log_events (bundle_id, level)",
         "CREATE INDEX IF NOT EXISTS idx_events_file_line ON log_events (file_id, line_number)",
         "CREATE INDEX IF NOT EXISTS idx_line_offsets_file_line ON log_line_offsets (file_id, line_number)",
+        "CREATE INDEX IF NOT EXISTS idx_temp_results_expiry ON temp_results (expires_at)",
     ];
 
     for statement in statements {

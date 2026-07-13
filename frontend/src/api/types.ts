@@ -118,3 +118,31 @@ export interface IssueLogSearchResponse {
   total: number;
   hits: IssueLogSearchHit[];
 }
+
+export interface TempResultInfo {
+  id: string;
+  name: string;
+  expression: string;
+  source_label: string;
+  line_count: number;
+  size_bytes: number;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface TempResultLinesResponse {
+  start: number;
+  limit: number;
+  line_count: number;
+  next_start?: number | null;
+  lines: FileLine[];
+}
+
+export interface TempResultPreviewResponse {
+  total: number;
+  lines: Array<FileLine & {
+    bundle_hash?: string;
+    file_id?: string;
+    path: string;
+  }>;
+}

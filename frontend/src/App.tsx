@@ -1,6 +1,7 @@
 import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { BundleView } from './features/files/FilesView';
 import { HomeView } from './features/files/HomeView';
+import { TempResultView } from './features/files/TempResultView';
 import { APP_VERSION } from './version';
 import './App.css';
 
@@ -31,6 +32,7 @@ function App() {
           <Route path="/issue/:issueCode" element={<BundleView />} />
           <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
           <Route path="/bundle/:bundleHash" element={<RedirectLegacyBundle />} />
+          <Route path="/temp-results/:resultId" element={<TempResultView />} />
         </Routes>
       </main>
     </div>

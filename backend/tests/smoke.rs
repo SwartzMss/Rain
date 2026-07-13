@@ -384,6 +384,85 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     assert_eq!(other_file_search["total"], 0);
 
+    let temporary_preview: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/temp-results/preview")
+            .set_json(serde_json::json!({
+                "expression": "ERROR AND NOT timeout",
+                "bundle_hash": bundle_hash,
+                "file_id": app_file_id,
+                "from": 0,
+                "size": 50
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(temporary_preview["total"], 1);
+    assert_eq!(temporary_preview["lines"][0]["line_number"], 1);
+    assert_eq!(
+        temporary_preview["lines"][0]["content"],
+        "ERROR smoke works"
+    );
+
+    let temporary_result_response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/temp-results")
+            .set_json(serde_json::json!({
+                "expression": "ERROR AND NOT timeout",
+                "bundle_hash": bundle_hash,
+                "file_id": app_file_id
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(temporary_result_response.status(), StatusCode::CREATED);
+    let temporary_result: Value = test::read_body_json(temporary_result_response).await;
+    let temporary_result_id = temporary_result["id"]
+        .as_str()
+        .expect("temporary result id");
+    assert_eq!(temporary_result["line_count"], 2);
+
+    let temporary_lines: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/temp-results/{temporary_result_id}/lines?start=0&limit=1000"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(temporary_lines["lines"][0]["content"], "# source: app.log");
+    assert_eq!(temporary_lines["lines"][1]["content"], "ERROR smoke works");
+
+    let temporary_download = test::call_and_read_body(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/temp-results/{temporary_result_id}/download"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(temporary_download, "# source: app.log\nERROR smoke works\n");
+
+    let delete_temporary_result = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/api/temp-results/{temporary_result_id}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete_temporary_result.status(), StatusCode::NO_CONTENT);
+
+    let missing_temporary_result = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/temp-results/{temporary_result_id}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(missing_temporary_result.status(), StatusCode::NOT_FOUND);
+
     let lines: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()
