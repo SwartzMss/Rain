@@ -20,6 +20,7 @@ struct LogQuery {
     q: String,
     timeline: Option<String>,
     path_like: Option<String>,
+    file_id: Option<i64>,
     from: Option<i64>,
     size: Option<i64>,
 }
@@ -57,6 +58,7 @@ pub async fn search_logs(
             Some(trimmed)
         }
     });
+    let file_id = term.file_id;
     let from = term.from.unwrap_or(0).max(0);
     let size = term
         .size
@@ -72,6 +74,7 @@ pub async fn search_logs(
           AND ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
+          AND (? IS NULL OR ls.file_id = ?)
         "#,
     )
     .bind(&fts_query)
@@ -80,6 +83,8 @@ pub async fn search_logs(
     .bind(&timeline)
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
+    .bind(file_id)
+    .bind(file_id)
     .fetch_one(&state.pool)
     .await
     .map_err(AppError::Database)?;
@@ -100,6 +105,7 @@ pub async fn search_logs(
           AND ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
+          AND (? IS NULL OR ls.file_id = ?)
         ORDER BY ls.line_offset NULLS FIRST, ls.id
         LIMIT ? OFFSET ?
         "#,
@@ -110,6 +116,8 @@ pub async fn search_logs(
     .bind(&timeline)
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
     .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
+    .bind(file_id)
+    .bind(file_id)
     .bind(size)
     .bind(from)
     .fetch_all(&state.pool)

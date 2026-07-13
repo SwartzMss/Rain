@@ -362,6 +362,28 @@ async fn upload_search_tree_and_delete_issue() {
     assert_eq!(tree["children"][0]["meta"]["line_count"], 2);
     let app_file_id = tree["children"][0]["id"].as_str().expect("file id");
 
+    let exact_file_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/log/v2/{bundle_hash}/search?q=smoke&file_id={app_file_id}&size=10"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(exact_file_search["total"], 1);
+
+    let other_file_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/log/v2/{bundle_hash}/search?q=smoke&file_id=999999999&size=10"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(other_file_search["total"], 0);
+
     let lines: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()

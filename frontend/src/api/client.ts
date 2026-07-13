@@ -124,10 +124,11 @@ export const rainApi = {
   deleteIssue(issueCode: string) {
     return request<void>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}`, { method: 'DELETE' });
   },
-  searchLogs(bundleId: string, query: string, options?: { timeline?: string; path_like?: string; from?: number; size?: number }) {
+  searchLogs(bundleId: string, query: string, options?: { timeline?: string; path_like?: string; file_id?: string; from?: number; size?: number }) {
     const params = new URLSearchParams({ q: query });
     if (options?.timeline) params.set('timeline', options.timeline);
     if (options?.path_like) params.set('path_like', options.path_like);
+    if (options?.file_id) params.set('file_id', options.file_id);
     if (typeof options?.from === 'number') params.set('from', String(options.from));
     if (typeof options?.size === 'number') params.set('size', String(options.size));
     return request<LogSearchResponse>(`/api/log/v2/${encodePathSegment(bundleId)}/search?${params.toString()}`);
