@@ -31,15 +31,23 @@ async fn move_bundle_directory_with_retry(
     destination: &std::path::Path,
 ) -> Result<(), AppError> {
     const RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
-    for attempt in 0..=RETRY_DELAYS_MS.len() {
+    let mut retry_delays = RETRY_DELAYS_MS.into_iter();
+    loop {
         match fs::rename(source, destination).await {
             Ok(()) => return Ok(()),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::PermissionDenied
-                    && attempt < RETRY_DELAYS_MS.len() =>
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAYS_MS[attempt]))
-                    .await;
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                if let Some(delay_ms) = retry_delays.next() {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                return Err(AppError::Io(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "move processed bundle {} -> {}: {error}",
+                        source.display(),
+                        destination.display()
+                    ),
+                )));
             }
             Err(error) => {
                 return Err(AppError::Io(std::io::Error::new(
@@ -53,7 +61,6 @@ async fn move_bundle_directory_with_retry(
             }
         }
     }
-    unreachable!("rename retry loop always returns")
 }
 
 // scoped under /api in routes::register, so use relative path

@@ -508,18 +508,6 @@ fn preview_page_size(requested: Option<i64>) -> i64 {
     requested.unwrap_or(1_000).clamp(1, 3_000)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::preview_page_size;
-
-    #[test]
-    fn preview_supports_log_viewer_page_sizes() {
-        assert_eq!(preview_page_size(Some(1_000)), 1_000);
-        assert_eq!(preview_page_size(Some(3_000)), 3_000);
-        assert_eq!(preview_page_size(Some(9_000)), 3_000);
-    }
-}
-
 fn to_response(record: TempResultRecord) -> TempResult {
     TempResult {
         id: record.id,
@@ -530,5 +518,17 @@ fn to_response(record: TempResultRecord) -> TempResult {
         size_bytes: record.size_bytes,
         created_at: record.created_at,
         expires_at: record.expires_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_page_size;
+
+    #[test]
+    fn preview_supports_log_viewer_page_sizes() {
+        assert_eq!(preview_page_size(Some(1_000)), 1_000);
+        assert_eq!(preview_page_size(Some(3_000)), 3_000);
+        assert_eq!(preview_page_size(Some(9_000)), 3_000);
     }
 }

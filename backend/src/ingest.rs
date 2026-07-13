@@ -1109,6 +1109,17 @@ fn gzip_output_name(name: &str) -> String {
     output
 }
 
+fn io_error(err: std::io::Error) -> AppError {
+    AppError::Io(err)
+}
+
+fn io_error_at(operation: &str, path: &Path, error: std::io::Error) -> AppError {
+    AppError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{operation} {}: {error}", path.display()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1167,15 +1178,4 @@ mod tests {
             Path::new("_Lpt9.log")
         );
     }
-}
-
-fn io_error(err: std::io::Error) -> AppError {
-    AppError::Io(err)
-}
-
-fn io_error_at(operation: &str, path: &Path, error: std::io::Error) -> AppError {
-    AppError::Io(std::io::Error::new(
-        error.kind(),
-        format!("{operation} {}: {error}", path.display()),
-    ))
 }
