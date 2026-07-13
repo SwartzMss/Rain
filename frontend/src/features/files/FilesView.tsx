@@ -3,6 +3,12 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
 import type { FileLinesResponse, FileNode, IssueLogSearchHit, LogSearchHit, UploadSummary } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
+import {
+  closeViewerTab,
+  openPreviewTab,
+  togglePinnedTab,
+  type ViewerTab
+} from './viewerTabs';
 
 type TreeNode = Omit<FileNode, 'id' | 'children'> & {
   id: string;
@@ -137,7 +143,15 @@ export function BundleView(props?: BundleViewProps) {
   const [tempResultCreating, setTempResultCreating] = useState(false);
   const [targetLine, setTargetLine] = useState<number | null>(null);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
+  const [viewerTabs, setViewerTabs] = useState<ViewerTab[]>([]);
+  const [activeViewerTabId, setActiveViewerTabId] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const activeViewerTab = viewerTabs.find((tab) => tab.id === activeViewerTabId) ?? null;
+
+  const openViewerTab = useCallback((tab: ViewerTab) => {
+    setViewerTabs((current) => openPreviewTab(current, tab));
+    setActiveViewerTabId(tab.id);
+  }, []);
 
   const formatHitPath = (raw: string) => {
     const parts = raw.replace(/^\//, '').split('/');
@@ -262,15 +276,30 @@ export function BundleView(props?: BundleViewProps) {
           expression: keyword,
           issue_code: issue,
           from: 0,
-          size: 50
+          size: LINE_PAGE_SIZE_OPTIONS[0]
         });
-        setSearchResults(response.lines.map((line) => ({
+        const hits = response.lines.map((line) => ({
           bundle_hash: line.bundle_hash,
           file_id: line.file_id ?? '',
           path: line.path,
           snippet: line.content,
           line_number: line.line_number
-        })));
+        }));
+        setSearchResults(hits);
+        const id = `search:${Date.now()}`;
+        openViewerTab({
+          id,
+          kind: 'search',
+          title: keyword,
+          pinned: false,
+          scrollTop: 0,
+          expression: keyword,
+          hits,
+          total: response.total,
+          from: 0,
+          pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+          source: { kind: 'issue', issueCode: issue }
+        });
       }
     } catch (error) {
       setSearchResults([]);
@@ -278,7 +307,7 @@ export function BundleView(props?: BundleViewProps) {
     } finally {
       setSearchLoading(false);
     }
-  }, [issueCode, searchMode, searchTerm]);
+  }, [issueCode, openViewerTab, searchMode, searchTerm]);
 
   const changeSearchMode = (mode: 'log' | 'detailed') => {
     if (mode === searchMode) return;
@@ -302,6 +331,8 @@ export function BundleView(props?: BundleViewProps) {
       setRootIds([]);
       setSelectedNodeId(null);
       setNonReadyBundles([]);
+      setViewerTabs([]);
+      setActiveViewerTabId(null);
 
       let bundles = fallbackBundles;
       if (issueCode) {
@@ -369,18 +400,28 @@ export function BundleView(props?: BundleViewProps) {
     setResultFilterText('');
   }, [issueCode, refreshKey]);
 
-  const currentFilteredResults = searchResults;
-  const visibleSearchResults = useMemo(() => {
+  const activeSearchResults = useMemo<IssueLogSearchHit[]>(() => {
+    if (activeViewerTab?.kind === 'search') return activeViewerTab.hits;
+    if (activeViewerTab?.kind === 'temp') {
+      return activeViewerTab.lines.map((content, index) => ({
+        file_id: activeViewerTab.resultId,
+        path: '',
+        snippet: content,
+        line_number: activeViewerTab.from + index
+      }));
+    }
+    return [];
+  }, [activeViewerTab]);
+  const visibleActiveSearchResults = useMemo(() => {
     const keyword = resultFilterText.trim().toLowerCase();
-    if (!keyword) return currentFilteredResults;
-
-    return currentFilteredResults.filter((hit) => {
+    if (!keyword) return activeSearchResults;
+    return activeSearchResults.filter((hit) => {
       const path = hit.path?.toLowerCase() ?? '';
       const snippet = hit.snippet?.toLowerCase() ?? '';
       const timeline = hit.timeline?.toLowerCase() ?? '';
       return path.includes(keyword) || snippet.includes(keyword) || timeline.includes(keyword);
     });
-  }, [currentFilteredResults, resultFilterText]);
+  }, [activeSearchResults, resultFilterText]);
 
   const handleNodeClick = async (
     nodeId: string,
@@ -427,9 +468,85 @@ export function BundleView(props?: BundleViewProps) {
     }
 
     setSelectedNodeId(node.id);
+    if (!node.is_dir && !isArchiveNode(node)) {
+      openViewerTab({
+        id: `file:${node.id}`,
+        kind: 'file',
+        title: node.name,
+        pinned: false,
+        scrollTop: 0,
+        nodeId: node.id,
+        lineStart: typeof line === 'number' && line >= 0
+          ? Math.floor(line / linePageSize) * linePageSize
+          : 0,
+        pageSize: linePageSize,
+        targetLine: typeof line === 'number' && line >= 0 ? line : null
+      });
+    }
   };
 
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
+
+  const activateViewerTab = (tab: ViewerTab) => {
+    if (activeViewerTabId && contentRef.current) {
+      const scrollTop = contentRef.current.scrollTop;
+      setViewerTabs((tabs) =>
+        tabs.map((item) => (item.id === activeViewerTabId ? { ...item, scrollTop } : item))
+      );
+    }
+    setActiveViewerTabId(tab.id);
+    if (tab.kind === 'file') {
+      setSelectedNodeId(tab.nodeId);
+      setLineStart(tab.lineStart);
+      setLinePageSize(tab.pageSize);
+      setTargetLine(tab.targetLine);
+    }
+    window.requestAnimationFrame(() => {
+      if (contentRef.current) contentRef.current.scrollTop = tab.scrollTop;
+    });
+  };
+
+  const closeTab = (id: string) => {
+    const index = viewerTabs.findIndex((tab) => tab.id === id);
+    const remaining = closeViewerTab(viewerTabs, id);
+    setViewerTabs(remaining);
+    if (activeViewerTabId === id) {
+      const next = remaining[Math.min(index, remaining.length - 1)] ?? null;
+      setActiveViewerTabId(next?.id ?? null);
+      if (next?.kind === 'file') {
+        setSelectedNodeId(next.nodeId);
+        setLineStart(next.lineStart);
+        setLinePageSize(next.pageSize);
+        setTargetLine(next.targetLine);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedNode || selectedNode.is_dir || isArchiveNode(selectedNode) || viewerTabs.length > 0) return;
+    openViewerTab({
+      id: `file:${selectedNode.id}`,
+      kind: 'file',
+      title: selectedNode.name,
+      pinned: false,
+      scrollTop: 0,
+      nodeId: selectedNode.id,
+      lineStart,
+      pageSize: linePageSize,
+      targetLine
+    });
+  }, [linePageSize, lineStart, openViewerTab, selectedNode, targetLine, viewerTabs.length]);
+
+  useEffect(() => {
+    if (!activeViewerTab || activeViewerTab.kind !== 'file') return;
+    setViewerTabs((tabs) =>
+      tabs.map((tab) =>
+        tab.id === activeViewerTab.id && tab.kind === 'file'
+          ? { ...tab, lineStart, pageSize: linePageSize, targetLine }
+          : tab
+      )
+    );
+  }, [activeViewerTab?.id, linePageSize, lineStart, targetLine]);
 
   const clearFileSearch = useCallback(() => {
     setFileSearchText('');
@@ -455,17 +572,36 @@ export function BundleView(props?: BundleViewProps) {
         bundle_hash: selectedBundleId,
         file_id: selectedNode.rawId,
         from,
-        size: 50
+        size: LINE_PAGE_SIZE_OPTIONS[0]
       });
-      setFileSearchResults(response.lines.map((line) => ({
+      const hits = response.lines.map((line) => ({
         file_id: selectedNode.rawId,
         path: selectedNode.path,
         snippet: line.content,
         line_number: line.line_number,
         offset: line.line_number
-      })));
+      }));
+      setFileSearchResults(hits);
       setFileSearchTotal(response.total);
       setFileSearchFrom(from);
+      if (from === 0 && hits.length > 0) {
+        const id = `search:${Date.now()}`;
+        openViewerTab({
+          id,
+          kind: 'search',
+          title: keyword,
+          pinned: false,
+          scrollTop: 0,
+          expression: keyword,
+          hits,
+          total: response.total,
+          from: 0,
+          pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+          source: { kind: 'file', bundleHash: selectedBundleId, fileId: selectedNode.rawId }
+        });
+        setFileSearchResults([]);
+        setFileSearchExecuted(false);
+      }
     } catch (error) {
       setFileSearchResults([]);
       setFileSearchTotal(0);
@@ -473,7 +609,7 @@ export function BundleView(props?: BundleViewProps) {
     } finally {
       setFileSearchLoading(false);
     }
-  }, [bundleId, fileSearchText, selectedNode]);
+  }, [bundleId, fileSearchText, openViewerTab, selectedNode]);
 
   const createTempResult = useCallback(async () => {
     const expression = fileSearchText.trim();
@@ -496,23 +632,92 @@ export function BundleView(props?: BundleViewProps) {
     }
   }, [bundleId, fileSearchText, navigate, selectedNode]);
 
-  const createIssueTempResult = useCallback(async () => {
-    const expression = searchTerm.trim();
-    if (!issueCode || !expression) return;
+  const createActiveSearchTempResult = useCallback(async () => {
+    if (!activeViewerTab || activeViewerTab.kind !== 'search') return;
     setTempResultCreating(true);
     setSearchError(null);
     try {
-      const result = await rainApi.createTempResult({
-        expression,
-        issue_code: issueCode
+      const result = await rainApi.createTempResult(
+        activeViewerTab.source.kind === 'issue'
+          ? { expression: activeViewerTab.expression, issue_code: activeViewerTab.source.issueCode }
+          : {
+              expression: activeViewerTab.expression,
+              bundle_hash: activeViewerTab.source.bundleHash,
+              file_id: activeViewerTab.source.fileId
+            }
+      );
+      const content = await rainApi.fetchTempResultLines(result.id, {
+        start: 0,
+        limit: LINE_PAGE_SIZE_OPTIONS[0]
       });
-      navigate(`/temp-results/${result.id}`);
+      openViewerTab({
+        id: `temp:${result.id}`,
+        kind: 'temp',
+        title: result.name,
+        pinned: true,
+        scrollTop: 0,
+        resultId: result.id,
+        expression: result.expression,
+        lines: content.lines.map((line) => line.content),
+        total: content.line_count,
+        from: content.start,
+        pageSize: content.limit
+      });
     } catch (error) {
       setSearchError(normalizeApiError(error));
     } finally {
       setTempResultCreating(false);
     }
-  }, [issueCode, navigate, searchTerm]);
+  }, [activeViewerTab, openViewerTab]);
+
+  const loadViewerPage = useCallback(async (tab: ViewerTab, from: number, pageSize: number) => {
+    setSearchLoading(true);
+    setSearchError(null);
+    try {
+      if (tab.kind === 'temp') {
+        const response = await rainApi.fetchTempResultLines(tab.resultId, {
+          start: from,
+          limit: pageSize
+        });
+        setViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'temp'
+          ? {
+              ...item,
+              lines: response.lines.map((line) => line.content),
+              total: response.line_count,
+              from: response.start,
+              pageSize: response.limit,
+              scrollTop: 0
+            }
+          : item));
+        return;
+      }
+      if (tab.kind !== 'search') return;
+      const payload = tab.source.kind === 'issue'
+        ? { expression: tab.expression, issue_code: tab.source.issueCode, from, size: pageSize }
+        : {
+            expression: tab.expression,
+            bundle_hash: tab.source.bundleHash,
+            file_id: tab.source.fileId,
+            from,
+            size: pageSize
+          };
+      const response = await rainApi.previewTempResult(payload);
+      const hits = response.lines.map((line) => ({
+        bundle_hash: line.bundle_hash,
+        file_id: line.file_id ?? '',
+        path: line.path,
+        snippet: line.content,
+        line_number: line.line_number
+      }));
+      setViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'search'
+        ? { ...item, hits, total: response.total, from, pageSize, scrollTop: 0 }
+        : item));
+    } catch (error) {
+      setSearchError(normalizeApiError(error));
+    } finally {
+      setSearchLoading(false);
+    }
+  }, []);
 
   const activeIssueLabel = activeBundle.issue || '未知 Issue';
   const activeNodeLabel = selectedNode?.name || '未选择文件';
@@ -612,6 +817,11 @@ export function BundleView(props?: BundleViewProps) {
     );
     pre.scrollTop = Math.max(0, clampedIndex * lineHeightPx);
   }, [fileLines, targetLine]);
+
+  useEffect(() => {
+    if (!contentRef.current || !activeViewerTab || targetLine !== null) return;
+    contentRef.current.scrollTop = activeViewerTab.scrollTop;
+  }, [activeViewerTab?.id, activeViewerTab?.scrollTop, fileLines, targetLine]);
 
   const renderTreeNode = (nodeId: string, depth = 0): JSX.Element | null => {
     const node = treeNodes[nodeId];
@@ -811,12 +1021,51 @@ export function BundleView(props?: BundleViewProps) {
           </div>
 
           <div className="flex min-h-[80vh] flex-col rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-200">
+            {viewerTabs.length > 0 ? (
+              <div className="mb-2 flex min-h-9 items-end gap-1 overflow-x-auto border-b border-slate-800">
+                {viewerTabs.map((tab) => (
+                  <div
+                    key={tab.id}
+                    className={`flex max-w-64 shrink-0 items-center gap-1 rounded-t border border-b-0 px-2 py-1.5 text-xs ${
+                      tab.id === activeViewerTabId
+                        ? 'border-slate-600 bg-slate-950 text-white'
+                        : 'border-transparent bg-slate-900 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 truncate text-left"
+                      title={tab.title}
+                      onClick={() => activateViewerTab(tab)}
+                    >
+                      {tab.kind === 'search' ? '⌕ ' : ''}{tab.title}
+                    </button>
+                    <button
+                      type="button"
+                      className={tab.pinned ? 'text-cyan-300' : 'text-slate-600 hover:text-slate-300'}
+                      title={tab.pinned ? '取消固定' : '固定标签'}
+                      aria-label={tab.pinned ? '取消固定' : '固定标签'}
+                      onClick={() => setViewerTabs((tabs) => togglePinnedTab(tabs, tab.id))}
+                    >
+                      {tab.pinned ? '●' : '○'}
+                    </button>
+                    <button
+                      type="button"
+                      className="text-slate-600 hover:text-rose-300"
+                      aria-label={`关闭 ${tab.title}`}
+                      onClick={() => closeTab(tab.id)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div className="flex min-h-0 flex-1 flex-col">
               <div className="flex min-h-0 flex-1 flex-col gap-2">
-                {selectedNode &&
+                {activeViewerTab?.kind === 'file' && selectedNode &&
                 !selectedNode.is_dir &&
-                !isArchiveNode(selectedNode) &&
-                !(searchMode === 'detailed' && searchExecuted) ? (
+                !isArchiveNode(selectedNode) ? (
                   <div className="flex min-h-11 flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 focus-within:border-cyan-500/60">
                     <span className="shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                     <input
@@ -865,7 +1114,7 @@ export function BundleView(props?: BundleViewProps) {
                   </div>
                 ) : null}
 
-                {searchMode === 'detailed' && searchExecuted && currentFilteredResults.length > 0 ? (
+                {(activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp') && activeSearchResults.length > 0 ? (
                   <div className="flex min-h-11 flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 focus-within:border-cyan-500/60">
                     <span className="shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                     <input
@@ -882,8 +1131,8 @@ export function BundleView(props?: BundleViewProps) {
                     />
                     <span className="shrink-0 text-xs text-slate-400">
                       {resultFilterText.trim()
-                        ? `已筛选 ${visibleSearchResults.length} / ${currentFilteredResults.length} 条`
-                        : `${currentFilteredResults.length} 条结果`}
+                        ? `本页已筛选 ${visibleActiveSearchResults.length} / ${activeSearchResults.length} 条`
+                        : `${activeViewerTab.total} 条结果`}
                     </span>
                     {resultFilterText ? (
                       <button
@@ -894,18 +1143,36 @@ export function BundleView(props?: BundleViewProps) {
                         清空
                       </button>
                     ) : null}
-                    <button
-                      type="button"
-                      className="shrink-0 text-xs text-cyan-300 transition hover:text-cyan-100 disabled:opacity-50"
-                      disabled={tempResultCreating || !searchTerm.trim()}
-                      onClick={() => createIssueTempResult().catch(() => undefined)}
-                    >
-                      {tempResultCreating ? '生成中...' : '生成临时文件'}
-                    </button>
+                    {activeViewerTab.kind === 'search' ? (
+                      <button
+                        type="button"
+                        className="shrink-0 text-xs text-cyan-300 transition hover:text-cyan-100 disabled:opacity-50"
+                        disabled={tempResultCreating}
+                        onClick={() => createActiveSearchTempResult().catch(() => undefined)}
+                      >
+                        {tempResultCreating ? '生成中...' : '生成临时文件'}
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="shrink-0 text-xs text-slate-400 transition hover:text-white"
+                          onClick={() => navigator.clipboard.writeText(`${window.location.origin}/temp-results/${activeViewerTab.resultId}`)}
+                        >
+                          复制分享链接
+                        </button>
+                        <a
+                          className="shrink-0 text-xs text-cyan-300 transition hover:text-cyan-100"
+                          href={rainApi.tempResultDownloadUrl(activeViewerTab.resultId)}
+                        >
+                          下载
+                        </a>
+                      </>
+                    )}
                   </div>
                 ) : null}
 
-                {fileSearchExecuted ? (
+                {activeViewerTab?.kind === 'file' && fileSearchExecuted ? (
                   fileSearchLoading && fileSearchResults.length === 0 ? (
                     <p className="py-8 text-center text-sm text-slate-500">正在搜索当前文件...</p>
                   ) : fileSearchError ? (
@@ -965,59 +1232,62 @@ export function BundleView(props?: BundleViewProps) {
                       </div>
                     </div>
                   )
-                ) : searchMode === 'detailed' && searchExecuted ? (
-                  searchLoading && currentFilteredResults.length === 0 ? (
+                ) : activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp' ? (
+                  searchLoading && activeSearchResults.length === 0 ? (
                     <p className="py-8 text-center text-sm text-slate-500">正在搜索...</p>
-                  ) : currentFilteredResults.length === 0 ? (
+                  ) : activeSearchResults.length === 0 ? (
                     <p className="py-8 text-center text-sm text-slate-500">未搜索到相关日志。</p>
-                  ) : visibleSearchResults.length === 0 && resultFilterText.trim() ? (
+                  ) : visibleActiveSearchResults.length === 0 && resultFilterText.trim() ? (
                     <p className="py-8 text-center text-sm text-slate-500">
                       当前结果中没有包含「{resultFilterText.trim()}」的内容。
                     </p>
                   ) : (
-                    <ul className="space-y-2">
-                      {visibleSearchResults.map((hit, index) => {
-                        const targetId = hit.bundle_hash
-                          ? `${hit.bundle_hash}:${hit.file_id}`
-                          : '';
-                        const selected = !!targetId && selectedNodeId === targetId;
-                        return (
-                          <li
-                            key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
-                            className={`cursor-pointer space-y-2 rounded-lg border bg-slate-950/70 p-3 transition ${
-                              selected
-                                ? 'border-cyan-500/60'
-                                : 'border-slate-800 hover:border-slate-700'
-                            }`}
-                            onClick={() => {
-                              if (!targetId) return;
-                              setSelectedNodeId(targetId);
-                              handleNodeClick(targetId, hit.line_number ?? null).catch(() => undefined);
-                            }}
+                    <div className="flex min-h-0 flex-1 flex-col gap-2">
+                      <div
+                        ref={contentRef}
+                        className="min-h-[70vh] flex-1 overflow-auto rounded bg-slate-950/70 p-3 font-mono text-xs leading-5 text-slate-100"
+                      >
+                        {visibleActiveSearchResults.map((hit, index) => (
+                          <div key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`} className="whitespace-pre">
+                            {highlightText(hit.snippet, resultFilterText)}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-2 text-xs text-slate-400">
+                        <label className="flex items-center gap-2">
+                          <span>每页</span>
+                          <select
+                            className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200 outline-none focus:border-cyan-500/60"
+                            value={activeViewerTab.pageSize}
+                            disabled={searchLoading}
+                            onChange={(event) => loadViewerPage(activeViewerTab, 0, Number(event.target.value)).catch(() => undefined)}
                           >
-                            <div className="flex min-w-0 items-center justify-between gap-3 text-[11px]">
-                              <p className="min-w-0 truncate text-slate-400">
-                                {highlightText(formatHitPath(hit.path), resultFilterText)}
-                              </p>
-                              <span className="shrink-0 text-slate-500">
-                                {hit.line_number !== null && hit.line_number !== undefined
-                                  ? `行 ${hit.line_number + 1}${
-                                      hit.line_end !== null && hit.line_end !== undefined
-                                        ? ` - ${hit.line_end + 1}`
-                                        : ''
-                                    }`
-                                  : '行号未知'}
-                              </span>
-                            </div>
-                            <pre className="truncate font-mono text-xs text-slate-100">
-                              {highlightText(hit.snippet, resultFilterText)}
-                            </pre>
-                          </li>
-                        );
-                      })}
-                    </ul>
+                            {LINE_PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} 行</option>)}
+                          </select>
+                        </label>
+                        <span>
+                          第 {Math.floor(activeViewerTab.from / activeViewerTab.pageSize) + 1} / {Math.max(1, Math.ceil(activeViewerTab.total / activeViewerTab.pageSize))} 页
+                        </span>
+                        <button
+                          type="button"
+                          className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
+                          disabled={activeViewerTab.from === 0 || searchLoading}
+                          onClick={() => loadViewerPage(activeViewerTab, Math.max(0, activeViewerTab.from - activeViewerTab.pageSize), activeViewerTab.pageSize).catch(() => undefined)}
+                        >
+                          上一页
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
+                          disabled={activeViewerTab.from + activeSearchResults.length >= activeViewerTab.total || searchLoading}
+                          onClick={() => loadViewerPage(activeViewerTab, activeViewerTab.from + activeViewerTab.pageSize, activeViewerTab.pageSize).catch(() => undefined)}
+                        >
+                          下一页
+                        </button>
+                      </div>
+                    </div>
                   )
-                ) : !selectedNode ? (
+                ) : activeViewerTab?.kind !== 'file' || !selectedNode ? (
                   <p className="py-8 text-center text-sm text-slate-500">
                     输入关键词搜索当前 Issue 的日志。
                   </p>
@@ -1032,11 +1302,6 @@ export function BundleView(props?: BundleViewProps) {
                 ) : fileLines ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-2">
                     <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
-                      <span>
-                        行 {fileLines.start + 1}
-                        {fileLines.lines.length > 0 ? ` - ${fileLines.start + fileLines.lines.length}` : ''}
-                        {fileLines.line_count ? ` / ${fileLines.line_count}` : ''}
-                      </span>
                       <a
                         className="ml-auto rounded border border-slate-700 px-3 py-1 text-slate-200 hover:border-slate-500"
                         href={rainApi.fileDownloadUrl(selectedNode.bundleId || bundleId, selectedNode.rawId)}

@@ -124,7 +124,7 @@ pub async fn preview_temp_result(
     };
     let sources = resolve_sources(&source_request, &state).await?;
     let from = payload.from.unwrap_or(0).max(0);
-    let size = payload.size.unwrap_or(50).clamp(1, 100);
+    let size = preview_page_size(payload.size);
     let mut matched = 0_i64;
     let mut lines = Vec::new();
     for source in sources {
@@ -193,12 +193,10 @@ pub async fn create_temp_result(
     let output_path = directory.join(format!("{id}.log"));
     let mut output = File::create(&output_path).await.map_err(AppError::Io)?;
     let mut matching_lines = 0_i64;
-    let mut marker_lines = 0_i64;
     for source in sources {
         let file = File::open(&source.path).await.map_err(AppError::Io)?;
         let mut reader = BufReader::new(file);
         let mut bytes = Vec::new();
-        let mut marker_written = false;
         loop {
             bytes.clear();
             if reader
@@ -211,14 +209,6 @@ pub async fn create_temp_result(
             }
             let line = String::from_utf8_lossy(&bytes);
             if expression.matches(line.trim_end_matches(['\r', '\n'])) {
-                if !marker_written {
-                    output
-                        .write_all(format!("# source: {}\n", source.label).as_bytes())
-                        .await
-                        .map_err(AppError::Io)?;
-                    marker_written = true;
-                    marker_lines += 1;
-                }
                 output.write_all(&bytes).await.map_err(AppError::Io)?;
                 if !bytes.ends_with(b"\n") {
                     output.write_all(b"\n").await.map_err(AppError::Io)?;
@@ -248,7 +238,7 @@ pub async fn create_temp_result(
     .bind(expression_text)
     .bind(&source_label)
     .bind(storage_path)
-    .bind(matching_lines + marker_lines)
+    .bind(matching_lines)
     .bind(metadata.len() as i64)
     .bind(created_at.to_rfc3339())
     .bind(expires_at.to_rfc3339())
@@ -512,6 +502,22 @@ fn checked_temp_path(state: &web::Data<AppState>, stored_path: &str) -> Result<P
         ));
     }
     Ok(path.to_path_buf())
+}
+
+fn preview_page_size(requested: Option<i64>) -> i64 {
+    requested.unwrap_or(1_000).clamp(1, 3_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_page_size;
+
+    #[test]
+    fn preview_supports_log_viewer_page_sizes() {
+        assert_eq!(preview_page_size(Some(1_000)), 1_000);
+        assert_eq!(preview_page_size(Some(3_000)), 3_000);
+        assert_eq!(preview_page_size(Some(9_000)), 3_000);
+    }
 }
 
 fn to_response(record: TempResultRecord) -> TempResult {

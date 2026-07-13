@@ -26,6 +26,36 @@ const MAX_CONCURRENT_PROCESSING_TASKS: usize = 2;
 static PROCESSING_PERMITS: Lazy<Semaphore> =
     Lazy::new(|| Semaphore::new(MAX_CONCURRENT_PROCESSING_TASKS));
 
+async fn move_bundle_directory_with_retry(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), AppError> {
+    const RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
+    for attempt in 0..=RETRY_DELAYS_MS.len() {
+        match fs::rename(source, destination).await {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt < RETRY_DELAYS_MS.len() =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAYS_MS[attempt]))
+                    .await;
+            }
+            Err(error) => {
+                return Err(AppError::Io(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "move processed bundle {} -> {}: {error}",
+                        source.display(),
+                        destination.display()
+                    ),
+                )));
+            }
+        }
+    }
+    unreachable!("rename retry loop always returns")
+}
+
 // scoped under /api in routes::register, so use relative path
 #[post("/issues/{issue_code}/uploads")]
 pub async fn upload_logs(
@@ -197,9 +227,7 @@ pub async fn upload_logs(
             if let Some(parent) = final_bundle_dir.parent() {
                 fs::create_dir_all(parent).await.map_err(AppError::Io)?;
             }
-            fs::rename(&staging_bundle_dir, &final_bundle_dir)
-                .await
-                .map_err(AppError::Io)?;
+            move_bundle_directory_with_retry(&staging_bundle_dir, &final_bundle_dir).await?;
             finalize_bundle_ready_with_retry(
                 &pool,
                 &task_bundle_id,

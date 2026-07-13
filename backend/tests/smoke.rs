@@ -422,7 +422,7 @@ async fn upload_search_tree_and_delete_issue() {
     let temporary_result_id = temporary_result["id"]
         .as_str()
         .expect("temporary result id");
-    assert_eq!(temporary_result["line_count"], 2);
+    assert_eq!(temporary_result["line_count"], 1);
 
     let temporary_lines: Value = test::call_and_read_body_json(
         &app,
@@ -433,8 +433,7 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(temporary_lines["lines"][0]["content"], "# source: app.log");
-    assert_eq!(temporary_lines["lines"][1]["content"], "ERROR smoke works");
+    assert_eq!(temporary_lines["lines"][0]["content"], "ERROR smoke works");
 
     let temporary_download = test::call_and_read_body(
         &app,
@@ -443,7 +442,7 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(temporary_download, "# source: app.log\nERROR smoke works\n");
+    assert_eq!(temporary_download, "ERROR smoke works\n");
 
     let delete_temporary_result = test::call_service(
         &app,

@@ -10,6 +10,7 @@ import type {
   UploadSummary,
   UploadTaskResponse
 } from '../../api/types';
+import { createOptimisticUploadRows, type UploadSelectionItem } from './uploadRows';
 
 const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
 
@@ -73,7 +74,7 @@ export function HomeView() {
   const [createIssueError, setCreateIssueError] = useState<string | null>(null);
   const [deletingIssue, setDeletingIssue] = useState<string | null>(null);
   const [bundles, setBundles] = useState<UploadSummary[]>([]);
-  const [bundlesLoading, setBundlesLoading] = useState(false);
+  const [, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
@@ -91,10 +92,9 @@ export function HomeView() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadTask, setUploadTask] = useState<UploadTaskResponse | null>(null);
-  const [uploadSelection, setUploadSelection] = useState<{ name: string; sizeBytes: number } | null>(null);
+  const [uploadSelection, setUploadSelection] = useState<UploadSelectionItem[]>([]);
 
   const currentIssueCode = selectedIssueCode.trim();
-  const selectedIssue = issues.find((issue) => issue.code === currentIssueCode) ?? null;
   const activeTask =
     uploadTask?.status === 'PROCESSING' || uploadTask?.status === 'PENDING' ? uploadTask : null;
   const uploadDisabled = !currentIssueCode || uploading || !!activeTask;
@@ -115,9 +115,21 @@ export function HomeView() {
       const stage = currentTask?.stage ?? bundle.stage;
       const state = bundleFiles[bundle.hash];
       if (status !== 'READY') {
+        if (currentTask && uploadSelection.length > 0) {
+          return uploadSelection.map((item, index) => ({
+            key: `active-upload:${index}:${item.name}`,
+            bundleHash: bundle.hash,
+            bundleName: item.name,
+            name: item.name,
+            status,
+            stage,
+            progressPercent: currentTask.progress_percent,
+            sizeBytes: item.sizeBytes
+          }));
+        }
         return [
           {
-            key: bundle.hash,
+            key: currentTask ? 'active-upload' : bundle.hash,
             bundleHash: bundle.hash,
             bundleName: bundle.name || bundle.hash,
             name: bundle.name || bundle.hash,
@@ -139,26 +151,20 @@ export function HomeView() {
         sizeBytes: file.size_bytes
       }));
     });
-    if (uploading && uploadSelection) {
-      rows.unshift({
-        key: 'uploading',
-        bundleHash: '',
-        bundleName: uploadSelection.name,
-        name: uploadSelection.name,
-        status: 'PROCESSING',
-        stage: 'UPLOADING',
-        progressPercent: uploadProgress,
-        sizeBytes: uploadSelection.sizeBytes
-      });
+    const taskBundleVisible = !!uploadTask?.bundle_hash && bundles.some(
+      (bundle) => bundle.hash === uploadTask.bundle_hash
+    );
+    if ((uploading || activeTask) && uploadSelection.length > 0 && !taskBundleVisible) {
+      rows.unshift(
+        ...createOptimisticUploadRows(
+          uploadSelection,
+          uploadProgress,
+          uploadTask?.bundle_hash ?? ''
+        )
+      );
     }
     return rows;
-  }, [bundleFiles, bundles, uploadProgress, uploadSelection, uploadTask, uploading]);
-  const availableFileCount = fileRows.filter(
-    (row) => row.status === 'READY' && !!row.file
-  ).length;
-  const failedTaskCount = bundles.filter(
-    (bundle) => bundle.status.upload_status === 'FAILED'
-  ).length;
+  }, [activeTask, bundleFiles, bundles, uploadProgress, uploadSelection, uploadTask, uploading]);
 
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
@@ -406,10 +412,7 @@ export function HomeView() {
     setUploadProgress(0);
     setUploadError(null);
     setUploadTask(null);
-    setUploadSelection({
-      name: files.length === 1 ? files[0].name : `${files[0].name} 等 ${files.length} 个文件`,
-      sizeBytes: files.reduce((total, file) => total + file.size, 0)
-    });
+    setUploadSelection(files.map((file) => ({ name: file.name, sizeBytes: file.size })));
     try {
       const response = await rainApi.uploadLogs(currentIssueCode, files, setUploadProgress);
       setUploadTask({
@@ -429,7 +432,6 @@ export function HomeView() {
       uploadingRef.current = false;
       setUploading(false);
       setUploadProgress(0);
-      setUploadSelection(null);
     }
   };
 
@@ -568,15 +570,6 @@ export function HomeView() {
               <h2 className="text-2xl font-semibold text-white">
                 {currentIssueCode || '请选择 Issue'}
               </h2>
-              <div className="mt-3 flex flex-wrap gap-5 text-sm text-slate-400">
-                {selectedIssue?.name && selectedIssue.name !== currentIssueCode ? (
-                  <span>{selectedIssue.name}</span>
-                ) : null}
-                <span>{bundles.length} 个日志包</span>
-                <span>{availableFileCount} 个可用文件</span>
-                <span>{failedTaskCount} 个失败任务</span>
-                {bundlesLoading ? <span>正在刷新...</span> : null}
-              </div>
             </div>
             {currentIssueCode ? (
               <button
@@ -662,16 +655,29 @@ export function HomeView() {
               </button>
             </div>
 
-            {uploading ? (
-              <div className="grid gap-3 text-sm text-slate-300 md:grid-cols-[1fr_auto] md:items-center">
-                <div>
-                  <div className="h-2 overflow-hidden rounded bg-slate-800">
-                    <div className="h-full bg-sky-500" style={{ width: `${uploadProgress}%` }} />
+            <div className="min-h-7">
+              {uploading || activeTask ? (
+                <div className="grid gap-3 text-sm text-slate-300 md:grid-cols-[1fr_auto] md:items-center">
+                  <div>
+                    <div className="h-2 overflow-hidden rounded bg-slate-800">
+                      <div
+                        className={`h-full bg-sky-500 transition-[width] duration-300 ${activeTask ? 'animate-pulse' : ''}`}
+                        style={{ width: `${uploading ? uploadProgress : 100}%` }}
+                      />
+                    </div>
                   </div>
+                  <span>
+                    {uploading
+                      ? uploadProgress < 100
+                        ? `上传 ${uploadProgress}%`
+                        : '上传完成，正在提交...'
+                      : activeTask
+                        ? stageLabel(activeTask.stage)
+                        : ''}
+                  </span>
                 </div>
-                <span>{uploadProgress < 100 ? `上传 ${uploadProgress}%` : '上传完成，正在解析...'}</span>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
             {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
           </form>
         </div>

@@ -53,7 +53,9 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     } = options;
 
     let bundle_dir = data_root.join(bundle_hash);
-    fs::create_dir_all(&bundle_dir).await.map_err(io_error)?;
+    fs::create_dir_all(&bundle_dir)
+        .await
+        .map_err(|error| io_error_at("create bundle staging directory", &bundle_dir, error))?;
 
     let disk_path = bundle_dir.join(storage_name);
     move_or_copy_file(source_path, &disk_path).await?;
@@ -88,7 +90,9 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     if is_supported_archive(original_name) || is_supported_archive(display_name) {
         let extracted_dir_name = format!("{storage_name}_extracted");
         let extracted_dir = bundle_dir.join(&extracted_dir_name);
-        fs::create_dir_all(&extracted_dir).await.map_err(io_error)?;
+        fs::create_dir_all(&extracted_dir).await.map_err(|error| {
+            io_error_at("create archive extraction directory", &extracted_dir, error)
+        })?;
 
         update_process_stage(pool, bundle_id, "EXTRACTING").await?;
         extract_archive(original_name, &disk_path, &extracted_dir).await?;
@@ -174,7 +178,9 @@ async fn ingest_directory(
             .unwrap_or("unknown");
         let rel_string = relative.to_string_lossy().replace('\\', "/");
         let db_path = format!("/{}/{}", relative_root.trim_start_matches('/'), rel_string);
-        let metadata = fs::metadata(&disk_path).await.map_err(io_error)?;
+        let metadata = fs::metadata(&disk_path)
+            .await
+            .map_err(|error| io_error_at("read extracted entry metadata", &disk_path, error))?;
         let size_bytes = if metadata.is_file() {
             Some(metadata.len() as i64)
         } else {
@@ -254,7 +260,9 @@ async fn move_or_copy_file(source: &Path, destination: &Path) -> Result<(), AppE
     match fs::rename(source, destination).await {
         Ok(()) => Ok(()),
         Err(_) => {
-            fs::copy(source, destination).await.map_err(io_error)?;
+            fs::copy(source, destination)
+                .await
+                .map_err(|error| io_error_at("copy uploaded file", destination, error))?;
             let _ = fs::remove_file(source).await;
             Ok(())
         }
@@ -268,7 +276,9 @@ async fn ingest_text_file(
     disk_path: &Path,
     _size_bytes: u64,
 ) -> Result<(), AppError> {
-    let file = fs::File::open(disk_path).await.map_err(io_error)?;
+    let file = fs::File::open(disk_path)
+        .await
+        .map_err(|error| io_error_at("open log file for indexing", disk_path, error))?;
     let mut reader = BufReader::new(file);
     let mut line_number = 0i64;
     let mut bytes_scanned = 0u64;
@@ -675,7 +685,8 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
     let src_path = src.to_path_buf();
     let dest_path = dest.to_path_buf();
     task::spawn_blocking(move || -> Result<(), AppError> {
-        let file = std::fs::File::open(&src_path).map_err(io_error)?;
+        let file = std::fs::File::open(&src_path)
+            .map_err(|error| io_error_at("open zip archive", &src_path, error))?;
         let mut archive =
             zip::ZipArchive::new(file).map_err(|err| AppError::BadRequest(err.to_string()))?;
 
@@ -738,13 +749,17 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
             }
 
             if entry.is_dir() {
-                std::fs::create_dir_all(&out_path).map_err(io_error)?;
+                std::fs::create_dir_all(&out_path)
+                    .map_err(|error| io_error_at("create extracted directory", &out_path, error))?;
             } else {
                 if let Some(parent) = out_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(io_error)?;
+                    std::fs::create_dir_all(parent)
+                        .map_err(|error| io_error_at("create extraction parent", parent, error))?;
                 }
-                let mut outfile = std::fs::File::create(&out_path).map_err(io_error)?;
-                let copied = std::io::copy(&mut entry, &mut outfile).map_err(io_error)?;
+                let mut outfile = std::fs::File::create(&out_path)
+                    .map_err(|error| io_error_at("create extracted file", &out_path, error))?;
+                let copied = std::io::copy(&mut entry, &mut outfile)
+                    .map_err(|error| io_error_at("write extracted file", &out_path, error))?;
                 if copied != uncompressed_size {
                     return Err(AppError::BadRequest(format!(
                         "zip entry size mismatch: {}",
@@ -766,7 +781,8 @@ async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError>
     let dest_path = dest.to_path_buf();
     task::spawn_blocking(move || -> Result<(), AppError> {
         let compressed_size = std::fs::metadata(&src_path).map_err(io_error)?.len().max(1);
-        let file = StdFile::open(&src_path).map_err(io_error)?;
+        let file = StdFile::open(&src_path)
+            .map_err(|error| io_error_at("open tar.gz archive", &src_path, error))?;
         let decoder = GzDecoder::new(file);
         let mut archive = tar::Archive::new(decoder);
         let mut total_uncompressed = 0u64;
@@ -832,13 +848,17 @@ async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError>
                 )));
             }
             if entry.header().entry_type().is_dir() {
-                std::fs::create_dir_all(&out_path).map_err(io_error)?;
+                std::fs::create_dir_all(&out_path)
+                    .map_err(|error| io_error_at("create extracted directory", &out_path, error))?;
             } else if entry.header().entry_type().is_file() {
                 if let Some(parent) = out_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(io_error)?;
+                    std::fs::create_dir_all(parent)
+                        .map_err(|error| io_error_at("create extraction parent", parent, error))?;
                 }
-                let mut outfile = StdFile::create(&out_path).map_err(io_error)?;
-                let copied = std::io::copy(&mut entry, &mut outfile).map_err(io_error)?;
+                let mut outfile = StdFile::create(&out_path)
+                    .map_err(|error| io_error_at("create extracted file", &out_path, error))?;
+                let copied = std::io::copy(&mut entry, &mut outfile)
+                    .map_err(|error| io_error_at("write extracted file", &out_path, error))?;
                 if copied != entry_size {
                     return Err(AppError::BadRequest(format!(
                         "tar.gz entry size mismatch: {}",
@@ -862,9 +882,11 @@ async fn extract_gzip_file(name: &str, src: &Path, dest: &Path) -> Result<(), Ap
     let output_name = gzip_output_name(name);
     task::spawn_blocking(move || -> Result<(), AppError> {
         let compressed_size = std::fs::metadata(&src_path).map_err(io_error)?.len().max(1);
-        let file = StdFile::open(&src_path).map_err(io_error)?;
+        let file = StdFile::open(&src_path)
+            .map_err(|error| io_error_at("open gzip archive", &src_path, error))?;
         let mut decoder = GzDecoder::new(file);
-        std::fs::create_dir_all(&dest_path).map_err(io_error)?;
+        std::fs::create_dir_all(&dest_path)
+            .map_err(|error| io_error_at("create gzip extraction directory", &dest_path, error))?;
         let out_path = dest_path.join(output_name);
         if out_path.exists() {
             return Err(AppError::BadRequest(format!(
@@ -872,7 +894,8 @@ async fn extract_gzip_file(name: &str, src: &Path, dest: &Path) -> Result<(), Ap
                 out_path.display()
             )));
         }
-        let mut outfile = StdFile::create(&out_path).map_err(io_error)?;
+        let mut outfile = StdFile::create(&out_path)
+            .map_err(|error| io_error_at("create gzip output", &out_path, error))?;
         let copied = copy_with_limit(&mut decoder, &mut outfile, MAX_ARCHIVE_ENTRY_BYTES)?;
         if copied > MAX_ARCHIVE_EXTRACTED_BYTES {
             return Err(AppError::BadRequest(format!(
@@ -966,7 +989,7 @@ fn sanitize_archive_path(path: &Path) -> PathBuf {
         if let std::path::Component::Normal(os_str) = component
             && let Some(segment) = os_str.to_str()
         {
-            let safe = segment
+            let mut safe = segment
                 .chars()
                 .map(|ch| {
                     if ch.is_ascii_alphanumeric() || "-_.".contains(ch) {
@@ -976,10 +999,34 @@ fn sanitize_archive_path(path: &Path) -> PathBuf {
                     }
                 })
                 .collect::<String>();
+            while safe.ends_with('.') {
+                safe.pop();
+            }
+            if safe.is_empty() {
+                safe.push('_');
+            }
+            if is_windows_reserved_name(&safe) {
+                safe.insert(0, '_');
+            }
             sanitized.push(safe);
         }
     }
     sanitized
+}
+
+fn is_windows_reserved_name(segment: &str) -> bool {
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or(segment)
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem.strip_prefix("COM").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
+        || stem.strip_prefix("LPT").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
 }
 
 fn is_text_like(name: &str, content_type: Option<&str>) -> bool {
@@ -1048,18 +1095,25 @@ fn gzip_output_name(name: &str) -> String {
             }
         })
         .collect::<String>();
-    if sanitized.is_empty() {
-        "decompressed".into()
+    let mut output = if sanitized.is_empty() {
+        "decompressed".to_string()
     } else {
         sanitized
+    };
+    while output.ends_with('.') {
+        output.pop();
     }
+    if is_windows_reserved_name(&output) {
+        output.insert(0, '_');
+    }
+    output
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{archive_parent_depth, gzip_output_name, split_timestamp};
+    use super::{archive_parent_depth, gzip_output_name, sanitize_archive_path, split_timestamp};
 
     #[test]
     fn archive_depth_counts_only_parent_directories() {
@@ -1090,8 +1144,38 @@ mod tests {
     fn gzip_output_name_handles_mixed_case_suffix_with_utf8_name() {
         assert_eq!(gzip_output_name("构建日志.Gz"), "____");
     }
+
+    #[test]
+    fn gzip_output_name_prefixes_windows_reserved_device_names() {
+        assert_eq!(gzip_output_name("NUL.GZ"), "_NUL");
+        assert_eq!(gzip_output_name("com1.txt.gz"), "_com1.txt");
+    }
+
+    #[test]
+    fn archive_paths_prefix_windows_reserved_device_names() {
+        assert_eq!(
+            sanitize_archive_path(Path::new("NUL.txt")),
+            Path::new("_NUL.txt")
+        );
+        assert_eq!(
+            sanitize_archive_path(Path::new("logs/con/output.log")),
+            Path::new("logs/_con/output.log")
+        );
+        assert_eq!(sanitize_archive_path(Path::new("COM1")), Path::new("_COM1"));
+        assert_eq!(
+            sanitize_archive_path(Path::new("Lpt9.log")),
+            Path::new("_Lpt9.log")
+        );
+    }
 }
 
 fn io_error(err: std::io::Error) -> AppError {
     AppError::Io(err)
+}
+
+fn io_error_at(operation: &str, path: &Path, error: std::io::Error) -> AppError {
+    AppError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{operation} {}: {error}", path.display()),
+    ))
 }
