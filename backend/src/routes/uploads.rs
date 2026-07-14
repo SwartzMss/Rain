@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     error::AppError,
-    ingest::{ProcessFileOptions, process_uploaded_file},
+    ingest::{ArchiveBudget, ProcessFileOptions, process_uploaded_file},
     models::issues::{UploadStage, UploadStatus},
 };
 
@@ -207,6 +207,7 @@ pub async fn upload_logs(
         };
 
         let process_result = async {
+            let archive_budget = ArchiveBudget::default();
             for uploaded in &files {
                 process_uploaded_file(ProcessFileOptions {
                     pool: &pool,
@@ -219,6 +220,7 @@ pub async fn upload_logs(
                     content_type: uploaded.content_type.as_deref(),
                     source_path: &uploaded.temp_path,
                     size_bytes: uploaded.size_bytes,
+                    archive_budget: archive_budget.clone(),
                 })
                 .await?;
             }

@@ -97,7 +97,7 @@
 ## 关系与典型上传
 
 - Issue -> 多个 Bundle：同一个 Issue 可多次上传，每次形成一个 Bundle。
-- Bundle -> Files：单文件上传会形成一个顶层 file 节点；`.zip`、`.tar.gz`、`.tgz`、`.gz` 上传会形成原始压缩包节点和一个 `{archive_name}_extracted` 解压目录。
+- Bundle -> Files：单文件上传会形成一个顶层 file 节点；每一层 `.zip`、`.tar.gz`、`.tgz`、`.gz` 都保留原始压缩包节点，并在其下挂载一个 `{archive_name}_extracted` 解压目录。
 - Files -> Log Segments：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会流式读取并按 chunk 写入 `log_segments` 供搜索；非文本文件仅保留 `files` 记录。
 - Files -> Line Offsets：文本类文件会每 1000 行记录一次 byte offset，用于 `/lines` 分页读取。
 - 单行读取上限为 1 MB，超过后会丢弃到下一个换行符，并在索引/分页内容中追加 `[line truncated]` 标记。
@@ -118,7 +118,9 @@ flowchart TD
     H --> I{是否支持的压缩包?}
     I -->|是| J[解压为目录树]
     I -->|否| K[单一文件节点]
-    J --> L[写 files 树]
+    J --> J1{解压结果仍有支持的压缩包?}
+    J1 -->|是| J
+    J1 -->|否| L[写 files 树]
     K --> L
     L --> M{文本类?}
     M -->|是| N[流式读取并写 line offsets]
@@ -127,3 +129,5 @@ flowchart TD
     P --> Q[基础解析写 log_events]
     Q --> R[Bundle 标记 READY]
 ```
+
+递归解压、文本扫描和索引全部在 `.tmp/{task_id}/staging/{bundle_hash}` 中完成。嵌套深度、条目总数和解压总字节数由同一 bundle 共享预算；任一层损坏或超过安全限制时，任务标记为 `FAILED`，并删除 staging 文件及该 bundle 的 `files`、行偏移、FTS 和事件半成品记录。

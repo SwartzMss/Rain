@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
 };
 
@@ -27,6 +27,9 @@ async fn upload_search_tree_and_delete_issue() {
             "SMOKE",
             "GZIP",
             "TARGZ",
+            "NESTEDZIP",
+            "NESTEDCHAIN",
+            "DEPTHFAIL",
             "DIRDELETE",
             "FAILEDCASE",
             "LARGE",
@@ -201,6 +204,126 @@ async fn upload_search_tree_and_delete_issue() {
             .expect("tar snippet")
             .contains("ERROR targz smoke works")
     );
+
+    let nested_zip_boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let inner_zip = zip_bytes(&[(
+        "inner.log",
+        b"INFO nested zip\nERROR nested zip search works\n",
+    )]);
+    let outer_zip = zip_bytes(&[("inner.zip", inner_zip.as_slice())]);
+    let nested_zip_body = multipart_body_bytes(
+        &nested_zip_boundary,
+        "NESTEDZIP",
+        "outer.zip",
+        "application/zip",
+        &outer_zip,
+    );
+    let nested_zip_upload: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/NESTEDZIP/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={nested_zip_boundary}"),
+            ))
+            .set_payload(nested_zip_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(nested_zip_upload["issue_code"], "NESTEDZIP");
+    wait_for_issue_ready(&pool, "NESTEDZIP").await;
+    let nested_zip_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/NESTEDZIP/search?q=nested%20zip%20search&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(nested_zip_search["total"], 1);
+    assert!(
+        nested_zip_search["hits"][0]["path"]
+            .as_str()
+            .expect("nested zip path")
+            .contains("inner.log")
+    );
+
+    let nested_chain_boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let nested_gzip = gzip_bytes("INFO deep chain\nERROR nested chain search works\n");
+    let nested_chain_zip = zip_bytes(&[("deep.log.gz", nested_gzip.as_slice())]);
+    let nested_chain_tar = tar_gz_multi_bytes(&[("middle.zip", nested_chain_zip.as_slice())]);
+    let nested_chain_body = multipart_body_bytes(
+        &nested_chain_boundary,
+        "NESTEDCHAIN",
+        "outer.tar.gz",
+        "application/gzip",
+        &nested_chain_tar,
+    );
+    let nested_chain_upload: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/NESTEDCHAIN/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={nested_chain_boundary}"),
+            ))
+            .set_payload(nested_chain_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(nested_chain_upload["issue_code"], "NESTEDCHAIN");
+    wait_for_issue_ready(&pool, "NESTEDCHAIN").await;
+    let nested_chain_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/NESTEDCHAIN/search?q=nested%20chain%20search&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(nested_chain_search["total"], 1);
+    assert!(
+        nested_chain_search["hits"][0]["path"]
+            .as_str()
+            .expect("nested chain path")
+            .contains("deep.log")
+    );
+
+    let depth_fail_boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let mut depth_fail_bytes = zip_bytes(&[("too-deep.log", b"ERROR must not be indexed\n")]);
+    for depth in 0..16 {
+        let filename = format!("level-{depth}.zip");
+        depth_fail_bytes = zip_bytes(&[(&filename, depth_fail_bytes.as_slice())]);
+    }
+    let depth_fail_body = multipart_body_bytes(
+        &depth_fail_boundary,
+        "DEPTHFAIL",
+        "depth-fail.zip",
+        "application/zip",
+        &depth_fail_bytes,
+    );
+    let depth_fail_upload: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/DEPTHFAIL/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={depth_fail_boundary}"),
+            ))
+            .set_payload(depth_fail_body)
+            .to_request(),
+    )
+    .await;
+    let depth_fail_bundle = depth_fail_upload["bundle_hash"]
+        .as_str()
+        .expect("depth failure bundle");
+    wait_for_issue_status(&pool, "DEPTHFAIL", "FAILED").await;
+    let depth_fail_tree = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/files/v1/{depth_fail_bundle}/files/root"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(depth_fail_tree.status(), StatusCode::CONFLICT);
 
     let delete_dir_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let delete_dir_bytes = tar_gz_multi(&[
@@ -1096,6 +1219,14 @@ fn tar_gz_bytes(path: &str, content: &str) -> Vec<u8> {
 }
 
 fn tar_gz_multi(files: &[(&str, &str)]) -> Vec<u8> {
+    let binary_files = files
+        .iter()
+        .map(|(path, content)| (*path, content.as_bytes()))
+        .collect::<Vec<_>>();
+    tar_gz_multi_bytes(&binary_files)
+}
+
+fn tar_gz_multi_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     {
         let mut builder = tar::Builder::new(&mut encoder);
@@ -1105,12 +1236,24 @@ fn tar_gz_multi(files: &[(&str, &str)]) -> Vec<u8> {
             header.set_mode(0o644);
             header.set_cksum();
             builder
-                .append_data(&mut header, *path, content.as_bytes())
+                .append_data(&mut header, *path, *content)
                 .expect("append tar entry");
         }
         builder.finish().expect("finish tar");
     }
     encoder.finish().expect("finish tar.gz")
+}
+
+fn zip_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let cursor = Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (path, content) in files {
+        writer.start_file(*path, options).expect("start zip entry");
+        writer.write_all(content).expect("write zip entry");
+    }
+    writer.finish().expect("finish zip").into_inner()
 }
 
 fn sqlite_url(path: &Path) -> String {
