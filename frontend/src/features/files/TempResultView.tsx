@@ -74,13 +74,6 @@ export function TempResultView() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
-              <a
-                className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500"
-                href={rainApi.tempResultDownloadUrl(resultId)}
-                title="下载已保存的临时搜索结果"
-              >
-                下载已保存结果
-              </a>
               <button
                 type="button"
                 className="rounded border border-rose-900/70 px-3 py-1.5 text-rose-300 hover:border-rose-700"
