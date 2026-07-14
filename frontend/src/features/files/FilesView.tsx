@@ -1396,7 +1396,7 @@ export function BundleView(props?: BundleViewProps) {
                           <div className="select-none text-right text-slate-600">
                             {activeSearchResults.map((hit, index) => (
                               <div key={`line:${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`}>
-                                {(hit.line_number ?? activeViewerTab.from + index) + 1}
+                                {activeViewerTab.from + index + 1}
                               </div>
                             ))}
                           </div>
