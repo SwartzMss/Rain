@@ -6,6 +6,7 @@ import type { BundleInfo } from '../../lib/bundles';
 import {
   closeViewerTab,
   openOrActivateTab,
+  reconcileViewerTabs,
   togglePinnedTab,
   type ViewerTab
 } from './viewerTabs';
@@ -145,7 +146,28 @@ export function BundleView(props?: BundleViewProps) {
   const [activeViewerTabId, setActiveViewerTabId] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const viewerInitializedRef = useRef(false);
+  const contextKeyRef = useRef<string | null>(null);
+  const viewerTabsRef = useRef<ViewerTab[]>([]);
+  const activeViewerTabIdRef = useRef<string | null>(null);
+  const selectedNodeIdRef = useRef<string | null>(null);
+  const treeNodesRef = useRef<Record<string, TreeNode>>({});
   const activeViewerTab = viewerTabs.find((tab) => tab.id === activeViewerTabId) ?? null;
+
+  useEffect(() => {
+    viewerTabsRef.current = viewerTabs;
+  }, [viewerTabs]);
+
+  useEffect(() => {
+    activeViewerTabIdRef.current = activeViewerTabId;
+  }, [activeViewerTabId]);
+
+  useEffect(() => {
+    selectedNodeIdRef.current = selectedNodeId;
+  }, [selectedNodeId]);
+
+  useEffect(() => {
+    treeNodesRef.current = treeNodes;
+  }, [treeNodes]);
 
   const openViewerTab = useCallback((tab: ViewerTab) => {
     viewerInitializedRef.current = true;
@@ -321,20 +343,36 @@ export function BundleView(props?: BundleViewProps) {
   useEffect(() => {
     const issueCode = issueCodeFromRoute || locationState?.issue || '';
     const fallbackBundles = bundleId ? [{ hash: bundleId, name: activeBundle.name }] : [];
+    const contextKey = `${issueCode}\u0000${bundleId}`;
+    const isContextChange = contextKeyRef.current !== contextKey;
+    contextKeyRef.current = contextKey;
 
     let ignore = false;
     const init = async () => {
       setTreeLoading(true);
       setTreeError(null);
-      setTreeNodes({});
-      setExpandedNodes(new Set());
-      setRootIds([]);
-      setSelectedNodeId(null);
-      setNonReadyBundles([]);
-      setViewerTabs([]);
-      setActiveViewerTabId(null);
+      const activeTabIdSnapshot = activeViewerTabIdRef.current;
+      const tabsSnapshot = activeTabIdSnapshot && contentRef.current
+        ? viewerTabsRef.current.map((tab) =>
+            tab.id === activeTabIdSnapshot ? { ...tab, scrollTop: contentRef.current?.scrollTop ?? tab.scrollTop } : tab
+          )
+        : viewerTabsRef.current;
+
+      if (isContextChange) {
+        setTreeNodes({});
+        setExpandedNodes(new Set());
+        setRootIds([]);
+        setSelectedNodeId(null);
+        setNonReadyBundles([]);
+        setViewerTabs([]);
+        setActiveViewerTabId(null);
+        viewerInitializedRef.current = false;
+      } else if (tabsSnapshot !== viewerTabsRef.current) {
+        setViewerTabs(tabsSnapshot);
+      }
 
       let bundles = fallbackBundles;
+      let loadFailed = false;
       if (issueCode) {
         try {
           const data = await rainApi.fetchIssueBundles(issueCode);
@@ -349,7 +387,10 @@ export function BundleView(props?: BundleViewProps) {
             .map((bundle) => ({ hash: bundle.hash, name: bundle.name || bundle.hash }));
           bundles = list;
         } catch (error) {
-          setTreeError(normalizeApiError(error));
+          loadFailed = true;
+          if (!ignore) {
+            setTreeError(normalizeApiError(error));
+          }
         }
       }
 
@@ -375,15 +416,70 @@ export function BundleView(props?: BundleViewProps) {
             first = result.node.childrenIds[0] ?? result.node.id;
           }
         } catch (error) {
-          setTreeError(normalizeApiError(error));
+          loadFailed = true;
+          if (!ignore) {
+            setTreeError(normalizeApiError(error));
+          }
+        }
+      }
+
+      const fileTabMetadata: Record<string, { nodeId: string; title: string }> = {};
+      if (!isContextChange && !loadFailed) {
+        for (const tab of tabsSnapshot) {
+          if (tab.kind !== 'file') continue;
+          const [tabBundleId, rawFileId] = tab.nodeId.includes(':')
+            ? tab.nodeId.split(/:(.+)/)
+            : [bundleId, tab.nodeId];
+          const previousNode = treeNodesRef.current[tab.nodeId];
+          try {
+            const result = await loadNode(tabBundleId, rawFileId, previousNode?.parentId ?? null);
+            const node = result?.node ?? null;
+            if (node && !node.is_dir && !isArchiveNode(node)) {
+              fileTabMetadata[tab.nodeId] = {
+                nodeId: node.id,
+                title: node.name
+              };
+            }
+          } catch (error) {
+            loadFailed = true;
+            if (!ignore) {
+              setTreeError(normalizeApiError(error));
+            }
+            break;
+          }
         }
       }
 
       if (!ignore) {
-        viewerInitializedRef.current = false;
-        setExpandedNodes(new Set());
-        setRootIds(collectedRoots);
-        setSelectedNodeId((prev) => prev || first);
+        if (isContextChange) {
+          setRootIds(collectedRoots);
+          setExpandedNodes(new Set());
+          setSelectedNodeId(first);
+        } else if (!loadFailed) {
+          setRootIds(collectedRoots);
+          const reconciled = reconcileViewerTabs(
+            tabsSnapshot,
+            activeTabIdSnapshot,
+            fileTabMetadata
+          );
+          setViewerTabs(reconciled.tabs);
+          setActiveViewerTabId(reconciled.activeTabId);
+          viewerInitializedRef.current = reconciled.tabs.length > 0;
+
+          const activeTab = reconciled.tabs.find((tab) => tab.id === reconciled.activeTabId) ?? null;
+          if (activeTab?.kind === 'file') {
+            setSelectedNodeId(activeTab.nodeId);
+            setLineStart(activeTab.lineStart);
+            setLinePageSize(activeTab.pageSize);
+            setTargetLine(activeTab.targetLine);
+          } else if (tabsSnapshot.find((tab) => tab.id === activeTabIdSnapshot)?.kind === 'file') {
+            setSelectedNodeId(null);
+          } else if (!selectedNodeIdRef.current) {
+            setSelectedNodeId(first);
+          }
+        } else if (!selectedNodeIdRef.current) {
+          setSelectedNodeId(first);
+        }
       }
       setTreeLoading(false);
     };
@@ -399,7 +495,7 @@ export function BundleView(props?: BundleViewProps) {
     setSearchError(null);
     setSearchExecuted(false);
     setResultFilterText('');
-  }, [issueCode, refreshKey]);
+  }, [issueCode]);
 
   const activeSearchResults = useMemo<IssueLogSearchHit[]>(() => {
     if (activeViewerTab?.kind === 'search') return activeViewerTab.hits;
