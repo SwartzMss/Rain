@@ -83,6 +83,19 @@ try {
   assert.match(markup, /AND|OR/);
   assert.match(markup, /NOT 运算符/);
   assert.match(markup, /删除关键词 request timeout/);
+  assert.match(markup, />AND<\/button><button[^>]*>OR<\/button><button[^>]*>NOT<\/button>/);
+
+  const emptyMarkup = renderToStaticMarkup(
+    React.createElement(SearchTokenEditor, {
+      tokens: [],
+      draft: '',
+      onTokensChange: () => undefined,
+      onDraftChange: () => undefined,
+      placeholder: '输入关键词',
+      ariaLabel: '空搜索条件'
+    })
+  );
+  assert.doesNotMatch(emptyMarkup, />NOT<\/button>/);
 } finally {
   await server.close();
 }

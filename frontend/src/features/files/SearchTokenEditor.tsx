@@ -71,7 +71,6 @@ export function SearchTokenEditor({
   };
 
   const canAddOperator = allowOperators && !expectsSearchTerm(tokens) && !draft.trim();
-  const canAddNot = allowOperators && expectsSearchTerm(tokens) && tokens[tokens.length - 1]?.value !== 'NOT';
 
   return (
     <div
@@ -205,17 +204,18 @@ export function SearchTokenEditor({
           >
             OR
           </button>
+          <button
+            type="button"
+            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/15"
+            disabled={disabled}
+            onClick={() => {
+              const withAnd = appendSearchOperator(tokens, 'AND');
+              onTokensChange(appendSearchOperator(withAnd, 'NOT'));
+            }}
+          >
+            NOT
+          </button>
         </>
-      ) : null}
-      {canAddNot ? (
-        <button
-          type="button"
-          className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/15"
-          disabled={disabled}
-          onClick={() => onTokensChange(appendSearchOperator(tokens, 'NOT'))}
-        >
-          NOT
-        </button>
       ) : null}
     </div>
   );
