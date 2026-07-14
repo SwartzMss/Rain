@@ -19,11 +19,6 @@ type SearchTokenEditorProps = {
   allowOperators?: boolean;
   disabled?: boolean;
   className?: string;
-  mode?: 'tokens' | 'advanced';
-  onModeChange?: (mode: 'tokens' | 'advanced') => void;
-  advancedValue?: string;
-  onAdvancedValueChange?: (value: string) => void;
-  onAdvancedSubmit?: () => void;
 };
 
 export function SearchTokenEditor({
@@ -35,12 +30,7 @@ export function SearchTokenEditor({
   ariaLabel,
   allowOperators = true,
   disabled = false,
-  className = '',
-  mode = 'tokens',
-  onModeChange,
-  advancedValue = '',
-  onAdvancedValueChange,
-  onAdvancedSubmit
+  className = ''
 }: SearchTokenEditorProps) {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editingValue, setEditingValue] = useState('');
@@ -82,59 +72,6 @@ export function SearchTokenEditor({
 
   const canAddOperator = allowOperators && !expectsSearchTerm(tokens) && !draft.trim();
   const canAddNot = allowOperators && expectsSearchTerm(tokens) && tokens[tokens.length - 1]?.value !== 'NOT';
-  const modeControl = onModeChange ? (
-    <div
-      className="flex h-7 shrink-0 rounded border border-slate-700 bg-slate-950/70 p-0.5"
-      role="group"
-      aria-label="搜索输入模式"
-    >
-      <button
-        type="button"
-        className={`rounded px-2 text-[11px] ${mode === 'tokens' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-200'}`}
-        disabled={disabled}
-        aria-pressed={mode === 'tokens'}
-        onClick={() => onModeChange('tokens')}
-      >
-        词组
-      </button>
-      <button
-        type="button"
-        className={`rounded px-2 text-[11px] ${mode === 'advanced' ? 'bg-cyan-500/20 text-cyan-100' : 'text-slate-500 hover:text-slate-200'}`}
-        disabled={disabled}
-        aria-pressed={mode === 'advanced'}
-        onClick={() => onModeChange('advanced')}
-      >
-        表达式
-      </button>
-    </div>
-  ) : null;
-
-  if (mode === 'advanced') {
-    return (
-      <div
-        className={`flex min-w-0 flex-1 flex-wrap items-center gap-1.5 ${className}`}
-        role="group"
-        aria-label={ariaLabel}
-      >
-        <input
-          ref={inputRef}
-          className="h-8 min-w-36 flex-1 bg-transparent px-1 font-mono text-sm text-white outline-none placeholder:font-sans placeholder:text-slate-500"
-          placeholder='例如：(ERROR OR WARN) AND NOT "timeout"'
-          aria-label={`${ariaLabel}（高级表达式）`}
-          value={advancedValue}
-          disabled={disabled}
-          onChange={(event) => onAdvancedValueChange?.(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && advancedValue.trim()) {
-              event.preventDefault();
-              onAdvancedSubmit?.();
-            }
-          }}
-        />
-        {modeControl}
-      </div>
-    );
-  }
 
   return (
     <div
@@ -280,7 +217,6 @@ export function SearchTokenEditor({
           NOT
         </button>
       ) : null}
-      {modeControl}
     </div>
   );
 }

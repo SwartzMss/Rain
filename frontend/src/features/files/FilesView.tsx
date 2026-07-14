@@ -144,16 +144,10 @@ export function BundleView(props?: BundleViewProps) {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchExecuted, setSearchExecuted] = useState(false);
   const [searchMode, setSearchMode] = useState<'log' | 'detailed'>('log');
-  const [searchEditorMode, setSearchEditorMode] = useState<'tokens' | 'advanced'>('tokens');
-  const [searchAdvancedExpression, setSearchAdvancedExpression] = useState('');
   const [resultFilterTokens, setResultFilterTokens] = useState<SearchToken[]>([]);
   const [resultFilterDraft, setResultFilterDraft] = useState('');
-  const [resultFilterMode, setResultFilterMode] = useState<'tokens' | 'advanced'>('tokens');
-  const [resultFilterAdvancedExpression, setResultFilterAdvancedExpression] = useState('');
   const [fileSearchTokens, setFileSearchTokens] = useState<SearchToken[]>([]);
   const [fileSearchDraft, setFileSearchDraft] = useState('');
-  const [fileSearchMode, setFileSearchMode] = useState<'tokens' | 'advanced'>('tokens');
-  const [fileSearchAdvancedExpression, setFileSearchAdvancedExpression] = useState('');
   const [fileSearchResults, setFileSearchResults] = useState<LogSearchHit[]>([]);
   const [fileSearchTotal, setFileSearchTotal] = useState(0);
   const [fileSearchFrom, setFileSearchFrom] = useState(0);
@@ -295,43 +289,29 @@ export function BundleView(props?: BundleViewProps) {
       setSearchExecuted(false);
       setResultFilterTokens([]);
       setResultFilterDraft('');
-      setResultFilterAdvancedExpression('');
       return;
     }
-    let keyword: string;
-    let title: string;
-    if (searchMode === 'detailed' && searchEditorMode === 'advanced') {
-      keyword = searchAdvancedExpression.trim();
-      if (!keyword) {
-        setSearchError('请输入搜索表达式');
-        return;
-      }
-      title = keyword;
-    } else {
-      let finalizedTokens: SearchToken[];
-      try {
-        finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft, searchMode === 'detailed');
-      } catch (error) {
-        setSearchError(error instanceof Error ? error.message : '搜索条件无效');
-        return;
-      }
-      keyword = searchMode === 'log'
-        ? getSearchTerms(finalizedTokens)[0]
-        : serializeSearchTokens(finalizedTokens);
-      title = formatSearchTokens(finalizedTokens);
-      setSearchTokens(finalizedTokens);
-      setSearchDraft('');
+    let finalizedTokens: SearchToken[];
+    try {
+      finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft, searchMode === 'detailed');
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : '搜索条件无效');
+      return;
     }
+    const keyword = searchMode === 'log'
+      ? getSearchTerms(finalizedTokens)[0]
+      : serializeSearchTokens(finalizedTokens);
+    const title = formatSearchTokens(finalizedTokens);
+    setSearchTokens(finalizedTokens);
+    setSearchDraft('');
     setSearchLoading(true);
     setSearchError(null);
     setSearchExecuted(true);
     setResultFilterTokens([]);
     setResultFilterDraft('');
-    setResultFilterAdvancedExpression('');
     setFileSearchResults([]);
     setFileSearchTokens([]);
     setFileSearchDraft('');
-    setFileSearchAdvancedExpression('');
     setFileSearchTotal(0);
     setFileSearchFrom(0);
     setFileSearchError(null);
@@ -379,15 +359,7 @@ export function BundleView(props?: BundleViewProps) {
     } finally {
       setSearchLoading(false);
     }
-  }, [
-    issueCode,
-    openViewerTab,
-    searchAdvancedExpression,
-    searchDraft,
-    searchEditorMode,
-    searchMode,
-    searchTokens
-  ]);
+  }, [issueCode, openViewerTab, searchDraft, searchMode, searchTokens]);
 
   const changeSearchMode = (mode: 'log' | 'detailed') => {
     if (mode === searchMode) return;
@@ -397,7 +369,6 @@ export function BundleView(props?: BundleViewProps) {
     setSearchExecuted(false);
     setResultFilterTokens([]);
     setResultFilterDraft('');
-    setResultFilterAdvancedExpression('');
     if (mode === 'log') {
       setSearchTokens((tokens) => {
         const firstTerm = tokens.find((token) => token.kind === 'term');
@@ -562,7 +533,6 @@ export function BundleView(props?: BundleViewProps) {
     setSearchExecuted(false);
     setResultFilterTokens([]);
     setResultFilterDraft('');
-    setResultFilterAdvancedExpression('');
   }, [issueCode]);
 
   const activeSearchResults = useMemo<IssueLogSearchHit[]>(() => {
@@ -596,7 +566,6 @@ export function BundleView(props?: BundleViewProps) {
       setSearchExecuted(false);
       setResultFilterTokens([]);
       setResultFilterDraft('');
-      setResultFilterAdvancedExpression('');
     }
     let node: TreeNode | null = treeNodes[nodeId] ?? null;
     const [prefBundle, rawFromId] = nodeId.includes(':') ? nodeId.split(/:(.+)/) : [bundleId, nodeId];
@@ -709,7 +678,6 @@ export function BundleView(props?: BundleViewProps) {
   const clearFileSearch = useCallback(() => {
     setFileSearchTokens([]);
     setFileSearchDraft('');
-    setFileSearchAdvancedExpression('');
     setFileSearchResults([]);
     setFileSearchTotal(0);
     setFileSearchFrom(0);
@@ -721,28 +689,17 @@ export function BundleView(props?: BundleViewProps) {
     if (!selectedNode || !canPreviewText(selectedNode)) return;
     const selectedBundleId = selectedNode.bundleId || bundleId;
     if (!selectedBundleId) return;
-    let expression: string;
-    let title: string;
-    if (fileSearchMode === 'advanced') {
-      expression = fileSearchAdvancedExpression.trim();
-      if (!expression) {
-        setFileSearchError('请输入搜索表达式');
-        return;
-      }
-      title = expression;
-    } else {
-      let finalizedTokens: SearchToken[];
-      try {
-        finalizedTokens = finalizeSearchTokens(fileSearchTokens, fileSearchDraft);
-      } catch (error) {
-        setFileSearchError(error instanceof Error ? error.message : '搜索条件无效');
-        return;
-      }
-      expression = serializeSearchTokens(finalizedTokens);
-      title = formatSearchTokens(finalizedTokens);
-      setFileSearchTokens(finalizedTokens);
-      setFileSearchDraft('');
+    let finalizedTokens: SearchToken[];
+    try {
+      finalizedTokens = finalizeSearchTokens(fileSearchTokens, fileSearchDraft);
+    } catch (error) {
+      setFileSearchError(error instanceof Error ? error.message : '搜索条件无效');
+      return;
     }
+    const expression = serializeSearchTokens(finalizedTokens);
+    const title = formatSearchTokens(finalizedTokens);
+    setFileSearchTokens(finalizedTokens);
+    setFileSearchDraft('');
 
     setFileSearchLoading(true);
     setFileSearchError(null);
@@ -790,38 +747,19 @@ export function BundleView(props?: BundleViewProps) {
     } finally {
       setFileSearchLoading(false);
     }
-  }, [
-    bundleId,
-    fileSearchAdvancedExpression,
-    fileSearchDraft,
-    fileSearchMode,
-    fileSearchTokens,
-    openViewerTab,
-    selectedNode
-  ]);
+  }, [bundleId, fileSearchDraft, fileSearchTokens, openViewerTab, selectedNode]);
 
   const searchWithinActiveResults = useCallback(async () => {
     if (!activeViewerTab || (activeViewerTab.kind !== 'search' && activeViewerTab.kind !== 'temp')) return;
-    let nestedExpression: string;
-    let title: string;
-    if (resultFilterMode === 'advanced') {
-      nestedExpression = resultFilterAdvancedExpression.trim();
-      if (!nestedExpression) {
-        setSearchError('请输入搜索表达式');
-        return;
-      }
-      title = nestedExpression;
-    } else {
-      let finalizedTokens: SearchToken[];
-      try {
-        finalizedTokens = finalizeSearchTokens(resultFilterTokens, resultFilterDraft);
-      } catch (error) {
-        setSearchError(error instanceof Error ? error.message : '搜索条件无效');
-        return;
-      }
-      nestedExpression = serializeSearchTokens(finalizedTokens);
-      title = formatSearchTokens(finalizedTokens);
+    let finalizedTokens: SearchToken[];
+    try {
+      finalizedTokens = finalizeSearchTokens(resultFilterTokens, resultFilterDraft);
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : '搜索条件无效');
+      return;
     }
+    const nestedExpression = serializeSearchTokens(finalizedTokens);
+    const title = formatSearchTokens(finalizedTokens);
     const expression = activeViewerTab.kind === 'search'
       ? combineSearchExpressions(activeViewerTab.expression, nestedExpression)
       : nestedExpression;
@@ -858,7 +796,6 @@ export function BundleView(props?: BundleViewProps) {
       }));
       setResultFilterTokens([]);
       setResultFilterDraft('');
-      setResultFilterAdvancedExpression('');
       openViewerTab({
         id: `search:${Date.now()}`,
         kind: 'search',
@@ -877,14 +814,7 @@ export function BundleView(props?: BundleViewProps) {
     } finally {
       setSearchLoading(false);
     }
-  }, [
-    activeViewerTab,
-    openViewerTab,
-    resultFilterAdvancedExpression,
-    resultFilterDraft,
-    resultFilterMode,
-    resultFilterTokens
-  ]);
+  }, [activeViewerTab, openViewerTab, resultFilterDraft, resultFilterTokens]);
 
   const loadViewerPage = useCallback(async (tab: ViewerTab, from: number, pageSize: number) => {
     setSearchLoading(true);
@@ -1126,15 +1056,9 @@ export function BundleView(props?: BundleViewProps) {
   const resultFilterHighlightTerm = getSearchTerms(resultFilterTokens)[0] ?? resultFilterDraft.trim();
   const canRunSearch = searchMode === 'log'
     ? Boolean(searchDraft.trim() || getSearchTerms(searchTokens).length > 0)
-    : searchEditorMode === 'advanced'
-      ? Boolean(searchAdvancedExpression.trim())
-      : canFinalizeSearch(searchTokens, searchDraft);
-  const canRunFileSearch = fileSearchMode === 'advanced'
-    ? Boolean(fileSearchAdvancedExpression.trim())
-    : canFinalizeSearch(fileSearchTokens, fileSearchDraft);
-  const canRunResultFilter = resultFilterMode === 'advanced'
-    ? Boolean(resultFilterAdvancedExpression.trim())
-    : canFinalizeSearch(resultFilterTokens, resultFilterDraft);
+    : canFinalizeSearch(searchTokens, searchDraft);
+  const canRunFileSearch = canFinalizeSearch(fileSearchTokens, fileSearchDraft);
+  const canRunResultFilter = canFinalizeSearch(resultFilterTokens, resultFilterDraft);
 
   return (
     <div className="space-y-5">
@@ -1166,11 +1090,6 @@ export function BundleView(props?: BundleViewProps) {
                   ariaLabel={searchMode === 'log' ? '文件名搜索条件' : '日志内容搜索条件'}
                   allowOperators={searchMode === 'detailed'}
                   disabled={searchLoading}
-                  mode={searchMode === 'detailed' ? searchEditorMode : 'tokens'}
-                  onModeChange={searchMode === 'detailed' ? setSearchEditorMode : undefined}
-                  advancedValue={searchAdvancedExpression}
-                  onAdvancedValueChange={setSearchAdvancedExpression}
-                  onAdvancedSubmit={() => runSearch().catch(() => undefined)}
                 />
                 <button
                   type="button"
@@ -1339,16 +1258,11 @@ export function BundleView(props?: BundleViewProps) {
                       placeholder="输入当前文件的关键词或短语..."
                       ariaLabel="当前文件搜索条件"
                       disabled={fileSearchLoading}
-                      mode={fileSearchMode}
-                      onModeChange={setFileSearchMode}
-                      advancedValue={fileSearchAdvancedExpression}
-                      onAdvancedValueChange={setFileSearchAdvancedExpression}
-                      onAdvancedSubmit={() => runFileSearch(0).catch(() => undefined)}
                     />
                     {fileSearchExecuted ? (
                       <span className="shrink-0 text-xs text-slate-400">{fileSearchTotal} 个结果</span>
                     ) : null}
-                    {fileSearchTokens.length > 0 || fileSearchDraft || fileSearchAdvancedExpression ? (
+                    {fileSearchTokens.length > 0 || fileSearchDraft ? (
                       <button
                         type="button"
                         className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-400 transition hover:border-slate-700 hover:text-white"
@@ -1386,23 +1300,17 @@ export function BundleView(props?: BundleViewProps) {
                       placeholder="在当前结果中添加关键词或短语..."
                       ariaLabel="当前结果筛选条件"
                       disabled={searchLoading}
-                      mode={resultFilterMode}
-                      onModeChange={setResultFilterMode}
-                      advancedValue={resultFilterAdvancedExpression}
-                      onAdvancedValueChange={setResultFilterAdvancedExpression}
-                      onAdvancedSubmit={() => searchWithinActiveResults().catch(() => undefined)}
                     />
                     <span className="shrink-0 text-xs text-slate-400">
                       {`${activeViewerTab.total} 条结果`}
                     </span>
-                    {resultFilterTokens.length > 0 || resultFilterDraft || resultFilterAdvancedExpression ? (
+                    {resultFilterTokens.length > 0 || resultFilterDraft ? (
                       <button
                         type="button"
                         className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-400 transition hover:border-slate-700 hover:text-white"
                         onClick={() => {
                           setResultFilterTokens([]);
                           setResultFilterDraft('');
-                          setResultFilterAdvancedExpression('');
                         }}
                       >
                         清空
