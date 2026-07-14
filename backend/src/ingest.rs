@@ -1,13 +1,15 @@
 use flate2::read::GzDecoder;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::File as StdFile,
+    future::Future,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    pin::Pin,
+    sync::{Arc, Mutex},
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::{fs, task};
-use walkdir::WalkDir;
 
 use crate::error::AppError;
 
@@ -18,12 +20,70 @@ pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 const TRUNCATED_LINE_MARKER: &str = " ... [line truncated]";
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_ARCHIVE_DEPTH: usize = 16;
+const MAX_ARCHIVE_RECURSION_DEPTH: usize = 16;
+const MAX_ARCHIVE_OUTPUT_PATH_CHARS: usize = 1024;
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_ARCHIVE_EXTRACTED_BYTES: u64 = 500 * 1024 * 1024;
 const MAX_ARCHIVE_COMPRESSION_RATIO: u64 = 100;
 const LOG_LEVELS: [&str; 7] = [
     "TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "FATAL",
 ];
+
+#[derive(Clone, Default)]
+pub struct ArchiveBudget {
+    counters: Arc<Mutex<ArchiveCounters>>,
+}
+
+#[derive(Default)]
+struct ArchiveCounters {
+    entries: usize,
+    extracted_bytes: u64,
+}
+
+impl ArchiveBudget {
+    fn reserve_entry(&self) -> Result<(), AppError> {
+        let mut counters = self
+            .counters
+            .lock()
+            .map_err(|_| AppError::BadRequest("archive budget lock poisoned".into()))?;
+        counters.entries = counters
+            .entries
+            .checked_add(1)
+            .ok_or_else(|| AppError::BadRequest("archive entry count overflow".into()))?;
+        if counters.entries > MAX_ARCHIVE_ENTRIES {
+            return Err(AppError::BadRequest(format!(
+                "archive bundle has too many entries; max {MAX_ARCHIVE_ENTRIES}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn reserve_bytes(&self, size_bytes: u64) -> Result<(), AppError> {
+        let mut counters = self
+            .counters
+            .lock()
+            .map_err(|_| AppError::BadRequest("archive budget lock poisoned".into()))?;
+        counters.extracted_bytes = counters
+            .extracted_bytes
+            .checked_add(size_bytes)
+            .ok_or_else(|| AppError::BadRequest("archive extracted size overflow".into()))?;
+        if counters.extracted_bytes > MAX_ARCHIVE_EXTRACTED_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "archive bundle extracted content is too large; max {} MB",
+                MAX_ARCHIVE_EXTRACTED_BYTES / 1024 / 1024
+            )));
+        }
+        Ok(())
+    }
+
+    fn remaining_bytes(&self) -> Result<u64, AppError> {
+        let counters = self
+            .counters
+            .lock()
+            .map_err(|_| AppError::BadRequest("archive budget lock poisoned".into()))?;
+        Ok(MAX_ARCHIVE_EXTRACTED_BYTES.saturating_sub(counters.extracted_bytes))
+    }
+}
 
 pub struct ProcessFileOptions<'a> {
     pub pool: &'a sqlx::SqlitePool,
@@ -36,6 +96,7 @@ pub struct ProcessFileOptions<'a> {
     pub content_type: Option<&'a str>,
     pub source_path: &'a Path,
     pub size_bytes: u64,
+    pub archive_budget: ArchiveBudget,
 }
 
 pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<(), AppError> {
@@ -50,6 +111,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         content_type,
         source_path,
         size_bytes,
+        archive_budget,
     } = options;
 
     let bundle_dir = data_root.join(bundle_hash);
@@ -95,7 +157,13 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         })?;
 
         update_process_stage(pool, bundle_id, "EXTRACTING").await?;
-        extract_archive(original_name, &disk_path, &extracted_dir).await?;
+        extract_archive(
+            original_name,
+            &disk_path,
+            &extracted_dir,
+            archive_budget.clone(),
+        )
+        .await?;
 
         let extracted_relative_path = format!("/{bundle_hash}/{extracted_dir_name}");
         let dir_meta = serde_json::json!({
@@ -123,8 +191,10 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             pool,
             bundle_id,
             dir_id,
-            &extracted_dir,
-            &format!("{}/{extracted_dir_name}", bundle_hash),
+            extracted_dir,
+            format!("{}/{extracted_dir_name}", bundle_hash),
+            archive_budget,
+            1,
         )
         .await?;
     }
@@ -146,77 +216,138 @@ async fn update_process_stage(
     Ok(())
 }
 
-async fn ingest_directory(
-    pool: &sqlx::SqlitePool,
-    bundle_id: &str,
+fn ingest_directory<'a>(
+    pool: &'a sqlx::SqlitePool,
+    bundle_id: &'a str,
     parent_id: i64,
-    dir_path: &Path,
-    relative_root: &str,
-) -> Result<(), AppError> {
-    let mut entries = Vec::new();
-    for entry in WalkDir::new(dir_path).into_iter().filter_map(Result::ok) {
-        let path = entry.path();
-        if path == dir_path {
-            continue;
-        }
-        let rel = path.strip_prefix(dir_path).unwrap_or(path).to_path_buf();
-        entries.push((rel, path.to_path_buf(), entry.file_type().is_dir()));
-    }
-
-    let mut id_map: HashMap<PathBuf, i64> = HashMap::new();
-    id_map.insert(PathBuf::new(), parent_id);
-
-    for (relative, disk_path, is_dir) in entries {
-        let parent_rel = relative
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(PathBuf::new);
-        let parent = *id_map.get(&parent_rel).unwrap_or(&parent_id);
-        let name = disk_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("unknown");
-        let rel_string = relative.to_string_lossy().replace('\\', "/");
-        let db_path = format!("/{}/{}", relative_root.trim_start_matches('/'), rel_string);
-        let metadata = fs::metadata(&disk_path)
+    dir_path: PathBuf,
+    relative_root: String,
+    archive_budget: ArchiveBudget,
+    archive_depth: usize,
+) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut read_dir = fs::read_dir(&dir_path)
             .await
-            .map_err(|error| io_error_at("read extracted entry metadata", &disk_path, error))?;
-        let size_bytes = if metadata.is_file() {
-            Some(metadata.len() as i64)
-        } else {
-            None
-        };
-        let meta = serde_json::json!({
-            "storage_path": disk_path.to_string_lossy(),
-            "kind": if is_dir { "extracted_dir" } else { "extracted_file" }
-        });
-
-        let record_id = insert_file_record(
-            pool,
-            bundle_id,
-            Some(parent),
-            name,
-            &db_path,
-            is_dir,
-            size_bytes,
-            None,
-            Some(meta),
-        )
-        .await?;
-
-        if !is_dir
-            && is_text_like(name, None)
-            && let Some(size) = size_bytes
+            .map_err(|error| io_error_at("read extracted directory", &dir_path, error))?;
+        let mut entries = Vec::new();
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|error| io_error_at("read extracted directory entry", &dir_path, error))?
         {
-            ingest_text_file(pool, bundle_id, record_id, &disk_path, size as u64).await?;
+            entries.push(entry.path());
+        }
+        entries.sort();
+
+        for disk_path in entries {
+            let name = disk_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let metadata = fs::metadata(&disk_path)
+                .await
+                .map_err(|error| io_error_at("read extracted entry metadata", &disk_path, error))?;
+            let is_dir = metadata.is_dir();
+            let size_bytes = metadata.is_file().then_some(metadata.len() as i64);
+            let db_path = format!("/{}/{}", relative_root.trim_start_matches('/'), name);
+            let meta = serde_json::json!({
+                "storage_path": disk_path.to_string_lossy(),
+                "kind": if is_dir { "extracted_dir" } else { "extracted_file" }
+            });
+
+            let record_id = insert_file_record(
+                pool,
+                bundle_id,
+                Some(parent_id),
+                &name,
+                &db_path,
+                is_dir,
+                size_bytes,
+                None,
+                Some(meta),
+            )
+            .await?;
+
+            if is_dir {
+                ingest_directory(
+                    pool,
+                    bundle_id,
+                    record_id,
+                    disk_path,
+                    format!("{relative_root}/{name}"),
+                    archive_budget.clone(),
+                    archive_depth,
+                )
+                .await?;
+                continue;
+            }
+
+            if is_text_like(&name, None)
+                && let Some(size) = size_bytes
+            {
+                ingest_text_file(pool, bundle_id, record_id, &disk_path, size as u64).await?;
+            }
+
+            if is_supported_archive(&name) {
+                if archive_depth >= MAX_ARCHIVE_RECURSION_DEPTH {
+                    return Err(AppError::BadRequest(format!(
+                        "archive recursion is too deep; max {MAX_ARCHIVE_RECURSION_DEPTH}: {db_path}"
+                    )));
+                }
+
+                let extracted_dir_name = format!("{name}_extracted");
+                let extracted_dir = dir_path.join(&extracted_dir_name);
+                validate_extracted_path(&extracted_dir, &db_path)?;
+                if fs::metadata(&extracted_dir).await.is_ok() {
+                    return Err(AppError::BadRequest(format!(
+                        "archive extraction output already exists: {}",
+                        extracted_dir.display()
+                    )));
+                }
+                fs::create_dir_all(&extracted_dir).await.map_err(|error| {
+                    io_error_at(
+                        "create nested archive extraction directory",
+                        &extracted_dir,
+                        error,
+                    )
+                })?;
+                extract_archive(&name, &disk_path, &extracted_dir, archive_budget.clone()).await?;
+
+                let extracted_db_path = format!("{db_path}_extracted");
+                let dir_meta = serde_json::json!({
+                    "source": name,
+                    "storage_name": extracted_dir_name,
+                    "storage_path": extracted_dir.to_string_lossy(),
+                    "kind": "extracted_dir"
+                });
+                let dir_id = insert_file_record(
+                    pool,
+                    bundle_id,
+                    Some(record_id),
+                    &extracted_dir_name,
+                    &extracted_db_path,
+                    true,
+                    None,
+                    None,
+                    Some(dir_meta),
+                )
+                .await?;
+                ingest_directory(
+                    pool,
+                    bundle_id,
+                    dir_id,
+                    extracted_dir,
+                    extracted_db_path.trim_start_matches('/').to_string(),
+                    archive_budget.clone(),
+                    archive_depth + 1,
+                )
+                .await?;
+            }
         }
 
-        if is_dir {
-            id_map.insert(relative, record_id);
-        }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -667,13 +798,18 @@ fn looks_like_timestamp(value: &str) -> bool {
         && bytes[6..8].iter().all(u8::is_ascii_digit)
 }
 
-async fn extract_archive(name: &str, src: &Path, dest: &Path) -> Result<(), AppError> {
+async fn extract_archive(
+    name: &str,
+    src: &Path,
+    dest: &Path,
+    archive_budget: ArchiveBudget,
+) -> Result<(), AppError> {
     if is_zip_file(name) {
-        extract_zip_archive(src, dest).await
+        extract_zip_archive(src, dest, archive_budget).await
     } else if is_tar_gz_file(name) {
-        extract_tar_gz_archive(src, dest).await
+        extract_tar_gz_archive(src, dest, archive_budget).await
     } else if is_gzip_file(name) {
-        extract_gzip_file(name, src, dest).await
+        extract_gzip_file(name, src, dest, archive_budget).await
     } else {
         Err(AppError::BadRequest(format!(
             "unsupported archive type: {name}"
@@ -681,7 +817,11 @@ async fn extract_archive(name: &str, src: &Path, dest: &Path) -> Result<(), AppE
     }
 }
 
-async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
+async fn extract_zip_archive(
+    src: &Path,
+    dest: &Path,
+    archive_budget: ArchiveBudget,
+) -> Result<(), AppError> {
     let src_path = src.to_path_buf();
     let dest_path = dest.to_path_buf();
     task::spawn_blocking(move || -> Result<(), AppError> {
@@ -696,7 +836,6 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
             )));
         }
 
-        let mut total_uncompressed = 0u64;
         let mut seen_paths = HashSet::new();
         for i in 0..archive.len() {
             let mut entry = archive
@@ -727,19 +866,13 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
                 )));
             }
 
-            total_uncompressed = total_uncompressed
-                .checked_add(uncompressed_size)
-                .ok_or_else(|| AppError::BadRequest("zip extracted size overflow".into()))?;
-            if total_uncompressed > MAX_ARCHIVE_EXTRACTED_BYTES {
-                return Err(AppError::BadRequest(format!(
-                    "zip extracted content is too large; max {} MB",
-                    MAX_ARCHIVE_EXTRACTED_BYTES / 1024 / 1024
-                )));
-            }
+            archive_budget.reserve_entry()?;
+            archive_budget.reserve_bytes(uncompressed_size)?;
 
             validate_zip_ratio(entry.name(), uncompressed_size, entry.compressed_size())?;
 
             let out_path = dest_path.join(entry_path);
+            validate_extracted_path(&out_path, entry.name())?;
             let normalized_out = normalize_extracted_path(&out_path);
             if !seen_paths.insert(normalized_out) {
                 return Err(AppError::BadRequest(format!(
@@ -776,7 +909,11 @@ async fn extract_zip_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError> {
+async fn extract_tar_gz_archive(
+    src: &Path,
+    dest: &Path,
+    archive_budget: ArchiveBudget,
+) -> Result<(), AppError> {
     let src_path = src.to_path_buf();
     let dest_path = dest.to_path_buf();
     task::spawn_blocking(move || -> Result<(), AppError> {
@@ -827,12 +964,8 @@ async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError>
             total_uncompressed = total_uncompressed
                 .checked_add(entry_size)
                 .ok_or_else(|| AppError::BadRequest("tar.gz extracted size overflow".into()))?;
-            if total_uncompressed > MAX_ARCHIVE_EXTRACTED_BYTES {
-                return Err(AppError::BadRequest(format!(
-                    "tar.gz extracted content is too large; max {} MB",
-                    MAX_ARCHIVE_EXTRACTED_BYTES / 1024 / 1024
-                )));
-            }
+            archive_budget.reserve_entry()?;
+            archive_budget.reserve_bytes(entry_size)?;
             validate_archive_ratio(
                 &raw_path.display().to_string(),
                 total_uncompressed,
@@ -840,6 +973,7 @@ async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError>
             )?;
 
             let out_path = dest_path.join(entry_path);
+            validate_extracted_path(&out_path, &raw_path.display().to_string())?;
             let normalized_out = normalize_extracted_path(&out_path);
             if !seen_paths.insert(normalized_out) {
                 return Err(AppError::BadRequest(format!(
@@ -876,11 +1010,19 @@ async fn extract_tar_gz_archive(src: &Path, dest: &Path) -> Result<(), AppError>
     Ok(())
 }
 
-async fn extract_gzip_file(name: &str, src: &Path, dest: &Path) -> Result<(), AppError> {
+async fn extract_gzip_file(
+    name: &str,
+    src: &Path,
+    dest: &Path,
+    archive_budget: ArchiveBudget,
+) -> Result<(), AppError> {
     let src_path = src.to_path_buf();
     let dest_path = dest.to_path_buf();
+    let source_name = name.to_string();
     let output_name = gzip_output_name(name);
     task::spawn_blocking(move || -> Result<(), AppError> {
+        archive_budget.reserve_entry()?;
+        let copy_limit = MAX_ARCHIVE_ENTRY_BYTES.min(archive_budget.remaining_bytes()?);
         let compressed_size = std::fs::metadata(&src_path).map_err(io_error)?.len().max(1);
         let file = StdFile::open(&src_path)
             .map_err(|error| io_error_at("open gzip archive", &src_path, error))?;
@@ -888,6 +1030,7 @@ async fn extract_gzip_file(name: &str, src: &Path, dest: &Path) -> Result<(), Ap
         std::fs::create_dir_all(&dest_path)
             .map_err(|error| io_error_at("create gzip extraction directory", &dest_path, error))?;
         let out_path = dest_path.join(output_name);
+        validate_extracted_path(&out_path, &source_name)?;
         if out_path.exists() {
             return Err(AppError::BadRequest(format!(
                 "gzip output path already exists: {}",
@@ -896,13 +1039,8 @@ async fn extract_gzip_file(name: &str, src: &Path, dest: &Path) -> Result<(), Ap
         }
         let mut outfile = StdFile::create(&out_path)
             .map_err(|error| io_error_at("create gzip output", &out_path, error))?;
-        let copied = copy_with_limit(&mut decoder, &mut outfile, MAX_ARCHIVE_ENTRY_BYTES)?;
-        if copied > MAX_ARCHIVE_EXTRACTED_BYTES {
-            return Err(AppError::BadRequest(format!(
-                "gzip extracted content is too large; max {} MB",
-                MAX_ARCHIVE_EXTRACTED_BYTES / 1024 / 1024
-            )));
-        }
+        let copied = copy_with_limit(&mut decoder, &mut outfile, copy_limit)?;
+        archive_budget.reserve_bytes(copied)?;
         validate_archive_ratio("gzip file", copied, compressed_size)?;
         Ok(())
     })
@@ -943,6 +1081,16 @@ fn normalize_extracted_path(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn validate_extracted_path(path: &Path, source_path: &str) -> Result<(), AppError> {
+    let path_chars = path.to_string_lossy().encode_utf16().count();
+    if path_chars > MAX_ARCHIVE_OUTPUT_PATH_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "archive output path is too long ({path_chars} > {MAX_ARCHIVE_OUTPUT_PATH_CHARS}): {source_path}"
+        )));
+    }
+    Ok(())
 }
 
 fn archive_parent_depth(path: &Path) -> usize {
@@ -1122,9 +1270,12 @@ fn io_error_at(operation: &str, path: &Path, error: std::io::Error) -> AppError 
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{archive_parent_depth, gzip_output_name, sanitize_archive_path, split_timestamp};
+    use super::{
+        MAX_ARCHIVE_OUTPUT_PATH_CHARS, archive_parent_depth, gzip_output_name,
+        sanitize_archive_path, split_timestamp, validate_extracted_path,
+    };
 
     #[test]
     fn archive_depth_counts_only_parent_directories() {
@@ -1177,5 +1328,14 @@ mod tests {
             sanitize_archive_path(Path::new("Lpt9.log")),
             Path::new("_Lpt9.log")
         );
+    }
+
+    #[test]
+    fn archive_output_path_rejects_windows_unsafe_length_with_source_path() {
+        let path = PathBuf::from("x".repeat(MAX_ARCHIVE_OUTPUT_PATH_CHARS + 1));
+        let error = validate_extracted_path(&path, "logs/too-long.log")
+            .expect_err("overlong archive output path should fail");
+
+        assert!(error.to_string().contains("logs/too-long.log"));
     }
 }
