@@ -428,9 +428,7 @@ async fn resolve_sources(
     let bundle = load_bundle(&state.pool, bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
     let file = fetch_file(&state.pool, &bundle.id, file_id).await?;
-    if file.is_dir {
-        return Err(AppError::BadRequest("cannot filter a directory".into()));
-    }
+    super::files::ensure_text_preview(&file)?;
     let path = resolve_file_path(&file, &data_root(state))?;
     Ok(vec![Source {
         path,

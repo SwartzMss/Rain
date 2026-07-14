@@ -153,6 +153,7 @@ Linux/macOS:
 - 多文件上传。
 - `.log`、`.txt` 等文本文件索引。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 后台递归解压并写入文件树，内层日志同样会建立索引和支持分页查看。
+- `.exe`、Office、图片等二进制文件保留在文件树中，显示类型与大小并支持显式下载，但不会文字预览或建立搜索索引。
 - 上传安全限制：单文件 512 MB、单次 2 GB、最多 100 个文件。
 - 压缩包防护按整个 bundle 累计：最多 16 层嵌套压缩、10000 个条目、500 MB 解压内容；单条目最多 100 MB、条目路径最多 16 层、完整输出路径最多 1024 个 UTF-16 字符、压缩比上限 100:1。
 - 文件树浏览。
@@ -267,6 +268,8 @@ Multipart 字段：
 - `GET /api/files/v1/{bundleId}/files/{fileId}/lines?start=0&limit=200`
 - `GET /api/files/v1/{bundleId}/files/{fileId}/download`
 - `DELETE /api/files/v1/{bundleId}/files/{fileId}`
+
+文件节点包含 `preview_kind`（`directory`、`text`、`binary` 或 `archive`），前端据此决定展开目录、显示文字查看器或显示二进制文件信息页。
 
 ### Search
 

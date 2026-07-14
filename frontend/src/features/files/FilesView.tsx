@@ -3,6 +3,8 @@ import { useLocation, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
 import type { FileLinesResponse, FileNode, IssueLogSearchHit, LogSearchHit, UploadSummary } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
+import { BinaryFileInfo } from './BinaryFileInfo';
+import { canPreviewText, isArchiveNode, isBinaryNode } from './filePresentation';
 import {
   closeViewerTab,
   openOrActivateTab,
@@ -20,9 +22,7 @@ type TreeNode = Omit<FileNode, 'id' | 'children'> & {
   hasLoadedChildren: boolean;
 };
 
-const archivePattern = /\.(zip|tar|gz|tgz|rar|7z)$/i;
 const LINE_PAGE_SIZE_OPTIONS = [1000, 3000] as const;
-const isArchiveNode = (node?: { name: string }) => (node?.name ? archivePattern.test(node.name) : false);
 
 const formatSize = (bytes?: number) => {
   if (bytes === undefined || bytes === null) return '--';
@@ -40,6 +40,7 @@ const formatSize = (bytes?: number) => {
 const nodeTypeLabel = (node: TreeNode) => {
   if (node.is_dir) return '目录';
   if (isArchiveNode(node)) return '压缩包';
+  if (isBinaryNode(node)) return '二进制文件';
   return '文件';
 };
 
@@ -198,6 +199,7 @@ export function BundleView(props?: BundleViewProps) {
     name: node.name,
     path: node.path,
     is_dir: node.is_dir,
+    preview_kind: node.preview_kind,
     size_bytes: node.size_bytes,
     mime_type: node.mime_type,
     status: node.status,
@@ -647,7 +649,7 @@ export function BundleView(props?: BundleViewProps) {
 
   const runFileSearch = useCallback(async (from = 0) => {
     const keyword = fileSearchText.trim();
-    if (!selectedNode || selectedNode.is_dir || isArchiveNode(selectedNode) || !keyword) return;
+    if (!selectedNode || !canPreviewText(selectedNode) || !keyword) return;
     const selectedBundleId = selectedNode.bundleId || bundleId;
     if (!selectedBundleId) return;
 
@@ -824,7 +826,8 @@ export function BundleView(props?: BundleViewProps) {
   useEffect(() => {
     setFileLines(null);
     setFileContentError(null);
-    if (!selectedNode || selectedNode.is_dir) return;
+    setFileContentLoading(false);
+    if (!selectedNode || !canPreviewText(selectedNode)) return;
     const bundleForContent = selectedNode.bundleId || bundleId;
     if (!bundleForContent) return;
     let ignore = false;
@@ -852,7 +855,7 @@ export function BundleView(props?: BundleViewProps) {
     return () => {
       ignore = true;
     };
-  }, [bundleId, selectedNode?.id, selectedNode?.is_dir, lineStart, linePageSize]);
+  }, [bundleId, selectedNode?.id, selectedNode?.is_dir, selectedNode?.preview_kind, lineStart, linePageSize]);
 
   useEffect(() => {
     if (!selectedNode) return;
@@ -936,12 +939,14 @@ export function BundleView(props?: BundleViewProps) {
     const isExpanded = expandedNodes.has(nodeId);
     const isSelected = selectedNodeId === nodeId;
     const canExpand = node.is_dir || isArchiveNode(node);
-    const typeIcon = node.is_dir ? '▣' : isArchiveNode(node) ? 'ZIP' : '□';
+    const typeIcon = node.is_dir ? '▣' : isArchiveNode(node) ? 'ZIP' : isBinaryNode(node) ? 'BIN' : 'TXT';
     const iconClass = node.is_dir
       ? 'text-cyan-300'
       : isArchiveNode(node)
         ? 'text-brand-200'
-        : 'text-slate-300';
+        : isBinaryNode(node)
+          ? 'text-amber-200'
+          : 'text-slate-300';
     const rowMeta = canExpand
       ? `${node.childrenIds.length || 0} 子节点`
       : node.mime_type ?? 'file';
@@ -1184,8 +1189,7 @@ export function BundleView(props?: BundleViewProps) {
             <div className="flex min-h-0 flex-1 flex-col p-4">
               <div className="flex min-h-0 flex-1 flex-col gap-2">
                 {activeViewerTab?.kind === 'file' && selectedNode &&
-                !selectedNode.is_dir &&
-                !isArchiveNode(selectedNode) ? (
+                canPreviewText(selectedNode) ? (
                   <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-800 bg-slate-950/30 px-4 py-3 focus-within:border-cyan-500/50">
                     <span className="shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                     <input
@@ -1413,6 +1417,14 @@ export function BundleView(props?: BundleViewProps) {
                   <p className="text-sm text-slate-500">压缩包请在左侧展开查看内部文件。</p>
                 ) : selectedNode.is_dir ? (
                   <p className="text-sm text-slate-500">当前为目录，选择文件后展示内容。</p>
+                ) : isBinaryNode(selectedNode) ? (
+                  <BinaryFileInfo
+                    node={selectedNode}
+                    downloadUrl={rainApi.fileDownloadUrl(
+                      selectedNode.bundleId || bundleId,
+                      selectedNode.rawId
+                    )}
+                  />
                 ) : fileContentLoading ? (
                   <p className="text-sm text-slate-500">读取中...</p>
                 ) : fileContentError ? (
