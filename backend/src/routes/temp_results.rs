@@ -21,6 +21,13 @@ use super::{
 
 const RETENTION_DAYS: i64 = 7;
 
+fn invalid_expression(error: log_expression::ParseError) -> AppError {
+    AppError::BadRequest(format!(
+        "搜索条件无效，请检查 AND/OR/NOT 前后是否都有关键词（位置 {}：{}）",
+        error.offset, error.message
+    ))
+}
+
 #[derive(Deserialize)]
 pub struct CreateTempResultRequest {
     expression: String,
@@ -109,12 +116,7 @@ pub async fn preview_temp_result(
 ) -> Result<HttpResponse, AppError> {
     cleanup_expired(&state).await?;
     let expression_text = payload.expression.trim();
-    let expression = log_expression::parse(expression_text).map_err(|error| {
-        AppError::BadRequest(format!(
-            "invalid expression at {}: {}",
-            error.offset, error.message
-        ))
-    })?;
+    let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
     let source_request = CreateTempResultRequest {
         expression: expression_text.to_string(),
         bundle_hash: payload.bundle_hash.clone(),
@@ -172,12 +174,7 @@ pub async fn create_temp_result(
 ) -> Result<HttpResponse, AppError> {
     cleanup_expired(&state).await?;
     let expression_text = payload.expression.trim();
-    let expression = log_expression::parse(expression_text).map_err(|error| {
-        AppError::BadRequest(format!(
-            "invalid expression at {}: {}",
-            error.offset, error.message
-        ))
-    })?;
+    let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
 
     let sources = resolve_sources(&payload, &state).await?;
     let source_label = if sources.len() == 1 {

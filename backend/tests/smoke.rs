@@ -707,6 +707,45 @@ async fn upload_search_tree_and_delete_issue() {
         "ERROR smoke works"
     );
 
+    let literal_phrase_preview: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/temp-results/preview")
+            .set_json(serde_json::json!({
+                "expression": "\"ERROR smoke works\"",
+                "bundle_hash": bundle_hash,
+                "file_id": app_file_id,
+                "from": 0,
+                "size": 50
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(literal_phrase_preview["total"], 1);
+
+    let invalid_expression_response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/temp-results/preview")
+            .set_json(serde_json::json!({
+                "expression": "\"ERROR\" AND",
+                "bundle_hash": bundle_hash,
+                "file_id": app_file_id
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        invalid_expression_response.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let invalid_expression_body: Value = test::read_body_json(invalid_expression_response).await;
+    let invalid_expression_message = invalid_expression_body["error"]
+        .as_str()
+        .expect("invalid expression error");
+    assert!(invalid_expression_message.contains("搜索条件无效"));
+    assert!(invalid_expression_message.contains("位置"));
+
     let temporary_result_response = test::call_service(
         &app,
         test::TestRequest::post()

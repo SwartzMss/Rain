@@ -91,21 +91,41 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
         if character == '"' {
             let offset = cursor;
             cursor += 1;
-            let start = cursor;
-            while cursor < input.len() && !input[cursor..].starts_with('"') {
-                cursor += input[cursor..]
-                    .chars()
-                    .next()
-                    .expect("quoted character")
-                    .len_utf8();
+            let mut phrase = String::new();
+            let mut closed = false;
+            while cursor < input.len() {
+                let quoted = input[cursor..].chars().next().expect("quoted character");
+                if quoted == '"' {
+                    cursor += quoted.len_utf8();
+                    closed = true;
+                    break;
+                }
+                if quoted == '\\' {
+                    cursor += quoted.len_utf8();
+                    if cursor >= input.len() {
+                        return Err(ParseError {
+                            offset,
+                            message: "unterminated quoted phrase".into(),
+                        });
+                    }
+                    let escaped = input[cursor..].chars().next().expect("escaped character");
+                    if escaped != '"' && escaped != '\\' {
+                        phrase.push('\\');
+                    }
+                    phrase.push(escaped);
+                    cursor += escaped.len_utf8();
+                    continue;
+                }
+                phrase.push(quoted);
+                cursor += quoted.len_utf8();
             }
-            if cursor >= input.len() {
+            if !closed {
                 return Err(ParseError {
                     offset,
                     message: "unterminated quoted phrase".into(),
                 });
             }
-            let phrase = input[start..cursor].trim();
+            let phrase = phrase.trim();
             if phrase.is_empty() {
                 return Err(ParseError {
                     offset,
@@ -116,7 +136,6 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 kind: TokenKind::Term(phrase.to_lowercase()),
                 offset,
             });
-            cursor += 1;
             continue;
         }
 
@@ -232,6 +251,31 @@ mod tests {
         let expression = parse("(ERROR OR WARN) AND \"tracking point\"").expect("parse expression");
         assert!(expression.matches("warn Interaction Tracking Point moved"));
         assert!(!expression.matches("warn tracking stopped"));
+    }
+
+    #[test]
+    fn supports_escaped_quotes_and_backslashes_in_quoted_phrases() {
+        let expression = parse(r#""disk \"primary\" at C:\\logs""#).expect("parse expression");
+        assert!(expression.matches(r#"mounted disk "primary" at C:\logs"#));
+        assert!(!expression.matches(r#"mounted disk "secondary" at C:\logs"#));
+    }
+
+    #[test]
+    fn treats_operator_words_as_literal_text_inside_quotes() {
+        let expression = parse(r#""AND OR NOT (vds): mounted""#).expect("parse expression");
+        assert!(expression.matches("and or not (vds): mounted successfully"));
+    }
+
+    #[test]
+    fn supports_three_levels_of_safely_nested_filters() {
+        let expression = parse(
+            r#"(("EXT4-fs (vds): mounted") AND ("ordered data mode")) AND ("AND remains literal")"#,
+        )
+        .expect("parse nested expression");
+        assert!(
+            expression
+                .matches("EXT4-fs (vds): mounted with ordered data mode; AND remains literal")
+        );
     }
 
     #[test]
