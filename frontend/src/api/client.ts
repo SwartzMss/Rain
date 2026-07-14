@@ -166,9 +166,6 @@ export const rainApi = {
     const query = params.toString();
     return request<TempResultLinesResponse>(`/api/temp-results/${encodePathSegment(id)}/lines${query ? `?${query}` : ''}`);
   },
-  tempResultDownloadUrl(id: string) {
-    return `${API_BASE_URL}/api/temp-results/${encodePathSegment(id)}/download`;
-  },
   deleteTempResult(id: string) {
     return request<void>(`/api/temp-results/${encodePathSegment(id)}`, { method: 'DELETE' });
   },

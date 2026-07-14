@@ -1454,10 +1454,6 @@ export function BundleView(props?: BundleViewProps) {
                 ) : isBinaryNode(selectedNode) ? (
                   <BinaryFileInfo
                     node={selectedNode}
-                    downloadUrl={rainApi.fileDownloadUrl(
-                      selectedNode.bundleId || bundleId,
-                      selectedNode.rawId
-                    )}
                   />
                 ) : fileContentLoading ? (
                   <p className="text-sm text-slate-500">读取中...</p>
