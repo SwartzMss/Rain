@@ -174,6 +174,19 @@ Linux/macOS:
 - timeline 目前固定为 `all`。
 - 已有基础结构化日志事件提取，事件查询和 AI 分析能力尚未接入。
 
+## Windows staging 移动验证
+
+后台完成解压和索引后，只重试 staging bundle 到正式目录的移动，不会重复处理内容。Windows 的访问拒绝、sharing violation（错误码 32）和 lock violation（错误码 33）会按 100、200、400、800、1600、3200、5000 ms 退避重试；日志包含 attempt、`ErrorKind`、原始 OS 错误码、下一次等待时间及完整来源/目标路径。重试耗尽后沿用现有 `FAILED` 状态和半成品清理流程。
+
+自动测试：
+
+```bash
+cd backend
+cargo test routes::uploads::tests
+```
+
+Windows 手动验证时，可在启用 Defender 或目录索引的环境上传包含大量小文件的压缩包，并观察发生短暂锁定时任务最终进入 `READY`；持续占用 staging 目录超过重试窗口时，任务应进入 `FAILED`，且文件树接口不应返回半成品。
+
 ## 数据位置
 
 默认数据都在仓库根目录下的 `data/`，该目录已被 `.gitignore` 忽略：

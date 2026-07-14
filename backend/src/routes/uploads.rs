@@ -3,9 +3,14 @@ use actix_web::{HttpResponse, get, http::StatusCode, post, web};
 use futures_util::TryStreamExt;
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use std::{
+    future::Future,
+    io,
+    path::{Path, PathBuf},
+};
 use tokio::sync::Semaphore;
 use tokio::{fs, io::AsyncWriteExt};
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -22,38 +27,83 @@ const MAX_UPLOAD_FILE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MAX_TEXT_FIELD_BYTES: usize = 64 * 1024;
 const MAX_CONCURRENT_PROCESSING_TASKS: usize = 2;
+const WINDOWS_MOVE_RETRY_DELAYS_MS: [u64; 7] = [100, 200, 400, 800, 1600, 3200, 5000];
+const DEFAULT_MOVE_RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
 
 static PROCESSING_PERMITS: Lazy<Semaphore> =
     Lazy::new(|| Semaphore::new(MAX_CONCURRENT_PROCESSING_TASKS));
 
 async fn move_bundle_directory_with_retry(
-    source: &std::path::Path,
-    destination: &std::path::Path,
+    source: &Path,
+    destination: &Path,
 ) -> Result<(), AppError> {
-    const RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
-    let mut retry_delays = RETRY_DELAYS_MS.into_iter();
-    loop {
-        match fs::rename(source, destination).await {
+    let retry_delays = if cfg!(windows) {
+        WINDOWS_MOVE_RETRY_DELAYS_MS.as_slice()
+    } else {
+        DEFAULT_MOVE_RETRY_DELAYS_MS.as_slice()
+    };
+    move_bundle_directory_with_retry_using(
+        source,
+        destination,
+        retry_delays,
+        cfg!(windows),
+        fs::rename,
+    )
+    .await
+}
+
+async fn move_bundle_directory_with_retry_using<R, Fut>(
+    source: &Path,
+    destination: &Path,
+    retry_delays_ms: &[u64],
+    windows: bool,
+    mut rename: R,
+) -> Result<(), AppError>
+where
+    R: FnMut(PathBuf, PathBuf) -> Fut + Send,
+    Fut: Future<Output = io::Result<()>> + Send,
+{
+    let source = absolute_diagnostic_path(source);
+    let destination = absolute_diagnostic_path(destination);
+    let max_attempts = retry_delays_ms.len() + 1;
+
+    for attempt in 1..=max_attempts {
+        match rename(source.clone(), destination.clone()).await {
             Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                if let Some(delay_ms) = retry_delays.next() {
+            Err(error) => {
+                let error_kind = error.kind();
+                let os_error = error.raw_os_error();
+                let retryable = is_retryable_bundle_move_error(&error, windows);
+                if retryable && attempt < max_attempts {
+                    let delay_ms = retry_delays_ms[attempt - 1];
+                    warn!(
+                        attempt,
+                        max_attempts,
+                        error_kind = ?error_kind,
+                        os_error,
+                        source = %source.display(),
+                        destination = %destination.display(),
+                        next_retry_ms = delay_ms,
+                        "transient bundle directory move failure; retrying"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
-                return Err(AppError::Io(std::io::Error::new(
-                    error.kind(),
+
+                error!(
+                    attempt,
+                    max_attempts,
+                    error_kind = ?error_kind,
+                    os_error,
+                    retryable,
+                    source = %source.display(),
+                    destination = %destination.display(),
+                    "bundle directory move failed"
+                );
+                return Err(AppError::Io(io::Error::new(
+                    error_kind,
                     format!(
-                        "move processed bundle {} -> {}: {error}",
-                        source.display(),
-                        destination.display()
-                    ),
-                )));
-            }
-            Err(error) => {
-                return Err(AppError::Io(std::io::Error::new(
-                    error.kind(),
-                    format!(
-                        "move processed bundle {} -> {}: {error}",
+                        "move processed bundle {} -> {} failed on attempt {attempt}/{max_attempts} (kind: {error_kind:?}, os error: {os_error:?}): {error}",
                         source.display(),
                         destination.display()
                     ),
@@ -61,6 +111,22 @@ async fn move_bundle_directory_with_retry(
             }
         }
     }
+
+    unreachable!("bundle move retry loop always returns")
+}
+
+fn is_retryable_bundle_move_error(error: &io::Error, windows: bool) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        || (windows && matches!(error.raw_os_error(), Some(5 | 32 | 33)))
+}
+
+fn absolute_diagnostic_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|current| current.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 // scoped under /api in routes::register, so use relative path
@@ -632,4 +698,89 @@ fn sanitize_extension(extension: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .take(16)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::ready,
+        io,
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use super::move_bundle_directory_with_retry_using;
+
+    #[tokio::test]
+    async fn retries_windows_sharing_violations_until_move_succeeds() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let rename_attempts = attempts.clone();
+
+        move_bundle_directory_with_retry_using(
+            Path::new("staging/bundle"),
+            Path::new("uploads/bundle"),
+            &[0, 0, 0],
+            true,
+            move |_, _| {
+                let attempt = rename_attempts.fetch_add(1, Ordering::SeqCst);
+                ready(if attempt < 3 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Ok(())
+                })
+            },
+        )
+        .await
+        .expect("transient Windows sharing violation should recover");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn fails_after_windows_lock_retry_window_is_exhausted() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let rename_attempts = attempts.clone();
+
+        let error = move_bundle_directory_with_retry_using(
+            Path::new("staging/bundle"),
+            Path::new("uploads/bundle"),
+            &[0, 0],
+            true,
+            move |_, _| {
+                rename_attempts.fetch_add(1, Ordering::SeqCst);
+                ready(Err(io::Error::from_raw_os_error(33)))
+            },
+        )
+        .await
+        .expect_err("persistent Windows lock violation should fail");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert!(error.to_string().contains("attempt 3/3"));
+        assert!(error.to_string().contains("staging"));
+        assert!(error.to_string().contains("uploads"));
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_non_recoverable_move_errors() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let rename_attempts = attempts.clone();
+
+        move_bundle_directory_with_retry_using(
+            Path::new("staging/bundle"),
+            Path::new("uploads/bundle"),
+            &[0, 0, 0],
+            true,
+            move |_, _| {
+                rename_attempts.fetch_add(1, Ordering::SeqCst);
+                ready(Err(io::Error::new(io::ErrorKind::NotFound, "missing")))
+            },
+        )
+        .await
+        .expect_err("non-recoverable move error should fail immediately");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
 }
