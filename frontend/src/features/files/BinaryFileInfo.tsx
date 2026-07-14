@@ -2,7 +2,6 @@ import type { FileNode } from '../../api/types';
 
 type BinaryFileInfoProps = {
   node: Pick<FileNode, 'name' | 'mime_type' | 'size_bytes'>;
-  downloadUrl: string;
 };
 
 const formatSize = (bytes?: number) => {
@@ -17,7 +16,7 @@ const formatSize = (bytes?: number) => {
   return `${unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 };
 
-export function BinaryFileInfo({ node, downloadUrl }: BinaryFileInfoProps) {
+export function BinaryFileInfo({ node }: BinaryFileInfoProps) {
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label="二进制文件信息">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-5">
@@ -30,12 +29,6 @@ export function BinaryFileInfo({ node, downloadUrl }: BinaryFileInfoProps) {
             <p className="mt-1 text-xs text-slate-500">二进制文件不支持文字预览</p>
           </div>
         </div>
-        <a
-          className="shrink-0 rounded border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400 hover:bg-cyan-500/20"
-          href={downloadUrl}
-        >
-          ↓ 下载文件
-        </a>
       </div>
 
       <dl className="mt-5 divide-y divide-slate-800 border-y border-slate-800 text-sm">

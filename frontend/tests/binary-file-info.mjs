@@ -24,16 +24,14 @@ try {
         name: 'tool.exe',
         mime_type: 'application/x-msdownload',
         size_bytes: 4096
-      },
-      downloadUrl: '/api/files/v1/bundle/files/7/download'
+      }
     })
   );
 
   assert.match(markup, /tool\.exe/);
   assert.match(markup, /application\/x-msdownload/);
   assert.match(markup, /4\.0 KB/);
-  assert.match(markup, /href="\/api\/files\/v1\/bundle\/files\/7\/download"/);
-  assert.match(markup, /下载文件/);
+  assert.doesNotMatch(markup, /下载/);
   assert.doesNotMatch(markup, /<pre/);
   assert.doesNotMatch(markup, /搜索/);
 

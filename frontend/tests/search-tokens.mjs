@@ -83,24 +83,19 @@ try {
   assert.match(markup, /AND|OR/);
   assert.match(markup, /NOT 运算符/);
   assert.match(markup, /删除关键词 request timeout/);
+  assert.match(markup, />AND<\/button><button[^>]*>OR<\/button><button[^>]*>NOT<\/button>/);
 
-  const advancedMarkup = renderToStaticMarkup(
+  const emptyMarkup = renderToStaticMarkup(
     React.createElement(SearchTokenEditor, {
       tokens: [],
       draft: '',
       onTokensChange: () => undefined,
       onDraftChange: () => undefined,
       placeholder: '输入关键词',
-      ariaLabel: '高级搜索条件',
-      mode: 'advanced',
-      onModeChange: () => undefined,
-      advancedValue: '(ERROR OR WARN) AND NOT timeout',
-      onAdvancedValueChange: () => undefined
+      ariaLabel: '空搜索条件'
     })
   );
-  assert.match(advancedMarkup, /高级搜索条件（高级表达式）/);
-  assert.match(advancedMarkup, /\(ERROR OR WARN\) AND NOT timeout/);
-  assert.match(advancedMarkup, /aria-label="搜索输入模式"/);
+  assert.doesNotMatch(emptyMarkup, />NOT<\/button>/);
 } finally {
   await server.close();
 }
