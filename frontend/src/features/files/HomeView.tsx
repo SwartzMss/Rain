@@ -91,6 +91,7 @@ export function HomeView() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadFailed, setUploadFailed] = useState(false);
   const [uploadTask, setUploadTask] = useState<UploadTaskResponse | null>(null);
   const [uploadSelection, setUploadSelection] = useState<UploadSelectionItem[]>([]);
 
@@ -154,17 +155,18 @@ export function HomeView() {
     const taskBundleVisible = !!uploadTask?.bundle_hash && bundles.some(
       (bundle) => bundle.hash === uploadTask.bundle_hash
     );
-    if ((uploading || activeTask) && uploadSelection.length > 0 && !taskBundleVisible) {
+    if ((uploading || activeTask || uploadFailed) && uploadSelection.length > 0 && !taskBundleVisible) {
       rows.unshift(
         ...createOptimisticUploadRows(
           uploadSelection,
           uploadProgress,
-          uploadTask?.bundle_hash ?? ''
+          uploadTask?.bundle_hash ?? '',
+          uploadFailed ? 'FAILED' : 'UPLOADING'
         )
       );
     }
     return rows;
-  }, [activeTask, bundleFiles, bundles, uploadProgress, uploadSelection, uploadTask, uploading]);
+  }, [activeTask, bundleFiles, bundles, uploadFailed, uploadProgress, uploadSelection, uploadTask, uploading]);
 
   useEffect(() => {
     const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
@@ -352,6 +354,11 @@ export function HomeView() {
     try {
       const code = normalizeIssueCode(value);
       setIssueError(null);
+      if (code !== currentIssueCode) {
+        setUploadFailed(false);
+        setUploadSelection([]);
+        setUploadError(null);
+      }
       setSelectedIssueCode(code);
     } catch (error) {
       setIssueError(normalizeApiError(error));
@@ -409,6 +416,7 @@ export function HomeView() {
 
     uploadingRef.current = true;
     setUploading(true);
+    setUploadFailed(false);
     setUploadProgress(0);
     setUploadError(null);
     setUploadTask(null);
@@ -427,6 +435,7 @@ export function HomeView() {
       await loadBundles(currentIssueCode);
       await loadIssues();
     } catch (error) {
+      setUploadFailed(true);
       setUploadError(normalizeApiError(error));
     } finally {
       uploadingRef.current = false;
@@ -629,9 +638,9 @@ export function HomeView() {
                     {!currentIssueCode
                       ? '先选择或新建 Issue'
                       : uploading
-                        ? '正在上传文件'
+                        ? '处理中'
                         : activeTask
-                          ? '后台解析中'
+                          ? '处理中'
                           : '拖拽日志文件到这里，或点击选择文件'}
                   </p>
                   <p className="mt-1 text-xs text-slate-400">
@@ -648,32 +657,8 @@ export function HomeView() {
                   if (!uploadDisabled) fileInputRef.current?.click();
                 }}
               >
-                选择文件
+                {uploading || activeTask ? '处理中' : '选择文件'}
               </button>
-            </div>
-
-            <div className="min-h-7">
-              {uploading || activeTask ? (
-                <div className="grid gap-3 text-sm text-slate-300 md:grid-cols-[1fr_auto] md:items-center">
-                  <div>
-                    <div className="h-2 overflow-hidden rounded bg-slate-800">
-                      <div
-                        className={`h-full bg-sky-500 transition-[width] duration-300 ${activeTask ? 'animate-pulse' : ''}`}
-                        style={{ width: `${uploading ? uploadProgress : 100}%` }}
-                      />
-                    </div>
-                  </div>
-                  <span>
-                    {uploading
-                      ? uploadProgress < 100
-                        ? `上传 ${uploadProgress}%`
-                        : '上传完成，正在提交...'
-                      : activeTask
-                        ? stageLabel(activeTask.stage)
-                        : ''}
-                  </span>
-                </div>
-              ) : null}
             </div>
             {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
           </form>
@@ -721,7 +706,7 @@ export function HomeView() {
                         {row.status === 'PROCESSING' || row.status === 'PENDING' ? (
                           <span className="mr-4 text-slate-500">等待完成</span>
                         ) : null}
-                        {row.stage !== 'UPLOADING' ? (
+                        {row.stage !== 'UPLOADING' && row.bundleHash ? (
                           <button
                             type="button"
                             className="text-rose-300 hover:text-rose-200 disabled:text-slate-600"
