@@ -17,6 +17,7 @@ use tokio::{
 use crate::{
     AppState,
     error::AppError,
+    file_classification::{PreviewKind, effective_mime_type, preview_kind_from_metadata},
     ingest::{MAX_LINE_BYTES, decode_log_line, read_line_bytes_limited},
     models::files::{FileNode, FileNodeResponse},
 };
@@ -72,6 +73,7 @@ pub async fn get_file_node(
             name: format!("{}_root", bundle.hash),
             path: format!("/{}", bundle.hash),
             is_dir: true,
+            preview_kind: PreviewKind::Directory,
             size_bytes: Some(0),
             mime_type: None,
             status: Some("READY".into()),
@@ -119,6 +121,7 @@ pub async fn get_file_content(
     if record.is_dir {
         return Err(AppError::BadRequest("cannot read directory content".into()));
     }
+    ensure_text_preview(&record)?;
 
     let disk_path = resolve_file_path(&record, &data_root(&state))?;
     let metadata = tokio::fs::metadata(&disk_path)
@@ -161,6 +164,7 @@ pub async fn get_file_lines(
     if record.is_dir {
         return Err(AppError::BadRequest("cannot read directory content".into()));
     }
+    ensure_text_preview(&record)?;
 
     let start = query.start.unwrap_or(0).max(0);
     let limit = query.limit.unwrap_or(1000).clamp(1, 3000);
@@ -496,6 +500,8 @@ pub async fn fetch_children(
 }
 
 pub fn to_file_node(record: FileRow) -> FileNode {
+    let preview_kind = preview_kind_for_record(&record);
+    let mime_type = effective_mime_type(&record.name, record.mime_type.as_deref());
     let meta = record
         .meta
         .as_deref()
@@ -505,11 +511,34 @@ pub fn to_file_node(record: FileRow) -> FileNode {
         name: record.name,
         path: record.path,
         is_dir: record.is_dir,
+        preview_kind,
         size_bytes: record.size_bytes.map(|value| value as u64),
-        mime_type: record.mime_type,
+        mime_type,
         status: record.status,
         meta: append_line_count_meta(meta, record.line_count),
     }
+}
+
+pub fn preview_kind_for_record(record: &FileRow) -> PreviewKind {
+    preview_kind_from_metadata(
+        &record.name,
+        record.mime_type.as_deref(),
+        record.is_dir,
+        record.line_count,
+        record.meta.as_deref(),
+    )
+}
+
+pub fn ensure_text_preview(record: &FileRow) -> Result<(), AppError> {
+    let preview_kind = preview_kind_for_record(record);
+    if preview_kind == PreviewKind::Text {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(format!(
+        "text preview is not supported for {} file: {}",
+        preview_kind.as_str(),
+        record.name
+    )))
 }
 
 async fn nearest_line_offset(

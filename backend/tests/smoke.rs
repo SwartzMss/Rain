@@ -30,6 +30,7 @@ async fn upload_search_tree_and_delete_issue() {
             "NESTEDZIP",
             "NESTEDCHAIN",
             "DEPTHFAIL",
+            "BINARY",
             "DIRDELETE",
             "FAILEDCASE",
             "LARGE",
@@ -324,6 +325,184 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(depth_fail_tree.status(), StatusCode::CONFLICT);
+
+    let binary_boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let executable_bytes = [b'M', b'Z', 0, 1, 2, 3, 255];
+    let unknown_text = b"INFO probe\nERROR unknown extension text works\n";
+    let unknown_binary = [0, 159, 146, 150, 1, 2, 3];
+    let docx_bytes = zip_bytes(&[(
+        "word/document.xml",
+        b"<document>must remain binary</document>",
+    )]);
+    let binary_body = multipart_body_multi_bytes(
+        &binary_boundary,
+        "BINARY",
+        &[
+            ("tool.exe", "application/octet-stream", &executable_bytes),
+            (
+                "report.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                docx_bytes.as_slice(),
+            ),
+            ("notes.data", "application/octet-stream", unknown_text),
+            ("blob.data", "application/octet-stream", &unknown_binary),
+        ],
+    );
+    let binary_upload: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/BINARY/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={binary_boundary}"),
+            ))
+            .set_payload(binary_body)
+            .to_request(),
+    )
+    .await;
+    let binary_bundle = binary_upload["bundle_hash"]
+        .as_str()
+        .expect("binary bundle");
+    wait_for_issue_ready(&pool, "BINARY").await;
+    let binary_tree: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/files/v1/{binary_bundle}/files/root"))
+            .to_request(),
+    )
+    .await;
+    let binary_children = binary_tree["children"]
+        .as_array()
+        .expect("binary tree children");
+    let executable_node = binary_children
+        .iter()
+        .find(|node| node["name"] == "tool.exe")
+        .expect("executable node");
+    let docx_node = binary_children
+        .iter()
+        .find(|node| node["name"] == "report.docx")
+        .expect("docx node");
+    let text_probe_node = binary_children
+        .iter()
+        .find(|node| node["name"] == "notes.data")
+        .expect("unknown text node");
+    let binary_probe_node = binary_children
+        .iter()
+        .find(|node| node["name"] == "blob.data")
+        .expect("unknown binary node");
+    assert_eq!(executable_node["preview_kind"], "binary");
+    assert_eq!(docx_node["preview_kind"], "binary");
+    assert_eq!(text_probe_node["preview_kind"], "text");
+    assert_eq!(binary_probe_node["preview_kind"], "binary");
+
+    for node in [executable_node, docx_node, binary_probe_node] {
+        let file_id = node["id"].as_str().expect("binary file id");
+        let content_response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/api/files/v1/{binary_bundle}/files/{file_id}/content"
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(content_response.status(), StatusCode::BAD_REQUEST);
+        let content_error: Value = test::read_body_json(content_response).await;
+        assert!(
+            content_error["error"]
+                .as_str()
+                .expect("binary content error")
+                .contains("text preview is not supported")
+        );
+        let lines_response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/api/files/v1/{binary_bundle}/files/{file_id}/lines"
+                ))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(lines_response.status(), StatusCode::BAD_REQUEST);
+        let lines_error: Value = test::read_body_json(lines_response).await;
+        assert!(
+            lines_error["error"]
+                .as_str()
+                .expect("binary lines error")
+                .contains("text preview is not supported")
+        );
+    }
+
+    let executable_id = executable_node["id"].as_str().expect("executable id");
+    let download_response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{binary_bundle}/files/{executable_id}/download"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(download_response.status(), StatusCode::OK);
+    assert!(
+        download_response
+            .headers()
+            .get("content-disposition")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("attachment"))
+    );
+
+    let docx_id = docx_node["id"].as_str().expect("docx id");
+    let docx_detail: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/files/v1/{binary_bundle}/files/{docx_id}"))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        docx_detail["children"]
+            .as_array()
+            .expect("docx children")
+            .is_empty()
+    );
+
+    let unknown_text_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/BINARY/search?q=unknown%20extension%20text&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(unknown_text_search["total"], 1);
+    let binary_file_ids = [
+        executable_id.parse::<i64>().expect("numeric executable id"),
+        docx_id.parse::<i64>().expect("numeric docx id"),
+        binary_probe_node["id"]
+            .as_str()
+            .expect("binary probe id")
+            .parse::<i64>()
+            .expect("numeric binary probe id"),
+    ];
+    for file_id in binary_file_ids {
+        let artifacts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM log_line_offsets WHERE file_id = ?),
+                (SELECT COUNT(*) FROM log_segments WHERE file_id = ?),
+                (SELECT COUNT(*) FROM log_segments_fts WHERE file_id = ?),
+                (SELECT COUNT(*) FROM log_events WHERE file_id = ?)
+            "#,
+        )
+        .bind(file_id)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(file_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count binary index artifacts");
+        assert_eq!(artifacts, (0, 0, 0, 0));
+    }
 
     let delete_dir_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let delete_dir_bytes = tar_gz_multi(&[
@@ -1202,6 +1381,36 @@ Content-Type: text/plain\r\n\r\n"
             .as_bytes(),
         );
         body.extend_from_slice(content.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
+fn multipart_body_multi_bytes(
+    boundary: &str,
+    issue_code: &str,
+    files: &[(&str, &str, &[u8])],
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"issue_code\"\r\n\r\n\
+{issue_code}\r\n"
+        )
+        .as_bytes(),
+    );
+    for (filename, content_type, content) in files {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"files\"; filename=\"{filename}\"\r\n\
+Content-Type: {content_type}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
         body.extend_from_slice(b"\r\n");
     }
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());

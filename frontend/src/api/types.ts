@@ -33,6 +33,7 @@ export interface FileNode {
   name: string;
   path: string;
   is_dir: boolean;
+  preview_kind: 'directory' | 'text' | 'binary' | 'archive';
   size_bytes?: number;
   mime_type?: string;
   status?: string;

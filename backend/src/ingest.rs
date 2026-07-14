@@ -11,7 +11,10 @@ use std::{
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::{fs, task};
 
-use crate::error::AppError;
+use crate::{
+    error::AppError,
+    file_classification::{PreviewKind, classify_file, effective_mime_type},
+};
 
 const LOG_CHUNK_LINES: usize = 200;
 const LINE_OFFSET_INTERVAL: i64 = 1000;
@@ -121,6 +124,8 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
 
     let disk_path = bundle_dir.join(storage_name);
     move_or_copy_file(source_path, &disk_path).await?;
+    let mime_type = effective_mime_type(original_name, content_type);
+    let preview_kind = classify_file(&disk_path, original_name, mime_type.as_deref()).await?;
 
     let relative_path = format!("/{bundle_hash}/{storage_name}");
     let meta = serde_json::json!({
@@ -128,7 +133,8 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         "display_name": display_name,
         "storage_name": storage_name,
         "storage_path": disk_path.to_string_lossy(),
-        "kind": "uploaded_file"
+        "kind": "uploaded_file",
+        "preview_kind": preview_kind.as_str()
     });
 
     let file_id = insert_file_record(
@@ -139,17 +145,17 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         &relative_path,
         false,
         Some(size_bytes as i64),
-        content_type,
+        mime_type.as_deref(),
         Some(meta),
     )
     .await?;
 
-    if is_text_like(original_name, content_type) || is_text_like(display_name, content_type) {
+    if preview_kind == PreviewKind::Text {
         update_process_stage(pool, bundle_id, "INDEXING").await?;
         ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes).await?;
     }
 
-    if is_supported_archive(original_name) || is_supported_archive(display_name) {
+    if preview_kind == PreviewKind::Archive {
         let extracted_dir_name = format!("{storage_name}_extracted");
         let extracted_dir = bundle_dir.join(&extracted_dir_name);
         fs::create_dir_all(&extracted_dir).await.map_err(|error| {
@@ -251,9 +257,18 @@ fn ingest_directory<'a>(
             let is_dir = metadata.is_dir();
             let size_bytes = metadata.is_file().then_some(metadata.len() as i64);
             let db_path = format!("/{}/{}", relative_root.trim_start_matches('/'), name);
+            let mime_type = (!is_dir)
+                .then(|| effective_mime_type(&name, None))
+                .flatten();
+            let preview_kind = if is_dir {
+                PreviewKind::Directory
+            } else {
+                classify_file(&disk_path, &name, mime_type.as_deref()).await?
+            };
             let meta = serde_json::json!({
                 "storage_path": disk_path.to_string_lossy(),
-                "kind": if is_dir { "extracted_dir" } else { "extracted_file" }
+                "kind": if is_dir { "extracted_dir" } else { "extracted_file" },
+                "preview_kind": preview_kind.as_str()
             });
 
             let record_id = insert_file_record(
@@ -264,7 +279,7 @@ fn ingest_directory<'a>(
                 &db_path,
                 is_dir,
                 size_bytes,
-                None,
+                mime_type.as_deref(),
                 Some(meta),
             )
             .await?;
@@ -283,13 +298,13 @@ fn ingest_directory<'a>(
                 continue;
             }
 
-            if is_text_like(&name, None)
+            if preview_kind == PreviewKind::Text
                 && let Some(size) = size_bytes
             {
                 ingest_text_file(pool, bundle_id, record_id, &disk_path, size as u64).await?;
             }
 
-            if is_supported_archive(&name) {
+            if preview_kind == PreviewKind::Archive {
                 if archive_depth >= MAX_ARCHIVE_RECURSION_DEPTH {
                     return Err(AppError::BadRequest(format!(
                         "archive recursion is too deep; max {MAX_ARCHIVE_RECURSION_DEPTH}: {db_path}"
@@ -1177,34 +1192,6 @@ fn is_windows_reserved_name(segment: &str) -> bool {
         })
 }
 
-fn is_text_like(name: &str, content_type: Option<&str>) -> bool {
-    if let Some(ct) = content_type
-        && ct.starts_with("text/")
-    {
-        return true;
-    }
-    matches!(
-        Path::new(name)
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-            .as_deref(),
-        Some("log")
-            | Some("txt")
-            | Some("toml")
-            | Some("rs")
-            | Some("json")
-            | Some("yaml")
-            | Some("yml")
-            | Some("md")
-            | Some("cfg")
-            | Some("conf")
-            | Some("ini")
-            | Some("env")
-            | Some("csv")
-    )
-}
-
 fn is_zip_file(name: &str) -> bool {
     Path::new(name)
         .extension()
@@ -1220,10 +1207,6 @@ fn is_tar_gz_file(name: &str) -> bool {
 
 fn is_gzip_file(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(".gz") && !is_tar_gz_file(name)
-}
-
-fn is_supported_archive(name: &str) -> bool {
-    is_zip_file(name) || is_tar_gz_file(name) || is_gzip_file(name)
 }
 
 fn gzip_output_name(name: &str) -> String {
