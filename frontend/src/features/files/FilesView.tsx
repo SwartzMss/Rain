@@ -1282,8 +1282,9 @@ export function BundleView(props?: BundleViewProps) {
                     <a
                       className="shrink-0 rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-500 hover:text-white"
                       href={rainApi.fileDownloadUrl(selectedNode.bundleId || bundleId, selectedNode.rawId)}
+                      title="下载当前正在查看的原始文件"
                     >
-                      下载
+                      下载原文件
                     </a>
                   </div>
                 ) : null}
@@ -1328,8 +1329,9 @@ export function BundleView(props?: BundleViewProps) {
                       <a
                         className="shrink-0 rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-500 hover:text-white"
                         href={rainApi.tempResultDownloadUrl(activeViewerTab.resultId)}
+                        title="下载已保存的临时搜索结果"
                       >
-                        下载
+                        下载已保存结果
                       </a>
                     ) : null}
                   </div>
