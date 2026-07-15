@@ -1,9 +1,10 @@
 mod embedded_frontend;
+mod http_access_log;
 
 use std::{fmt::Display, fs, future::Future, path::PathBuf, time::Duration};
 
 use actix_cors::Cors;
-use actix_web::{App, HttpServer, middleware::Logger, web};
+use actix_web::{App, HttpServer, middleware::from_fn, web};
 use backend::{
     AppState,
     config::AppConfig,
@@ -94,7 +95,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .wrap(Logger::default())
+            .wrap(from_fn(http_access_log::log_useful_requests))
             .wrap(Cors::permissive())
             .app_data(shared_state.clone())
             .configure(register)
