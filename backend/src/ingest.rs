@@ -233,6 +233,7 @@ async fn update_process_stage(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ingest_directory<'a>(
     pool: &'a sqlx::SqlitePool,
     bundle_id: &'a str,
