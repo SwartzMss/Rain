@@ -1230,6 +1230,42 @@ async fn issue_creation_and_upload_require_existing_issue() {
 }
 
 #[actix_web::test]
+async fn startup_recovery_marks_processing_bundle_failed_with_reason() {
+    let test_dir = TestDir::new("rain-stale-recovery");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues (code, name) VALUES ('STALE', 'STALE')")
+        .execute(&pool)
+        .await
+        .expect("insert issue");
+    sqlx::query(
+        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('stale', 'STALE', 'stale-hash', 'stale', 'PROCESSING')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert stale bundle");
+
+    assert_eq!(
+        db::fail_stale_processing_bundles(&pool)
+            .await
+            .expect("recover stale bundle"),
+        1
+    );
+    let recovered: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT status, process_stage, failure_reason FROM bundles WHERE id = 'stale'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read recovered bundle");
+    assert_eq!(recovered.0, "FAILED");
+    assert_eq!(recovered.1, "FAILED");
+    assert!(recovered.2.is_some_and(|reason| reason.contains("重启")));
+}
+
+#[actix_web::test]
 async fn processing_bundles_cannot_be_deleted() {
     let test_dir = TestDir::new("rain-processing-delete");
     let db_url = sqlite_url(&test_dir.path.join("rain.db"));
