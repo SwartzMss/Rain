@@ -5,7 +5,7 @@ use std::{
 };
 
 use actix_web::{App, http::StatusCode, test, web};
-use backend::{AppState, db, routes};
+use backend::{AppState, config::AppLimits, db, routes};
 use flate2::{Compression, write::GzEncoder};
 use serde_json::Value;
 use uuid::Uuid;
@@ -44,10 +44,11 @@ async fn upload_search_tree_and_delete_issue() {
 
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(AppState {
-                pool: app_pool,
+            .app_data(web::Data::new(AppState::new(
+                app_pool,
                 data_root,
-            }))
+                AppLimits::default(),
+            )))
             .configure(routes::register),
     )
     .await;
@@ -1057,10 +1058,11 @@ async fn issue_creation_and_upload_require_existing_issue() {
         .expect("prepare schema");
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(AppState {
-                pool: pool.clone(),
-                data_root: data_root.clone(),
-            }))
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                data_root.clone(),
+                AppLimits::default(),
+            )))
             .configure(routes::register),
     )
     .await;
@@ -1276,7 +1278,11 @@ async fn processing_bundles_cannot_be_deleted() {
 
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(AppState { pool, data_root }))
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                data_root,
+                AppLimits::default(),
+            )))
             .configure(routes::register),
     )
     .await;
