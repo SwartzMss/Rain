@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
-import type { FileLinesResponse, FileNode, IssueLogSearchHit, LogSearchHit, UploadSummary } from '../../api/types';
+import type { IssueLogSearchHit, LogSearchHit, UploadSummary } from '../../api/types';
 import type { BundleInfo } from '../../lib/bundles';
 import { BinaryFileInfo } from './BinaryFileInfo';
 import { SearchTokenEditor } from './SearchTokenEditor';
@@ -18,48 +18,23 @@ import {
   type SearchToken
 } from './searchTokens';
 import {
-  closeViewerTab,
-  openOrActivateTab,
   reconcileViewerTabs,
-  togglePinnedTab,
   type ViewerTab
 } from './viewerTabs';
-
-type TreeNode = Omit<FileNode, 'id' | 'children'> & {
-  id: string;
-  rawId: string;
-  bundleId: string;
-  parentId: string | null;
-  childrenIds: string[];
-  hasLoadedChildren: boolean;
-};
+import {
+  formatHitPath,
+  isExtractionFolder,
+  toTreeNode,
+  type TreeNode
+} from './treeModel';
+import { useViewerTabs } from './hooks/useViewerTabs';
+import { useFileContent } from './hooks/useFileContent';
+import { ViewerTabBar } from './components/ViewerTabBar';
+import { CodeLinesPane } from './components/CodeLinesPane';
+import { FileTreeNode } from './components/FileTreeNode';
+import { SearchResultViewer } from './components/SearchResultViewer';
 
 const LINE_PAGE_SIZE_OPTIONS = [1000, 3000] as const;
-
-const formatSize = (bytes?: number) => {
-  if (bytes === undefined || bytes === null) return '--';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let size = bytes;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  const fixed = unit === 0 ? size.toFixed(0) : size.toFixed(1);
-  return `${fixed} ${units[unit]}`;
-};
-
-const nodeTypeLabel = (node: TreeNode) => {
-  if (node.is_dir) return '目录';
-  if (isArchiveNode(node)) return '压缩包';
-  if (isBinaryNode(node)) return '二进制文件';
-  return '文件';
-};
-
-const isExtractionFolder = (node: TreeNode, parent?: TreeNode | null) => {
-  if (!node.is_dir || !node.name.toLowerCase().endsWith('_extracted')) return false;
-  return parent ? isArchiveNode(parent) : false;
-};
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
@@ -136,11 +111,6 @@ export function BundleView(props?: BundleViewProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
-  const [fileLines, setFileLines] = useState<FileLinesResponse | null>(null);
-  const [lineStart, setLineStart] = useState(0);
-  const [linePageSize, setLinePageSize] = useState<number>(LINE_PAGE_SIZE_OPTIONS[0]);
-  const [fileContentLoading, setFileContentLoading] = useState(false);
-  const [fileContentError, setFileContentError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [filenameQuery, setFilenameQuery] = useState('');
   const [searchTokens, setSearchTokens] = useState<SearchToken[]>([]);
@@ -160,20 +130,44 @@ export function BundleView(props?: BundleViewProps) {
   const [fileSearchLoading, setFileSearchLoading] = useState(false);
   const [fileSearchError, setFileSearchError] = useState<string | null>(null);
   const [fileSearchExecuted, setFileSearchExecuted] = useState(false);
-  const [targetLine, setTargetLine] = useState<number | null>(null);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
-  const [viewerTabs, setViewerTabs] = useState<ViewerTab[]>([]);
-  const [activeViewerTabId, setActiveViewerTabId] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const filenameInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestGenerationRef = useRef(0);
-  const viewerInitializedRef = useRef(false);
   const contextKeyRef = useRef<string | null>(null);
   const viewerTabsRef = useRef<ViewerTab[]>([]);
   const activeViewerTabIdRef = useRef<string | null>(null);
   const selectedNodeIdRef = useRef<string | null>(null);
   const treeNodesRef = useRef<Record<string, TreeNode>>({});
-  const activeViewerTab = viewerTabs.find((tab) => tab.id === activeViewerTabId) ?? null;
+  const {
+    viewerTabs,
+    activeViewerTabId,
+    activeViewerTab,
+    viewerInitializedRef,
+    openViewerTab,
+    activateViewerTab,
+    closeViewerTab,
+    setViewerTabsState,
+    resetViewerTabs,
+    updateViewerTabs,
+    togglePinnedViewerTab
+  } = useViewerTabs();
+  const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
+  const {
+    fileLines,
+    lineStart,
+    setLineStart,
+    linePageSize,
+    setLinePageSize,
+    fileContentLoading,
+    fileContentError,
+    targetLine,
+    setTargetLine
+  } = useFileContent({
+    bundleId,
+    selectedNode,
+    defaultPageSize: LINE_PAGE_SIZE_OPTIONS[0]
+  });
 
   useEffect(() => {
     viewerTabsRef.current = viewerTabs;
@@ -190,44 +184,6 @@ export function BundleView(props?: BundleViewProps) {
   useEffect(() => {
     treeNodesRef.current = treeNodes;
   }, [treeNodes]);
-
-  const openViewerTab = useCallback((tab: ViewerTab) => {
-    viewerInitializedRef.current = true;
-    setViewerTabs((current) => openOrActivateTab(current, tab));
-    setActiveViewerTabId(tab.id);
-  }, []);
-
-  const formatHitPath = (raw: string) => {
-    const parts = raw.replace(/^\//, '').split('/');
-    if (parts.length === 0) return raw;
-    // drop bundle hash
-    const [, ...rest] = parts;
-    if (rest.length === 0) return raw.replace(/^\//, '');
-    const normalized = rest.map((segment, index) => {
-      if (index === 0 && segment.endsWith('_extracted')) {
-        return segment.replace(/_extracted$/, '');
-      }
-      return segment;
-    });
-    return normalized.join('/');
-  };
-
-  const toTreeNode = (bundleId: string, node: FileNode, parentId: string | null = null): TreeNode => ({
-    id: `${bundleId}:${node.id.toString()}`,
-    rawId: node.id.toString(),
-    bundleId,
-    parentId,
-    name: node.name,
-    path: node.path,
-    is_dir: node.is_dir,
-    preview_kind: node.preview_kind,
-    size_bytes: node.size_bytes,
-    mime_type: node.mime_type,
-    status: node.status,
-    meta: node.meta,
-    childrenIds: [],
-    hasLoadedChildren: false
-  });
 
   const loadNode = useCallback(
     async (
@@ -432,11 +388,9 @@ export function BundleView(props?: BundleViewProps) {
         setRootIds([]);
         setSelectedNodeId(null);
         setNonReadyBundles([]);
-        setViewerTabs([]);
-        setActiveViewerTabId(null);
-        viewerInitializedRef.current = false;
+        resetViewerTabs();
       } else if (tabsSnapshot !== viewerTabsRef.current) {
-        setViewerTabs(tabsSnapshot);
+        setViewerTabsState(tabsSnapshot, activeTabIdSnapshot);
       }
 
       let bundles = fallbackBundles;
@@ -530,9 +484,7 @@ export function BundleView(props?: BundleViewProps) {
             activeTabIdSnapshot,
             fileTabMetadata
           );
-          setViewerTabs(reconciled.tabs);
-          setActiveViewerTabId(reconciled.activeTabId);
-          viewerInitializedRef.current = reconciled.tabs.length > 0;
+          setViewerTabsState(reconciled.tabs, reconciled.activeTabId);
 
           const activeTab = reconciled.tabs.find((tab) => tab.id === reconciled.activeTabId) ?? null;
           if (activeTab?.kind === 'file') {
@@ -556,7 +508,16 @@ export function BundleView(props?: BundleViewProps) {
     return () => {
       ignore = true;
     };
-  }, [issueCodeFromRoute, locationState?.issue, bundleId, activeBundle.name, loadNode, refreshKey]);
+  }, [
+    issueCodeFromRoute,
+    locationState?.issue,
+    bundleId,
+    activeBundle.name,
+    loadNode,
+    refreshKey,
+    resetViewerTabs,
+    setViewerTabsState
+  ]);
 
   useEffect(() => {
     searchRequestGenerationRef.current += 1;
@@ -647,16 +608,14 @@ export function BundleView(props?: BundleViewProps) {
     }
   };
 
-  const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
-
-  const activateViewerTab = (tab: ViewerTab) => {
+  const activateViewerTabWithState = (tab: ViewerTab) => {
     if (activeViewerTabId && contentRef.current) {
       const scrollTop = contentRef.current.scrollTop;
-      setViewerTabs((tabs) =>
+      updateViewerTabs((tabs) =>
         tabs.map((item) => (item.id === activeViewerTabId ? { ...item, scrollTop } : item))
       );
     }
-    setActiveViewerTabId(tab.id);
+    activateViewerTab(tab);
     if (tab.kind === 'file') {
       setSelectedNodeId(tab.nodeId);
       setLineStart(tab.lineStart);
@@ -670,11 +629,10 @@ export function BundleView(props?: BundleViewProps) {
 
   const closeTab = (id: string) => {
     const index = viewerTabs.findIndex((tab) => tab.id === id);
-    const remaining = closeViewerTab(viewerTabs, id);
-    setViewerTabs(remaining);
+    const remaining = viewerTabs.filter((tab) => tab.id !== id);
+    closeViewerTab(id);
     if (activeViewerTabId === id) {
       const next = remaining[Math.min(index, remaining.length - 1)] ?? null;
-      setActiveViewerTabId(next?.id ?? null);
       if (next?.kind === 'file') {
         setSelectedNodeId(next.nodeId);
         setLineStart(next.lineStart);
@@ -702,14 +660,14 @@ export function BundleView(props?: BundleViewProps) {
 
   useEffect(() => {
     if (!activeViewerTab || activeViewerTab.kind !== 'file') return;
-    setViewerTabs((tabs) =>
+    updateViewerTabs((tabs) =>
       tabs.map((tab) =>
         tab.id === activeViewerTab.id && tab.kind === 'file'
           ? { ...tab, lineStart, pageSize: linePageSize, targetLine }
           : tab
       )
     );
-  }, [activeViewerTab?.id, linePageSize, lineStart, targetLine]);
+  }, [activeViewerTab?.id, linePageSize, lineStart, targetLine, updateViewerTabs]);
 
   const clearFileSearch = useCallback(() => {
     setFileSearchTokens([]);
@@ -861,7 +819,7 @@ export function BundleView(props?: BundleViewProps) {
           start: from,
           limit: pageSize
         });
-        setViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'temp'
+        updateViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'temp'
           ? {
               ...item,
               lines: response.lines.map((line) => line.content),
@@ -898,7 +856,7 @@ export function BundleView(props?: BundleViewProps) {
         snippet: line.content,
         line_number: line.line_number
       }));
-      setViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'search'
+      updateViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'search'
         ? { ...item, hits, total: response.total, from, pageSize, scrollTop: 0 }
         : item));
     } catch (error) {
@@ -906,48 +864,13 @@ export function BundleView(props?: BundleViewProps) {
     } finally {
       setSearchLoading(false);
     }
-  }, []);
+  }, [updateViewerTabs]);
 
   const activeIssueLabel = activeBundle.issue || '未知 Issue';
-  const activeNodeLabel = selectedNode?.name || '未选择文件';
 
   useEffect(() => {
     clearFileSearch();
   }, [selectedNode?.id, clearFileSearch]);
-
-  useEffect(() => {
-    setFileLines(null);
-    setFileContentError(null);
-    setFileContentLoading(false);
-    if (!selectedNode || !canPreviewText(selectedNode)) return;
-    const bundleForContent = selectedNode.bundleId || bundleId;
-    if (!bundleForContent) return;
-    let ignore = false;
-    const fetchContent = async () => {
-      setFileContentLoading(true);
-      try {
-        const content = await rainApi.fetchFileLines(bundleForContent, selectedNode.rawId, {
-          start: lineStart,
-          limit: linePageSize
-        });
-        if (!ignore) {
-          setFileLines(content);
-        }
-      } catch (error) {
-        if (!ignore) {
-          setFileContentError(normalizeApiError(error));
-        }
-      } finally {
-        if (!ignore) {
-          setFileContentLoading(false);
-        }
-      }
-    };
-    fetchContent();
-    return () => {
-      ignore = true;
-    };
-  }, [bundleId, selectedNode?.id, selectedNode?.is_dir, selectedNode?.preview_kind, lineStart, linePageSize]);
 
   useEffect(() => {
     if (!selectedNode) return;
@@ -1012,80 +935,6 @@ export function BundleView(props?: BundleViewProps) {
     if (!contentRef.current || !activeViewerTab || targetLine !== null) return;
     contentRef.current.scrollTop = activeViewerTab.scrollTop;
   }, [activeViewerTab?.id, activeViewerTab?.scrollTop, fileLines, targetLine]);
-
-  const renderTreeNode = (nodeId: string, depth = 0): JSX.Element | null => {
-    const node = treeNodes[nodeId];
-    if (!node) return null;
-    const parentNode = node.parentId ? treeNodes[node.parentId] : null;
-    if (isExtractionFolder(node, parentNode)) {
-      return (
-        <div key={nodeId} className="border-l border-slate-200 pl-3">
-          {node.childrenIds.length > 0 ? (
-            node.childrenIds.map((childId) => renderTreeNode(childId, depth))
-          ) : (
-            <p className="py-1 text-xs text-slate-500">暂无子节点</p>
-          )}
-        </div>
-      );
-    }
-    const isExpanded = expandedNodes.has(nodeId);
-    const isSelected = selectedNodeId === nodeId;
-    const canExpand = node.is_dir || isArchiveNode(node);
-    const typeIcon = node.is_dir ? '▣' : isArchiveNode(node) ? 'ZIP' : isBinaryNode(node) ? 'BIN' : 'TXT';
-    const iconClass = node.is_dir
-      ? 'text-cyan-700'
-      : isArchiveNode(node)
-        ? 'text-sky-700'
-        : isBinaryNode(node)
-          ? 'text-amber-700'
-          : 'text-slate-600';
-    const rowMeta = canExpand
-      ? `${node.childrenIds.length || 0} 子节点`
-      : node.mime_type ?? 'file';
-
-    return (
-      <div key={nodeId}>
-        <button
-          type="button"
-          onClick={() => handleNodeClick(node.id).catch(() => undefined)}
-          className={[
-            'group flex h-9 w-full items-center gap-2 rounded-md border border-transparent px-2 text-left text-sm transition',
-            isSelected ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-[inset_3px_0_0_rgba(37,99,235,0.82)]' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'
-          ].join(' ')}
-          style={{ paddingLeft: `${8 + depth * 16}px` }}
-        >
-          <span className="w-3 shrink-0 text-slate-500">
-            {canExpand ? (isExpanded ? '⌄' : '›') : ''}
-          </span>
-          <span className={`flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-[10px] font-semibold shadow-sm shadow-slate-100 ${iconClass}`}>
-            {typeIcon}
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[13px] font-medium leading-4">{node.name}</p>
-            <p className="truncate text-[10px] uppercase leading-3 text-slate-500">{rowMeta}</p>
-          </div>
-          <span className="ml-2 shrink-0 text-[11px] text-slate-500 group-hover:text-slate-500">
-            {canExpand ? (isExpanded ? '收起' : '展开') : formatSize(node.size_bytes)}
-          </span>
-        </button>
-        {canExpand && isExpanded ? (
-          <div className="ml-4 border-l border-slate-200">
-            {node.childrenIds.length > 0 ? (
-              node.childrenIds.map((childId) => renderTreeNode(childId, depth + 1))
-            ) : (
-              <p className="py-1 text-xs text-slate-500">暂无子节点</p>
-            )}
-          </div>
-        ) : null}
-      </div>
-    );
-  };
-
-  const tabIcon = (kind: ViewerTab['kind']) => {
-    if (kind === 'file') return '□';
-    if (kind === 'search') return '⌕';
-    return '◈';
-  };
 
   const searchHighlightTerm = searchMode === 'log'
     ? filenameQuery.trim()
@@ -1259,7 +1108,18 @@ export function BundleView(props?: BundleViewProps) {
                       {(treeNodes[rootId]?.childrenIds ?? []).map((childId) => {
                         const topNode = treeNodes[childId];
                         if (!topNode) return null;
-                        return renderTreeNode(childId, 0);
+                        return (
+                          <FileTreeNode
+                            key={childId}
+                            nodeId={childId}
+                            treeNodes={treeNodes}
+                            expandedNodes={expandedNodes}
+                            selectedNodeId={selectedNodeId}
+                            onNodeClick={(nodeId) => {
+                              handleNodeClick(nodeId).catch(() => undefined);
+                            }}
+                          />
+                        );
                       })}
                     </div>
                   ))
@@ -1276,49 +1136,13 @@ export function BundleView(props?: BundleViewProps) {
           </div>
 
           <div className="flex min-h-[calc(100vh-104px)] flex-col bg-slate-50 text-sm text-slate-700">
-            {viewerTabs.length > 0 ? (
-              <div className="flex min-h-14 items-end gap-2 overflow-x-auto border-b border-slate-200 bg-slate-50 px-4 pt-3">
-                {viewerTabs.map((tab) => (
-                  <div
-                    key={tab.id}
-                    className={`flex h-10 max-w-64 shrink-0 items-center gap-2 rounded-t-md border px-3 text-xs shadow-sm transition ${
-                      tab.id === activeViewerTabId
-                        ? 'border-sky-200 bg-white text-sky-700 shadow-[inset_0_-2px_0_rgba(37,99,235,0.85)]'
-                        : 'border-slate-200 bg-white/75 text-slate-600 hover:bg-white hover:text-slate-900'
-                    }`}
-                  >
-                    <span className={tab.kind === 'temp' ? 'text-cyan-700' : tab.kind === 'search' ? 'text-brand-700' : 'text-slate-500'}>
-                      {tabIcon(tab.kind)}
-                    </span>
-                    <button
-                      type="button"
-                      className="min-w-0 flex-1 truncate text-left"
-                      title={tab.title}
-                      onClick={() => activateViewerTab(tab)}
-                    >
-                      {tab.title}
-                    </button>
-                    <button
-                      type="button"
-                      className={tab.pinned ? 'text-cyan-700' : 'text-slate-600 hover:text-slate-600'}
-                      title={tab.pinned ? '取消固定' : '固定标签'}
-                      aria-label={tab.pinned ? '取消固定' : '固定标签'}
-                      onClick={() => setViewerTabs((tabs) => togglePinnedTab(tabs, tab.id))}
-                    >
-                      {tab.pinned ? '●' : '○'}
-                    </button>
-                    <button
-                      type="button"
-                      className="text-slate-600 hover:text-rose-600"
-                      aria-label={`关闭 ${tab.title}`}
-                      onClick={() => closeTab(tab.id)}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : null}
+            <ViewerTabBar
+              tabs={viewerTabs}
+              activeTabId={activeViewerTabId}
+              onActivate={activateViewerTabWithState}
+              onTogglePinned={togglePinnedViewerTab}
+              onClose={closeTab}
+            />
             <div className="flex min-h-0 flex-1 flex-col p-4">
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm shadow-slate-100">
                 {activeViewerTab?.kind === 'file' && selectedNode &&
@@ -1352,45 +1176,6 @@ export function BundleView(props?: BundleViewProps) {
                       className="shrink-0 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={fileSearchLoading || !canRunFileSearch}
                       onClick={() => runFileSearch(0).catch(() => undefined)}
-                    >
-                      搜索
-                    </button>
-                  </div>
-                ) : null}
-
-                {(activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp') && activeSearchResults.length > 0 ? (
-                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 focus-within:border-sky-400">
-                    <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
-                    <SearchTokenEditor
-                      className="min-w-[220px]"
-                      tokens={resultFilterTokens}
-                      draft={resultFilterDraft}
-                      onTokensChange={setResultFilterTokens}
-                      onDraftChange={setResultFilterDraft}
-                      placeholder="在当前结果中添加关键词或短语..."
-                      ariaLabel="当前结果筛选条件"
-                      disabled={searchLoading}
-                    />
-                    <span className="shrink-0 text-xs text-slate-500">
-                      {`${activeViewerTab.total} 条结果`}
-                    </span>
-                    {resultFilterTokens.length > 0 || resultFilterDraft ? (
-                      <button
-                        type="button"
-                        className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300 hover:text-slate-950"
-                        onClick={() => {
-                          setResultFilterTokens([]);
-                          setResultFilterDraft('');
-                        }}
-                      >
-                        清空
-                      </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      className="shrink-0 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={searchLoading || !canRunResultFilter}
-                      onClick={() => searchWithinActiveResults().catch(() => undefined)}
                     >
                       搜索
                     </button>
@@ -1458,67 +1243,28 @@ export function BundleView(props?: BundleViewProps) {
                     </div>
                   )
                 ) : activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp' ? (
-                  searchLoading && activeSearchResults.length === 0 ? (
-                    <p className="py-8 text-center text-sm text-slate-500">正在搜索...</p>
-                  ) : activeSearchResults.length === 0 ? (
-                    <p className="py-8 text-center text-sm text-slate-500">未搜索到相关日志。</p>
-                  ) : (
-                    <div className="flex min-h-0 flex-1 flex-col gap-2">
-                      <div
-                        ref={contentRef}
-                        className="min-h-[70vh] flex-1 overflow-auto bg-white p-0 font-mono text-xs leading-5 text-slate-900"
-                      >
-                        <div className="grid min-h-full grid-cols-[58px_1fr]">
-                          <div className="select-none border-r border-slate-100 bg-slate-50 px-3 py-3 text-right text-slate-500">
-                            {activeSearchResults.map((hit, index) => (
-                              <div key={`line:${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`}>
-                                {activeViewerTab.from + index + 1}
-                              </div>
-                            ))}
-                          </div>
-                          <div className="px-4 py-3">
-                            {activeSearchResults.map((hit, index) => (
-                              <div key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`} className="whitespace-pre">
-                                {highlightText(hit.snippet, resultFilterHighlightTerm)}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
-                        <label className="flex items-center gap-2">
-                          <span>每页</span>
-                          <select
-                            className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 outline-none focus:border-cyan-500/60"
-                            value={activeViewerTab.pageSize}
-                            disabled={searchLoading}
-                            onChange={(event) => loadViewerPage(activeViewerTab, 0, Number(event.target.value)).catch(() => undefined)}
-                          >
-                            {LINE_PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} 行</option>)}
-                          </select>
-                        </label>
-                        <span>
-                          第 {Math.floor(activeViewerTab.from / activeViewerTab.pageSize) + 1} / {Math.max(1, Math.ceil(activeViewerTab.total / activeViewerTab.pageSize))} 页
-                        </span>
-                        <button
-                          type="button"
-                          className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-                          disabled={activeViewerTab.from === 0 || searchLoading}
-                          onClick={() => loadViewerPage(activeViewerTab, Math.max(0, activeViewerTab.from - activeViewerTab.pageSize), activeViewerTab.pageSize).catch(() => undefined)}
-                        >
-                          上一页
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-                          disabled={activeViewerTab.from + activeSearchResults.length >= activeViewerTab.total || searchLoading}
-                          onClick={() => loadViewerPage(activeViewerTab, activeViewerTab.from + activeViewerTab.pageSize, activeViewerTab.pageSize).catch(() => undefined)}
-                        >
-                          下一页
-                        </button>
-                      </div>
-                    </div>
-                  )
+                  <SearchResultViewer
+                    activeViewerTab={activeViewerTab}
+                    results={activeSearchResults}
+                    resultFilterTokens={resultFilterTokens}
+                    resultFilterDraft={resultFilterDraft}
+                    onResultFilterTokensChange={setResultFilterTokens}
+                    onResultFilterDraftChange={setResultFilterDraft}
+                    onClearResultFilter={() => {
+                      setResultFilterTokens([]);
+                      setResultFilterDraft('');
+                    }}
+                    onSearchWithinResults={() => searchWithinActiveResults().catch(() => undefined)}
+                    canRunResultFilter={canRunResultFilter}
+                    searchLoading={searchLoading}
+                    contentRef={contentRef}
+                    pageSizeOptions={LINE_PAGE_SIZE_OPTIONS}
+                    onLoadPage={(tab, from, pageSize) => {
+                      loadViewerPage(tab, from, pageSize).catch(() => undefined);
+                    }}
+                    highlightTerm={resultFilterHighlightTerm}
+                    renderHighlightedText={highlightText}
+                  />
                 ) : activeViewerTab?.kind !== 'file' || !selectedNode ? (
                   <p className="py-8 text-center text-sm text-slate-500">
                     输入关键词搜索当前 Issue 的日志。
@@ -1537,25 +1283,11 @@ export function BundleView(props?: BundleViewProps) {
                   <p className="text-sm text-rose-600">{fileContentError}</p>
                 ) : fileLines ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-2">
-                    <div
-                      ref={contentRef}
-                      className="min-h-[70vh] flex-1 overflow-auto bg-white p-0 text-xs leading-5 text-slate-900"
-                    >
-                      <div className="grid min-h-full grid-cols-[58px_1fr] font-mono">
-                        <div className="select-none border-r border-slate-100 bg-slate-50 px-3 py-3 text-right text-slate-500">
-                          {fileLines.lines.map((line) => (
-                            <div key={line.line_number}>{line.line_number + 1}</div>
-                          ))}
-                        </div>
-                        <div className="px-4 py-3">
-                          {fileLines.lines.map((line) => (
-                            <div key={line.line_number} className="whitespace-pre">
-                              {line.content}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
+                    <CodeLinesPane
+                      lines={fileLines.lines}
+                      contentRef={contentRef}
+                      lineNumberOffset={fileLines.start}
+                    />
                     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
                       <label className="flex items-center gap-2">
                         <span>每页</span>
