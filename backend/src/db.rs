@@ -8,6 +8,14 @@ use sqlx::{
 use crate::error::AppError;
 
 pub const CLEANUP_BATCH_SIZE: u64 = 10_000;
+const LARGE_CLEANUP_CHECKPOINT_ROWS: u64 = 10_000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct WalCheckpointStats {
+    pub busy: i64,
+    pub log_pages: i64,
+    pub checkpointed_pages: i64,
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CleanupPhaseStats {
@@ -58,6 +66,19 @@ pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppErr
     Ok(())
 }
 
+pub async fn checkpoint_wal(pool: &SqlitePool) -> Result<WalCheckpointStats, AppError> {
+    let (busy, log_pages, checkpointed_pages): (i64, i64, i64) =
+        sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+            .fetch_one(pool)
+            .await
+            .map_err(AppError::Database)?;
+    Ok(WalCheckpointStats {
+        busy,
+        log_pages,
+        checkpointed_pages,
+    })
+}
+
 pub async fn cleanup_bundle_content_batched(
     pool: &SqlitePool,
     bundle_id: &str,
@@ -69,7 +90,7 @@ pub async fn cleanup_bundle_content_batched(
         ));
     }
 
-    Ok(BundleCleanupStats {
+    let stats = BundleCleanupStats {
         events: delete_bundle_rows_in_batches(
             pool,
             bundle_id,
@@ -110,7 +131,29 @@ pub async fn cleanup_bundle_content_batched(
             "DELETE FROM files WHERE rowid IN (SELECT rowid FROM files WHERE bundle_id = ? LIMIT ?)",
         )
         .await?,
-    })
+    };
+
+    if stats.total_rows() >= LARGE_CLEANUP_CHECKPOINT_ROWS {
+        let started = std::time::Instant::now();
+        match checkpoint_wal(pool).await {
+            Ok(checkpoint) => tracing::info!(
+                bundle_id,
+                busy = checkpoint.busy,
+                log_pages = checkpoint.log_pages,
+                checkpointed_pages = checkpoint.checkpointed_pages,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "large bundle cleanup WAL checkpoint completed"
+            ),
+            Err(error) => tracing::warn!(
+                bundle_id,
+                error = %error,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "large bundle cleanup WAL checkpoint failed"
+            ),
+        }
+    }
+
+    Ok(stats)
 }
 
 async fn delete_bundle_rows_in_batches(
@@ -390,4 +433,22 @@ fn ensure_sqlite_parent(database_url: &str) -> Result<(), AppError> {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checkpoint_wal;
+
+    #[tokio::test]
+    async fn checkpoint_returns_sqlite_page_counts() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+
+        let stats = checkpoint_wal(&pool).await.expect("checkpoint wal");
+        assert!(stats.busy >= 0);
+        assert!(stats.log_pages >= -1);
+        assert!(stats.checkpointed_pages >= -1);
+    }
 }

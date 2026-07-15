@@ -17,6 +17,12 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 const STARTUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 
+struct SqliteSidecarPaths {
+    main: PathBuf,
+    wal: PathBuf,
+    shm: PathBuf,
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let config = AppConfig::from_env().expect("failed to load config");
@@ -48,6 +54,7 @@ async fn main() -> std::io::Result<()> {
     prepare_schema(&pool, config.reset_db)
         .await
         .expect("failed to prepare database schema");
+    log_sqlite_file_sizes(&config.database_url).await;
 
     if config.reset_db {
         if fs::metadata(&config.data_root).is_ok() {
@@ -201,11 +208,53 @@ fn sqlite_diagnostic_path(database_url: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("<non-sqlite-database>"))
 }
 
+fn sqlite_sidecar_paths(database_url: &str) -> Option<SqliteSidecarPaths> {
+    let main = database_url
+        .strip_prefix("sqlite://")
+        .map(PathBuf::from)
+        .map(|path| absolute_diagnostic_path(&path))?;
+    let wal = PathBuf::from(format!("{}-wal", main.display()));
+    let shm = PathBuf::from(format!("{}-shm", main.display()));
+    Some(SqliteSidecarPaths { main, wal, shm })
+}
+
+async fn log_sqlite_file_sizes(database_url: &str) {
+    let Some(paths) = sqlite_sidecar_paths(database_url) else {
+        return;
+    };
+    for (kind, path) in [("main", paths.main), ("wal", paths.wal), ("shm", paths.shm)] {
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) => info!(
+                database_file = kind,
+                path = %path.display(),
+                size_bytes = metadata.len(),
+                "SQLite database file size"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!(
+                database_file = kind,
+                path = %path.display(),
+                error = %error,
+                "failed to inspect SQLite database file size"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::run_optional_recovery_stage;
+    use super::{run_optional_recovery_stage, sqlite_sidecar_paths};
+
+    #[test]
+    fn resolves_sqlite_main_wal_and_shm_paths() {
+        let paths = sqlite_sidecar_paths("sqlite://data/rain.db").expect("sqlite paths");
+        assert!(paths.main.ends_with("data/rain.db"));
+        assert!(paths.wal.ends_with("data/rain.db-wal"));
+        assert!(paths.shm.ends_with("data/rain.db-shm"));
+        assert!(sqlite_sidecar_paths("postgres://localhost/rain").is_none());
+    }
 
     #[actix_web::test]
     async fn optional_recovery_error_does_not_abort_startup() {
