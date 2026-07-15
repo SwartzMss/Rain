@@ -11,6 +11,7 @@ import type {
   UploadTaskResponse
 } from '../../api/types';
 import { createOptimisticUploadRows, type UploadSelectionItem } from './uploadRows';
+import { uploadFailureMessage } from './uploadFailure';
 
 const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
 
@@ -31,6 +32,7 @@ type FileRow = {
   stage: UploadStage | 'UPLOADING';
   progressPercent?: number;
   sizeBytes?: number;
+  failureReason?: string | null;
 };
 
 const formatBytes = (bytes?: number | null) => {
@@ -125,7 +127,11 @@ export function HomeView() {
             status,
             stage,
             progressPercent: currentTask.progress_percent,
-            sizeBytes: item.sizeBytes
+            sizeBytes: item.sizeBytes,
+            failureReason: uploadFailureMessage({
+              status,
+              failure_reason: currentTask.failure_reason ?? bundle.failure_reason
+            })
           }));
         }
         return [
@@ -136,7 +142,11 @@ export function HomeView() {
             name: bundle.name || bundle.hash,
             status,
             stage,
-            sizeBytes: currentTask?.total_bytes ?? bundle.size_bytes ?? undefined
+            sizeBytes: currentTask?.total_bytes ?? bundle.size_bytes ?? undefined,
+            failureReason: uploadFailureMessage({
+              status,
+              failure_reason: currentTask?.failure_reason ?? bundle.failure_reason
+            })
           }
         ];
       }
@@ -329,6 +339,9 @@ export function HomeView() {
         if (cancelled) return;
         setUploadTask(task);
         if (task.status === 'READY' || task.status === 'FAILED') {
+          const failureMessage = uploadFailureMessage(task);
+          setUploadFailed(task.status === 'FAILED');
+          setUploadError(failureMessage);
           if (selectedIssueRef.current === task.issue_code) {
             await loadBundles(task.issue_code);
           }
@@ -692,6 +705,9 @@ export function HomeView() {
                         <span className={`rounded-full border px-2 py-1 text-xs ${stageClass(row.stage)}`}>
                           {stageLabel(row.stage, row.progressPercent)}
                         </span>
+                        {row.failureReason ? (
+                          <p className="mt-1 max-w-[360px] text-xs text-rose-300">{row.failureReason}</p>
+                        ) : null}
                       </td>
                       <td className="px-4 py-3">{formatBytes(row.sizeBytes)}</td>
                       <td className="whitespace-nowrap px-4 py-3">

@@ -9,6 +9,7 @@ export interface UploadSummary {
     [key: string]: unknown;
   };
   stage: UploadStage;
+  failure_reason?: string | null;
   size_bytes?: number | null;
 }
 
@@ -77,6 +78,7 @@ export interface UploadTaskResponse {
   bundle_hash: string;
   status: UploadStatus;
   stage: UploadStage;
+  failure_reason?: string | null;
   progress_percent: number;
   total_bytes: number;
 }
