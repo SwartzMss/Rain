@@ -22,6 +22,7 @@ use super::issues::{normalize_issue_code, require_issue_exists};
 
 const WINDOWS_MOVE_RETRY_DELAYS_MS: [u64; 7] = [100, 200, 400, 800, 1600, 3200, 5000];
 const DEFAULT_MOVE_RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
+const FAILURE_STATUS_RETRY_DELAYS_MS: [u64; 2] = [100, 250];
 
 async fn move_bundle_directory_with_retry(
     source: &Path,
@@ -265,12 +266,13 @@ pub async fn upload_logs(
                     error = %error,
                     "failed to acquire upload processing permit"
                 );
-                let _ = update_bundle_status(
+                finalize_bundle_failed(
                     &pool,
                     &task_bundle_id,
-                    "FAILED",
-                    "FAILED",
-                    Some("无法启动上传处理任务，请删除后重试"),
+                    &data_root,
+                    &staging_root,
+                    &task_bundle_hash,
+                    &AppError::Conflict("上传处理任务已停止".into()),
                 )
                 .await;
                 let _ = fs::remove_dir_all(&temp_dir).await;
@@ -328,20 +330,13 @@ pub async fn upload_logs(
                 error = %error,
                 "failed to process uploaded log bundle"
             );
-            let _ = cleanup_failed_bundle_artifacts(
+            finalize_bundle_failed(
                 &pool,
                 &task_bundle_id,
                 &data_root,
                 &staging_root,
                 &task_bundle_hash,
-            )
-            .await;
-            let _ = update_bundle_status(
-                &pool,
-                &task_bundle_id,
-                "FAILED",
-                "FAILED",
-                Some("上传处理失败，请删除后重试"),
+                &error,
             )
             .await;
         }
@@ -518,6 +513,82 @@ async fn update_bundle_status(
     Ok(())
 }
 
+fn user_facing_failure_reason(error: &AppError) -> String {
+    match error {
+        AppError::BadRequest(message) | AppError::Conflict(message) => message.clone(),
+        _ => "上传处理失败，请删除后重试".to_string(),
+    }
+}
+
+async fn finalize_bundle_failed(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    data_root: &Path,
+    staging_root: &Path,
+    bundle_hash: &str,
+    failure: &AppError,
+) {
+    let reason = user_facing_failure_reason(failure);
+    let max_attempts = FAILURE_STATUS_RETRY_DELAYS_MS.len() + 1;
+    let mut terminal_state_persisted = false;
+
+    for attempt in 1..=max_attempts {
+        match update_bundle_status(pool, bundle_id, "FAILED", "FAILED", Some(&reason)).await {
+            Ok(()) => {
+                terminal_state_persisted = true;
+                break;
+            }
+            Err(error) => {
+                error!(
+                    bundle_id,
+                    bundle_hash,
+                    attempt,
+                    max_attempts,
+                    error = %error,
+                    "failed to persist terminal upload state"
+                );
+                if attempt < max_attempts {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        FAILURE_STATUS_RETRY_DELAYS_MS[attempt - 1],
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
+    if !terminal_state_persisted {
+        error!(
+            bundle_id,
+            bundle_hash,
+            "upload terminal state could not be persisted; startup recovery will retry"
+        );
+    }
+
+    if let Err(error) = cleanup_failed_bundle_database_artifacts(pool, bundle_id).await {
+        error!(
+            bundle_id,
+            bundle_hash,
+            error = %error,
+            "failed to clean database artifacts for failed upload"
+        );
+    }
+
+    for path in [staging_root.join(bundle_hash), data_root.join(bundle_hash)] {
+        match fs::remove_dir_all(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => error!(
+                bundle_id,
+                bundle_hash,
+                path = %path.display(),
+                error = %error,
+                "failed to clean filesystem artifacts for failed upload"
+            ),
+        }
+    }
+}
+
 async fn finalize_bundle_ready_with_retry(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
@@ -541,14 +612,6 @@ async fn finalize_bundle_ready_with_retry(
         }
     }
 
-    let _ = update_bundle_status(
-        pool,
-        bundle_id,
-        "FAILED",
-        "FAILED",
-        Some("上传处理失败，请删除后重试"),
-    )
-    .await;
     Err(last_error.unwrap_or_else(|| AppError::Database(sqlx::Error::RowNotFound)))
 }
 
@@ -613,12 +676,9 @@ async fn finalize_bundle_ready(
     Ok(())
 }
 
-async fn cleanup_failed_bundle_artifacts(
+async fn cleanup_failed_bundle_database_artifacts(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
-    data_root: &std::path::Path,
-    staging_root: &std::path::Path,
-    bundle_hash: &str,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
@@ -655,16 +715,6 @@ async fn cleanup_failed_bundle_artifacts(
         .map_err(AppError::Database)?;
 
     tx.commit().await.map_err(AppError::Database)?;
-
-    let staging_bundle_dir = staging_root.join(bundle_hash);
-    if fs::metadata(&staging_bundle_dir).await.is_ok() {
-        let _ = fs::remove_dir_all(&staging_bundle_dir).await;
-    }
-
-    let final_bundle_dir = data_root.join(bundle_hash);
-    if fs::metadata(&final_bundle_dir).await.is_ok() {
-        let _ = fs::remove_dir_all(&final_bundle_dir).await;
-    }
 
     Ok(())
 }
@@ -744,7 +794,25 @@ mod tests {
         },
     };
 
-    use super::move_bundle_directory_with_retry_using;
+    use super::{move_bundle_directory_with_retry_using, user_facing_failure_reason};
+    use crate::error::AppError;
+
+    #[test]
+    fn preserves_actionable_bad_request_failure_reason() {
+        let error = AppError::BadRequest("压缩包条目超过配置上限".into());
+        assert_eq!(user_facing_failure_reason(&error), "压缩包条目超过配置上限");
+    }
+
+    #[test]
+    fn hides_internal_failure_details() {
+        let error = AppError::Io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "/secret/path",
+        ));
+        let reason = user_facing_failure_reason(&error);
+        assert_eq!(reason, "上传处理失败，请删除后重试");
+        assert!(!reason.contains("/secret/path"));
+    }
 
     #[tokio::test]
     async fn retries_windows_sharing_violations_until_move_succeeds() {
