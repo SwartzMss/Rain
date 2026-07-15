@@ -6,6 +6,7 @@ import type { BundleInfo } from '../../lib/bundles';
 import { BinaryFileInfo } from './BinaryFileInfo';
 import { SearchTokenEditor } from './SearchTokenEditor';
 import { canPreviewText, isArchiveNode, isBinaryNode } from './filePresentation';
+import { shouldShowFilenameClear } from './filenameSearch';
 import {
   canFinalizeSearch,
   combineSearchExpressions,
@@ -137,6 +138,7 @@ export function BundleView(props?: BundleViewProps) {
   const [fileContentLoading, setFileContentLoading] = useState(false);
   const [fileContentError, setFileContentError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [filenameQuery, setFilenameQuery] = useState('');
   const [searchTokens, setSearchTokens] = useState<SearchToken[]>([]);
   const [searchDraft, setSearchDraft] = useState('');
   const [searchResults, setSearchResults] = useState<IssueLogSearchHit[]>([]);
@@ -159,6 +161,8 @@ export function BundleView(props?: BundleViewProps) {
   const [viewerTabs, setViewerTabs] = useState<ViewerTab[]>([]);
   const [activeViewerTabId, setActiveViewerTabId] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const filenameInputRef = useRef<HTMLInputElement | null>(null);
+  const searchRequestGenerationRef = useRef(0);
   const viewerInitializedRef = useRef(false);
   const contextKeyRef = useRef<string | null>(null);
   const viewerTabsRef = useRef<ViewerTab[]>([]);
@@ -291,19 +295,24 @@ export function BundleView(props?: BundleViewProps) {
       setResultFilterDraft('');
       return;
     }
-    let finalizedTokens: SearchToken[];
-    try {
-      finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft, searchMode === 'detailed');
-    } catch (error) {
-      setSearchError(error instanceof Error ? error.message : '搜索条件无效');
+    let keyword = filenameQuery.trim();
+    let title = keyword;
+    if (searchMode === 'detailed') {
+      let finalizedTokens: SearchToken[];
+      try {
+        finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft);
+      } catch (error) {
+        setSearchError(error instanceof Error ? error.message : '搜索条件无效');
+        return;
+      }
+      keyword = serializeSearchTokens(finalizedTokens);
+      title = formatSearchTokens(finalizedTokens);
+      setSearchTokens(finalizedTokens);
+      setSearchDraft('');
+    } else if (!keyword) {
       return;
     }
-    const keyword = searchMode === 'log'
-      ? getSearchTerms(finalizedTokens)[0]
-      : serializeSearchTokens(finalizedTokens);
-    const title = formatSearchTokens(finalizedTokens);
-    setSearchTokens(finalizedTokens);
-    setSearchDraft('');
+    const requestGeneration = ++searchRequestGenerationRef.current;
     setSearchLoading(true);
     setSearchError(null);
     setSearchExecuted(true);
@@ -322,6 +331,7 @@ export function BundleView(props?: BundleViewProps) {
           mode: 'filename',
           size: 50
         });
+        if (requestGeneration !== searchRequestGenerationRef.current) return;
         setSearchResults(response.hits);
       } else {
         const response = await rainApi.previewTempResult({
@@ -330,6 +340,7 @@ export function BundleView(props?: BundleViewProps) {
           from: 0,
           size: LINE_PAGE_SIZE_OPTIONS[0]
         });
+        if (requestGeneration !== searchRequestGenerationRef.current) return;
         const hits = response.lines.map((line) => ({
           bundle_hash: line.bundle_hash,
           file_id: line.file_id ?? '',
@@ -354,27 +365,43 @@ export function BundleView(props?: BundleViewProps) {
         });
       }
     } catch (error) {
+      if (requestGeneration !== searchRequestGenerationRef.current) return;
       setSearchResults([]);
       setSearchError(normalizeApiError(error));
     } finally {
-      setSearchLoading(false);
+      if (requestGeneration === searchRequestGenerationRef.current) {
+        setSearchLoading(false);
+      }
     }
-  }, [issueCode, openViewerTab, searchDraft, searchMode, searchTokens]);
+  }, [filenameQuery, issueCode, openViewerTab, searchDraft, searchMode, searchTokens]);
 
-  const changeSearchMode = (mode: 'log' | 'detailed') => {
-    if (mode === searchMode) return;
-    setSearchMode(mode);
+  const clearFilenameSearch = useCallback(() => {
+    searchRequestGenerationRef.current += 1;
+    setFilenameQuery('');
     setSearchResults([]);
+    setSearchLoading(false);
     setSearchError(null);
     setSearchExecuted(false);
     setResultFilterTokens([]);
     setResultFilterDraft('');
-    if (mode === 'log') {
-      setSearchTokens((tokens) => {
-        const firstTerm = tokens.find((token) => token.kind === 'term');
-        return firstTerm ? [firstTerm] : [];
-      });
-    }
+    window.requestAnimationFrame(() => filenameInputRef.current?.focus());
+  }, []);
+
+  const handleSearchSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void runSearch();
+  };
+
+  const changeSearchMode = (mode: 'log' | 'detailed') => {
+    if (mode === searchMode) return;
+    searchRequestGenerationRef.current += 1;
+    setSearchMode(mode);
+    setSearchResults([]);
+    setSearchLoading(false);
+    setSearchError(null);
+    setSearchExecuted(false);
+    setResultFilterTokens([]);
+    setResultFilterDraft('');
   };
 
   useEffect(() => {
@@ -528,7 +555,12 @@ export function BundleView(props?: BundleViewProps) {
   }, [issueCodeFromRoute, locationState?.issue, bundleId, activeBundle.name, loadNode, refreshKey]);
 
   useEffect(() => {
+    searchRequestGenerationRef.current += 1;
+    setFilenameQuery('');
+    setSearchTokens([]);
+    setSearchDraft('');
     setSearchResults([]);
+    setSearchLoading(false);
     setSearchError(null);
     setSearchExecuted(false);
     setResultFilterTokens([]);
@@ -1051,12 +1083,21 @@ export function BundleView(props?: BundleViewProps) {
     return '◈';
   };
 
-  const searchHighlightTerm = getSearchTerms(searchTokens)[0] ?? searchDraft.trim();
+  const searchHighlightTerm = searchMode === 'log'
+    ? filenameQuery.trim()
+    : getSearchTerms(searchTokens)[0] ?? searchDraft.trim();
   const fileSearchHighlightTerm = getSearchTerms(fileSearchTokens)[0] ?? fileSearchDraft.trim();
   const resultFilterHighlightTerm = getSearchTerms(resultFilterTokens)[0] ?? resultFilterDraft.trim();
   const canRunSearch = searchMode === 'log'
-    ? Boolean(searchDraft.trim() || getSearchTerms(searchTokens).length > 0)
+    ? Boolean(filenameQuery.trim())
     : canFinalizeSearch(searchTokens, searchDraft);
+  const showFilenameClear = searchMode === 'log' && shouldShowFilenameClear({
+    query: filenameQuery,
+    executed: searchExecuted,
+    resultCount: searchResults.length,
+    loading: searchLoading,
+    error: searchError
+  });
   const canRunFileSearch = canFinalizeSearch(fileSearchTokens, fileSearchDraft);
   const canRunResultFilter = canFinalizeSearch(resultFilterTokens, resultFilterDraft);
 
@@ -1079,27 +1120,51 @@ export function BundleView(props?: BundleViewProps) {
                   刷新
                 </button>
               </div>
-              <div className="flex min-h-10 items-start gap-2 rounded border border-slate-700 bg-slate-950/70 px-3 py-1.5 focus-within:border-cyan-500/60">
+              <form
+                className="flex min-h-10 items-start gap-2 rounded border border-slate-700 bg-slate-950/70 px-3 py-1.5 focus-within:border-cyan-500/60"
+                onSubmit={handleSearchSubmit}
+              >
                 <span className="mt-1.5 shrink-0 text-slate-500" aria-hidden="true">⌕</span>
-                <SearchTokenEditor
-                  tokens={searchTokens}
-                  draft={searchDraft}
-                  onTokensChange={setSearchTokens}
-                  onDraftChange={setSearchDraft}
-                  placeholder={searchMode === 'log' ? '搜索文件或目录...' : '输入完整关键词或短语...'}
-                  ariaLabel={searchMode === 'log' ? '文件名搜索条件' : '日志内容搜索条件'}
-                  allowOperators={searchMode === 'detailed'}
-                  disabled={searchLoading}
-                />
+                {searchMode === 'log' ? (
+                  <input
+                    ref={filenameInputRef}
+                    className="h-8 min-w-0 flex-1 bg-transparent px-1 text-sm text-white outline-none placeholder:text-slate-500"
+                    aria-label="文件名搜索"
+                    placeholder="搜索文件或目录..."
+                    value={filenameQuery}
+                    disabled={searchLoading}
+                    onChange={(event) => setFilenameQuery(event.target.value)}
+                  />
+                ) : (
+                  <SearchTokenEditor
+                    tokens={searchTokens}
+                    draft={searchDraft}
+                    onTokensChange={setSearchTokens}
+                    onDraftChange={setSearchDraft}
+                    placeholder="输入完整关键词或短语..."
+                    ariaLabel="日志内容搜索条件"
+                    disabled={searchLoading}
+                  />
+                )}
+                {showFilenameClear ? (
+                  <button
+                    type="button"
+                    className="mt-0.5 shrink-0 rounded border border-slate-600 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-slate-400 hover:text-white"
+                    aria-label="清除文件名搜索"
+                    onClick={clearFilenameSearch}
+                  >
+                    清除
+                  </button>
+                ) : null}
                 <button
-                  type="button"
+                  type="submit"
                   className="mt-0.5 shrink-0 rounded bg-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => runSearch().catch(() => undefined)}
+                  aria-label={searchMode === 'log' ? '搜索文件名' : '搜索日志内容'}
                   disabled={searchLoading || !issueCode || !canRunSearch}
                 >
                   搜索
                 </button>
-              </div>
+              </form>
               <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
                 <span className="shrink-0">搜索方式</span>
                 <div className="flex rounded border border-slate-700 bg-slate-950/70 p-0.5">
