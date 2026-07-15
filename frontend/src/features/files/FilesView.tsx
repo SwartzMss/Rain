@@ -92,7 +92,7 @@ function highlightText(text: string, keyword: string): React.ReactNode {
     parts.push(
       <mark
         key={`${matchIndex}-${end}`}
-        className="rounded bg-cyan-400/20 px-0.5 text-cyan-100"
+        className="rounded bg-cyan-400/20 px-0.5 text-cyan-800"
       >
         {text.slice(matchIndex, end)}
       </mark>
@@ -1019,7 +1019,7 @@ export function BundleView(props?: BundleViewProps) {
     const parentNode = node.parentId ? treeNodes[node.parentId] : null;
     if (isExtractionFolder(node, parentNode)) {
       return (
-        <div key={nodeId} className="border-l border-slate-800 pl-3">
+        <div key={nodeId} className="border-l border-slate-200 pl-3">
           {node.childrenIds.length > 0 ? (
             node.childrenIds.map((childId) => renderTreeNode(childId, depth))
           ) : (
@@ -1033,12 +1033,12 @@ export function BundleView(props?: BundleViewProps) {
     const canExpand = node.is_dir || isArchiveNode(node);
     const typeIcon = node.is_dir ? '▣' : isArchiveNode(node) ? 'ZIP' : isBinaryNode(node) ? 'BIN' : 'TXT';
     const iconClass = node.is_dir
-      ? 'text-cyan-300'
+      ? 'text-cyan-700'
       : isArchiveNode(node)
-        ? 'text-brand-200'
+        ? 'text-sky-700'
         : isBinaryNode(node)
-          ? 'text-amber-200'
-          : 'text-slate-300';
+          ? 'text-amber-700'
+          : 'text-slate-600';
     const rowMeta = canExpand
       ? `${node.childrenIds.length || 0} 子节点`
       : node.mime_type ?? 'file';
@@ -1050,26 +1050,26 @@ export function BundleView(props?: BundleViewProps) {
           onClick={() => handleNodeClick(node.id).catch(() => undefined)}
           className={[
             'group flex h-9 w-full items-center gap-2 rounded border border-transparent px-2 text-left text-sm transition',
-            isSelected ? 'border-cyan-500/50 bg-cyan-500/15 text-white shadow-[inset_2px_0_0_rgba(56,189,248,0.75)]' : 'text-slate-300 hover:bg-slate-900/70 hover:text-white'
+            isSelected ? 'border-cyan-500/50 bg-cyan-500/15 text-slate-950 shadow-[inset_2px_0_0_rgba(56,189,248,0.75)]' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'
           ].join(' ')}
           style={{ paddingLeft: `${8 + depth * 16}px` }}
         >
           <span className="w-3 shrink-0 text-slate-500">
             {canExpand ? (isExpanded ? '⌄' : '›') : ''}
           </span>
-          <span className={`flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-700/80 bg-slate-950/60 text-[10px] font-semibold ${iconClass}`}>
+          <span className={`flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-300 bg-slate-50 text-[10px] font-semibold ${iconClass}`}>
             {typeIcon}
           </span>
           <div className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-medium leading-4">{node.name}</p>
             <p className="truncate text-[10px] uppercase leading-3 text-slate-500">{rowMeta}</p>
           </div>
-          <span className="ml-2 shrink-0 text-[11px] text-slate-500 group-hover:text-slate-400">
+          <span className="ml-2 shrink-0 text-[11px] text-slate-500 group-hover:text-slate-500">
             {canExpand ? (isExpanded ? '收起' : '展开') : formatSize(node.size_bytes)}
           </span>
         </button>
         {canExpand && isExpanded ? (
-          <div className="ml-4 border-l border-slate-800/80">
+          <div className="ml-4 border-l border-slate-200">
             {node.childrenIds.length > 0 ? (
               node.childrenIds.map((childId) => renderTreeNode(childId, depth + 1))
             ) : (
@@ -1108,16 +1108,16 @@ export function BundleView(props?: BundleViewProps) {
   return (
     <div className="space-y-5">
       <section className="panel space-y-4 !p-0">
-        {treeError ? <p className="text-sm text-rose-300">{treeError}</p> : null}
+        {treeError ? <p className="text-sm text-rose-600">{treeError}</p> : null}
 
         <div className="grid min-h-[82vh] gap-0 lg:grid-cols-[360px_minmax(0,1fr)]">
-          <div className="flex min-h-0 flex-col border-r border-slate-800/90 bg-slate-950/40">
-            <div className="border-b border-slate-800 px-4 py-4">
+          <div className="flex min-h-0 flex-col border-r border-slate-200 bg-slate-50">
+            <div className="border-b border-slate-200 px-4 py-4">
               <div className="mb-3 flex items-center justify-between gap-3">
-                <p className="truncate text-sm font-medium text-slate-200">Issue: {activeIssueLabel}</p>
+                <p className="truncate text-sm font-medium text-slate-700">Issue: {activeIssueLabel}</p>
                 <button
                   type="button"
-                  className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:border-slate-500 hover:text-white"
+                  className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-500 hover:border-slate-500 hover:text-slate-950"
                   title="刷新文件树"
                   onClick={() => setRefreshKey((key) => key + 1)}
                 >
@@ -1125,14 +1125,14 @@ export function BundleView(props?: BundleViewProps) {
                 </button>
               </div>
               <form
-                className="flex min-h-10 items-start gap-2 rounded border border-slate-700 bg-slate-950/70 px-3 py-1.5 focus-within:border-cyan-500/60"
+                className="flex min-h-10 items-start gap-2 rounded border border-slate-300 bg-white px-3 py-1.5 focus-within:border-cyan-500/60"
                 onSubmit={handleSearchSubmit}
               >
                 <span className="mt-1.5 shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                 {searchMode === 'log' ? (
                   <input
                     ref={filenameInputRef}
-                    className="h-8 min-w-0 flex-1 bg-transparent px-1 text-sm text-white outline-none placeholder:text-slate-500"
+                    className="h-8 min-w-0 flex-1 bg-transparent px-1 text-sm text-slate-950 outline-none placeholder:text-slate-500"
                     aria-label="文件名搜索"
                     placeholder="搜索文件或目录..."
                     value={filenameQuery}
@@ -1153,7 +1153,7 @@ export function BundleView(props?: BundleViewProps) {
                 {showFilenameClear ? (
                   <button
                     type="button"
-                    className="mt-0.5 shrink-0 rounded border border-slate-600 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-slate-400 hover:text-white"
+                    className="mt-0.5 shrink-0 rounded border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-400 hover:text-slate-950"
                     aria-label="清除文件名搜索"
                     onClick={clearFilenameSearch}
                   >
@@ -1162,41 +1162,41 @@ export function BundleView(props?: BundleViewProps) {
                 ) : null}
                 <button
                   type="submit"
-                  className="mt-0.5 shrink-0 rounded bg-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="mt-0.5 shrink-0 rounded bg-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-900 transition hover:bg-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
                   aria-label={searchMode === 'log' ? '搜索文件名' : '搜索日志内容'}
                   disabled={searchLoading || !issueCode || !canRunSearch}
                 >
                   搜索
                 </button>
               </form>
-              <div className="mt-3 flex items-center gap-2 text-xs text-slate-400">
+              <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
                 <span className="shrink-0">搜索方式</span>
-                <div className="flex rounded border border-slate-700 bg-slate-950/70 p-0.5">
+                <div className="flex rounded border border-slate-300 bg-white p-0.5">
                   <button
                     type="button"
-                    className={`rounded px-3 py-1 transition ${searchMode === 'log' ? 'bg-cyan-500/15 text-cyan-100' : 'text-slate-400 hover:text-white'}`}
+                    className={`rounded px-3 py-1 transition ${searchMode === 'log' ? 'bg-cyan-500/15 text-cyan-800' : 'text-slate-500 hover:text-slate-950'}`}
                     onClick={() => changeSearchMode('log')}
                   >
                     按文件名
                   </button>
                   <button
                     type="button"
-                    className={`rounded px-3 py-1 transition ${searchMode === 'detailed' ? 'bg-cyan-500/15 text-cyan-100' : 'text-slate-400 hover:text-white'}`}
+                    className={`rounded px-3 py-1 transition ${searchMode === 'detailed' ? 'bg-cyan-500/15 text-cyan-800' : 'text-slate-500 hover:text-slate-950'}`}
                     onClick={() => changeSearchMode('detailed')}
                   >
                     搜日志内容
                   </button>
                 </div>
               </div>
-              {searchError ? <p className="mt-2 text-xs text-rose-300">{searchError}</p> : null}
+              {searchError ? <p className="mt-2 text-xs text-rose-600">{searchError}</p> : null}
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-3">
             {nonReadyBundles.length > 0 ? (
-              <div className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
+              <div className="space-y-1 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
                 {nonReadyBundles.map((bundle) => (
                   <div key={bundle.hash} className="flex items-center justify-between gap-3">
                     <span className="truncate">{bundle.name || bundle.hash}</span>
-                    <span className={bundle.status.upload_status === 'FAILED' ? 'text-rose-300' : 'text-amber-200'}>
+                    <span className={bundle.status.upload_status === 'FAILED' ? 'text-rose-600' : 'text-amber-700'}>
                       {bundleStatusLabel(bundle)}
                     </span>
                   </div>
@@ -1209,7 +1209,7 @@ export function BundleView(props?: BundleViewProps) {
               ) : searchResults.length === 0 ? (
                 <p className="py-6 text-center text-sm text-slate-500">未找到匹配的日志文件。</p>
               ) : (
-                <div className="space-y-1 text-sm text-slate-200">
+                <div className="space-y-1 text-sm text-slate-700">
                   <p className="px-2 pb-1 text-xs text-slate-500">找到 {searchResults.length} 个日志文件</p>
                   {searchResults.map((hit, index) => {
                     const targetId = hit.bundle_hash ? `${hit.bundle_hash}:${hit.file_id}` : '';
@@ -1220,15 +1220,15 @@ export function BundleView(props?: BundleViewProps) {
                         type="button"
                         className={`group flex h-10 w-full items-center gap-2 rounded border px-2 text-left transition ${
                           selected
-                            ? 'border-cyan-500/50 bg-cyan-500/15 text-white shadow-[inset_2px_0_0_rgba(56,189,248,0.75)]'
-                            : 'border-transparent text-slate-300 hover:bg-slate-900/70 hover:text-white'
+                            ? 'border-cyan-500/50 bg-cyan-500/15 text-slate-950 shadow-[inset_2px_0_0_rgba(56,189,248,0.75)]'
+                            : 'border-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-950'
                         }`}
                         onClick={() => {
                           if (!targetId) return;
                           handleNodeClick(targetId, null, { preserveSearch: true }).catch(() => undefined);
                         }}
                       >
-                        <span className="flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-700/80 bg-slate-950/60 text-[10px] font-semibold text-slate-300">
+                        <span className="flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-300 bg-slate-50 text-[10px] font-semibold text-slate-600">
                           □
                         </span>
                         <div className="min-w-0 flex-1">
@@ -1245,7 +1245,7 @@ export function BundleView(props?: BundleViewProps) {
                 </div>
               )
             ) : rootIds.length > 0 ? (
-              <div className="space-y-2 text-sm text-slate-200">
+              <div className="space-y-2 text-sm text-slate-700">
                 {rootIds.some((rootId) => (treeNodes[rootId]?.childrenIds.length ?? 0) > 0) ? (
                   rootIds.map((rootId) => (
                     <div key={rootId} className="space-y-1">
@@ -1261,26 +1261,26 @@ export function BundleView(props?: BundleViewProps) {
                 )}
               </div>
             ) : treeLoading ? (
-              <p className="text-sm text-slate-400">文件树加载中...</p>
+              <p className="text-sm text-slate-500">文件树加载中...</p>
             ) : (
               <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
             )}
             </div>
           </div>
 
-          <div className="flex min-h-[82vh] flex-col bg-slate-950/20 text-sm text-slate-200">
+          <div className="flex min-h-[82vh] flex-col bg-slate-50 text-sm text-slate-700">
             {viewerTabs.length > 0 ? (
-              <div className="flex min-h-12 items-end gap-1 overflow-x-auto border-b border-slate-800 bg-slate-950/50 px-4">
+              <div className="flex min-h-12 items-end gap-1 overflow-x-auto border-b border-slate-200 bg-slate-100 px-4">
                 {viewerTabs.map((tab) => (
                   <div
                     key={tab.id}
                     className={`flex h-11 max-w-64 shrink-0 items-center gap-2 border border-b-0 px-3 text-xs transition ${
                       tab.id === activeViewerTabId
-                        ? 'border-cyan-500/50 bg-slate-900 text-white shadow-[inset_0_1px_0_rgba(56,189,248,0.22)]'
-                        : 'border-transparent bg-transparent text-slate-400 hover:bg-slate-900/60 hover:text-slate-200'
+                        ? 'border-cyan-500/50 bg-white text-slate-950 shadow-[inset_0_1px_0_rgba(56,189,248,0.22)]'
+                        : 'border-transparent bg-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-700'
                     }`}
                   >
-                    <span className={tab.kind === 'temp' ? 'text-cyan-300' : tab.kind === 'search' ? 'text-brand-300' : 'text-slate-500'}>
+                    <span className={tab.kind === 'temp' ? 'text-cyan-700' : tab.kind === 'search' ? 'text-brand-700' : 'text-slate-500'}>
                       {tabIcon(tab.kind)}
                     </span>
                     <button
@@ -1293,7 +1293,7 @@ export function BundleView(props?: BundleViewProps) {
                     </button>
                     <button
                       type="button"
-                      className={tab.pinned ? 'text-cyan-300' : 'text-slate-600 hover:text-slate-300'}
+                      className={tab.pinned ? 'text-cyan-700' : 'text-slate-600 hover:text-slate-600'}
                       title={tab.pinned ? '取消固定' : '固定标签'}
                       aria-label={tab.pinned ? '取消固定' : '固定标签'}
                       onClick={() => setViewerTabs((tabs) => togglePinnedTab(tabs, tab.id))}
@@ -1302,7 +1302,7 @@ export function BundleView(props?: BundleViewProps) {
                     </button>
                     <button
                       type="button"
-                      className="text-slate-600 hover:text-rose-300"
+                      className="text-slate-600 hover:text-rose-600"
                       aria-label={`关闭 ${tab.title}`}
                       onClick={() => closeTab(tab.id)}
                     >
@@ -1316,7 +1316,7 @@ export function BundleView(props?: BundleViewProps) {
               <div className="flex min-h-0 flex-1 flex-col gap-2">
                 {activeViewerTab?.kind === 'file' && selectedNode &&
                 canPreviewText(selectedNode) ? (
-                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-800 bg-slate-950/30 px-4 py-3 focus-within:border-cyan-500/50">
+                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 focus-within:border-cyan-500/50">
                     <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
                     <SearchTokenEditor
                       className="min-w-[220px]"
@@ -1329,12 +1329,12 @@ export function BundleView(props?: BundleViewProps) {
                       disabled={fileSearchLoading}
                     />
                     {fileSearchExecuted ? (
-                      <span className="shrink-0 text-xs text-slate-400">{fileSearchTotal} 个结果</span>
+                      <span className="shrink-0 text-xs text-slate-500">{fileSearchTotal} 个结果</span>
                     ) : null}
                     {fileSearchTokens.length > 0 || fileSearchDraft ? (
                       <button
                         type="button"
-                        className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-400 transition hover:border-slate-700 hover:text-white"
+                        className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300 hover:text-slate-950"
                         onClick={clearFileSearch}
                       >
                         清空
@@ -1342,7 +1342,7 @@ export function BundleView(props?: BundleViewProps) {
                     ) : null}
                     <button
                       type="button"
-                      className="shrink-0 rounded border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="shrink-0 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={fileSearchLoading || !canRunFileSearch}
                       onClick={() => runFileSearch(0).catch(() => undefined)}
                     >
@@ -1352,7 +1352,7 @@ export function BundleView(props?: BundleViewProps) {
                 ) : null}
 
                 {(activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp') && activeSearchResults.length > 0 ? (
-                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-800 bg-slate-950/30 px-4 py-3 focus-within:border-cyan-500/50">
+                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 focus-within:border-cyan-500/50">
                     <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
                     <SearchTokenEditor
                       className="min-w-[220px]"
@@ -1364,13 +1364,13 @@ export function BundleView(props?: BundleViewProps) {
                       ariaLabel="当前结果筛选条件"
                       disabled={searchLoading}
                     />
-                    <span className="shrink-0 text-xs text-slate-400">
+                    <span className="shrink-0 text-xs text-slate-500">
                       {`${activeViewerTab.total} 条结果`}
                     </span>
                     {resultFilterTokens.length > 0 || resultFilterDraft ? (
                       <button
                         type="button"
-                        className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-400 transition hover:border-slate-700 hover:text-white"
+                        className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300 hover:text-slate-950"
                         onClick={() => {
                           setResultFilterTokens([]);
                           setResultFilterDraft('');
@@ -1381,7 +1381,7 @@ export function BundleView(props?: BundleViewProps) {
                     ) : null}
                     <button
                       type="button"
-                      className="shrink-0 rounded border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="shrink-0 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={searchLoading || !canRunResultFilter}
                       onClick={() => searchWithinActiveResults().catch(() => undefined)}
                     >
@@ -1394,7 +1394,7 @@ export function BundleView(props?: BundleViewProps) {
                   fileSearchLoading && fileSearchResults.length === 0 ? (
                     <p className="py-8 text-center text-sm text-slate-500">正在搜索当前文件...</p>
                   ) : fileSearchError ? (
-                    <p className="py-8 text-center text-sm text-rose-300">{fileSearchError}</p>
+                    <p className="py-8 text-center text-sm text-rose-600">{fileSearchError}</p>
                   ) : fileSearchResults.length === 0 ? (
                     <p className="py-8 text-center text-sm text-slate-500">当前文件中没有相关日志。</p>
                   ) : (
@@ -1404,7 +1404,7 @@ export function BundleView(props?: BundleViewProps) {
                           <button
                             key={`${hit.file_id}:${hit.offset ?? hit.line_number ?? index}:${index}`}
                             type="button"
-                            className="w-full space-y-1 rounded-lg border border-slate-800 bg-slate-950/70 p-3 text-left transition hover:border-slate-700"
+                            className="w-full space-y-1 rounded-lg border border-slate-200 bg-white p-3 text-left transition hover:border-slate-300"
                             onClick={() => {
                               const line = hit.line_number ?? hit.offset ?? null;
                               clearFileSearch();
@@ -1419,20 +1419,20 @@ export function BundleView(props?: BundleViewProps) {
                                   : '行号未知'}
                               </span>
                             </div>
-                            <pre className="truncate font-mono text-xs text-slate-100">
+                            <pre className="truncate font-mono text-xs text-slate-900">
                               {highlightText(hit.snippet, fileSearchHighlightTerm)}
                             </pre>
                           </button>
                         ))}
                       </div>
-                      <div className="flex items-center justify-between text-xs text-slate-400">
+                      <div className="flex items-center justify-between text-xs text-slate-500">
                         <span>
                           {fileSearchFrom + 1} - {Math.min(fileSearchFrom + fileSearchResults.length, fileSearchTotal)} / {fileSearchTotal}
                         </span>
                         <div className="flex gap-2">
                           <button
                             type="button"
-                            className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
+                            className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
                             disabled={fileSearchFrom === 0 || fileSearchLoading}
                             onClick={() => runFileSearch(Math.max(0, fileSearchFrom - 50)).catch(() => undefined)}
                           >
@@ -1440,7 +1440,7 @@ export function BundleView(props?: BundleViewProps) {
                           </button>
                           <button
                             type="button"
-                            className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
+                            className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
                             disabled={fileSearchFrom + fileSearchResults.length >= fileSearchTotal || fileSearchLoading}
                             onClick={() => runFileSearch(fileSearchFrom + 50).catch(() => undefined)}
                           >
@@ -1459,7 +1459,7 @@ export function BundleView(props?: BundleViewProps) {
                     <div className="flex min-h-0 flex-1 flex-col gap-2">
                       <div
                         ref={contentRef}
-                        className="min-h-[70vh] flex-1 overflow-auto rounded border border-slate-800 bg-slate-950/70 p-3 font-mono text-xs leading-5 text-slate-100"
+                        className="min-h-[70vh] flex-1 overflow-auto rounded border border-slate-200 bg-white p-3 font-mono text-xs leading-5 text-slate-900"
                       >
                         <div className="grid grid-cols-[auto_1fr] gap-3">
                           <div className="select-none text-right text-slate-600">
@@ -1478,11 +1478,11 @@ export function BundleView(props?: BundleViewProps) {
                           </div>
                         </div>
                       </div>
-                      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-2 text-xs text-slate-400">
+                      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 pt-2 text-xs text-slate-500">
                         <label className="flex items-center gap-2">
                           <span>每页</span>
                           <select
-                            className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200 outline-none focus:border-cyan-500/60"
+                            className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 outline-none focus:border-cyan-500/60"
                             value={activeViewerTab.pageSize}
                             disabled={searchLoading}
                             onChange={(event) => loadViewerPage(activeViewerTab, 0, Number(event.target.value)).catch(() => undefined)}
@@ -1495,7 +1495,7 @@ export function BundleView(props?: BundleViewProps) {
                         </span>
                         <button
                           type="button"
-                          className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
+                          className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
                           disabled={activeViewerTab.from === 0 || searchLoading}
                           onClick={() => loadViewerPage(activeViewerTab, Math.max(0, activeViewerTab.from - activeViewerTab.pageSize), activeViewerTab.pageSize).catch(() => undefined)}
                         >
@@ -1503,7 +1503,7 @@ export function BundleView(props?: BundleViewProps) {
                         </button>
                         <button
                           type="button"
-                          className="rounded border border-slate-700 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
+                          className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
                           disabled={activeViewerTab.from + activeSearchResults.length >= activeViewerTab.total || searchLoading}
                           onClick={() => loadViewerPage(activeViewerTab, activeViewerTab.from + activeViewerTab.pageSize, activeViewerTab.pageSize).catch(() => undefined)}
                         >
@@ -1527,12 +1527,12 @@ export function BundleView(props?: BundleViewProps) {
                 ) : fileContentLoading ? (
                   <p className="text-sm text-slate-500">读取中...</p>
                 ) : fileContentError ? (
-                  <p className="text-sm text-rose-300">{fileContentError}</p>
+                  <p className="text-sm text-rose-600">{fileContentError}</p>
                 ) : fileLines ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-2">
                     <div
                       ref={contentRef}
-                      className="min-h-[70vh] flex-1 overflow-auto rounded border border-slate-800 bg-slate-950/70 p-3 text-xs leading-5 text-slate-100"
+                      className="min-h-[70vh] flex-1 overflow-auto rounded border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-900"
                     >
                       <div className="grid grid-cols-[auto_1fr] gap-3 font-mono">
                         <div className="select-none text-right text-slate-500">
@@ -1549,11 +1549,11 @@ export function BundleView(props?: BundleViewProps) {
                         </div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-2 text-xs text-slate-400">
+                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 pt-2 text-xs text-slate-500">
                       <label className="flex items-center gap-2">
                         <span>每页</span>
                         <select
-                          className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200 outline-none focus:border-cyan-500/60"
+                          className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 outline-none focus:border-cyan-500/60"
                           value={linePageSize}
                           onChange={(event) => {
                             setLinePageSize(Number(event.target.value));
@@ -1574,7 +1574,7 @@ export function BundleView(props?: BundleViewProps) {
                       </span>
                       <button
                         type="button"
-                        className="rounded border border-slate-700 px-3 py-1 text-slate-300 hover:border-slate-500 disabled:opacity-50"
+                        className="rounded border border-slate-300 px-3 py-1 text-slate-600 hover:border-slate-500 disabled:opacity-50"
                         disabled={lineStart <= 0 || fileContentLoading}
                         onClick={() => setLineStart(Math.max(0, lineStart - linePageSize))}
                       >
@@ -1582,7 +1582,7 @@ export function BundleView(props?: BundleViewProps) {
                       </button>
                       <button
                         type="button"
-                        className="rounded border border-slate-700 px-3 py-1 text-slate-300 hover:border-slate-500 disabled:opacity-50"
+                        className="rounded border border-slate-300 px-3 py-1 text-slate-600 hover:border-slate-500 disabled:opacity-50"
                         disabled={!fileLines.next_start || fileContentLoading}
                         onClick={() => setLineStart(fileLines.next_start ?? lineStart + linePageSize)}
                       >

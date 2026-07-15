@@ -7,19 +7,19 @@ import './App.css';
 
 function App() {
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <header className="border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+    <div className="min-h-screen text-slate-900">
+      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 shadow-sm shadow-slate-200/60 backdrop-blur">
         <div className="mx-auto flex w-full max-w-none items-center justify-between gap-3 px-5 py-3">
-          <Link to="/" className="text-white no-underline">
+          <Link to="/" className="text-slate-950 no-underline">
             <div className="flex flex-wrap items-center gap-2.5">
-              <span className="text-xl text-sky-400">☁</span>
-              <h1 className="text-xl font-semibold text-white">Rain</h1>
-              <span className="rounded border border-slate-700 px-2 py-0.5 text-xs font-semibold text-slate-400">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-100 text-lg text-sky-700">☁</span>
+              <h1 className="text-xl font-semibold text-slate-950">Rain</h1>
+              <span className="rounded border border-slate-300 px-2 py-0.5 text-xs font-semibold text-slate-500">
                 {APP_VERSION}
               </span>
             </div>
           </Link>
-          <div className="flex items-center gap-2 text-sm text-slate-200">
+          <div className="flex items-center gap-2 text-sm text-slate-700">
             <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
             <span>服务正常</span>
           </div>

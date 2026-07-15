@@ -60,21 +60,21 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
   return (
     <section className="panel space-y-4">
       <header>
-        <h2 className="text-lg font-semibold text-white">日志搜索</h2>
-        <p className="text-sm text-slate-400">基于后端索引的关键词匹配，支持 timeline / 路径过滤与分页。</p>
+        <h2 className="text-lg font-semibold text-slate-950">日志搜索</h2>
+        <p className="text-sm text-slate-500">基于后端索引的关键词匹配，支持 timeline / 路径过滤与分页。</p>
       </header>
 
       <form onSubmit={handleSearch} className="grid gap-3 md:grid-cols-[1fr_1fr_0.8fr_0.8fr_auto]">
         <div className="space-y-2">
           <input
-            className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+            className="w-full rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-950 focus:border-brand-500 focus:outline-none"
             placeholder="bundleId"
             value={bundleId}
             onChange={(event) => setBundleId(event.target.value)}
           />
           {recentBundles.length > 0 ? (
             <select
-              className="w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-300 focus:border-brand-500 focus:outline-none"
+              className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 focus:border-brand-500 focus:outline-none"
               value={bundleId && recentBundles.find((item) => item.hash === bundleId) ? bundleId : ''}
               onChange={(event) => {
                 const value = event.target.value;
@@ -95,19 +95,19 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
           ) : null}
         </div>
         <input
-          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+          className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-950 focus:border-brand-500 focus:outline-none"
           placeholder="关键词，例如 error"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
         <input
-          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+          className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-950 focus:border-brand-500 focus:outline-none"
           placeholder="可选 timeline"
           value={timeline}
           onChange={(event) => setTimeline(event.target.value)}
         />
         <input
-          className="rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-white focus:border-brand-500 focus:outline-none"
+          className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-950 focus:border-brand-500 focus:outline-none"
           placeholder="路径包含（可选）"
           value={pathLike}
           onChange={(event) => setPathLike(event.target.value)}
@@ -121,11 +121,11 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
         </button>
       </form>
 
-      {error ? <p className="text-sm text-rose-300">{error}</p> : null}
+      {error ? <p className="text-sm text-rose-600">{error}</p> : null}
 
       {result ? (
         <div className="space-y-2">
-          <div className="flex items-center justify-between text-sm text-slate-400">
+          <div className="flex items-center justify-between text-sm text-slate-500">
             <p>
               命中 {result.total} 条，展示 {result.hits.length} 条（第 {page + 1} 页，每页 {pageSize} 条）
             </p>
@@ -138,13 +138,13 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
                   max={50}
                   value={pageSize}
                   onChange={(event) => setPageSize(Number(event.target.value) || 10)}
-                  className="w-16 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-white"
+                  className="w-16 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-950"
                 />
               </label>
               <div className="flex gap-2">
                 <button
                   type="button"
-                  className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 disabled:opacity-50"
+                  className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 disabled:opacity-50"
                   disabled={page === 0 || loading}
                   onClick={() => {
                     const next = Math.max(0, page - 1);
@@ -156,7 +156,7 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
                 </button>
                 <button
                   type="button"
-                  className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-200 disabled:opacity-50"
+                  className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 disabled:opacity-50"
                   disabled={loading || (result.total <= (page + 1) * pageSize)}
                   onClick={() => {
                     const next = page + 1;
@@ -171,11 +171,11 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
           </div>
           <ul className="space-y-3">
             {result.hits.map((hit) => (
-              <li key={`${hit.file_id}-${hit.offset ?? hit.path}`} className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+              <li key={`${hit.file_id}-${hit.offset ?? hit.path}`} className="rounded-lg border border-slate-200 bg-white p-4">
                 <p className="text-xs uppercase text-slate-500">
                   {hit.timeline ?? 'all'} · {hit.path} · 行 {hit.line_number ?? hit.offset ?? '-'} · 分块 {hit.chunk_index ?? '-'}
                 </p>
-                <pre className="mt-2 whitespace-pre-wrap text-sm text-slate-100">{hit.snippet}</pre>
+                <pre className="mt-2 whitespace-pre-wrap text-sm text-slate-900">{hit.snippet}</pre>
               </li>
             ))}
           </ul>

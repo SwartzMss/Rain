@@ -53,9 +53,9 @@ const stageLabel = (stage: FileRow['stage'], progressPercent?: number) => {
 };
 
 const stageClass = (stage: FileRow['stage']) => {
-  if (stage === 'READY') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
-  if (stage === 'FAILED') return 'border-rose-500/40 bg-rose-500/10 text-rose-300';
-  return 'border-sky-500/40 bg-sky-500/10 text-sky-300';
+  if (stage === 'READY') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700';
+  if (stage === 'FAILED') return 'border-rose-500/40 bg-rose-500/10 text-rose-600';
+  return 'border-sky-500/40 bg-sky-500/10 text-sky-700';
 };
 
 const getFileLabel = (file: FileNode) =>
@@ -509,12 +509,12 @@ export function HomeView() {
 
   return (
     <div className="grid min-h-[calc(100vh-72px)] gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
-      <aside className="flex min-h-[680px] flex-col rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+      <aside className="flex min-h-[680px] flex-col rounded-lg border border-slate-200 bg-white p-4">
         <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-white">Issues</h2>
+          <h2 className="text-lg font-semibold text-slate-950">Issues</h2>
           <button
             type="button"
-            className="rounded border border-sky-500/60 px-3 py-2 text-sm font-semibold text-sky-300 transition hover:bg-sky-500/10"
+            className="rounded border border-sky-500/60 px-3 py-2 text-sm font-semibold text-sky-700 transition hover:bg-sky-500/10"
             onClick={() => setCreateDialogOpen(true)}
           >
             + 新建 Issue
@@ -523,7 +523,7 @@ export function HomeView() {
 
         <div className="relative">
           <input
-            className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-4 py-2 pr-10 text-sm text-white outline-none transition focus:border-sky-500"
+            className="w-full rounded-lg border border-slate-300 bg-white px-4 py-2 pr-10 text-sm text-slate-950 outline-none transition focus:border-sky-500"
             placeholder="搜索 Issue ID..."
             value={issueSearchText}
             onChange={(event) => setIssueSearchText(event.target.value)}
@@ -537,9 +537,9 @@ export function HomeView() {
           <span className="absolute right-3 top-2.5 text-slate-500">⌕</span>
         </div>
 
-        {issueError ? <p className="mt-2 text-xs text-rose-300">{issueError}</p> : null}
+        {issueError ? <p className="mt-2 text-xs text-rose-600">{issueError}</p> : null}
         {issuesError ? (
-          <div className="mt-3 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
+          <div className="mt-3 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-700">
             <p>{issuesError}</p>
             <button
               type="button"
@@ -562,7 +562,7 @@ export function HomeView() {
                 title="双击查看 Issue 日志"
                 className={[
                   'flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left transition',
-                  active ? 'bg-sky-500/20 text-white' : 'text-slate-200 hover:bg-slate-800/80'
+                  active ? 'bg-sky-500/20 text-slate-950' : 'text-slate-700 hover:bg-slate-100'
                 ].join(' ')}
                 onClick={() => selectIssue(issue.code)}
                 onDoubleClick={() => navigate(`/issue/${encodeURIComponent(issue.code)}`)}
@@ -575,7 +575,7 @@ export function HomeView() {
             );
           })}
           {!filteredIssues.length ? (
-            <p className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-sm text-slate-500">
+            <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
               暂无 Issue
             </p>
           ) : null}
@@ -583,17 +583,17 @@ export function HomeView() {
       </aside>
 
       <section className="min-w-0 space-y-4">
-        <div className="rounded-lg border border-slate-800 bg-slate-900/70">
-          <div className="flex flex-col gap-3 border-b border-slate-800 p-4 md:flex-row md:items-start md:justify-between">
+        <div className="rounded-lg border border-slate-200 bg-white">
+          <div className="flex flex-col gap-3 border-b border-slate-200 p-4 md:flex-row md:items-start md:justify-between">
             <div>
-              <h2 className="text-2xl font-semibold text-white">
+              <h2 className="text-2xl font-semibold text-slate-950">
                 {currentIssueCode || '请选择 Issue'}
               </h2>
             </div>
             {currentIssueCode ? (
               <button
                 type="button"
-                className="rounded-lg border border-rose-500/60 px-4 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/10 disabled:opacity-60"
+                className="rounded-lg border border-rose-500/60 px-4 py-2 text-sm font-semibold text-rose-600 transition hover:bg-rose-500/10 disabled:opacity-60"
                 disabled={deletingIssue === currentIssueCode}
                 onClick={() => deleteIssue(currentIssueCode)}
               >
@@ -603,7 +603,7 @@ export function HomeView() {
           </div>
 
           <form onSubmit={handleUpload} className="space-y-3 p-4">
-            <h3 className="text-lg font-semibold text-white">上传日志</h3>
+            <h3 className="text-lg font-semibold text-slate-950">上传日志</h3>
             <input
               ref={fileInputRef}
               type="file"
@@ -622,7 +622,7 @@ export function HomeView() {
               }}
             />
             <div
-              className="flex min-h-24 items-center justify-between gap-4 rounded-lg border border-dashed border-slate-700 bg-slate-950/40 px-5 py-4 text-sm transition aria-disabled:opacity-60"
+              className="flex min-h-24 items-center justify-between gap-4 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-5 py-4 text-sm transition aria-disabled:opacity-60"
               aria-disabled={uploadDisabled}
               onClick={() => {
                 if (!uploadDisabled && !uploadingRef.current) {
@@ -643,11 +643,11 @@ export function HomeView() {
               }}
             >
               <div className="flex min-w-0 items-center gap-4">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-sky-500/60 text-xl text-sky-300">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-sky-500/60 text-xl text-sky-700">
                   ↑
                 </div>
                 <div>
-                  <p className="font-semibold text-white">
+                  <p className="font-semibold text-slate-950">
                     {!currentIssueCode
                       ? '先选择或新建 Issue'
                       : uploading
@@ -656,7 +656,7 @@ export function HomeView() {
                           ? '处理中'
                           : '拖拽日志文件到这里，或点击选择文件'}
                   </p>
-                  <p className="mt-1 text-xs text-slate-400">
+                  <p className="mt-1 text-xs text-slate-500">
                     支持 .log、.txt、.zip、.tar.gz、.tgz、.gz，单个文件最大 512 MB
                   </p>
                 </div>
@@ -673,18 +673,18 @@ export function HomeView() {
                 {uploading || activeTask ? '处理中' : '选择文件'}
               </button>
             </div>
-            {uploadError ? <p className="text-sm text-rose-300">{uploadError}</p> : null}
+            {uploadError ? <p className="text-sm text-rose-600">{uploadError}</p> : null}
           </form>
         </div>
 
-        <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
+        <div className="rounded-lg border border-slate-200 bg-white p-4">
           <div className="mb-4 flex items-center justify-between gap-3">
-            <h3 className="text-lg font-semibold text-white">文件列表</h3>
-            {bundlesError ? <span className="text-sm text-rose-300">{bundlesError}</span> : null}
+            <h3 className="text-lg font-semibold text-slate-950">文件列表</h3>
+            {bundlesError ? <span className="text-sm text-rose-600">{bundlesError}</span> : null}
           </div>
-          <div className="overflow-x-auto rounded-lg border border-slate-800">
-            <table className="min-w-full divide-y divide-slate-800 text-sm">
-              <thead className="bg-slate-950/40 text-left text-xs uppercase text-slate-400">
+          <div className="overflow-x-auto rounded-lg border border-slate-200">
+            <table className="min-w-full divide-y divide-slate-200 text-sm">
+              <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
                 <tr>
                   <th className="px-4 py-2.5 font-medium">文件名</th>
                   <th className="px-4 py-2.5 font-medium">状态</th>
@@ -692,7 +692,7 @@ export function HomeView() {
                   <th className="px-4 py-2.5 font-medium">操作</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800 text-slate-200">
+              <tbody className="divide-y divide-slate-200 text-slate-700">
                 {fileRows.map((row) => {
                   const deleting = deletingKey === row.key;
                   return (
@@ -706,14 +706,14 @@ export function HomeView() {
                           {stageLabel(row.stage, row.progressPercent)}
                         </span>
                         {row.failureReason ? (
-                          <p className="mt-1 max-w-[360px] text-xs text-rose-300">{row.failureReason}</p>
+                          <p className="mt-1 max-w-[360px] text-xs text-rose-600">{row.failureReason}</p>
                         ) : null}
                       </td>
                       <td className="px-4 py-3">{formatBytes(row.sizeBytes)}</td>
                       <td className="whitespace-nowrap px-4 py-3">
                         {row.status === 'READY' && row.file ? (
                           <a
-                            className="mr-4 text-sky-300 hover:text-sky-200"
+                            className="mr-4 text-sky-700 hover:text-sky-800"
                             href={rainApi.fileDownloadUrl(row.bundleHash, String(row.file.id))}
                           >
                             下载
@@ -725,7 +725,7 @@ export function HomeView() {
                         {row.stage !== 'UPLOADING' && row.bundleHash ? (
                           <button
                             type="button"
-                            className="text-rose-300 hover:text-rose-200 disabled:text-slate-600"
+                            className="text-rose-600 hover:text-rose-700 disabled:text-slate-600"
                             disabled={deleting || row.status === 'PROCESSING' || row.status === 'PENDING'}
                             onClick={() => deleteRow(row)}
                           >
@@ -751,13 +751,13 @@ export function HomeView() {
 
       {createDialogOpen ? (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 backdrop-blur-sm"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) closeCreateDialog();
           }}
         >
           <form
-            className="w-full max-w-md rounded-lg border border-slate-800 bg-slate-900 p-5 shadow-2xl"
+            className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-5 shadow-2xl"
             onSubmit={(event) => {
               event.preventDefault();
               handleCreateIssue().catch(() => undefined);
@@ -766,21 +766,21 @@ export function HomeView() {
               if (event.key === 'Escape') closeCreateDialog();
             }}
           >
-            <h3 className="text-lg font-semibold text-white">新建 Issue</h3>
-            <label className="mt-4 block text-sm text-slate-300">
+            <h3 className="text-lg font-semibold text-slate-950">新建 Issue</h3>
+            <label className="mt-4 block text-sm text-slate-600">
               Issue ID
               <input
-                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-4 py-2 text-white outline-none focus:border-sky-500"
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-4 py-2 text-slate-950 outline-none focus:border-sky-500"
                 value={newIssueCode}
                 onChange={(event) => setNewIssueCode(event.target.value)}
                 placeholder="例如 CN014"
               />
             </label>
-            {createIssueError ? <p className="mt-3 text-sm text-rose-300">{createIssueError}</p> : null}
+            {createIssueError ? <p className="mt-3 text-sm text-rose-600">{createIssueError}</p> : null}
             <div className="mt-5 flex justify-end gap-3">
               <button
                 type="button"
-                className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200"
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700"
                 onClick={closeCreateDialog}
                 disabled={creatingIssue}
               >
@@ -799,13 +799,13 @@ export function HomeView() {
       ) : null}
 
       {confirmDialog ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4">
-          <div className="w-full max-w-sm rounded-lg border border-slate-800 bg-slate-900 p-5 shadow-2xl">
-            <p className="text-sm text-slate-200">{confirmDialog.message}</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-5 shadow-2xl">
+            <p className="text-sm text-slate-700">{confirmDialog.message}</p>
             <div className="mt-4 flex justify-end gap-3">
               <button
                 type="button"
-                className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200"
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700"
                 onClick={() => setConfirmDialog(null)}
                 disabled={!!confirmDialog.busy}
               >

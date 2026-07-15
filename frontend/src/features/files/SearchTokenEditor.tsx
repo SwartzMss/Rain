@@ -83,14 +83,14 @@ export function SearchTokenEditor({
           key={`${token.kind}:${token.value}:${index}`}
           className={`inline-flex h-7 max-w-full items-center overflow-hidden rounded border text-xs ${
             token.kind === 'operator'
-              ? 'border-cyan-500/50 bg-cyan-500/15 font-semibold text-cyan-100'
-              : 'border-slate-600 bg-slate-800 text-slate-100'
+              ? 'border-cyan-500/50 bg-cyan-500/15 font-semibold text-cyan-800'
+              : 'border-slate-300 bg-slate-100 text-slate-900'
           }`}
         >
           {editingIndex === index && token.kind === 'term' ? (
             <input
               autoFocus
-              className="h-full min-w-24 max-w-56 bg-slate-950 px-2 text-xs text-white outline-none"
+              className="h-full min-w-24 max-w-56 bg-white px-2 text-xs text-slate-950 outline-none"
               aria-label={`编辑关键词 ${token.value}`}
               value={editingValue}
               onChange={(event) => setEditingValue(event.target.value)}
@@ -154,7 +154,7 @@ export function SearchTokenEditor({
 
       <input
         ref={inputRef}
-        className="h-8 min-w-32 flex-1 bg-transparent px-1 text-sm text-white outline-none placeholder:text-slate-500"
+        className="h-8 min-w-32 flex-1 bg-transparent px-1 text-sm text-slate-950 outline-none placeholder:text-slate-500"
         placeholder={placeholder}
         aria-label={ariaLabel}
         value={draft}
@@ -177,7 +177,7 @@ export function SearchTokenEditor({
       {draft.trim() ? (
         <button
           type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-slate-600 text-slate-300 hover:border-slate-400 hover:text-white"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-slate-300 text-slate-600 hover:border-slate-400 hover:text-slate-950"
           title="添加关键词"
           aria-label="添加关键词"
           disabled={disabled}
@@ -190,7 +190,7 @@ export function SearchTokenEditor({
         <>
           <button
             type="button"
-            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/15"
+            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15"
             disabled={disabled}
             onClick={() => onTokensChange(appendSearchOperator(tokens, 'AND'))}
           >
@@ -198,7 +198,7 @@ export function SearchTokenEditor({
           </button>
           <button
             type="button"
-            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/15"
+            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15"
             disabled={disabled}
             onClick={() => onTokensChange(appendSearchOperator(tokens, 'OR'))}
           >
@@ -206,7 +206,7 @@ export function SearchTokenEditor({
           </button>
           <button
             type="button"
-            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/15"
+            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15"
             disabled={disabled}
             onClick={() => {
               const withAnd = appendSearchOperator(tokens, 'AND');
