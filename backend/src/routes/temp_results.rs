@@ -269,7 +269,10 @@ pub async fn get_temp_result_lines(
     cleanup_expired(&state).await?;
     let result = load_and_renew(&state, &id).await?;
     let start = query.start.unwrap_or(0).max(0);
-    let limit = query.limit.unwrap_or(1000).clamp(1, 3000);
+    let limit = query
+        .limit
+        .unwrap_or(state.limits.api.default_line_page_size)
+        .clamp(1, state.limits.api.max_line_page_size);
     let file = File::open(checked_temp_path(&state, &result.storage_path)?)
         .await
         .map_err(AppError::Io)?;

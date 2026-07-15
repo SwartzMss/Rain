@@ -1,14 +1,12 @@
 use actix_multipart::{Field, Multipart};
 use actix_web::{HttpResponse, get, http::StatusCode, post, web};
 use futures_util::TryStreamExt;
-use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::{
     future::Future,
     io,
     path::{Path, PathBuf},
 };
-use tokio::sync::Semaphore;
 use tokio::{fs, io::AsyncWriteExt};
 use tracing::{error, warn};
 use uuid::Uuid;
@@ -22,16 +20,8 @@ use crate::{
 
 use super::issues::{normalize_issue_code, require_issue_exists};
 
-const MAX_UPLOAD_FILES: usize = 100;
-const MAX_UPLOAD_FILE_BYTES: usize = 512 * 1024 * 1024;
-const MAX_UPLOAD_TOTAL_BYTES: usize = 2 * 1024 * 1024 * 1024;
-const MAX_TEXT_FIELD_BYTES: usize = 64 * 1024;
-const MAX_CONCURRENT_PROCESSING_TASKS: usize = 2;
 const WINDOWS_MOVE_RETRY_DELAYS_MS: [u64; 7] = [100, 200, 400, 800, 1600, 3200, 5000];
 const DEFAULT_MOVE_RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
-
-static PROCESSING_PERMITS: Lazy<Semaphore> =
-    Lazy::new(|| Semaphore::new(MAX_CONCURRENT_PROCESSING_TASKS));
 
 async fn move_bundle_directory_with_retry(
     source: &Path,
@@ -155,7 +145,7 @@ pub async fn upload_logs(
 
         match field_name.as_str() {
             "issue_code" => {
-                collect_text_field(&mut field).await?;
+                collect_text_field(&mut field, state.limits.upload.max_text_field_size).await?;
             }
             "files" => {
                 let filename = content_disposition
@@ -171,7 +161,7 @@ pub async fn upload_logs(
                 let size_bytes = match collect_file_field(
                     &mut field,
                     &temp_path,
-                    MAX_UPLOAD_FILE_BYTES,
+                    state.limits.upload.max_file_size,
                     &filename,
                 )
                 .await
@@ -184,18 +174,19 @@ pub async fn upload_logs(
                 };
 
                 if size_bytes > 0 {
-                    if files.len() >= MAX_UPLOAD_FILES {
+                    if files.len() >= state.limits.upload.max_files {
                         let _ = fs::remove_dir_all(&temp_dir).await;
                         return Err(AppError::BadRequest(format!(
-                            "too many files; max {MAX_UPLOAD_FILES} files per upload"
+                            "too many files; max {} files per upload",
+                            state.limits.upload.max_files
                         )));
                     }
                     total_bytes = total_bytes.saturating_add(size_bytes);
-                    if total_bytes > MAX_UPLOAD_TOTAL_BYTES as u64 {
+                    if total_bytes > state.limits.upload.max_total_size {
                         let _ = fs::remove_dir_all(&temp_dir).await;
                         return Err(AppError::BadRequest(format!(
                             "upload is too large; max total size is {}",
-                            format_bytes(MAX_UPLOAD_TOTAL_BYTES)
+                            format_bytes(state.limits.upload.max_total_size)
                         )));
                     }
                     files.push(UploadedFile {
@@ -212,7 +203,12 @@ pub async fn upload_logs(
             }
             _ => {
                 // Ignore unknown fields
-                collect_binary_field(&mut field, MAX_TEXT_FIELD_BYTES, &field_name).await?;
+                collect_binary_field(
+                    &mut field,
+                    state.limits.upload.max_text_field_size,
+                    &field_name,
+                )
+                .await?;
             }
         }
     }
@@ -254,10 +250,13 @@ pub async fn upload_logs(
     let pool = state.pool.clone();
     let data_root = state.data_root.clone();
     let staging_root = temp_dir.join("staging");
+    let processing_permits = state.processing_permits.clone();
+    let archive_config = state.limits.archive.clone();
+    let indexing_config = state.limits.indexing.clone();
     let task_bundle_id = bundle_id.clone();
     let task_bundle_hash = bundle_hash.clone();
     tokio::spawn(async move {
-        let _permit = match PROCESSING_PERMITS.acquire().await {
+        let _permit = match processing_permits.acquire_owned().await {
             Ok(permit) => permit,
             Err(error) => {
                 error!(
@@ -273,7 +272,7 @@ pub async fn upload_logs(
         };
 
         let process_result = async {
-            let archive_budget = ArchiveBudget::default();
+            let archive_budget = ArchiveBudget::new(archive_config);
             for uploaded in &files {
                 process_uploaded_file(ProcessFileOptions {
                     pool: &pool,
@@ -287,6 +286,7 @@ pub async fn upload_logs(
                     source_path: &uploaded.temp_path,
                     size_bytes: uploaded.size_bytes,
                     archive_budget: archive_budget.clone(),
+                    indexing: &indexing_config,
                 })
                 .await?;
             }
@@ -426,8 +426,8 @@ struct UploadedFile {
     content_type: Option<String>,
 }
 
-async fn collect_text_field(field: &mut Field) -> Result<String, AppError> {
-    let bytes = collect_binary_field(field, MAX_TEXT_FIELD_BYTES, "text field").await?;
+async fn collect_text_field(field: &mut Field, limit: u64) -> Result<String, AppError> {
+    let bytes = collect_binary_field(field, limit, "text field").await?;
     let value = String::from_utf8(bytes)
         .map_err(|_| AppError::BadRequest("field is not valid UTF-8".into()))?;
     Ok(value.trim().to_string())
@@ -435,7 +435,7 @@ async fn collect_text_field(field: &mut Field) -> Result<String, AppError> {
 
 async fn collect_binary_field(
     field: &mut Field,
-    limit: usize,
+    limit: u64,
     label: &str,
 ) -> Result<Vec<u8>, AppError> {
     let mut data = Vec::new();
@@ -444,7 +444,7 @@ async fn collect_binary_field(
         .await
         .map_err(|err| AppError::BadRequest(format!("failed to read field: {err}")))?
     {
-        if data.len() + chunk.len() > limit {
+        if (data.len() as u64).saturating_add(chunk.len() as u64) > limit {
             return Err(AppError::BadRequest(format!(
                 "{label} is too large; max size is {}",
                 format_bytes(limit)
@@ -458,7 +458,7 @@ async fn collect_binary_field(
 async fn collect_file_field(
     field: &mut Field,
     path: &std::path::Path,
-    limit: usize,
+    limit: u64,
     label: &str,
 ) -> Result<u64, AppError> {
     let mut file = fs::File::create(path).await.map_err(AppError::Io)?;
@@ -469,7 +469,7 @@ async fn collect_file_field(
         .map_err(|err| AppError::BadRequest(format!("failed to read field: {err}")))?
     {
         written = written.saturating_add(chunk.len() as u64);
-        if written > limit as u64 {
+        if written > limit {
             return Err(AppError::BadRequest(format!(
                 "{label} is too large; max size is {}",
                 format_bytes(limit)
@@ -645,11 +645,13 @@ struct FileMetaRow {
     meta: Option<String>,
 }
 
-fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{} MB", bytes / 1024 / 1024)
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{} GiB", bytes / 1024 / 1024 / 1024)
+    } else if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / 1024 / 1024)
     } else if bytes >= 1024 {
-        format!("{} KB", bytes / 1024)
+        format!("{} KiB", bytes / 1024)
     } else {
         format!("{bytes} B")
     }

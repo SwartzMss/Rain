@@ -12,29 +12,26 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::{fs, task};
 
 use crate::{
+    config::{ArchiveConfig, IndexingConfig},
     error::AppError,
     file_classification::{PreviewKind, classify_file, effective_mime_type},
 };
 
-const LOG_CHUNK_LINES: usize = 200;
-const LINE_OFFSET_INTERVAL: i64 = 1000;
-const LOG_COMMIT_LINES: i64 = 5000;
-pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 const TRUNCATED_LINE_MARKER: &str = " ... [line truncated]";
-const MAX_ARCHIVE_ENTRIES: usize = 10_000;
-const MAX_ARCHIVE_DEPTH: usize = 16;
-const MAX_ARCHIVE_RECURSION_DEPTH: usize = 16;
-const MAX_ARCHIVE_OUTPUT_PATH_CHARS: usize = 1024;
-const MAX_ARCHIVE_ENTRY_BYTES: u64 = 100 * 1024 * 1024;
-const MAX_ARCHIVE_EXTRACTED_BYTES: u64 = 500 * 1024 * 1024;
-const MAX_ARCHIVE_COMPRESSION_RATIO: u64 = 100;
 const LOG_LEVELS: [&str; 7] = [
     "TRACE", "DEBUG", "INFO", "WARN", "WARNING", "ERROR", "FATAL",
 ];
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ArchiveBudget {
     counters: Arc<Mutex<ArchiveCounters>>,
+    config: ArchiveConfig,
+}
+
+impl Default for ArchiveBudget {
+    fn default() -> Self {
+        Self::new(ArchiveConfig::default())
+    }
 }
 
 #[derive(Default)]
@@ -44,6 +41,13 @@ struct ArchiveCounters {
 }
 
 impl ArchiveBudget {
+    pub fn new(config: ArchiveConfig) -> Self {
+        Self {
+            counters: Arc::new(Mutex::new(ArchiveCounters::default())),
+            config,
+        }
+    }
+
     fn reserve_entry(&self) -> Result<(), AppError> {
         let mut counters = self
             .counters
@@ -53,9 +57,10 @@ impl ArchiveBudget {
             .entries
             .checked_add(1)
             .ok_or_else(|| AppError::BadRequest("archive entry count overflow".into()))?;
-        if counters.entries > MAX_ARCHIVE_ENTRIES {
+        if counters.entries > self.config.max_entries {
             return Err(AppError::BadRequest(format!(
-                "archive bundle has too many entries; max {MAX_ARCHIVE_ENTRIES}"
+                "archive bundle has too many entries; max {}",
+                self.config.max_entries
             )));
         }
         Ok(())
@@ -70,10 +75,10 @@ impl ArchiveBudget {
             .extracted_bytes
             .checked_add(size_bytes)
             .ok_or_else(|| AppError::BadRequest("archive extracted size overflow".into()))?;
-        if counters.extracted_bytes > MAX_ARCHIVE_EXTRACTED_BYTES {
+        if counters.extracted_bytes > self.config.max_extracted_size {
             return Err(AppError::BadRequest(format!(
-                "archive bundle extracted content is too large; max {} MB",
-                MAX_ARCHIVE_EXTRACTED_BYTES / 1024 / 1024
+                "archive bundle exceeds configured extracted size; max bundle size {}",
+                format_binary_size(self.config.max_extracted_size)
             )));
         }
         Ok(())
@@ -84,7 +89,10 @@ impl ArchiveBudget {
             .counters
             .lock()
             .map_err(|_| AppError::BadRequest("archive budget lock poisoned".into()))?;
-        Ok(MAX_ARCHIVE_EXTRACTED_BYTES.saturating_sub(counters.extracted_bytes))
+        Ok(self
+            .config
+            .max_extracted_size
+            .saturating_sub(counters.extracted_bytes))
     }
 }
 
@@ -100,6 +108,7 @@ pub struct ProcessFileOptions<'a> {
     pub source_path: &'a Path,
     pub size_bytes: u64,
     pub archive_budget: ArchiveBudget,
+    pub indexing: &'a IndexingConfig,
 }
 
 pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<(), AppError> {
@@ -115,6 +124,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         source_path,
         size_bytes,
         archive_budget,
+        indexing,
     } = options;
 
     let bundle_dir = data_root.join(bundle_hash);
@@ -152,7 +162,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
 
     if preview_kind == PreviewKind::Text {
         update_process_stage(pool, bundle_id, "INDEXING").await?;
-        ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes).await?;
+        ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes, indexing).await?;
     }
 
     if preview_kind == PreviewKind::Archive {
@@ -200,6 +210,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             extracted_dir,
             format!("{}/{extracted_dir_name}", bundle_hash),
             archive_budget,
+            indexing,
             1,
         )
         .await?;
@@ -229,6 +240,7 @@ fn ingest_directory<'a>(
     dir_path: PathBuf,
     relative_root: String,
     archive_budget: ArchiveBudget,
+    indexing: &'a IndexingConfig,
     archive_depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
     Box::pin(async move {
@@ -292,6 +304,7 @@ fn ingest_directory<'a>(
                     disk_path,
                     format!("{relative_root}/{name}"),
                     archive_budget.clone(),
+                    indexing,
                     archive_depth,
                 )
                 .await?;
@@ -301,19 +314,32 @@ fn ingest_directory<'a>(
             if preview_kind == PreviewKind::Text
                 && let Some(size) = size_bytes
             {
-                ingest_text_file(pool, bundle_id, record_id, &disk_path, size as u64).await?;
+                ingest_text_file(
+                    pool,
+                    bundle_id,
+                    record_id,
+                    &disk_path,
+                    size as u64,
+                    indexing,
+                )
+                .await?;
             }
 
             if preview_kind == PreviewKind::Archive {
-                if archive_depth >= MAX_ARCHIVE_RECURSION_DEPTH {
+                if archive_depth >= archive_budget.config.max_recursion_depth {
                     return Err(AppError::BadRequest(format!(
-                        "archive recursion is too deep; max {MAX_ARCHIVE_RECURSION_DEPTH}: {db_path}"
+                        "archive recursion is too deep; max {}: {db_path}",
+                        archive_budget.config.max_recursion_depth
                     )));
                 }
 
                 let extracted_dir_name = format!("{name}_extracted");
                 let extracted_dir = dir_path.join(&extracted_dir_name);
-                validate_extracted_path(&extracted_dir, &db_path)?;
+                validate_extracted_path(
+                    &extracted_dir,
+                    &db_path,
+                    archive_budget.config.max_output_path_chars,
+                )?;
                 if fs::metadata(&extracted_dir).await.is_ok() {
                     return Err(AppError::BadRequest(format!(
                         "archive extraction output already exists: {}",
@@ -355,6 +381,7 @@ fn ingest_directory<'a>(
                     extracted_dir,
                     extracted_db_path.trim_start_matches('/').to_string(),
                     archive_budget.clone(),
+                    indexing,
                     archive_depth + 1,
                 )
                 .await?;
@@ -421,6 +448,7 @@ async fn ingest_text_file(
     file_id: i64,
     disk_path: &Path,
     _size_bytes: u64,
+    indexing: &IndexingConfig,
 ) -> Result<(), AppError> {
     let file = fs::File::open(disk_path)
         .await
@@ -429,22 +457,29 @@ async fn ingest_text_file(
     let mut line_number = 0i64;
     let mut bytes_scanned = 0u64;
     let mut chunk_index = 0i64;
-    let mut chunk = LogChunk::new(chunk_index);
+    let mut chunk = LogChunk::new(chunk_index, indexing.chunk_lines);
     let mut line = Vec::new();
     let mut offsets = Vec::new();
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
     loop {
         let line_offset = bytes_scanned;
-        let Some((read, truncated)) =
-            read_line_bytes_limited(&mut reader, &mut line, MAX_LINE_BYTES)
-                .await
-                .map_err(io_error)?
+        let Some((read, truncated)) = read_line_bytes_limited(
+            &mut reader,
+            &mut line,
+            usize::try_from(indexing.max_line_size).map_err(|_| {
+                AppError::Config(
+                    "RAIN_INDEXING_MAX_LINE_SIZE cannot be represented on this platform".into(),
+                )
+            })?,
+        )
+        .await
+        .map_err(io_error)?
         else {
             break;
         };
 
-        if line_number % LINE_OFFSET_INTERVAL == 0 {
+        if line_number % indexing.line_offset_interval == 0 {
             offsets.push((line_number, line_offset as i64));
         }
         bytes_scanned = bytes_scanned.saturating_add(read as u64);
@@ -453,19 +488,19 @@ async fn ingest_text_file(
         if !cleaned.is_empty() {
             chunk.push(line_number, cleaned);
 
-            if chunk.len() >= LOG_CHUNK_LINES {
+            if chunk.len() >= indexing.chunk_lines {
                 flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
                 chunk_index += 1;
-                chunk = LogChunk::new(chunk_index);
+                chunk = LogChunk::new(chunk_index, indexing.chunk_lines);
             }
         }
 
         line_number += 1;
-        if line_number % LOG_COMMIT_LINES == 0 {
+        if line_number % indexing.commit_lines == 0 {
             if !chunk.is_empty() {
                 flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
                 chunk_index += 1;
-                chunk = LogChunk::new(chunk_index);
+                chunk = LogChunk::new(chunk_index, indexing.chunk_lines);
             }
             tx.commit().await.map_err(AppError::Database)?;
             tx = pool.begin().await.map_err(AppError::Database)?;
@@ -529,12 +564,12 @@ struct ParsedLogEvent {
 }
 
 impl LogChunk {
-    fn new(chunk_index: i64) -> Self {
+    fn new(chunk_index: i64, capacity: usize) -> Self {
         Self {
             chunk_index,
             line_start: None,
             line_end: None,
-            lines: Vec::with_capacity(LOG_CHUNK_LINES),
+            lines: Vec::with_capacity(capacity),
         }
     }
 
@@ -845,9 +880,10 @@ async fn extract_zip_archive(
         let mut archive =
             zip::ZipArchive::new(file).map_err(|err| AppError::BadRequest(err.to_string()))?;
 
-        if archive.len() > MAX_ARCHIVE_ENTRIES {
+        if archive.len() > archive_budget.config.max_entries {
             return Err(AppError::BadRequest(format!(
-                "zip has too many entries; max {MAX_ARCHIVE_ENTRIES}"
+                "zip has too many entries; max {}",
+                archive_budget.config.max_entries
             )));
         }
 
@@ -866,7 +902,7 @@ async fn extract_zip_archive(
             } else {
                 archive_parent_depth(&entry_path)
             };
-            if depth > MAX_ARCHIVE_DEPTH {
+            if depth > archive_budget.config.max_path_depth {
                 return Err(AppError::BadRequest(format!(
                     "zip entry is too deep: {}",
                     entry.name()
@@ -874,20 +910,30 @@ async fn extract_zip_archive(
             }
 
             let uncompressed_size = entry.size();
-            if !entry.is_dir() && uncompressed_size > MAX_ARCHIVE_ENTRY_BYTES {
+            if !entry.is_dir() && uncompressed_size > archive_budget.config.max_entry_size {
                 return Err(AppError::BadRequest(format!(
-                    "zip entry is too large: {}",
-                    entry.name()
+                    "archive entry exceeds configured limit; max entry size {}: {}",
+                    format_binary_size(archive_budget.config.max_entry_size),
+                    entry.name(),
                 )));
             }
 
             archive_budget.reserve_entry()?;
             archive_budget.reserve_bytes(uncompressed_size)?;
 
-            validate_zip_ratio(entry.name(), uncompressed_size, entry.compressed_size())?;
+            validate_zip_ratio(
+                entry.name(),
+                uncompressed_size,
+                entry.compressed_size(),
+                archive_budget.config.max_compression_ratio,
+            )?;
 
             let out_path = dest_path.join(entry_path);
-            validate_extracted_path(&out_path, entry.name())?;
+            validate_extracted_path(
+                &out_path,
+                entry.name(),
+                archive_budget.config.max_output_path_chars,
+            )?;
             let normalized_out = normalize_extracted_path(&out_path);
             if !seen_paths.insert(normalized_out) {
                 return Err(AppError::BadRequest(format!(
@@ -943,9 +989,10 @@ async fn extract_tar_gz_archive(
 
         for entry_result in archive.entries().map_err(io_error)? {
             entries_count += 1;
-            if entries_count > MAX_ARCHIVE_ENTRIES {
+            if entries_count > archive_budget.config.max_entries {
                 return Err(AppError::BadRequest(format!(
-                    "tar.gz has too many entries; max {MAX_ARCHIVE_ENTRIES}"
+                    "tar.gz has too many entries; max {}",
+                    archive_budget.config.max_entries
                 )));
             }
 
@@ -961,7 +1008,7 @@ async fn extract_tar_gz_archive(
             } else {
                 archive_parent_depth(&entry_path)
             };
-            if depth > MAX_ARCHIVE_DEPTH {
+            if depth > archive_budget.config.max_path_depth {
                 return Err(AppError::BadRequest(format!(
                     "tar.gz entry is too deep: {}",
                     raw_path.display()
@@ -969,10 +1016,11 @@ async fn extract_tar_gz_archive(
             }
 
             let entry_size = entry.header().size().map_err(io_error)?;
-            if entry_size > MAX_ARCHIVE_ENTRY_BYTES {
+            if entry_size > archive_budget.config.max_entry_size {
                 return Err(AppError::BadRequest(format!(
-                    "tar.gz entry is too large: {}",
-                    raw_path.display()
+                    "archive entry exceeds configured limit; max entry size {}: {}",
+                    format_binary_size(archive_budget.config.max_entry_size),
+                    raw_path.display(),
                 )));
             }
 
@@ -985,10 +1033,15 @@ async fn extract_tar_gz_archive(
                 &raw_path.display().to_string(),
                 total_uncompressed,
                 compressed_size,
+                archive_budget.config.max_compression_ratio,
             )?;
 
             let out_path = dest_path.join(entry_path);
-            validate_extracted_path(&out_path, &raw_path.display().to_string())?;
+            validate_extracted_path(
+                &out_path,
+                &raw_path.display().to_string(),
+                archive_budget.config.max_output_path_chars,
+            )?;
             let normalized_out = normalize_extracted_path(&out_path);
             if !seen_paths.insert(normalized_out) {
                 return Err(AppError::BadRequest(format!(
@@ -1037,7 +1090,9 @@ async fn extract_gzip_file(
     let output_name = gzip_output_name(name);
     task::spawn_blocking(move || -> Result<(), AppError> {
         archive_budget.reserve_entry()?;
-        let copy_limit = MAX_ARCHIVE_ENTRY_BYTES.min(archive_budget.remaining_bytes()?);
+        let remaining = archive_budget.remaining_bytes()?;
+        let entry_limit = archive_budget.config.max_entry_size;
+        let copy_limit = entry_limit.min(remaining);
         let compressed_size = std::fs::metadata(&src_path).map_err(io_error)?.len().max(1);
         let file = StdFile::open(&src_path)
             .map_err(|error| io_error_at("open gzip archive", &src_path, error))?;
@@ -1045,7 +1100,11 @@ async fn extract_gzip_file(
         std::fs::create_dir_all(&dest_path)
             .map_err(|error| io_error_at("create gzip extraction directory", &dest_path, error))?;
         let out_path = dest_path.join(output_name);
-        validate_extracted_path(&out_path, &source_name)?;
+        validate_extracted_path(
+            &out_path,
+            &source_name,
+            archive_budget.config.max_output_path_chars,
+        )?;
         if out_path.exists() {
             return Err(AppError::BadRequest(format!(
                 "gzip output path already exists: {}",
@@ -1054,9 +1113,30 @@ async fn extract_gzip_file(
         }
         let mut outfile = StdFile::create(&out_path)
             .map_err(|error| io_error_at("create gzip output", &out_path, error))?;
-        let copied = copy_with_limit(&mut decoder, &mut outfile, copy_limit)?;
+        let copied = copy_with_limit(&mut decoder, &mut outfile, copy_limit).map_err(|error| {
+            if matches!(error, AppError::BadRequest(_)) {
+                if remaining <= entry_limit {
+                    AppError::BadRequest(format!(
+                        "archive bundle exceeds configured extracted size; max bundle size {}",
+                        format_binary_size(archive_budget.config.max_extracted_size)
+                    ))
+                } else {
+                    AppError::BadRequest(format!(
+                        "archive entry exceeds configured limit; max entry size {}",
+                        format_binary_size(entry_limit)
+                    ))
+                }
+            } else {
+                error
+            }
+        })?;
         archive_budget.reserve_bytes(copied)?;
-        validate_archive_ratio("gzip file", copied, compressed_size)?;
+        validate_archive_ratio(
+            "gzip file",
+            copied,
+            compressed_size,
+            archive_budget.config.max_compression_ratio,
+        )?;
         Ok(())
     })
     .await
@@ -1082,8 +1162,7 @@ fn copy_with_limit<R: Read, W: Write>(
             .ok_or_else(|| AppError::BadRequest("gzip extracted size overflow".into()))?;
         if total > limit {
             return Err(AppError::BadRequest(format!(
-                "gzip entry is too large; max {} MB",
-                limit / 1024 / 1024
+                "gzip exceeds limit of {limit} bytes"
             )));
         }
         writer.write_all(&buffer[..read]).map_err(io_error)?;
@@ -1098,11 +1177,15 @@ fn normalize_extracted_path(path: &Path) -> String {
         .join("/")
 }
 
-fn validate_extracted_path(path: &Path, source_path: &str) -> Result<(), AppError> {
+fn validate_extracted_path(
+    path: &Path,
+    source_path: &str,
+    max_output_path_chars: usize,
+) -> Result<(), AppError> {
     let path_chars = path.to_string_lossy().encode_utf16().count();
-    if path_chars > MAX_ARCHIVE_OUTPUT_PATH_CHARS {
+    if path_chars > max_output_path_chars {
         return Err(AppError::BadRequest(format!(
-            "archive output path is too long ({path_chars} > {MAX_ARCHIVE_OUTPUT_PATH_CHARS}): {source_path}"
+            "archive output path is too long ({path_chars} > {max_output_path_chars}): {source_path}"
         )));
     }
     Ok(())
@@ -1118,14 +1201,21 @@ fn validate_zip_ratio(
     name: &str,
     uncompressed_size: u64,
     compressed_size: u64,
+    max_compression_ratio: u64,
 ) -> Result<(), AppError> {
-    validate_archive_ratio(name, uncompressed_size, compressed_size)
+    validate_archive_ratio(
+        name,
+        uncompressed_size,
+        compressed_size,
+        max_compression_ratio,
+    )
 }
 
 fn validate_archive_ratio(
     name: &str,
     uncompressed_size: u64,
     compressed_size: u64,
+    max_compression_ratio: u64,
 ) -> Result<(), AppError> {
     if uncompressed_size == 0 {
         return Ok(());
@@ -1137,13 +1227,25 @@ fn validate_archive_ratio(
         )));
     }
 
-    if uncompressed_size / compressed_size > MAX_ARCHIVE_COMPRESSION_RATIO {
+    if uncompressed_size / compressed_size > max_compression_ratio {
         return Err(AppError::BadRequest(format!(
             "archive compression ratio is too high: {name}"
         )));
     }
 
     Ok(())
+}
+
+fn format_binary_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{} GiB", bytes / 1024 / 1024 / 1024)
+    } else if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / 1024 / 1024)
+    } else if bytes >= 1024 {
+        format!("{} KiB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn sanitize_archive_path(path: &Path) -> PathBuf {
@@ -1253,10 +1355,16 @@ fn io_error_at(operation: &str, path: &Path, error: std::io::Error) -> AppError 
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        io::Write,
+        path::{Path, PathBuf},
+    };
+
+    use crate::config::ArchiveConfig;
+    use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        MAX_ARCHIVE_OUTPUT_PATH_CHARS, archive_parent_depth, gzip_output_name,
+        ArchiveBudget, archive_parent_depth, extract_gzip_file, gzip_output_name,
         sanitize_archive_path, split_timestamp, validate_extracted_path,
     };
 
@@ -1315,10 +1423,69 @@ mod tests {
 
     #[test]
     fn archive_output_path_rejects_windows_unsafe_length_with_source_path() {
-        let path = PathBuf::from("x".repeat(MAX_ARCHIVE_OUTPUT_PATH_CHARS + 1));
-        let error = validate_extracted_path(&path, "logs/too-long.log")
-            .expect_err("overlong archive output path should fail");
+        let max = ArchiveConfig::default().max_output_path_chars;
+        let path = PathBuf::from("x".repeat(max + 1));
+        let error = validate_extracted_path(
+            &path,
+            "logs/too-long.log",
+            ArchiveConfig::default().max_output_path_chars,
+        )
+        .expect_err("overlong archive output path should fail");
 
         assert!(error.to_string().contains("logs/too-long.log"));
+    }
+
+    fn gzip_fixture(name: &str, content: &[u8]) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("rain-ingest-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("sample.log.gz");
+        let destination = root.join("out");
+        let file = std::fs::File::create(&source).unwrap();
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        encoder.write_all(content).unwrap();
+        encoder.finish().unwrap();
+        (source, destination)
+    }
+
+    #[tokio::test]
+    async fn gzip_reports_configured_entry_limit() {
+        let (source, destination) = gzip_fixture("entry-limit", b"hello");
+        let config = ArchiveConfig {
+            max_entry_size: 4,
+            max_extracted_size: 8,
+            ..ArchiveConfig::default()
+        };
+
+        let error = extract_gzip_file(
+            "sample.log.gz",
+            &source,
+            &destination,
+            ArchiveBudget::new(config),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("max entry size 4 B"));
+        let _ = std::fs::remove_dir_all(source.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn gzip_reports_exhausted_bundle_budget() {
+        let (source, destination) = gzip_fixture("bundle-limit", b"hello");
+        let config = ArchiveConfig {
+            max_entry_size: 6,
+            max_extracted_size: 8,
+            ..ArchiveConfig::default()
+        };
+        let budget = ArchiveBudget::new(config);
+        budget.reserve_bytes(4).unwrap();
+
+        let error = extract_gzip_file("sample.log.gz", &source, &destination, budget)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("max bundle size 8 B"));
+        let _ = std::fs::remove_dir_all(source.parent().unwrap());
     }
 }

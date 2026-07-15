@@ -75,10 +75,12 @@ async fn main() -> std::io::Result<()> {
     );
 
     let bind_addr = format!("{}:{}", config.host, config.port);
-    let shared_state = web::Data::new(AppState {
+    info!(limits = ?config.limits, "effective application limits");
+    let shared_state = web::Data::new(AppState::new(
         pool,
-        data_root: config.data_root.clone(),
-    });
+        config.data_root.clone(),
+        config.limits.clone(),
+    ));
 
     HttpServer::new(move || {
         App::new()
