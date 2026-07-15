@@ -39,7 +39,7 @@ Archive copy failures distinguish the per-entry ceiling from the shared extracte
 
 ## Compatibility and documentation
 
-When no new variables are set, behavior remains identical to the current constants. `backend/.env.example` lists every variable and default. The README documents precedence, accepted size syntax, validation rules, and all defaults. Existing release packaging continues to ship only the executable and `.env`.
+When no new variables are set, behavior remains identical to the current constants. `backend/.env.example` lists every variable and default, with a short Chinese comment immediately above each setting explaining its purpose, units, and any important relationship or zero-value behavior. The README documents precedence, accepted size syntax, validation rules, and all defaults. Existing release packaging continues to ship only the executable and `.env`.
 
 ## Testing
 
