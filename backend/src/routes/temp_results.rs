@@ -7,14 +7,19 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, BufReader},
 };
 use uuid::Uuid;
 
-use crate::{AppState, error::AppError, log_expression};
+use crate::{
+    AppState,
+    error::AppError,
+    log_expression,
+    repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
+    services::temp_results::{TempResultExecutor, TempSource},
+};
 
 use super::{
-    files::{fetch_file, resolve_file_path},
     helpers::{data_root, ensure_bundle_ready, load_bundle},
     issues::normalize_issue_code,
 };
@@ -94,21 +99,6 @@ struct TempLine {
     content: String,
 }
 
-#[derive(Serialize)]
-struct TempPreview {
-    total: i64,
-    lines: Vec<PreviewLine>,
-}
-
-#[derive(Serialize)]
-struct PreviewLine {
-    bundle_hash: Option<String>,
-    file_id: Option<String>,
-    path: String,
-    line_number: i64,
-    content: String,
-}
-
 #[post("/temp-results/preview")]
 pub async fn preview_temp_result(
     payload: web::Json<PreviewTempResultRequest>,
@@ -127,44 +117,8 @@ pub async fn preview_temp_result(
     let sources = resolve_sources(&source_request, &state).await?;
     let from = payload.from.unwrap_or(0).max(0);
     let size = preview_page_size(payload.size);
-    let mut matched = 0_i64;
-    let mut lines = Vec::new();
-    for source in sources {
-        let file = File::open(&source.path).await.map_err(AppError::Io)?;
-        let mut reader = BufReader::new(file);
-        let mut bytes = Vec::new();
-        let mut source_line = 0_i64;
-        loop {
-            bytes.clear();
-            if reader
-                .read_until(b'\n', &mut bytes)
-                .await
-                .map_err(AppError::Io)?
-                == 0
-            {
-                break;
-            }
-            let line = String::from_utf8_lossy(&bytes);
-            let content = line.trim_end_matches(['\r', '\n']);
-            if expression.matches(content) {
-                if matched >= from && matched < from + size {
-                    lines.push(PreviewLine {
-                        bundle_hash: source.bundle_hash.clone(),
-                        file_id: source.file_id.clone(),
-                        path: source.label.clone(),
-                        line_number: source_line,
-                        content: content.to_string(),
-                    });
-                }
-                matched += 1;
-            }
-            source_line += 1;
-        }
-    }
-    Ok(HttpResponse::Ok().json(TempPreview {
-        total: matched,
-        lines,
-    }))
+    let preview = TempResultExecutor::scan_preview(&sources, &expression, from, size).await?;
+    Ok(HttpResponse::Ok().json(preview))
 }
 
 #[post("/temp-results")]
@@ -189,32 +143,8 @@ pub async fn create_temp_result(
         .map_err(AppError::Io)?;
     let output_path = directory.join(format!("{id}.log"));
     let mut output = File::create(&output_path).await.map_err(AppError::Io)?;
-    let mut matching_lines = 0_i64;
-    for source in sources {
-        let file = File::open(&source.path).await.map_err(AppError::Io)?;
-        let mut reader = BufReader::new(file);
-        let mut bytes = Vec::new();
-        loop {
-            bytes.clear();
-            if reader
-                .read_until(b'\n', &mut bytes)
-                .await
-                .map_err(AppError::Io)?
-                == 0
-            {
-                break;
-            }
-            let line = String::from_utf8_lossy(&bytes);
-            if expression.matches(line.trim_end_matches(['\r', '\n'])) {
-                output.write_all(&bytes).await.map_err(AppError::Io)?;
-                if !bytes.ends_with(b"\n") {
-                    output.write_all(b"\n").await.map_err(AppError::Io)?;
-                }
-                matching_lines += 1;
-            }
-        }
-    }
-    output.flush().await.map_err(AppError::Io)?;
+    let matching_lines =
+        TempResultExecutor::write_matches(&sources, &expression, &mut output).await?;
 
     let metadata = tokio::fs::metadata(&output_path)
         .await
@@ -338,13 +268,6 @@ pub async fn delete_temp_result(
     Ok(HttpResponse::NoContent().finish())
 }
 
-struct Source {
-    path: PathBuf,
-    label: String,
-    bundle_hash: Option<String>,
-    file_id: Option<String>,
-}
-
 #[derive(FromRow)]
 struct IssueSourceRow {
     id: i64,
@@ -361,10 +284,10 @@ struct IssueSourceRow {
 async fn resolve_sources(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
-) -> Result<Vec<Source>, AppError> {
+) -> Result<Vec<TempSource>, AppError> {
     if let Some(source_id) = payload.source_temp_id.as_deref() {
         let source = load_and_renew(state, source_id).await?;
-        return Ok(vec![Source {
+        return Ok(vec![TempSource {
             path: checked_temp_path(state, &source.storage_path)?,
             label: source.name,
             bundle_hash: None,
@@ -390,7 +313,7 @@ async fn resolve_sources(
         .map_err(AppError::Database)?;
         let mut sources = Vec::new();
         for row in rows {
-            let file = super::files::FileRow {
+            let file = FileRow {
                 id: row.id,
                 name: row.name,
                 path: row.path,
@@ -401,7 +324,7 @@ async fn resolve_sources(
                 status: row.status,
                 meta: row.meta,
             };
-            sources.push(Source {
+            sources.push(TempSource {
                 path: resolve_file_path(&file, &data_root(state))?,
                 label: file.name.clone(),
                 bundle_hash: Some(row.bundle_hash),
@@ -428,9 +351,9 @@ async fn resolve_sources(
     let bundle = load_bundle(&state.pool, bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
     let file = fetch_file(&state.pool, &bundle.id, file_id).await?;
-    super::files::ensure_text_preview(&file)?;
+    ensure_text_preview(&file)?;
     let path = resolve_file_path(&file, &data_root(state))?;
-    Ok(vec![Source {
+    Ok(vec![TempSource {
         path,
         label: file.name,
         bundle_hash: Some(bundle.hash),

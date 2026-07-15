@@ -5,7 +5,10 @@ pub mod file_classification;
 pub mod ingest;
 pub mod log_expression;
 pub mod models;
+pub mod repositories;
 pub mod routes;
+pub mod services;
+pub mod upload;
 
 use std::{path::PathBuf, sync::Arc};
 
