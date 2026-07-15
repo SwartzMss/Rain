@@ -1049,15 +1049,15 @@ export function BundleView(props?: BundleViewProps) {
           type="button"
           onClick={() => handleNodeClick(node.id).catch(() => undefined)}
           className={[
-            'group flex h-9 w-full items-center gap-2 rounded border border-transparent px-2 text-left text-sm transition',
-            isSelected ? 'border-cyan-500/50 bg-cyan-500/15 text-slate-950 shadow-[inset_2px_0_0_rgba(56,189,248,0.75)]' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'
+            'group flex h-9 w-full items-center gap-2 rounded-md border border-transparent px-2 text-left text-sm transition',
+            isSelected ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-[inset_3px_0_0_rgba(37,99,235,0.82)]' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'
           ].join(' ')}
           style={{ paddingLeft: `${8 + depth * 16}px` }}
         >
           <span className="w-3 shrink-0 text-slate-500">
             {canExpand ? (isExpanded ? '⌄' : '›') : ''}
           </span>
-          <span className={`flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-300 bg-slate-50 text-[10px] font-semibold ${iconClass}`}>
+          <span className={`flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-[10px] font-semibold shadow-sm shadow-slate-100 ${iconClass}`}>
             {typeIcon}
           </span>
           <div className="min-w-0 flex-1">
@@ -1107,17 +1107,24 @@ export function BundleView(props?: BundleViewProps) {
 
   return (
     <div className="space-y-5">
-      <section className="panel space-y-4 !p-0">
-        {treeError ? <p className="text-sm text-rose-600">{treeError}</p> : null}
+      <section className="panel overflow-hidden !p-0">
+        {treeError ? (
+          <p className="m-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-600">
+            {treeError}
+          </p>
+        ) : null}
 
-        <div className="grid min-h-[82vh] gap-0 lg:grid-cols-[360px_minmax(0,1fr)]">
-          <div className="flex min-h-0 flex-col border-r border-slate-200 bg-slate-50">
+        <div className="grid min-h-[calc(100vh-104px)] gap-0 lg:grid-cols-[330px_minmax(0,1fr)]">
+          <div className="flex min-h-0 flex-col border-r border-slate-200 bg-white">
             <div className="border-b border-slate-200 px-4 py-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <p className="truncate text-sm font-medium text-slate-700">Issue: {activeIssueLabel}</p>
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-slate-500">当前 Issue</p>
+                  <p className="mt-1 truncate text-xl font-semibold leading-6 text-slate-950">{activeIssueLabel}</p>
+                </div>
                 <button
                   type="button"
-                  className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-500 hover:border-slate-500 hover:text-slate-950"
+                  className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 shadow-sm shadow-slate-100 hover:border-slate-300 hover:text-slate-950"
                   title="刷新文件树"
                   onClick={() => setRefreshKey((key) => key + 1)}
                 >
@@ -1125,7 +1132,7 @@ export function BundleView(props?: BundleViewProps) {
                 </button>
               </div>
               <form
-                className="flex min-h-10 items-start gap-2 rounded border border-slate-300 bg-white px-3 py-1.5 focus-within:border-cyan-500/60"
+                className="flex min-h-11 items-start gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm shadow-slate-100 focus-within:border-sky-400"
                 onSubmit={handleSearchSubmit}
               >
                 <span className="mt-1.5 shrink-0 text-slate-500" aria-hidden="true">⌕</span>
@@ -1171,17 +1178,17 @@ export function BundleView(props?: BundleViewProps) {
               </form>
               <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
                 <span className="shrink-0">搜索方式</span>
-                <div className="flex rounded border border-slate-300 bg-white p-0.5">
+                <div className="flex rounded-md border border-slate-200 bg-slate-50 p-0.5 shadow-inner">
                   <button
                     type="button"
-                    className={`rounded px-3 py-1 transition ${searchMode === 'log' ? 'bg-cyan-500/15 text-cyan-800' : 'text-slate-500 hover:text-slate-950'}`}
+                    className={`rounded px-4 py-1.5 font-semibold transition ${searchMode === 'log' ? 'border border-sky-300 bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
                     onClick={() => changeSearchMode('log')}
                   >
                     按文件名
                   </button>
                   <button
                     type="button"
-                    className={`rounded px-3 py-1 transition ${searchMode === 'detailed' ? 'bg-cyan-500/15 text-cyan-800' : 'text-slate-500 hover:text-slate-950'}`}
+                    className={`rounded px-4 py-1.5 font-semibold transition ${searchMode === 'detailed' ? 'border border-sky-300 bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
                     onClick={() => changeSearchMode('detailed')}
                   >
                     搜日志内容
@@ -1190,7 +1197,7 @@ export function BundleView(props?: BundleViewProps) {
               </div>
               {searchError ? <p className="mt-2 text-xs text-rose-600">{searchError}</p> : null}
             </div>
-            <div className="min-h-0 flex-1 overflow-auto p-3">
+            <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
             {nonReadyBundles.length > 0 ? (
               <div className="space-y-1 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
                 {nonReadyBundles.map((bundle) => (
@@ -1220,7 +1227,7 @@ export function BundleView(props?: BundleViewProps) {
                         type="button"
                         className={`group flex h-10 w-full items-center gap-2 rounded border px-2 text-left transition ${
                           selected
-                            ? 'border-cyan-500/50 bg-cyan-500/15 text-slate-950 shadow-[inset_2px_0_0_rgba(56,189,248,0.75)]'
+                            ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-[inset_3px_0_0_rgba(37,99,235,0.82)]'
                             : 'border-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-950'
                         }`}
                         onClick={() => {
@@ -1228,7 +1235,7 @@ export function BundleView(props?: BundleViewProps) {
                           handleNodeClick(targetId, null, { preserveSearch: true }).catch(() => undefined);
                         }}
                       >
-                        <span className="flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-300 bg-slate-50 text-[10px] font-semibold text-slate-600">
+                        <span className="flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-[10px] font-semibold text-slate-600 shadow-sm shadow-slate-100">
                           □
                         </span>
                         <div className="min-w-0 flex-1">
@@ -1268,16 +1275,16 @@ export function BundleView(props?: BundleViewProps) {
             </div>
           </div>
 
-          <div className="flex min-h-[82vh] flex-col bg-slate-50 text-sm text-slate-700">
+          <div className="flex min-h-[calc(100vh-104px)] flex-col bg-slate-50 text-sm text-slate-700">
             {viewerTabs.length > 0 ? (
-              <div className="flex min-h-12 items-end gap-1 overflow-x-auto border-b border-slate-200 bg-slate-100 px-4">
+              <div className="flex min-h-14 items-end gap-2 overflow-x-auto border-b border-slate-200 bg-slate-50 px-4 pt-3">
                 {viewerTabs.map((tab) => (
                   <div
                     key={tab.id}
-                    className={`flex h-11 max-w-64 shrink-0 items-center gap-2 border border-b-0 px-3 text-xs transition ${
+                    className={`flex h-10 max-w-64 shrink-0 items-center gap-2 rounded-t-md border px-3 text-xs shadow-sm transition ${
                       tab.id === activeViewerTabId
-                        ? 'border-cyan-500/50 bg-white text-slate-950 shadow-[inset_0_1px_0_rgba(56,189,248,0.22)]'
-                        : 'border-transparent bg-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                        ? 'border-sky-200 bg-white text-sky-700 shadow-[inset_0_-2px_0_rgba(37,99,235,0.85)]'
+                        : 'border-slate-200 bg-white/75 text-slate-600 hover:bg-white hover:text-slate-900'
                     }`}
                   >
                     <span className={tab.kind === 'temp' ? 'text-cyan-700' : tab.kind === 'search' ? 'text-brand-700' : 'text-slate-500'}>
@@ -1313,10 +1320,10 @@ export function BundleView(props?: BundleViewProps) {
               </div>
             ) : null}
             <div className="flex min-h-0 flex-1 flex-col p-4">
-              <div className="flex min-h-0 flex-1 flex-col gap-2">
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm shadow-slate-100">
                 {activeViewerTab?.kind === 'file' && selectedNode &&
                 canPreviewText(selectedNode) ? (
-                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 focus-within:border-cyan-500/50">
+                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 focus-within:border-sky-400">
                     <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
                     <SearchTokenEditor
                       className="min-w-[220px]"
@@ -1352,7 +1359,7 @@ export function BundleView(props?: BundleViewProps) {
                 ) : null}
 
                 {(activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp') && activeSearchResults.length > 0 ? (
-                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 focus-within:border-cyan-500/50">
+                  <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 focus-within:border-sky-400">
                     <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
                     <SearchTokenEditor
                       className="min-w-[220px]"
@@ -1404,7 +1411,7 @@ export function BundleView(props?: BundleViewProps) {
                           <button
                             key={`${hit.file_id}:${hit.offset ?? hit.line_number ?? index}:${index}`}
                             type="button"
-                            className="w-full space-y-1 rounded-lg border border-slate-200 bg-white p-3 text-left transition hover:border-slate-300"
+                            className="w-full space-y-1 rounded-md border border-slate-200 bg-white p-3 text-left transition hover:border-sky-200 hover:bg-sky-50/40"
                             onClick={() => {
                               const line = hit.line_number ?? hit.offset ?? null;
                               clearFileSearch();
@@ -1459,17 +1466,17 @@ export function BundleView(props?: BundleViewProps) {
                     <div className="flex min-h-0 flex-1 flex-col gap-2">
                       <div
                         ref={contentRef}
-                        className="min-h-[70vh] flex-1 overflow-auto rounded border border-slate-200 bg-white p-3 font-mono text-xs leading-5 text-slate-900"
+                        className="min-h-[70vh] flex-1 overflow-auto bg-white p-0 font-mono text-xs leading-5 text-slate-900"
                       >
-                        <div className="grid grid-cols-[auto_1fr] gap-3">
-                          <div className="select-none text-right text-slate-600">
+                        <div className="grid min-h-full grid-cols-[58px_1fr]">
+                          <div className="select-none border-r border-slate-100 bg-slate-50 px-3 py-3 text-right text-slate-500">
                             {activeSearchResults.map((hit, index) => (
                               <div key={`line:${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`}>
                                 {activeViewerTab.from + index + 1}
                               </div>
                             ))}
                           </div>
-                          <div>
+                          <div className="px-4 py-3">
                             {activeSearchResults.map((hit, index) => (
                               <div key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${hit.line_number ?? index}:${index}`} className="whitespace-pre">
                                 {highlightText(hit.snippet, resultFilterHighlightTerm)}
@@ -1478,7 +1485,7 @@ export function BundleView(props?: BundleViewProps) {
                           </div>
                         </div>
                       </div>
-                      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 pt-2 text-xs text-slate-500">
+                      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
                         <label className="flex items-center gap-2">
                           <span>每页</span>
                           <select
@@ -1532,15 +1539,15 @@ export function BundleView(props?: BundleViewProps) {
                   <div className="flex min-h-0 flex-1 flex-col gap-2">
                     <div
                       ref={contentRef}
-                      className="min-h-[70vh] flex-1 overflow-auto rounded border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-900"
+                      className="min-h-[70vh] flex-1 overflow-auto bg-white p-0 text-xs leading-5 text-slate-900"
                     >
-                      <div className="grid grid-cols-[auto_1fr] gap-3 font-mono">
-                        <div className="select-none text-right text-slate-500">
+                      <div className="grid min-h-full grid-cols-[58px_1fr] font-mono">
+                        <div className="select-none border-r border-slate-100 bg-slate-50 px-3 py-3 text-right text-slate-500">
                           {fileLines.lines.map((line) => (
                             <div key={line.line_number}>{line.line_number + 1}</div>
                           ))}
                         </div>
-                        <div>
+                        <div className="px-4 py-3">
                           {fileLines.lines.map((line) => (
                             <div key={line.line_number} className="whitespace-pre">
                               {line.content}
@@ -1549,7 +1556,7 @@ export function BundleView(props?: BundleViewProps) {
                         </div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 pt-2 text-xs text-slate-500">
+                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
                       <label className="flex items-center gap-2">
                         <span>每页</span>
                         <select

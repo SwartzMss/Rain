@@ -1,7 +1,7 @@
 .panel {
   border: 1px solid rgb(226 232 240);
-  border-radius: 0.75rem;
+  border-radius: 0.5rem;
   padding: 1rem;
-  background-color: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 12px 30px rgb(15 23 42 / 0.06);
+  background-color: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 14px 36px rgb(15 23 42 / 0.06);
 }
