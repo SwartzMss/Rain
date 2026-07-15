@@ -58,6 +58,7 @@ pub struct IndexingConfig {
     pub chunk_lines: usize,
     pub commit_lines: i64,
     pub line_offset_interval: i64,
+    pub max_events_per_bundle: usize,
 }
 
 impl Default for IndexingConfig {
@@ -67,6 +68,7 @@ impl Default for IndexingConfig {
             chunk_lines: 200,
             commit_lines: 5000,
             line_offset_interval: 1000,
+            max_events_per_bundle: 250_000,
         }
     }
 }
@@ -216,6 +218,10 @@ impl AppLimits {
                     "RAIN_INDEXING_LINE_OFFSET_INTERVAL",
                     defaults.indexing.line_offset_interval,
                 )?,
+                max_events_per_bundle: env_value(
+                    "RAIN_INDEXING_MAX_EVENTS_PER_BUNDLE",
+                    defaults.indexing.max_events_per_bundle,
+                )?,
             },
             api: ApiConfig {
                 file_preview_size: env_size(
@@ -291,6 +297,10 @@ impl AppLimits {
         positive!(
             self.indexing.line_offset_interval,
             "RAIN_INDEXING_LINE_OFFSET_INTERVAL"
+        );
+        positive!(
+            self.indexing.max_events_per_bundle,
+            "RAIN_INDEXING_MAX_EVENTS_PER_BUNDLE"
         );
         positive!(self.api.file_preview_size, "RAIN_API_FILE_PREVIEW_SIZE");
         positive!(
@@ -450,6 +460,7 @@ mod tests {
         assert_eq!(limits.archive.max_extracted_size, 500 * 1024 * 1024);
         assert_eq!(limits.archive.max_entry_size, 100 * 1024 * 1024);
         assert_eq!(limits.indexing.max_line_size, 1024 * 1024);
+        assert_eq!(limits.indexing.max_events_per_bundle, 250_000);
         assert_eq!(limits.api.file_preview_size, 64 * 1024);
     }
 
@@ -502,5 +513,35 @@ mod tests {
             None => unsafe { std::env::remove_var(name) },
         }
         assert_eq!(limits.api.file_preview_size, 4 * 1024_u64.pow(3));
+    }
+
+    #[test]
+    fn event_limit_environment_value_overrides_default() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let name = "RAIN_INDEXING_MAX_EVENTS_PER_BUNDLE";
+        let previous = std::env::var_os(name);
+        unsafe { std::env::set_var(name, "12345") };
+
+        let limits = AppLimits::from_env().unwrap();
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+        assert_eq!(limits.indexing.max_events_per_bundle, 12_345);
+    }
+
+    #[test]
+    fn rejects_zero_event_limit() {
+        let mut limits = AppLimits::default();
+        limits.indexing.max_events_per_bundle = 0;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_INDEXING_MAX_EVENTS_PER_BUNDLE")
+        );
     }
 }
