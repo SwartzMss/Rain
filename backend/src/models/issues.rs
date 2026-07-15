@@ -26,6 +26,7 @@ pub struct UploadSummary {
     pub name: String,
     pub status: UploadStatusWrapper,
     pub stage: UploadStage,
+    pub failure_reason: Option<String>,
     pub size_bytes: Option<u64>,
 }
 

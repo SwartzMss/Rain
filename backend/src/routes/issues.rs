@@ -118,7 +118,7 @@ pub async fn get_issue_bundles(
             .ok_or_else(|| AppError::NotFound(format!("issue {issue_code}")))?;
 
     let rows = sqlx::query_as::<_, BundleRow>(
-        "SELECT hash, name, status, process_stage, size_bytes FROM bundles WHERE issue_code = ? ORDER BY created_at DESC",
+        "SELECT hash, name, status, process_stage, failure_reason, size_bytes FROM bundles WHERE issue_code = ? ORDER BY created_at DESC",
     )
     .bind(&issue.code)
     .fetch_all(&state.pool)
@@ -136,6 +136,7 @@ pub async fn get_issue_bundles(
                     upload_status: UploadStatus::from_db_value(&bundle.status),
                 },
                 stage: UploadStage::from_db_value(&bundle.process_stage),
+                failure_reason: bundle.failure_reason,
                 size_bytes: bundle.size_bytes.map(|size| size.max(0) as u64),
             })
             .collect(),
@@ -179,6 +180,7 @@ struct BundleRow {
     name: String,
     status: String,
     process_stage: String,
+    failure_reason: Option<String>,
     size_bytes: Option<i64>,
 }
 

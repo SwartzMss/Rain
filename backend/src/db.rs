@@ -108,7 +108,13 @@ pub async fn cleanup_expired_bundles(
 
 pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
     let result = sqlx::query(
-        "UPDATE bundles SET status = 'FAILED', process_stage = 'FAILED' WHERE status = 'PROCESSING'",
+        r#"
+        UPDATE bundles
+        SET status = 'FAILED',
+            process_stage = 'FAILED',
+            failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
+        WHERE status = 'PROCESSING'
+        "#,
     )
     .execute(pool)
     .await
@@ -163,6 +169,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             name TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'PENDING',
             process_stage TEXT NOT NULL DEFAULT 'PENDING',
+            failure_reason TEXT,
             size_bytes INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
@@ -266,6 +273,19 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
 
     for statement in statements {
         sqlx::query(statement)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+
+    let has_failure_reason: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bundles') WHERE name = 'failure_reason')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if !has_failure_reason {
+        sqlx::query("ALTER TABLE bundles ADD COLUMN failure_reason TEXT")
             .execute(pool)
             .await
             .map_err(AppError::Database)?;

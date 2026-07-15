@@ -21,6 +21,13 @@ async fn upload_search_tree_and_delete_issue() {
     db::prepare_schema(&pool, true)
         .await
         .expect("prepare schema");
+    let failure_reason_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('bundles') WHERE name = 'failure_reason'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect bundles schema");
+    assert_eq!(failure_reason_columns, 1);
     insert_issues(
         &pool,
         &[
@@ -99,6 +106,7 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(completed_task["stage"], "READY");
+    assert!(completed_task["failure_reason"].is_null());
 
     let filename_search: Value = test::call_and_read_body_json(
         &app,
@@ -632,6 +640,18 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(failed_task["status"], "FAILED");
+    assert!(failed_task["failure_reason"].is_string());
+    let failed_issue: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/FAILEDCASE")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        failed_issue["log_bundles"][0]["failure_reason"],
+        failed_task["failure_reason"]
+    );
     let failed_tree = test::call_service(
         &app,
         test::TestRequest::get()

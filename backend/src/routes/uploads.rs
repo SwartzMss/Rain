@@ -265,7 +265,14 @@ pub async fn upload_logs(
                     error = %error,
                     "failed to acquire upload processing permit"
                 );
-                let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED", "FAILED").await;
+                let _ = update_bundle_status(
+                    &pool,
+                    &task_bundle_id,
+                    "FAILED",
+                    "FAILED",
+                    Some("无法启动上传处理任务，请删除后重试"),
+                )
+                .await;
                 let _ = fs::remove_dir_all(&temp_dir).await;
                 return;
             }
@@ -329,7 +336,14 @@ pub async fn upload_logs(
                 &task_bundle_hash,
             )
             .await;
-            let _ = update_bundle_status(&pool, &task_bundle_id, "FAILED", "FAILED").await;
+            let _ = update_bundle_status(
+                &pool,
+                &task_bundle_id,
+                "FAILED",
+                "FAILED",
+                Some("上传处理失败，请删除后重试"),
+            )
+            .await;
         }
 
         let _ = fs::remove_dir_all(&temp_dir).await;
@@ -367,7 +381,7 @@ pub async fn get_upload_task(
     let task_id = path.into_inner();
     let row = sqlx::query_as::<_, UploadTaskRow>(
         r#"
-        SELECT issue_code, hash, status, process_stage, size_bytes
+        SELECT issue_code, hash, status, process_stage, failure_reason, size_bytes
         FROM bundles
         WHERE hash = ?
         LIMIT 1
@@ -392,6 +406,7 @@ pub async fn get_upload_task(
         bundle_hash: row.hash,
         status,
         stage: UploadStage::from_db_value(&row.process_stage),
+        failure_reason: row.failure_reason,
         progress_percent,
         total_bytes: row.size_bytes.unwrap_or(0).max(0) as u64,
     }))
@@ -403,6 +418,7 @@ struct UploadTaskRow {
     hash: String,
     status: String,
     process_stage: String,
+    failure_reason: Option<String>,
     size_bytes: Option<i64>,
 }
 
@@ -413,6 +429,7 @@ struct UploadTaskResponse {
     bundle_hash: String,
     status: UploadStatus,
     stage: UploadStage,
+    failure_reason: Option<String>,
     progress_percent: u8,
     total_bytes: u64,
 }
@@ -486,14 +503,18 @@ async fn update_bundle_status(
     bundle_id: &str,
     status: &str,
     stage: &str,
+    failure_reason: Option<&str>,
 ) -> Result<(), AppError> {
-    sqlx::query("UPDATE bundles SET status = ?, process_stage = ? WHERE id = ?")
-        .bind(status)
-        .bind(stage)
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
+    sqlx::query(
+        "UPDATE bundles SET status = ?, process_stage = ?, failure_reason = ? WHERE id = ?",
+    )
+    .bind(status)
+    .bind(stage)
+    .bind(failure_reason)
+    .bind(bundle_id)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
     Ok(())
 }
 
@@ -520,7 +541,14 @@ async fn finalize_bundle_ready_with_retry(
         }
     }
 
-    let _ = update_bundle_status(pool, bundle_id, "FAILED", "FAILED").await;
+    let _ = update_bundle_status(
+        pool,
+        bundle_id,
+        "FAILED",
+        "FAILED",
+        Some("上传处理失败，请删除后重试"),
+    )
+    .await;
     Err(last_error.unwrap_or_else(|| AppError::Database(sqlx::Error::RowNotFound)))
 }
 
@@ -573,7 +601,9 @@ async fn finalize_bundle_ready(
             .await
             .map_err(AppError::Database)?;
     }
-    sqlx::query("UPDATE bundles SET status = 'READY', process_stage = 'READY' WHERE id = ?")
+    sqlx::query(
+        "UPDATE bundles SET status = 'READY', process_stage = 'READY', failure_reason = NULL WHERE id = ?",
+    )
         .bind(bundle_id)
         .execute(&mut *tx)
         .await
