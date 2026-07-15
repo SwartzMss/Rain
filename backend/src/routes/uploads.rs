@@ -13,8 +13,9 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    db::{CLEANUP_BATCH_SIZE, cleanup_bundle_content_batched},
     error::AppError,
-    ingest::{ArchiveBudget, ProcessFileOptions, process_uploaded_file},
+    ingest::{ArchiveBudget, EventBudget, ProcessFileOptions, process_uploaded_file},
     models::issues::{UploadStage, UploadStatus},
 };
 
@@ -282,6 +283,7 @@ pub async fn upload_logs(
 
         let process_result = async {
             let archive_budget = ArchiveBudget::new(archive_config);
+            let event_budget = EventBudget::new(indexing_config.max_events_per_bundle);
             for uploaded in &files {
                 process_uploaded_file(ProcessFileOptions {
                     pool: &pool,
@@ -295,6 +297,7 @@ pub async fn upload_logs(
                     source_path: &uploaded.temp_path,
                     size_bytes: uploaded.size_bytes,
                     archive_budget: archive_budget.clone(),
+                    event_budget: event_budget.clone(),
                     indexing: &indexing_config,
                 })
                 .await?;
@@ -680,42 +683,7 @@ async fn cleanup_failed_bundle_database_artifacts(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-
-    sqlx::query(
-        "DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)",
-    )
-    .bind(bundle_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-
-    sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
-        .bind(bundle_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-    sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
-        .bind(bundle_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-    sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
-        .bind(bundle_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-    sqlx::query("DELETE FROM files WHERE bundle_id = ?")
-        .bind(bundle_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-    tx.commit().await.map_err(AppError::Database)?;
-
+    cleanup_bundle_content_batched(pool, bundle_id, CLEANUP_BATCH_SIZE).await?;
     Ok(())
 }
 

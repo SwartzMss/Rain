@@ -7,6 +7,41 @@ use sqlx::{
 
 use crate::error::AppError;
 
+pub const CLEANUP_BATCH_SIZE: u64 = 10_000;
+const LARGE_CLEANUP_CHECKPOINT_ROWS: u64 = 10_000;
+
+#[derive(Debug, Clone, Copy)]
+pub struct WalCheckpointStats {
+    pub busy: i64,
+    pub log_pages: i64,
+    pub checkpointed_pages: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CleanupPhaseStats {
+    pub rows: u64,
+    pub batches: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BundleCleanupStats {
+    pub events: CleanupPhaseStats,
+    pub line_offsets: CleanupPhaseStats,
+    pub fts_segments: CleanupPhaseStats,
+    pub segments: CleanupPhaseStats,
+    pub files: CleanupPhaseStats,
+}
+
+impl BundleCleanupStats {
+    pub fn total_rows(self) -> u64 {
+        self.events.rows
+            + self.line_offsets.rows
+            + self.fts_segments.rows
+            + self.segments.rows
+            + self.files.rows
+    }
+}
+
 pub fn init_pool(database_url: &str) -> Result<SqlitePool, AppError> {
     ensure_sqlite_parent(database_url)?;
 
@@ -31,6 +66,130 @@ pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppErr
     Ok(())
 }
 
+pub async fn checkpoint_wal(pool: &SqlitePool) -> Result<WalCheckpointStats, AppError> {
+    let (busy, log_pages, checkpointed_pages): (i64, i64, i64) =
+        sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+            .fetch_one(pool)
+            .await
+            .map_err(AppError::Database)?;
+    Ok(WalCheckpointStats {
+        busy,
+        log_pages,
+        checkpointed_pages,
+    })
+}
+
+pub async fn cleanup_bundle_content_batched(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    batch_size: u64,
+) -> Result<BundleCleanupStats, AppError> {
+    if batch_size == 0 {
+        return Err(AppError::Config(
+            "cleanup batch size must be positive".into(),
+        ));
+    }
+
+    let stats = BundleCleanupStats {
+        events: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "log_events",
+            "DELETE FROM log_events WHERE rowid IN (SELECT rowid FROM log_events WHERE bundle_id = ? LIMIT ?)",
+        )
+        .await?,
+        line_offsets: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "log_line_offsets",
+            "DELETE FROM log_line_offsets WHERE rowid IN (SELECT rowid FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?) LIMIT ?)",
+        )
+        .await?,
+        fts_segments: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "log_segments_fts",
+            "DELETE FROM log_segments_fts WHERE rowid IN (SELECT rowid FROM log_segments_fts WHERE bundle_id = ? LIMIT ?)",
+        )
+        .await?,
+        segments: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "log_segments",
+            "DELETE FROM log_segments WHERE rowid IN (SELECT rowid FROM log_segments WHERE bundle_id = ? LIMIT ?)",
+        )
+        .await?,
+        files: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "files",
+            "DELETE FROM files WHERE rowid IN (SELECT rowid FROM files WHERE bundle_id = ? LIMIT ?)",
+        )
+        .await?,
+    };
+
+    if stats.total_rows() >= LARGE_CLEANUP_CHECKPOINT_ROWS {
+        let started = std::time::Instant::now();
+        match checkpoint_wal(pool).await {
+            Ok(checkpoint) => tracing::info!(
+                bundle_id,
+                busy = checkpoint.busy,
+                log_pages = checkpoint.log_pages,
+                checkpointed_pages = checkpoint.checkpointed_pages,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "large bundle cleanup WAL checkpoint completed"
+            ),
+            Err(error) => tracing::warn!(
+                bundle_id,
+                error = %error,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "large bundle cleanup WAL checkpoint failed"
+            ),
+        }
+    }
+
+    Ok(stats)
+}
+
+async fn delete_bundle_rows_in_batches(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    batch_size: u64,
+    phase: &'static str,
+    statement: &'static str,
+) -> Result<CleanupPhaseStats, AppError> {
+    let started = std::time::Instant::now();
+    let mut stats = CleanupPhaseStats::default();
+    loop {
+        let affected = sqlx::query(statement)
+            .bind(bundle_id)
+            .bind(batch_size as i64)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected();
+        if affected == 0 {
+            break;
+        }
+        stats.rows += affected;
+        stats.batches += 1;
+    }
+    tracing::info!(
+        bundle_id,
+        phase,
+        rows = stats.rows,
+        batches = stats.batches,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "bundle cleanup phase completed"
+    );
+    Ok(stats)
+}
+
 pub async fn cleanup_expired_bundles(
     pool: &SqlitePool,
     data_root: &Path,
@@ -53,48 +212,15 @@ pub async fn cleanup_expired_bundles(
         return Ok(0);
     }
 
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     for bundle in &bundles {
-        sqlx::query(
-            "DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)",
-        )
-        .bind(&bundle.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM files WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
+        cleanup_bundle_content_batched(pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
 
         sqlx::query("DELETE FROM bundles WHERE id = ?")
             .bind(&bundle.id)
-            .execute(&mut *tx)
+            .execute(pool)
             .await
             .map_err(AppError::Database)?;
     }
-
-    tx.commit().await.map_err(AppError::Database)?;
 
     for bundle in &bundles {
         let bundle_dir = data_root.join(&bundle.hash);
@@ -307,4 +433,22 @@ fn ensure_sqlite_parent(database_url: &str) -> Result<(), AppError> {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checkpoint_wal;
+
+    #[tokio::test]
+    async fn checkpoint_returns_sqlite_page_counts() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+
+        let stats = checkpoint_wal(&pool).await.expect("checkpoint wal");
+        assert!(stats.busy >= 0);
+        assert!(stats.log_pages >= -1);
+        assert!(stats.checkpointed_pages >= -1);
+    }
 }

@@ -6,7 +6,10 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::{fs, task};
@@ -96,6 +99,57 @@ impl ArchiveBudget {
     }
 }
 
+#[derive(Clone)]
+pub struct EventBudget {
+    inner: Arc<EventBudgetInner>,
+}
+
+struct EventBudgetInner {
+    used: AtomicUsize,
+    cap_reported: AtomicBool,
+    limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventReservation {
+    Reserved,
+    CapReached,
+    Exhausted,
+}
+
+impl EventBudget {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            inner: Arc::new(EventBudgetInner {
+                used: AtomicUsize::new(0),
+                cap_reported: AtomicBool::new(false),
+                limit,
+            }),
+        }
+    }
+
+    fn reserve(&self) -> EventReservation {
+        if self
+            .inner
+            .used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                (used < self.inner.limit).then_some(used + 1)
+            })
+            .is_ok()
+        {
+            EventReservation::Reserved
+        } else if !self.inner.cap_reported.swap(true, Ordering::Relaxed) {
+            EventReservation::CapReached
+        } else {
+            EventReservation::Exhausted
+        }
+    }
+
+    fn limit(&self) -> usize {
+        self.inner.limit
+    }
+}
+
 pub struct ProcessFileOptions<'a> {
     pub pool: &'a sqlx::SqlitePool,
     pub bundle_id: &'a str,
@@ -108,6 +162,7 @@ pub struct ProcessFileOptions<'a> {
     pub source_path: &'a Path,
     pub size_bytes: u64,
     pub archive_budget: ArchiveBudget,
+    pub event_budget: EventBudget,
     pub indexing: &'a IndexingConfig,
 }
 
@@ -124,6 +179,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         source_path,
         size_bytes,
         archive_budget,
+        event_budget,
         indexing,
     } = options;
 
@@ -162,7 +218,16 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
 
     if preview_kind == PreviewKind::Text {
         update_process_stage(pool, bundle_id, "INDEXING").await?;
-        ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes, indexing).await?;
+        ingest_text_file(
+            pool,
+            bundle_id,
+            file_id,
+            &disk_path,
+            size_bytes,
+            indexing,
+            &event_budget,
+        )
+        .await?;
     }
 
     if preview_kind == PreviewKind::Archive {
@@ -210,6 +275,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             extracted_dir,
             format!("{}/{extracted_dir_name}", bundle_hash),
             archive_budget,
+            event_budget,
             indexing,
             1,
         )
@@ -241,6 +307,7 @@ fn ingest_directory<'a>(
     dir_path: PathBuf,
     relative_root: String,
     archive_budget: ArchiveBudget,
+    event_budget: EventBudget,
     indexing: &'a IndexingConfig,
     archive_depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
@@ -305,6 +372,7 @@ fn ingest_directory<'a>(
                     disk_path,
                     format!("{relative_root}/{name}"),
                     archive_budget.clone(),
+                    event_budget.clone(),
                     indexing,
                     archive_depth,
                 )
@@ -322,6 +390,7 @@ fn ingest_directory<'a>(
                     &disk_path,
                     size as u64,
                     indexing,
+                    &event_budget,
                 )
                 .await?;
             }
@@ -382,6 +451,7 @@ fn ingest_directory<'a>(
                     extracted_dir,
                     extracted_db_path.trim_start_matches('/').to_string(),
                     archive_budget.clone(),
+                    event_budget.clone(),
                     indexing,
                     archive_depth + 1,
                 )
@@ -450,6 +520,7 @@ async fn ingest_text_file(
     disk_path: &Path,
     _size_bytes: u64,
     indexing: &IndexingConfig,
+    event_budget: &EventBudget,
 ) -> Result<(), AppError> {
     let file = fs::File::open(disk_path)
         .await
@@ -490,7 +561,7 @@ async fn ingest_text_file(
             chunk.push(line_number, cleaned);
 
             if chunk.len() >= indexing.chunk_lines {
-                flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+                flush_log_chunk(&mut tx, bundle_id, file_id, &chunk, event_budget).await?;
                 chunk_index += 1;
                 chunk = LogChunk::new(chunk_index, indexing.chunk_lines);
             }
@@ -499,7 +570,7 @@ async fn ingest_text_file(
         line_number += 1;
         if line_number % indexing.commit_lines == 0 {
             if !chunk.is_empty() {
-                flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+                flush_log_chunk(&mut tx, bundle_id, file_id, &chunk, event_budget).await?;
                 chunk_index += 1;
                 chunk = LogChunk::new(chunk_index, indexing.chunk_lines);
             }
@@ -509,7 +580,7 @@ async fn ingest_text_file(
     }
 
     if !chunk.is_empty() {
-        flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+        flush_log_chunk(&mut tx, bundle_id, file_id, &chunk, event_budget).await?;
     }
 
     sqlx::query("DELETE FROM log_line_offsets WHERE file_id = ?")
@@ -607,6 +678,7 @@ async fn flush_log_chunk(
     bundle_id: &str,
     file_id: i64,
     chunk: &LogChunk,
+    event_budget: &EventBudget,
 ) -> Result<(), AppError> {
     if chunk.is_empty() {
         return Ok(());
@@ -651,6 +723,18 @@ async fn flush_log_chunk(
 
     for line in &chunk.lines {
         if let Some(event) = parse_log_event(&line.content) {
+            match event_budget.reserve() {
+                EventReservation::Reserved => {}
+                EventReservation::CapReached => {
+                    tracing::warn!(
+                        bundle_id,
+                        max_events_per_bundle = event_budget.limit(),
+                        "structured event indexing limit reached; full-text indexing continues"
+                    );
+                    continue;
+                }
+                EventReservation::Exhausted => continue,
+            }
             sqlx::query(
                 r#"
                 INSERT INTO log_events (
@@ -1382,6 +1466,17 @@ mod tests {
         let path = Path::new("01/02/03/04/05/06/07/08/09/10/11/12/13/14/15/16/file.log");
 
         assert_eq!(archive_parent_depth(path), 16);
+    }
+
+    #[test]
+    fn event_budget_is_shared_across_clones_and_reports_cap_once() {
+        let budget = super::EventBudget::new(2);
+        let clone = budget.clone();
+
+        assert_eq!(budget.reserve(), super::EventReservation::Reserved);
+        assert_eq!(clone.reserve(), super::EventReservation::Reserved);
+        assert_eq!(budget.reserve(), super::EventReservation::CapReached);
+        assert_eq!(clone.reserve(), super::EventReservation::Exhausted);
     }
 
     #[test]

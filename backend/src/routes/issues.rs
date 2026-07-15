@@ -5,6 +5,7 @@ use tokio::fs;
 
 use crate::{
     AppState,
+    db::{CLEANUP_BATCH_SIZE, cleanup_bundle_content_batched},
     error::AppError,
     models::issues::{
         IssueBundlesResponse, IssueSummary, UploadStage, UploadStatus, UploadStatusWrapper,
@@ -200,8 +201,6 @@ pub async fn delete_issue_bundle(
 ) -> Result<HttpResponse, AppError> {
     let (issue_code, bundle_hash) = path.into_inner();
     let issue_code = normalize_issue_code(&issue_code)?;
-    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
-
     let bundle: BundleIdRow = sqlx::query_as(
         r#"
         SELECT id, hash, issue_code, status
@@ -212,51 +211,19 @@ pub async fn delete_issue_bundle(
     )
     .bind(&issue_code)
     .bind(&bundle_hash)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&state.pool)
     .await
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("bundle {bundle_hash}")))?;
     reject_processing_bundle(&bundle)?;
 
-    sqlx::query(
-        "DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)",
-    )
-    .bind(&bundle.id)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-
-    sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
-        .bind(&bundle.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-    sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
-        .bind(&bundle.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-    sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
-        .bind(&bundle.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-    sqlx::query("DELETE FROM files WHERE bundle_id = ?")
-        .bind(&bundle.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
+    cleanup_bundle_content_batched(&state.pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
 
     sqlx::query("DELETE FROM bundles WHERE id = ?")
         .bind(&bundle.id)
-        .execute(&mut *tx)
+        .execute(&state.pool)
         .await
         .map_err(AppError::Database)?;
-
-    tx.commit().await.map_err(AppError::Database)?;
 
     let bundle_dir = state.data_root.join(&bundle.hash);
     if fs::metadata(&bundle_dir).await.is_ok() {
@@ -272,8 +239,6 @@ pub async fn delete_issue(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
-    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
-
     let bundles: Vec<BundleIdRow> = sqlx::query_as(
         r#"
         SELECT id, hash, issue_code, status
@@ -282,67 +247,36 @@ pub async fn delete_issue(
         "#,
     )
     .bind(&issue_code)
-    .fetch_all(&mut *tx)
+    .fetch_all(&state.pool)
     .await
     .map_err(AppError::Database)?;
 
     if bundles.is_empty() {
         sqlx::query("DELETE FROM issues WHERE code = ?")
             .bind(&issue_code)
-            .execute(&mut *tx)
+            .execute(&state.pool)
             .await
             .map_err(AppError::Database)?;
-        tx.commit().await.map_err(AppError::Database)?;
         return Ok(HttpResponse::NoContent().finish());
     }
 
     reject_processing_bundles(&bundles)?;
 
     for bundle in &bundles {
-        sqlx::query("DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM files WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
+        cleanup_bundle_content_batched(&state.pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
 
         sqlx::query("DELETE FROM bundles WHERE id = ?")
             .bind(&bundle.id)
-            .execute(&mut *tx)
+            .execute(&state.pool)
             .await
             .map_err(AppError::Database)?;
     }
 
     sqlx::query("DELETE FROM issues WHERE code = ?")
         .bind(&issue_code)
-        .execute(&mut *tx)
+        .execute(&state.pool)
         .await
         .map_err(AppError::Database)?;
-
-    tx.commit().await.map_err(AppError::Database)?;
 
     for bundle in bundles {
         let dir = state.data_root.join(&bundle.hash);
