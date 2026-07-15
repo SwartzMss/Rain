@@ -118,7 +118,11 @@ pub fn parse_byte_size(value: &str) -> Result<u64, String> {
         "mib" => MIB,
         "gib" => GIB,
         "tib" => GIB * 1024,
-        _ => return Err(format!("unsupported byte size unit '{unit}'; use a binary unit such as KiB, MiB, or GiB")),
+        _ => {
+            return Err(format!(
+                "unsupported byte size unit '{unit}'; use a binary unit such as KiB, MiB, or GiB"
+            ));
+        }
     };
     number
         .checked_mul(multiplier)
@@ -131,9 +135,9 @@ where
     T::Err: std::fmt::Display,
 {
     match env::var(name) {
-        Ok(value) => value.parse().map_err(|error| {
-            AppError::Config(format!("invalid {name} value '{value}': {error}"))
-        }),
+        Ok(value) => value
+            .parse()
+            .map_err(|error| AppError::Config(format!("invalid {name} value '{value}': {error}"))),
         Err(env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(AppError::Config(format!("invalid {name}: {error}"))),
     }
@@ -154,32 +158,86 @@ impl AppLimits {
         let limits = Self {
             upload: UploadConfig {
                 max_files: env_value("RAIN_UPLOAD_MAX_FILES", defaults.upload.max_files)?,
-                max_file_size: env_size("RAIN_UPLOAD_MAX_FILE_SIZE", defaults.upload.max_file_size)?,
-                max_total_size: env_size("RAIN_UPLOAD_MAX_TOTAL_SIZE", defaults.upload.max_total_size)?,
-                max_text_field_size: env_size("RAIN_UPLOAD_MAX_TEXT_FIELD_SIZE", defaults.upload.max_text_field_size)?,
-                concurrent_processing_tasks: env_value("RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS", defaults.upload.concurrent_processing_tasks)?,
+                max_file_size: env_size(
+                    "RAIN_UPLOAD_MAX_FILE_SIZE",
+                    defaults.upload.max_file_size,
+                )?,
+                max_total_size: env_size(
+                    "RAIN_UPLOAD_MAX_TOTAL_SIZE",
+                    defaults.upload.max_total_size,
+                )?,
+                max_text_field_size: env_size(
+                    "RAIN_UPLOAD_MAX_TEXT_FIELD_SIZE",
+                    defaults.upload.max_text_field_size,
+                )?,
+                concurrent_processing_tasks: env_value(
+                    "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS",
+                    defaults.upload.concurrent_processing_tasks,
+                )?,
             },
             archive: ArchiveConfig {
-                max_extracted_size: env_size("RAIN_ARCHIVE_MAX_EXTRACTED_SIZE", defaults.archive.max_extracted_size)?,
-                max_entry_size: env_size("RAIN_ARCHIVE_MAX_ENTRY_SIZE", defaults.archive.max_entry_size)?,
+                max_extracted_size: env_size(
+                    "RAIN_ARCHIVE_MAX_EXTRACTED_SIZE",
+                    defaults.archive.max_extracted_size,
+                )?,
+                max_entry_size: env_size(
+                    "RAIN_ARCHIVE_MAX_ENTRY_SIZE",
+                    defaults.archive.max_entry_size,
+                )?,
                 max_entries: env_value("RAIN_ARCHIVE_MAX_ENTRIES", defaults.archive.max_entries)?,
-                max_path_depth: env_value("RAIN_ARCHIVE_MAX_PATH_DEPTH", defaults.archive.max_path_depth)?,
-                max_recursion_depth: env_value("RAIN_ARCHIVE_MAX_RECURSION_DEPTH", defaults.archive.max_recursion_depth)?,
-                max_output_path_chars: env_value("RAIN_ARCHIVE_MAX_OUTPUT_PATH_CHARS", defaults.archive.max_output_path_chars)?,
-                max_compression_ratio: env_value("RAIN_ARCHIVE_MAX_COMPRESSION_RATIO", defaults.archive.max_compression_ratio)?,
+                max_path_depth: env_value(
+                    "RAIN_ARCHIVE_MAX_PATH_DEPTH",
+                    defaults.archive.max_path_depth,
+                )?,
+                max_recursion_depth: env_value(
+                    "RAIN_ARCHIVE_MAX_RECURSION_DEPTH",
+                    defaults.archive.max_recursion_depth,
+                )?,
+                max_output_path_chars: env_value(
+                    "RAIN_ARCHIVE_MAX_OUTPUT_PATH_CHARS",
+                    defaults.archive.max_output_path_chars,
+                )?,
+                max_compression_ratio: env_value(
+                    "RAIN_ARCHIVE_MAX_COMPRESSION_RATIO",
+                    defaults.archive.max_compression_ratio,
+                )?,
             },
             indexing: IndexingConfig {
-                max_line_size: env_size("RAIN_INDEXING_MAX_LINE_SIZE", defaults.indexing.max_line_size)?,
+                max_line_size: env_size(
+                    "RAIN_INDEXING_MAX_LINE_SIZE",
+                    defaults.indexing.max_line_size,
+                )?,
                 chunk_lines: env_value("RAIN_INDEXING_CHUNK_LINES", defaults.indexing.chunk_lines)?,
-                commit_lines: env_value("RAIN_INDEXING_COMMIT_LINES", defaults.indexing.commit_lines)?,
-                line_offset_interval: env_value("RAIN_INDEXING_LINE_OFFSET_INTERVAL", defaults.indexing.line_offset_interval)?,
+                commit_lines: env_value(
+                    "RAIN_INDEXING_COMMIT_LINES",
+                    defaults.indexing.commit_lines,
+                )?,
+                line_offset_interval: env_value(
+                    "RAIN_INDEXING_LINE_OFFSET_INTERVAL",
+                    defaults.indexing.line_offset_interval,
+                )?,
             },
             api: ApiConfig {
-                file_preview_size: env_size("RAIN_API_FILE_PREVIEW_SIZE", defaults.api.file_preview_size)?,
-                default_line_page_size: env_value("RAIN_API_DEFAULT_LINE_PAGE_SIZE", defaults.api.default_line_page_size)?,
-                max_line_page_size: env_value("RAIN_API_MAX_LINE_PAGE_SIZE", defaults.api.max_line_page_size)?,
-                default_search_results: env_value("RAIN_API_DEFAULT_SEARCH_RESULTS", defaults.api.default_search_results)?,
-                max_search_results: env_value("RAIN_API_MAX_SEARCH_RESULTS", defaults.api.max_search_results)?,
+                file_preview_size: env_size(
+                    "RAIN_API_FILE_PREVIEW_SIZE",
+                    defaults.api.file_preview_size,
+                )?,
+                default_line_page_size: env_value(
+                    "RAIN_API_DEFAULT_LINE_PAGE_SIZE",
+                    defaults.api.default_line_page_size,
+                )?,
+                max_line_page_size: env_value(
+                    "RAIN_API_MAX_LINE_PAGE_SIZE",
+                    defaults.api.max_line_page_size,
+                )?,
+                default_search_results: env_value(
+                    "RAIN_API_DEFAULT_SEARCH_RESULTS",
+                    defaults.api.default_search_results,
+                )?,
+                max_search_results: env_value(
+                    "RAIN_API_MAX_SEARCH_RESULTS",
+                    defaults.api.max_search_results,
+                )?,
             },
         };
         limits.validate()?;
@@ -190,44 +248,89 @@ impl AppLimits {
         macro_rules! positive {
             ($value:expr, $name:literal) => {
                 if $value == 0 {
-                    return Err(AppError::Config(format!(concat!($name, " must be positive"))));
+                    return Err(AppError::Config(format!(concat!(
+                        $name,
+                        " must be positive"
+                    ))));
                 }
             };
         }
         positive!(self.upload.max_files, "RAIN_UPLOAD_MAX_FILES");
         positive!(self.upload.max_file_size, "RAIN_UPLOAD_MAX_FILE_SIZE");
         positive!(self.upload.max_total_size, "RAIN_UPLOAD_MAX_TOTAL_SIZE");
-        positive!(self.upload.max_text_field_size, "RAIN_UPLOAD_MAX_TEXT_FIELD_SIZE");
-        positive!(self.upload.concurrent_processing_tasks, "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS");
-        positive!(self.archive.max_extracted_size, "RAIN_ARCHIVE_MAX_EXTRACTED_SIZE");
+        positive!(
+            self.upload.max_text_field_size,
+            "RAIN_UPLOAD_MAX_TEXT_FIELD_SIZE"
+        );
+        positive!(
+            self.upload.concurrent_processing_tasks,
+            "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS"
+        );
+        positive!(
+            self.archive.max_extracted_size,
+            "RAIN_ARCHIVE_MAX_EXTRACTED_SIZE"
+        );
         positive!(self.archive.max_entry_size, "RAIN_ARCHIVE_MAX_ENTRY_SIZE");
         positive!(self.archive.max_entries, "RAIN_ARCHIVE_MAX_ENTRIES");
         positive!(self.archive.max_path_depth, "RAIN_ARCHIVE_MAX_PATH_DEPTH");
-        positive!(self.archive.max_recursion_depth, "RAIN_ARCHIVE_MAX_RECURSION_DEPTH");
-        positive!(self.archive.max_output_path_chars, "RAIN_ARCHIVE_MAX_OUTPUT_PATH_CHARS");
-        positive!(self.archive.max_compression_ratio, "RAIN_ARCHIVE_MAX_COMPRESSION_RATIO");
+        positive!(
+            self.archive.max_recursion_depth,
+            "RAIN_ARCHIVE_MAX_RECURSION_DEPTH"
+        );
+        positive!(
+            self.archive.max_output_path_chars,
+            "RAIN_ARCHIVE_MAX_OUTPUT_PATH_CHARS"
+        );
+        positive!(
+            self.archive.max_compression_ratio,
+            "RAIN_ARCHIVE_MAX_COMPRESSION_RATIO"
+        );
         positive!(self.indexing.max_line_size, "RAIN_INDEXING_MAX_LINE_SIZE");
         positive!(self.indexing.chunk_lines, "RAIN_INDEXING_CHUNK_LINES");
         positive!(self.indexing.commit_lines, "RAIN_INDEXING_COMMIT_LINES");
-        positive!(self.indexing.line_offset_interval, "RAIN_INDEXING_LINE_OFFSET_INTERVAL");
+        positive!(
+            self.indexing.line_offset_interval,
+            "RAIN_INDEXING_LINE_OFFSET_INTERVAL"
+        );
         positive!(self.api.file_preview_size, "RAIN_API_FILE_PREVIEW_SIZE");
-        positive!(self.api.default_line_page_size, "RAIN_API_DEFAULT_LINE_PAGE_SIZE");
+        positive!(
+            self.api.default_line_page_size,
+            "RAIN_API_DEFAULT_LINE_PAGE_SIZE"
+        );
         positive!(self.api.max_line_page_size, "RAIN_API_MAX_LINE_PAGE_SIZE");
-        positive!(self.api.default_search_results, "RAIN_API_DEFAULT_SEARCH_RESULTS");
+        positive!(
+            self.api.default_search_results,
+            "RAIN_API_DEFAULT_SEARCH_RESULTS"
+        );
         positive!(self.api.max_search_results, "RAIN_API_MAX_SEARCH_RESULTS");
         if self.archive.max_entry_size > self.archive.max_extracted_size {
-            return Err(AppError::Config("RAIN_ARCHIVE_MAX_ENTRY_SIZE must not exceed RAIN_ARCHIVE_MAX_EXTRACTED_SIZE".into()));
+            return Err(AppError::Config(
+                "RAIN_ARCHIVE_MAX_ENTRY_SIZE must not exceed RAIN_ARCHIVE_MAX_EXTRACTED_SIZE"
+                    .into(),
+            ));
         }
         if self.upload.max_file_size > self.upload.max_total_size {
-            return Err(AppError::Config("RAIN_UPLOAD_MAX_FILE_SIZE must not exceed RAIN_UPLOAD_MAX_TOTAL_SIZE".into()));
+            return Err(AppError::Config(
+                "RAIN_UPLOAD_MAX_FILE_SIZE must not exceed RAIN_UPLOAD_MAX_TOTAL_SIZE".into(),
+            ));
         }
         if self.api.default_line_page_size > self.api.max_line_page_size {
-            return Err(AppError::Config("RAIN_API_DEFAULT_LINE_PAGE_SIZE must not exceed RAIN_API_MAX_LINE_PAGE_SIZE".into()));
+            return Err(AppError::Config(
+                "RAIN_API_DEFAULT_LINE_PAGE_SIZE must not exceed RAIN_API_MAX_LINE_PAGE_SIZE"
+                    .into(),
+            ));
         }
         if self.api.default_search_results > self.api.max_search_results {
-            return Err(AppError::Config("RAIN_API_DEFAULT_SEARCH_RESULTS must not exceed RAIN_API_MAX_SEARCH_RESULTS".into()));
+            return Err(AppError::Config(
+                "RAIN_API_DEFAULT_SEARCH_RESULTS must not exceed RAIN_API_MAX_SEARCH_RESULTS"
+                    .into(),
+            ));
         }
-        usize::try_from(self.indexing.max_line_size).map_err(|_| AppError::Config("RAIN_INDEXING_MAX_LINE_SIZE cannot be represented on this platform".into()))?;
+        usize::try_from(self.indexing.max_line_size).map_err(|_| {
+            AppError::Config(
+                "RAIN_INDEXING_MAX_LINE_SIZE cannot be represented on this platform".into(),
+            )
+        })?;
         Ok(())
     }
 }
@@ -310,7 +413,7 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, sync::Mutex};
 
     use super::{AppLimits, dotenv_path_for_executable, parse_byte_size};
 
@@ -354,14 +457,50 @@ mod tests {
     fn validates_cross_field_limit_relationships() {
         let mut limits = AppLimits::default();
         limits.archive.max_entry_size = limits.archive.max_extracted_size + 1;
-        assert!(limits.validate().unwrap_err().to_string().contains("RAIN_ARCHIVE_MAX_ENTRY_SIZE"));
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_ARCHIVE_MAX_ENTRY_SIZE")
+        );
 
         let mut limits = AppLimits::default();
         limits.upload.max_file_size = limits.upload.max_total_size + 1;
-        assert!(limits.validate().unwrap_err().to_string().contains("RAIN_UPLOAD_MAX_FILE_SIZE"));
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_UPLOAD_MAX_FILE_SIZE")
+        );
 
         let mut limits = AppLimits::default();
         limits.api.default_line_page_size = limits.api.max_line_page_size + 1;
-        assert!(limits.validate().unwrap_err().to_string().contains("RAIN_API_DEFAULT_LINE_PAGE_SIZE"));
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_API_DEFAULT_LINE_PAGE_SIZE")
+        );
+    }
+
+    #[test]
+    fn environment_values_override_limit_defaults() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let name = "RAIN_API_FILE_PREVIEW_SIZE";
+        let previous = std::env::var_os(name);
+        // SAFETY: This test serializes mutation of this Rain-specific variable and restores it.
+        unsafe { std::env::set_var(name, "4 GiB") };
+
+        let limits = AppLimits::from_env().unwrap();
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+        assert_eq!(limits.api.file_preview_size, 4 * 1024_u64.pow(3));
     }
 }

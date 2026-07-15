@@ -18,13 +18,11 @@ use crate::{
     AppState,
     error::AppError,
     file_classification::{PreviewKind, effective_mime_type, preview_kind_from_metadata},
-    ingest::{MAX_LINE_BYTES, decode_log_line, read_line_bytes_limited},
+    ingest::{decode_log_line, read_line_bytes_limited},
     models::files::{FileNode, FileNodeResponse},
 };
 
 use super::helpers::{data_root, ensure_bundle_ready, load_bundle};
-
-const MAX_FILE_PREVIEW_BYTES: u64 = 64 * 1024;
 
 #[derive(Deserialize)]
 struct FilePath {
@@ -130,14 +128,14 @@ pub async fn get_file_content(
     let size_bytes = metadata.len();
     let file = File::open(&disk_path).await.map_err(AppError::Io)?;
     let mut buffer = Vec::new();
-    let mut limited = file.take(MAX_FILE_PREVIEW_BYTES);
+    let mut limited = file.take(state.limits.api.file_preview_size);
     limited
         .read_to_end(&mut buffer)
         .await
         .map_err(AppError::Io)?;
 
     let preview = String::from_utf8_lossy(&buffer).to_string();
-    let truncated = size_bytes > MAX_FILE_PREVIEW_BYTES;
+    let truncated = size_bytes > state.limits.api.file_preview_size;
 
     Ok(HttpResponse::Ok().json(json!({
         "path": record.path,
@@ -167,7 +165,10 @@ pub async fn get_file_lines(
     ensure_text_preview(&record)?;
 
     let start = query.start.unwrap_or(0).max(0);
-    let limit = query.limit.unwrap_or(1000).clamp(1, 3000);
+    let limit = query
+        .limit
+        .unwrap_or(state.limits.api.default_line_page_size)
+        .clamp(1, state.limits.api.max_line_page_size);
     let (base_line, byte_offset) = nearest_line_offset(&state.pool, record.id, start).await?;
     let disk_path = resolve_file_path(&record, &data_root(&state))?;
 
@@ -182,10 +183,17 @@ pub async fn get_file_lines(
     let mut buffer = Vec::new();
 
     while current_line < end_line {
-        let Some((_read, truncated)) =
-            read_line_bytes_limited(&mut reader, &mut buffer, MAX_LINE_BYTES)
-                .await
-                .map_err(AppError::Io)?
+        let Some((_read, truncated)) = read_line_bytes_limited(
+            &mut reader,
+            &mut buffer,
+            usize::try_from(state.limits.indexing.max_line_size).map_err(|_| {
+                AppError::Config(
+                    "RAIN_INDEXING_MAX_LINE_SIZE cannot be represented on this platform".into(),
+                )
+            })?,
+        )
+        .await
+        .map_err(AppError::Io)?
         else {
             break;
         };

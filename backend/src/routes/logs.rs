@@ -12,9 +12,6 @@ use super::issues::normalize_issue_code;
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
 
-const DEFAULT_LOG_RESULTS: i64 = 50;
-const MAX_LOG_RESULTS: i64 = 100;
-
 #[derive(Deserialize)]
 struct LogQuery {
     q: String,
@@ -62,8 +59,8 @@ pub async fn search_logs(
     let from = term.from.unwrap_or(0).max(0);
     let size = term
         .size
-        .unwrap_or(DEFAULT_LOG_RESULTS)
-        .clamp(1, MAX_LOG_RESULTS);
+        .unwrap_or(state.limits.api.default_search_results)
+        .clamp(1, state.limits.api.max_search_results);
 
     let total: i64 = sqlx::query_scalar(
         r#"
@@ -177,8 +174,15 @@ pub async fn search_issue_logs(
     }
 
     if matches!(term.mode, IssueSearchMode::Filename) {
-        return search_issue_files(&state.pool, &issue_code, search_term, term.from, term.size)
-            .await;
+        return search_issue_files(
+            &state.pool,
+            &state.limits.api,
+            &issue_code,
+            search_term,
+            term.from,
+            term.size,
+        )
+        .await;
     }
 
     let fts_query = build_fts_query(search_term);
@@ -193,8 +197,8 @@ pub async fn search_issue_logs(
     let from = term.from.unwrap_or(0).max(0);
     let size = term
         .size
-        .unwrap_or(DEFAULT_LOG_RESULTS)
-        .clamp(1, MAX_LOG_RESULTS);
+        .unwrap_or(state.limits.api.default_search_results)
+        .clamp(1, state.limits.api.max_search_results);
 
     let total: i64 = sqlx::query_scalar(
         r#"
@@ -270,6 +274,7 @@ pub async fn search_issue_logs(
 
 async fn search_issue_files(
     pool: &sqlx::SqlitePool,
+    api: &crate::config::ApiConfig,
     issue_code: &str,
     search_term: &str,
     from: Option<i64>,
@@ -277,8 +282,8 @@ async fn search_issue_files(
 ) -> Result<HttpResponse, AppError> {
     let from = from.unwrap_or(0).max(0);
     let size = size
-        .unwrap_or(DEFAULT_LOG_RESULTS)
-        .clamp(1, MAX_LOG_RESULTS);
+        .unwrap_or(api.default_search_results)
+        .clamp(1, api.max_search_results);
     let pattern = format!("%{}%", escape_like_pattern(search_term));
 
     let total: i64 = sqlx::query_scalar(

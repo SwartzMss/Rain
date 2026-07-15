@@ -23,9 +23,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(pool: SqlitePool, data_root: PathBuf, limits: AppLimits) -> Self {
-        let processing_permits = Arc::new(Semaphore::new(
-            limits.upload.concurrent_processing_tasks,
-        ));
+        let processing_permits =
+            Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
         Self {
             pool,
             data_root,

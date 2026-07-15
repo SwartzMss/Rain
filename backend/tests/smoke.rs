@@ -1358,7 +1358,14 @@ async fn wait_for_issue_status(pool: &sqlx::SqlitePool, issue_code: &str, status
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("issue {issue_code} did not become {status}");
+    let states: Vec<(String, String)> = sqlx::query_as(
+        "SELECT status, process_stage FROM bundles WHERE issue_code = ?",
+    )
+    .bind(issue_code)
+    .fetch_all(pool)
+    .await
+    .expect("inspect timed out issue status");
+    panic!("issue {issue_code} did not become {status}; observed {states:?}");
 }
 
 fn multipart_body(boundary: &str, issue_code: &str, filename: &str, content: &str) -> Vec<u8> {
