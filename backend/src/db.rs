@@ -7,6 +7,33 @@ use sqlx::{
 
 use crate::error::AppError;
 
+pub const CLEANUP_BATCH_SIZE: u64 = 10_000;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CleanupPhaseStats {
+    pub rows: u64,
+    pub batches: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BundleCleanupStats {
+    pub events: CleanupPhaseStats,
+    pub line_offsets: CleanupPhaseStats,
+    pub fts_segments: CleanupPhaseStats,
+    pub segments: CleanupPhaseStats,
+    pub files: CleanupPhaseStats,
+}
+
+impl BundleCleanupStats {
+    pub fn total_rows(self) -> u64 {
+        self.events.rows
+            + self.line_offsets.rows
+            + self.fts_segments.rows
+            + self.segments.rows
+            + self.files.rows
+    }
+}
+
 pub fn init_pool(database_url: &str) -> Result<SqlitePool, AppError> {
     ensure_sqlite_parent(database_url)?;
 
@@ -31,6 +58,95 @@ pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppErr
     Ok(())
 }
 
+pub async fn cleanup_bundle_content_batched(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    batch_size: u64,
+) -> Result<BundleCleanupStats, AppError> {
+    if batch_size == 0 {
+        return Err(AppError::Config(
+            "cleanup batch size must be positive".into(),
+        ));
+    }
+
+    Ok(BundleCleanupStats {
+        events: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "log_events",
+            "DELETE FROM log_events WHERE rowid IN (SELECT rowid FROM log_events WHERE bundle_id = ? LIMIT ?)",
+        )
+        .await?,
+        line_offsets: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "log_line_offsets",
+            "DELETE FROM log_line_offsets WHERE rowid IN (SELECT rowid FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?) LIMIT ?)",
+        )
+        .await?,
+        fts_segments: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "log_segments_fts",
+            "DELETE FROM log_segments_fts WHERE rowid IN (SELECT rowid FROM log_segments_fts WHERE bundle_id = ? LIMIT ?)",
+        )
+        .await?,
+        segments: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "log_segments",
+            "DELETE FROM log_segments WHERE rowid IN (SELECT rowid FROM log_segments WHERE bundle_id = ? LIMIT ?)",
+        )
+        .await?,
+        files: delete_bundle_rows_in_batches(
+            pool,
+            bundle_id,
+            batch_size,
+            "files",
+            "DELETE FROM files WHERE rowid IN (SELECT rowid FROM files WHERE bundle_id = ? LIMIT ?)",
+        )
+        .await?,
+    })
+}
+
+async fn delete_bundle_rows_in_batches(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    batch_size: u64,
+    phase: &'static str,
+    statement: &'static str,
+) -> Result<CleanupPhaseStats, AppError> {
+    let started = std::time::Instant::now();
+    let mut stats = CleanupPhaseStats::default();
+    loop {
+        let affected = sqlx::query(statement)
+            .bind(bundle_id)
+            .bind(batch_size as i64)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected();
+        if affected == 0 {
+            break;
+        }
+        stats.rows += affected;
+        stats.batches += 1;
+    }
+    tracing::info!(
+        bundle_id,
+        phase,
+        rows = stats.rows,
+        batches = stats.batches,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "bundle cleanup phase completed"
+    );
+    Ok(stats)
+}
+
 pub async fn cleanup_expired_bundles(
     pool: &SqlitePool,
     data_root: &Path,
@@ -53,48 +169,15 @@ pub async fn cleanup_expired_bundles(
         return Ok(0);
     }
 
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     for bundle in &bundles {
-        sqlx::query(
-            "DELETE FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?)",
-        )
-        .bind(&bundle.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_events WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_segments_fts WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM log_segments WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-
-        sqlx::query("DELETE FROM files WHERE bundle_id = ?")
-            .bind(&bundle.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
+        cleanup_bundle_content_batched(pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
 
         sqlx::query("DELETE FROM bundles WHERE id = ?")
             .bind(&bundle.id)
-            .execute(&mut *tx)
+            .execute(pool)
             .await
             .map_err(AppError::Database)?;
     }
-
-    tx.commit().await.map_err(AppError::Database)?;
 
     for bundle in &bundles {
         let bundle_dir = data_root.join(&bundle.hash);

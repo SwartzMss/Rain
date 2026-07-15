@@ -1230,6 +1230,96 @@ async fn issue_creation_and_upload_require_existing_issue() {
 }
 
 #[actix_web::test]
+async fn bundle_content_cleanup_runs_in_batches_and_preserves_bundle() {
+    let test_dir = TestDir::new("rain-batched-cleanup");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues (code, name) VALUES ('CLEAN', 'CLEAN')")
+        .execute(&pool)
+        .await
+        .expect("insert issue");
+    sqlx::query(
+        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('cleanup', 'CLEAN', 'cleanup-hash', 'cleanup', 'FAILED')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert bundle");
+
+    for index in 0..3i64 {
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('cleanup', ?, ?, 0) RETURNING id",
+        )
+        .bind(format!("{index}.log"))
+        .bind(format!("/{index}.log"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert file");
+        sqlx::query(
+            "INSERT INTO log_line_offsets (file_id, line_number, byte_offset) VALUES (?, 0, 0)",
+        )
+        .bind(file_id)
+        .execute(&pool)
+        .await
+        .expect("insert offset");
+        let segment_id: i64 = sqlx::query_scalar(
+            "INSERT INTO log_segments (bundle_id, file_id, content) VALUES ('cleanup', ?, ?) RETURNING id",
+        )
+        .bind(file_id)
+        .bind(format!("ERROR cleanup {index}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert segment");
+        sqlx::query(
+            "INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id) VALUES (?, ?, 'cleanup', ?)",
+        )
+        .bind(format!("ERROR cleanup {index}"))
+        .bind(segment_id)
+        .bind(file_id)
+        .execute(&pool)
+        .await
+        .expect("insert fts segment");
+        sqlx::query(
+            "INSERT INTO log_events (bundle_id, file_id, segment_id, message, raw, parser_name, parser_confidence) VALUES ('cleanup', ?, ?, 'cleanup', 'cleanup', 'test', 1.0)",
+        )
+        .bind(file_id)
+        .bind(segment_id)
+        .execute(&pool)
+        .await
+        .expect("insert event");
+    }
+
+    let stats = db::cleanup_bundle_content_batched(&pool, "cleanup", 2)
+        .await
+        .expect("cleanup bundle content");
+    assert_eq!(stats.events.rows, 3);
+    assert_eq!(stats.events.batches, 2);
+    assert_eq!(stats.files.rows, 3);
+
+    for table in [
+        "log_events",
+        "log_line_offsets",
+        "log_segments_fts",
+        "log_segments",
+        "files",
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&pool)
+            .await
+            .expect("count cleaned rows");
+        assert_eq!(count, 0, "{table} should be empty");
+    }
+    let bundle_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bundles WHERE id = 'cleanup')")
+            .fetch_one(&pool)
+            .await
+            .expect("check retained bundle");
+    assert!(bundle_exists);
+}
+
+#[actix_web::test]
 async fn startup_recovery_marks_processing_bundle_failed_with_reason() {
     let test_dir = TestDir::new("rain-stale-recovery");
     let db_url = sqlite_url(&test_dir.path.join("rain.db"));
