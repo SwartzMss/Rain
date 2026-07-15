@@ -86,6 +86,7 @@
 - Modify: `README.md`
 
 - [ ] Add every `RAIN_UPLOAD_*`, `RAIN_ARCHIVE_*`, `RAIN_INDEXING_*`, and `RAIN_API_*` variable to `.env.example` using the preserved defaults and human-readable binary sizes.
+- [ ] Put a concise Chinese comment immediately above every `.env.example` setting. State its purpose and, where relevant, accepted binary units, whether zero disables it, or the default/max and entry/bundle relationship.
 - [ ] Document `.env` discovery, process-environment precedence, accepted byte syntax, validation relationships, and a table of every configurable limit/default in README.
 - [ ] Update existing fixed-limit prose to point to defaults rather than imply values are immutable.
 - [ ] Run `rg -n "512 MB|2 GB|500 MB|100 MB|10000|3000|1 MB|64 KB" README.md backend/.env.example` and inspect every match for consistency.
