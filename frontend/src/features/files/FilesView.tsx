@@ -7,6 +7,7 @@ import { BinaryFileInfo } from './BinaryFileInfo';
 import { SearchTokenEditor } from './SearchTokenEditor';
 import { canPreviewText, isArchiveNode, isBinaryNode } from './filePresentation';
 import { shouldShowFilenameClear } from './filenameSearch';
+import { uploadFailureMessage } from './uploadFailure';
 import {
   canFinalizeSearch,
   combineSearchExpressions,
@@ -65,7 +66,10 @@ const bundleStatusLabel = (bundle: UploadSummary) => {
     return '正在建立索引';
   }
   if (bundle.status.upload_status === 'FAILED') {
-    return '处理失败';
+    return uploadFailureMessage({
+      status: bundle.status.upload_status,
+      failure_reason: bundle.failure_reason
+    }) ?? '处理失败';
   }
   return bundle.status.upload_status;
 };
