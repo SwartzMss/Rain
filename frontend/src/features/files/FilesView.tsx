@@ -738,6 +738,7 @@ export function BundleView(props?: BundleViewProps) {
         size: LINE_PAGE_SIZE_OPTIONS[0]
       });
       const hits = response.lines.map((line) => ({
+        bundle_hash: selectedBundleId,
         file_id: selectedNode.rawId,
         path: selectedNode.path,
         snippet: line.content,

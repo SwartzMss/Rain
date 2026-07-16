@@ -146,6 +146,10 @@ try {
   assert.match(filesView, /getSearchHitSource\(hit\)/);
   assert.match(filesView, /handleNodeClick\(source\.nodeId, source\.line, \{ preserveSearch: true \}\)/);
   assert.match(filesView, /navigator\.clipboard\.writeText\(hit\.path\)/);
+  assert.match(
+    filesView,
+    /const hits = response\.lines\.map\(\(line\) => \(\{\s+bundle_hash: selectedBundleId,/
+  );
   assert.match(filesView, /onOpenSource=\{openSearchHitSource\}/);
   assert.match(filesView, /onCopySourcePath=\{copySearchHitPath\}/);
   assert.match(filesView, /scrollIntoView\(\{ block: 'center' \}\)/);
