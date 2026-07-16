@@ -324,22 +324,44 @@ fn validated_storage_path(
     let candidate = storage_path_candidate(record, data_root);
 
     let canonical_data_root = std::fs::canonicalize(data_root).map_err(AppError::Io)?;
-    let canonical_candidate = std::fs::canonicalize(&candidate).map_err(AppError::Io)?;
+    let (resolved_path, canonical_boundary) = match std::fs::canonicalize(&candidate) {
+        Ok(path) => (path.clone(), path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            candidate.clone(),
+            canonicalize_existing_ancestor(&candidate)?,
+        ),
+        Err(error) => return Err(AppError::Io(error)),
+    };
 
-    if !canonical_candidate.starts_with(&canonical_data_root) {
+    if !canonical_boundary.starts_with(&canonical_data_root) {
         return Err(AppError::BadRequest(
             "file path is outside data root".into(),
         ));
     }
 
-    Ok(canonical_candidate)
+    Ok(resolved_path)
+}
+
+fn canonicalize_existing_ancestor(path: &std::path::Path) -> Result<PathBuf, AppError> {
+    let mut ancestor = path.to_path_buf();
+    loop {
+        match std::fs::canonicalize(&ancestor) {
+            Ok(path) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !ancestor.pop() {
+                    return Err(AppError::Io(error));
+                }
+            }
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{FileRow, storage_path_candidate};
+    use super::{FileRow, storage_path_candidate, validated_storage_path};
 
     fn row(path: &str, meta: Option<&str>) -> FileRow {
         FileRow {
@@ -376,5 +398,42 @@ mod tests {
             storage_path_candidate(&record, Path::new("/data")),
             PathBuf::from("/legacy/bundle/app.log")
         );
+    }
+
+    #[test]
+    fn missing_file_path_can_still_be_selected_for_database_cleanup() {
+        let root = std::env::temp_dir().join(format!(
+            "rain-missing-storage-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join("bundle")).unwrap();
+        let record = row("/bundle/missing.log", None);
+
+        let selected = validated_storage_path(&record, &root).unwrap();
+
+        assert_eq!(selected, root.join("bundle/missing.log"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn existing_legacy_path_outside_data_root_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "rain-storage-root-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "rain-storage-outside-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, "outside").unwrap();
+        let meta = serde_json::json!({ "storage_path": outside }).to_string();
+        let record = row("/bundle/app.log", Some(&meta));
+
+        let error = validated_storage_path(&record, &root).unwrap_err();
+
+        assert!(error.to_string().contains("outside data root"));
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(outside);
     }
 }

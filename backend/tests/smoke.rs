@@ -615,11 +615,24 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     let dirs = extracted_node["children"].as_array().expect("dirs");
-    let target_dir_id = dirs
+    let target_dir = dirs
         .iter()
         .find(|node| node["name"] == "a_b")
-        .and_then(|node| node["id"].as_str())
         .expect("a_b dir");
+    let target_dir_id = target_dir["id"].as_str().expect("a_b dir id");
+    let target_disk_path = data_root.join(
+        target_dir["path"]
+            .as_str()
+            .expect("a_b dir path")
+            .trim_start_matches('/'),
+    );
+    let target_meta: String = sqlx::query_scalar("SELECT meta FROM files WHERE id = ?")
+        .bind(target_dir_id.parse::<i64>().expect("numeric file id"))
+        .fetch_one(&pool)
+        .await
+        .expect("load target metadata");
+    assert!(!target_meta.contains("storage_path"));
+    assert!(target_disk_path.exists());
     assert!(dirs.iter().any(|node| node["name"] == "axb"));
     let delete_dir_response = test::call_service(
         &app,
@@ -645,6 +658,7 @@ async fn upload_search_tree_and_delete_issue() {
         .expect("remaining dirs");
     assert!(remaining_dirs.iter().any(|node| node["name"] == "axb"));
     assert!(!remaining_dirs.iter().any(|node| node["name"] == "a_b"));
+    assert!(!target_disk_path.exists());
 
     let failed_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let failed_bytes = tar_gz_multi(&[
