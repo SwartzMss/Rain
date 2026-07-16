@@ -1122,7 +1122,10 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(following_lines["lines"][0]["line_number"], 1);
-    assert_eq!(following_lines["lines"][0]["content"], "ERROR after long line");
+    assert_eq!(
+        following_lines["lines"][0]["content"],
+        "ERROR after long line"
+    );
     assert_eq!(following_lines["lines"][0]["truncated"], false);
 
     let collision_boundary = format!("rain-{}", Uuid::new_v4().simple());

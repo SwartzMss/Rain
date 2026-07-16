@@ -776,15 +776,15 @@ mod tests {
     use crate::config::ArchiveConfig;
     use flate2::{Compression, write::GzEncoder};
 
+    use super::limits::{
+        INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES, INDEX_COMMIT_MAX_LINES,
+        INDEX_COMMIT_TARGET_BYTES,
+    };
     use super::{
         ArchiveBudget, IndexBatchBudget, IssueQuota, LogChunk, PreparedDirectoryEntry,
         archive_parent_depth, extract_gzip_file, extracted_directory_meta, extracted_entry_meta,
         flush_log_chunks, gzip_output_name, insert_directory_children, insert_line_offsets,
         sanitize_archive_path, uploaded_file_meta, validate_extracted_path,
-    };
-    use super::limits::{
-        INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES, INDEX_COMMIT_MAX_LINES,
-        INDEX_COMMIT_TARGET_BYTES,
     };
 
     #[test]

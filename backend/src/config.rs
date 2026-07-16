@@ -261,8 +261,7 @@ impl AppLimits {
         }
         usize::try_from(self.indexing.max_indexed_line_size).map_err(|_| {
             AppError::Config(
-                "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE cannot be represented on this platform"
-                    .into(),
+                "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE cannot be represented on this platform".into(),
             )
         })?;
         usize::try_from(self.api.max_preview_line_size).map_err(|_| {
