@@ -1,4 +1,6 @@
+use sqlx::{QueryBuilder, Sqlite};
 use std::{
+    collections::HashMap,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -24,6 +26,9 @@ use archive::{extract_archive, validate_extracted_path};
 use indexing::clean_log_line;
 pub use indexing::line_reader::{decode_log_line, read_line_bytes_limited};
 use limits::{INDEX_CHUNK_LINES, INDEX_COMMIT_LINES, LINE_OFFSET_INTERVAL};
+
+const LINE_OFFSET_BATCH_SIZE: usize = 500;
+const SEGMENT_BATCH_SIZE: usize = 100;
 pub use quota::IssueQuota;
 
 pub struct ProcessFileOptions<'a> {
@@ -70,6 +75,17 @@ fn extracted_directory_meta(source: &str, storage_name: &str) -> serde_json::Val
         "storage_name": storage_name,
         "kind": "extracted_dir"
     })
+}
+
+struct PreparedDirectoryEntry {
+    disk_path: PathBuf,
+    name: String,
+    db_path: String,
+    is_dir: bool,
+    size_bytes: Option<i64>,
+    mime_type: Option<String>,
+    preview_kind: PreviewKind,
+    meta: serde_json::Value,
 }
 
 pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<(), AppError> {
@@ -213,6 +229,7 @@ fn ingest_directory<'a>(
         }
         entries.sort();
 
+        let mut prepared = Vec::with_capacity(entries.len());
         for disk_path in entries {
             let name = disk_path
                 .file_name()
@@ -245,18 +262,30 @@ fn ingest_directory<'a>(
                 preview_kind,
             );
 
-            let record_id = insert_file_record(
-                pool,
-                bundle_id,
-                Some(parent_id),
-                &name,
-                &db_path,
+            prepared.push(PreparedDirectoryEntry {
+                disk_path,
+                name,
+                db_path,
                 is_dir,
                 size_bytes,
-                mime_type.as_deref(),
-                Some(meta),
-            )
-            .await?;
+                mime_type,
+                preview_kind,
+                meta,
+            });
+        }
+
+        let record_ids =
+            insert_directory_children(pool, bundle_id, Some(parent_id), &prepared).await?;
+        for (entry, record_id) in prepared.into_iter().zip(record_ids) {
+            let PreparedDirectoryEntry {
+                disk_path,
+                name,
+                db_path,
+                is_dir,
+                size_bytes,
+                preview_kind,
+                ..
+            } = entry;
 
             if is_dir {
                 ingest_directory(
@@ -351,6 +380,56 @@ fn ingest_directory<'a>(
     })
 }
 
+async fn insert_directory_children(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    parent_id: Option<i64>,
+    entries: &[PreparedDirectoryEntry],
+) -> Result<Vec<i64>, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let mut ids = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match insert_file_record_in_tx(&mut tx, bundle_id, parent_id, entry).await {
+            Ok(id) => ids.push(id),
+            Err(error) => {
+                tx.rollback().await.map_err(AppError::Database)?;
+                return Err(error);
+            }
+        }
+    }
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(ids)
+}
+
+async fn insert_file_record_in_tx(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    bundle_id: &str,
+    parent_id: Option<i64>,
+    entry: &PreparedDirectoryEntry,
+) -> Result<i64, AppError> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO files (
+            bundle_id, parent_id, name, path, is_dir, size_bytes, mime_type, status, meta
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(parent_id)
+    .bind(&entry.name)
+    .bind(&entry.db_path)
+    .bind(entry.is_dir)
+    .bind(entry.size_bytes)
+    .bind(entry.mime_type.as_deref())
+    .bind(Some("READY"))
+    .bind(entry.meta.to_string())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(AppError::Database)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_file_record(
     pool: &sqlx::SqlitePool,
@@ -417,6 +496,7 @@ async fn ingest_text_file(
     let mut bytes_scanned = 0u64;
     let mut chunk_index = 0i64;
     let mut chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
+    let mut pending_chunks = Vec::new();
     let mut line = Vec::new();
     let mut offsets = Vec::new();
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
@@ -448,7 +528,7 @@ async fn ingest_text_file(
             chunk.push(line_number, cleaned);
 
             if chunk.len() >= INDEX_CHUNK_LINES {
-                flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+                pending_chunks.push(chunk);
                 chunk_index += 1;
                 chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
             }
@@ -457,18 +537,21 @@ async fn ingest_text_file(
         line_number += 1;
         if line_number % INDEX_COMMIT_LINES == 0 {
             if !chunk.is_empty() {
-                flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+                pending_chunks.push(chunk);
                 chunk_index += 1;
                 chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
             }
+            flush_log_chunks(&mut tx, bundle_id, file_id, &pending_chunks).await?;
+            pending_chunks.clear();
             tx.commit().await.map_err(AppError::Database)?;
             tx = pool.begin().await.map_err(AppError::Database)?;
         }
     }
 
     if !chunk.is_empty() {
-        flush_log_chunk(&mut tx, bundle_id, file_id, &chunk).await?;
+        pending_chunks.push(chunk);
     }
+    flush_log_chunks(&mut tx, bundle_id, file_id, &pending_chunks).await?;
 
     sqlx::query("DELETE FROM log_line_offsets WHERE file_id = ?")
         .bind(file_id)
@@ -476,20 +559,7 @@ async fn ingest_text_file(
         .await
         .map_err(AppError::Database)?;
 
-    for (line_number, byte_offset) in offsets {
-        sqlx::query(
-            r#"
-            INSERT INTO log_line_offsets (file_id, line_number, byte_offset)
-            VALUES (?, ?, ?)
-            "#,
-        )
-        .bind(file_id)
-        .bind(line_number)
-        .bind(byte_offset)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-    }
+    insert_line_offsets(&mut tx, file_id, &offsets).await?;
 
     sqlx::query("UPDATE files SET line_count = ? WHERE id = ?")
         .bind(line_number)
@@ -499,6 +569,29 @@ async fn ingest_text_file(
         .map_err(AppError::Database)?;
 
     tx.commit().await.map_err(AppError::Database)?;
+    Ok(())
+}
+
+async fn insert_line_offsets(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    file_id: i64,
+    offsets: &[(i64, i64)],
+) -> Result<(), AppError> {
+    for batch in offsets.chunks(LINE_OFFSET_BATCH_SIZE) {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO log_line_offsets (file_id, line_number, byte_offset) ",
+        );
+        builder.push_values(batch, |mut row, (line_number, byte_offset)| {
+            row.push_bind(file_id)
+                .push_bind(*line_number)
+                .push_bind(*byte_offset);
+        });
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(AppError::Database)?;
+    }
     Ok(())
 }
 
@@ -548,52 +641,69 @@ impl LogChunk {
     }
 }
 
-async fn flush_log_chunk(
+async fn flush_log_chunks(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     bundle_id: &str,
     file_id: i64,
-    chunk: &LogChunk,
+    chunks: &[LogChunk],
 ) -> Result<(), AppError> {
-    if chunk.is_empty() {
-        return Ok(());
+    for batch in chunks.chunks(SEGMENT_BATCH_SIZE) {
+        let mut segments = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index) ",
+        );
+        segments.push_values(batch, |mut row, chunk| {
+            row.push_bind(bundle_id)
+                .push_bind(file_id)
+                .push_bind("all")
+                .push_bind(chunk.content())
+                .push_bind(chunk.line_start)
+                .push_bind(chunk.line_end)
+                .push_bind(chunk.chunk_index);
+        });
+        segments.push(" RETURNING id, chunk_index");
+        let returned = segments
+            .build_query_as::<(i64, i64)>()
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(AppError::Database)?;
+        let mut segment_ids = HashMap::with_capacity(returned.len());
+        for (segment_id, chunk_index) in returned {
+            if segment_ids.insert(chunk_index, segment_id).is_some() {
+                return Err(AppError::Database(sqlx::Error::Protocol(format!(
+                    "duplicate returned log chunk index {chunk_index}"
+                ))));
+            }
+        }
+        if segment_ids.len() != batch.len() {
+            return Err(AppError::Database(sqlx::Error::Protocol(
+                "log segment insert did not return every chunk".into(),
+            )));
+        }
+        if batch
+            .iter()
+            .any(|chunk| !segment_ids.contains_key(&chunk.chunk_index))
+        {
+            return Err(AppError::Database(sqlx::Error::Protocol(
+                "log segment insert returned an unexpected chunk index".into(),
+            )));
+        }
+
+        let mut fts = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline) ",
+        );
+        fts.push_values(batch, |mut row, chunk| {
+            let segment_id = segment_ids[&chunk.chunk_index];
+            row.push_bind(chunk.content())
+                .push_bind(segment_id)
+                .push_bind(bundle_id)
+                .push_bind(file_id)
+                .push_bind("all");
+        });
+        fts.build()
+            .execute(&mut **tx)
+            .await
+            .map_err(AppError::Database)?;
     }
-
-    let content = chunk.content();
-    let timeline = Some("all".to_string());
-    let segment_id = sqlx::query_scalar::<_, i64>(
-        r#"
-        INSERT INTO log_segments (
-            bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        RETURNING id
-        "#,
-    )
-    .bind(bundle_id)
-    .bind(file_id)
-    .bind(&timeline)
-    .bind(&content)
-    .bind(chunk.line_start)
-    .bind(chunk.line_end)
-    .bind(Some(chunk.chunk_index))
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(AppError::Database)?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
-        VALUES (?, ?, ?, ?, ?)
-        "#,
-    )
-    .bind(&content)
-    .bind(segment_id)
-    .bind(bundle_id)
-    .bind(file_id)
-    .bind(&timeline)
-    .execute(&mut **tx)
-    .await
-    .map_err(AppError::Database)?;
 
     Ok(())
 }
@@ -620,10 +730,168 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        ArchiveBudget, IssueQuota, archive_parent_depth, extract_gzip_file,
-        extracted_directory_meta, extracted_entry_meta, gzip_output_name, sanitize_archive_path,
+        ArchiveBudget, IssueQuota, LogChunk, PreparedDirectoryEntry, archive_parent_depth,
+        extract_gzip_file, extracted_directory_meta, extracted_entry_meta, flush_log_chunks,
+        gzip_output_name, insert_directory_children, insert_line_offsets, sanitize_archive_path,
         uploaded_file_meta, validate_extracted_path,
     };
+
+    fn prepared_entry(name: &str, path: &str) -> PreparedDirectoryEntry {
+        PreparedDirectoryEntry {
+            disk_path: PathBuf::from(name),
+            name: name.into(),
+            db_path: path.into(),
+            is_dir: false,
+            size_bytes: Some(1),
+            mime_type: Some("text/plain".into()),
+            preview_kind: crate::file_classification::PreviewKind::Text,
+            meta: serde_json::json!({ "kind": "extracted_file" }),
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_children_share_a_short_atomic_transaction() {
+        let pool = quota_fixture("DIRECTORY", &["bundle"]).await;
+        let entries = vec![
+            prepared_entry("a.log", "/bundle-hash/a.log"),
+            prepared_entry("b.log", "/bundle-hash/b.log"),
+            prepared_entry("c.log", "/bundle-hash/c.log"),
+        ];
+
+        let ids = insert_directory_children(&pool, "bundle", None, &entries)
+            .await
+            .unwrap();
+
+        assert_eq!(ids.len(), 3);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE bundle_id = 'bundle'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn directory_child_failure_rolls_back_every_sibling() {
+        let pool = quota_fixture("DIRECTORYFAIL", &["bundle"]).await;
+        let entries = vec![
+            prepared_entry("first.log", "/bundle-hash/duplicate.log"),
+            prepared_entry("second.log", "/bundle-hash/duplicate.log"),
+        ];
+
+        let result = insert_directory_children(&pool, "bundle", None, &entries).await;
+
+        assert!(result.is_err());
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE bundle_id = 'bundle'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn batches_segments_and_fts_with_chunk_index_mapping() {
+        let pool = quota_fixture("SEGMENTS", &["bundle"]).await;
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('bundle', 'app.log', '/bundle-hash/app.log', 0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut chunks = Vec::new();
+        for index in 0..125_i64 {
+            let mut chunk = LogChunk::new(index, 1);
+            chunk.push(index, format!("unique-content-{index}"));
+            chunks.push(chunk);
+        }
+        let mut tx = pool.begin().await.unwrap();
+
+        flush_log_chunks(&mut tx, "bundle", file_id, &chunks)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mapped: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM log_segments ls
+            JOIN log_segments_fts fts ON fts.segment_id = ls.id
+            WHERE ls.file_id = ? AND fts.content = ls.content
+            "#,
+        )
+        .bind(file_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapped, 125);
+    }
+
+    #[tokio::test]
+    async fn batch_segment_failure_rolls_back_segments_and_fts_together() {
+        let pool = quota_fixture("ROLLBACK", &["bundle"]).await;
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('bundle', 'app.log', '/bundle-hash/app.log', 0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DROP TABLE log_segments_fts")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut chunk = LogChunk::new(0, 1);
+        chunk.push(0, "content".into());
+        let mut tx = pool.begin().await.unwrap();
+
+        let result = flush_log_chunks(&mut tx, "bundle", file_id, &[chunk]).await;
+        assert!(result.is_err());
+        tx.rollback().await.unwrap();
+
+        let segments: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM log_segments WHERE file_id = ?")
+                .bind(file_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(segments, 0);
+    }
+
+    #[tokio::test]
+    async fn inserts_line_offsets_in_complete_batches() {
+        let pool = quota_fixture("OFFSETS", &["bundle"]).await;
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('bundle', 'app.log', '/bundle-hash/app.log', 0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let offsets = (0..1_201)
+            .map(|line| (line * 1_000, line * 4_096))
+            .collect::<Vec<_>>();
+        let mut tx = pool.begin().await.unwrap();
+
+        insert_line_offsets(&mut tx, file_id, &offsets)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM log_line_offsets WHERE file_id = ?")
+                .bind(file_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let last: (i64, i64) = sqlx::query_as(
+            "SELECT line_number, byte_offset FROM log_line_offsets WHERE file_id = ? ORDER BY line_number DESC LIMIT 1",
+        )
+        .bind(file_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1_201);
+        assert_eq!(last, (1_200_000, 4_915_200));
+    }
 
     #[test]
     fn new_file_metadata_uses_stable_database_paths() {
