@@ -84,14 +84,15 @@ try {
       onLoadPage: () => undefined,
       highlightTerm: 'ERROR',
       renderHighlightedText: (text) => text,
-      onOpenSource: () => undefined,
-      onCopySourcePath: () => undefined
+      onOpenSource: () => undefined
     })
   );
-  assert.match(markup, /aria-label="打开原文件：app\.log，第 18 行"/);
-  assert.match(markup, /title="打开原文件"/);
-  assert.match(markup, /app\.log/);
-  assert.match(markup, /第 18 行/);
+  assert.match(markup, /data-search-results-log="true"/);
+  assert.match(markup, /data-source-line="17"/);
+  assert.match(markup, />18<\/span>/);
+  assert.match(markup, /select-text/);
+  assert.doesNotMatch(markup, /aria-label="打开原文件/);
+  assert.doesNotMatch(markup, /title="打开原文件"/);
 
   const missingSourceMarkup = renderToStaticMarkup(
     React.createElement(SearchResultViewer, {
@@ -110,29 +111,24 @@ try {
       contentRef: { current: null }, pageSizeOptions: [1000],
       onLoadPage: () => undefined, highlightTerm: '',
       renderHighlightedText: (text) => text,
-      onOpenSource: () => undefined, onCopySourcePath: () => undefined
+      onOpenSource: () => undefined
     })
   );
-  assert.match(missingSourceMarkup, /aria-disabled="true"/);
-  assert.doesNotMatch(
-    missingSourceMarkup,
-    /<button[^>]*title="来源文件信息不可用"[^>]*disabled=""/
-  );
+  assert.match(missingSourceMarkup, /orphan\.log|ERROR/);
+  assert.doesNotMatch(missingSourceMarkup, /aria-disabled=/);
+  assert.doesNotMatch(missingSourceMarkup, /<button[^>]*title="来源文件信息不可用"/);
 
   const menuMarkup = renderToStaticMarkup(
     React.createElement(SearchHitContextMenu, {
       x: 100,
       y: 100,
-      canOpen: true,
-      canCopy: true,
       onOpen: () => undefined,
-      onCopyPath: () => undefined,
       onClose: () => undefined
     })
   );
   assert.match(menuMarkup, /role="menu"/);
   assert.match(menuMarkup, /在原文件中打开/);
-  assert.match(menuMarkup, /复制文件路径/);
+  assert.doesNotMatch(menuMarkup, /复制文件路径/);
 
   const filesView = await readFile(
     new URL('../src/features/files/FilesView.tsx', import.meta.url),
@@ -145,13 +141,13 @@ try {
   assert.match(filesView, /const openSearchHitSource = async/);
   assert.match(filesView, /getSearchHitSource\(hit\)/);
   assert.match(filesView, /handleNodeClick\(source\.nodeId, source\.line, \{ preserveSearch: true \}\)/);
-  assert.match(filesView, /navigator\.clipboard\.writeText\(hit\.path\)/);
+  assert.doesNotMatch(filesView, /navigator\.clipboard\.writeText\(hit\.path\)/);
   assert.match(
     filesView,
     /const hits = response\.lines\.map\(\(line\) => \(\{\s+bundle_hash: selectedBundleId,/
   );
   assert.match(filesView, /onOpenSource=\{openSearchHitSource\}/);
-  assert.match(filesView, /onCopySourcePath=\{copySearchHitPath\}/);
+  assert.doesNotMatch(filesView, /onCopySourcePath=/);
   assert.match(filesView, /scrollIntoView\(\{ block: 'center' \}\)/);
   assert.match(codeLinesPane, /targetLine/);
   assert.match(codeLinesPane, /data-source-line/);
