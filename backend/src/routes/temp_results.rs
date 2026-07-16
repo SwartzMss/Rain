@@ -96,7 +96,7 @@ struct TempResultLines {
     lines: Vec<TempLine>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct TempLine {
     bundle_hash: Option<String>,
     file_id: Option<String>,
@@ -129,12 +129,6 @@ pub async fn preview_temp_result(
     };
     let sources = resolve_sources(&source_request, &state).await?;
     let from = payload.from.unwrap_or(0).max(0);
-    if from != 0 {
-        return Err(AppError::BadRequest(
-            "materialized preview must start at zero; use the result lines endpoint for paging"
-                .into(),
-        ));
-    }
     let size = preview_page_size(payload.size);
     let source_label = source_label(&sources);
     let id = Uuid::new_v4().simple().to_string();
@@ -145,13 +139,23 @@ pub async fn preview_temp_result(
     let output_path = directory.join(format!("{id}.log"));
     let meta_path = output_path.with_extension("meta");
     let index_path = output_path.with_extension("idx");
+    let staging_output_path = staging_path(&output_path);
+    let staging_meta_path = staging_path(&meta_path);
+    let staging_index_path = staging_path(&index_path);
     let materialized = async {
-        let mut output = File::create(&output_path).await.map_err(AppError::Io)?;
-        let mut metadata = File::create(&meta_path).await.map_err(AppError::Io)?;
-        let mut index = File::create(&index_path).await.map_err(AppError::Io)?;
+        let mut output = File::create(&staging_output_path)
+            .await
+            .map_err(AppError::Io)?;
+        let mut metadata = File::create(&staging_meta_path)
+            .await
+            .map_err(AppError::Io)?;
+        let mut index = File::create(&staging_index_path)
+            .await
+            .map_err(AppError::Io)?;
         TempResultExecutor::materialize_preview(
             &sources,
             &expression,
+            from,
             size,
             &mut output,
             &mut metadata,
@@ -163,13 +167,34 @@ pub async fn preview_temp_result(
     let preview = match materialized {
         Ok(preview) => preview,
         Err(error) => {
-            remove_result_files(&output_path).await?;
+            remove_preview_artifacts(&output_path).await?;
             return Err(error);
         }
     };
-    let metadata = tokio::fs::metadata(&output_path)
-        .await
-        .map_err(AppError::Io)?;
+    let metadata = match tokio::fs::metadata(&staging_output_path).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            remove_preview_artifacts(&output_path).await?;
+            return Err(AppError::Io(error));
+        }
+    };
+    let publish_result = async {
+        tokio::fs::rename(&staging_output_path, &output_path)
+            .await
+            .map_err(AppError::Io)?;
+        tokio::fs::rename(&staging_meta_path, &meta_path)
+            .await
+            .map_err(AppError::Io)?;
+        tokio::fs::rename(&staging_index_path, &index_path)
+            .await
+            .map_err(AppError::Io)?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(error) = publish_result {
+        remove_preview_artifacts(&output_path).await?;
+        return Err(error);
+    }
     if let Err(error) = insert_temp_result(
         &state,
         &id,
@@ -181,7 +206,7 @@ pub async fn preview_temp_result(
     )
     .await
     {
-        remove_result_files(&output_path).await?;
+        remove_preview_artifacts(&output_path).await?;
         return Err(error);
     }
     Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
@@ -272,14 +297,27 @@ pub async fn get_temp_result_lines(
     let result_path = checked_temp_path(&state, &result.storage_path)?;
     let meta_path = result_path.with_extension("meta");
     let index_path = result_path.with_extension("idx");
-    if tokio::fs::try_exists(&meta_path)
+    let has_meta = tokio::fs::try_exists(&meta_path)
         .await
-        .map_err(AppError::Io)?
-        && tokio::fs::try_exists(&index_path)
-            .await
-            .map_err(AppError::Io)?
-    {
-        let lines = read_indexed_lines(&result_path, &meta_path, &index_path, start, limit).await?;
+        .map_err(AppError::Io)?;
+    let has_index = tokio::fs::try_exists(&index_path)
+        .await
+        .map_err(AppError::Io)?;
+    if has_meta != has_index {
+        return Err(invalid_sidecar(
+            "temporary result metadata and index must either both exist or both be absent",
+        ));
+    }
+    if has_meta {
+        let lines = read_indexed_lines(
+            &result_path,
+            &meta_path,
+            &index_path,
+            start,
+            limit,
+            result.line_count,
+        )
+        .await?;
         let next_start =
             (start + (lines.len() as i64) < result.line_count).then_some(start + limit);
         return Ok(HttpResponse::Ok().json(TempResultLines {
@@ -373,8 +411,23 @@ async fn resolve_sources(
 ) -> Result<Vec<TempSource>, AppError> {
     if let Some(source_id) = payload.source_temp_id.as_deref() {
         let source = load_and_renew(state, source_id).await?;
+        let path = checked_temp_path(state, &source.storage_path)?;
+        let meta_path = path.with_extension("meta");
+        let index_path = path.with_extension("idx");
+        let has_meta = tokio::fs::try_exists(&meta_path)
+            .await
+            .map_err(AppError::Io)?;
+        let has_index = tokio::fs::try_exists(&index_path)
+            .await
+            .map_err(AppError::Io)?;
+        if has_meta != has_index {
+            return Err(invalid_sidecar(
+                "temporary result metadata and index must either both exist or both be absent",
+            ));
+        }
         return Ok(vec![TempSource {
-            path: checked_temp_path(state, &source.storage_path)?,
+            path,
+            metadata_path: has_meta.then_some(meta_path),
             label: source.name,
             bundle_hash: None,
             file_id: None,
@@ -412,6 +465,7 @@ async fn resolve_sources(
             };
             sources.push(TempSource {
                 path: resolve_file_path(&file, &data_root(state))?,
+                metadata_path: None,
                 label: file.name.clone(),
                 bundle_hash: Some(row.bundle_hash),
                 file_id: Some(file.id.to_string()),
@@ -441,6 +495,7 @@ async fn resolve_sources(
     let path = resolve_file_path(&file, &data_root(state))?;
     Ok(vec![TempSource {
         path,
+        metadata_path: None,
         label: file.name,
         bundle_hash: Some(bundle.hash),
         file_id: Some(file.id.to_string()),
@@ -495,12 +550,18 @@ async fn read_indexed_lines(
     index_path: &Path,
     start: i64,
     limit: i64,
+    line_count: i64,
 ) -> Result<Vec<TempLine>, AppError> {
+    if start >= line_count {
+        return Ok(Vec::new());
+    }
     let index_content = tokio::fs::read_to_string(index_path)
         .await
         .map_err(AppError::Io)?;
     if index_content.is_empty() {
-        return Ok(Vec::new());
+        return Err(invalid_sidecar(
+            "temporary result index is empty for a nonempty result",
+        ));
     }
     let checkpoints = index_content
         .lines()
@@ -527,6 +588,7 @@ async fn read_indexed_lines(
     let mut content = String::new();
     let mut metadata_line = String::new();
     let mut lines = Vec::new();
+    let expected_end = (start + limit).min(line_count);
     while lines.len() < limit as usize {
         content.clear();
         metadata_line.clear();
@@ -539,6 +601,11 @@ async fn read_indexed_lines(
             .await
             .map_err(AppError::Io)?;
         if content_bytes == 0 && metadata_bytes == 0 {
+            if current < expected_end {
+                return Err(invalid_sidecar(
+                    "temporary result ended before expected line count",
+                ));
+            }
             break;
         }
         if content_bytes == 0 || metadata_bytes == 0 {
@@ -565,6 +632,13 @@ async fn read_indexed_lines(
 fn decode_sidecar<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, AppError> {
     serde_json::from_str(line)
         .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))
+}
+
+fn invalid_sidecar(message: &str) -> AppError {
+    AppError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
 }
 
 async fn load_record(state: &web::Data<AppState>, id: &str) -> Result<TempResultRecord, AppError> {
@@ -635,6 +709,30 @@ async fn remove_result_files(log_path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
+fn staging_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".part");
+    PathBuf::from(value)
+}
+
+async fn remove_preview_artifacts(log_path: &Path) -> Result<(), AppError> {
+    let paths = [
+        log_path.to_path_buf(),
+        log_path.with_extension("meta"),
+        log_path.with_extension("idx"),
+    ];
+    for path in paths {
+        for candidate in [path.clone(), staging_path(&path)] {
+            match tokio::fs::remove_file(candidate).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AppError::Io(error)),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn checked_temp_path(state: &web::Data<AppState>, stored_path: &str) -> Result<PathBuf, AppError> {
     let root = data_root(state).join("temp-results");
     let path = Path::new(stored_path);
@@ -665,12 +763,125 @@ fn to_response(record: TempResultRecord) -> TempResult {
 
 #[cfg(test)]
 mod tests {
-    use super::preview_page_size;
+    use uuid::Uuid;
+
+    use super::{preview_page_size, read_indexed_lines, staging_path};
 
     #[test]
     fn preview_supports_log_viewer_page_sizes() {
         assert_eq!(preview_page_size(Some(1_000)), 1_000);
         assert_eq!(preview_page_size(Some(3_000)), 3_000);
         assert_eq!(preview_page_size(Some(9_000)), 3_000);
+    }
+
+    #[test]
+    fn preview_uses_distinct_staging_paths_before_publication() {
+        let final_path = std::path::Path::new("temp-results/result.log");
+
+        assert_eq!(
+            staging_path(final_path),
+            std::path::PathBuf::from("temp-results/result.log.part")
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_reader_seeks_to_deep_pages_and_preserves_metadata() {
+        let root = std::env::temp_dir().join(format!("rain-index-read-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let log = root.join("result.log");
+        let meta = root.join("result.meta");
+        let index = root.join("result.idx");
+        let mut log_content = String::new();
+        let mut meta_content = String::new();
+        for line in 0..1_005 {
+            log_content.push_str(&format!("line {line}\n"));
+            meta_content.push_str(&format!(
+                "{{\"bundle_hash\":\"bundle\",\"file_id\":\"42\",\"path\":\"app.log\",\"line_number\":{line}}}\n"
+            ));
+        }
+        tokio::fs::write(&log, log_content).await.unwrap();
+        tokio::fs::write(&meta, meta_content).await.unwrap();
+        let log_offset = (0..1_000)
+            .map(|line| format!("line {line}\n").len())
+            .sum::<usize>();
+        let meta_offset = (0..1_000)
+            .map(|line| {
+                format!(
+                    "{{\"bundle_hash\":\"bundle\",\"file_id\":\"42\",\"path\":\"app.log\",\"line_number\":{line}}}\n"
+                )
+                .len()
+            })
+            .sum::<usize>();
+        tokio::fs::write(
+            &index,
+            format!(
+                "{{\"result_line\":0,\"log_offset\":0,\"meta_offset\":0}}\n{{\"result_line\":1000,\"log_offset\":{log_offset},\"meta_offset\":{meta_offset}}}\n"
+            ),
+        )
+        .await
+        .unwrap();
+
+        let lines = read_indexed_lines(&log, &meta, &index, 1_002, 2, 1_005)
+            .await
+            .unwrap();
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].content, "line 1002");
+        assert_eq!(lines[0].line_number, 1_002);
+        assert_eq!(lines[0].path.as_deref(), Some("app.log"));
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn indexed_reader_rejects_jointly_truncated_content_and_metadata() {
+        let root = std::env::temp_dir().join(format!("rain-index-corrupt-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let log = root.join("result.log");
+        let meta = root.join("result.meta");
+        let index = root.join("result.idx");
+        tokio::fs::write(&log, "only one\n").await.unwrap();
+        tokio::fs::write(
+            &meta,
+            "{\"bundle_hash\":null,\"file_id\":null,\"path\":\"app.log\",\"line_number\":0}\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &index,
+            "{\"result_line\":0,\"log_offset\":0,\"meta_offset\":0}\n",
+        )
+        .await
+        .unwrap();
+
+        let error = read_indexed_lines(&log, &meta, &index, 0, 2, 2)
+            .await
+            .expect_err("truncated sidecars must fail");
+
+        assert!(error.to_string().contains("ended before expected line"));
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn indexed_reader_rejects_empty_index_for_nonempty_result() {
+        let root = std::env::temp_dir().join(format!("rain-index-empty-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let log = root.join("result.log");
+        let meta = root.join("result.meta");
+        let index = root.join("result.idx");
+        tokio::fs::write(&log, "line\n").await.unwrap();
+        tokio::fs::write(
+            &meta,
+            "{\"bundle_hash\":null,\"file_id\":null,\"path\":\"app.log\",\"line_number\":0}\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(&index, "").await.unwrap();
+
+        let error = read_indexed_lines(&log, &meta, &index, 0, 1, 1)
+            .await
+            .expect_err("nonempty results require checkpoint zero");
+
+        assert!(error.to_string().contains("index is empty"));
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 }
