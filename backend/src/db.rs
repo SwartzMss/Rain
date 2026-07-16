@@ -25,7 +25,6 @@ pub struct CleanupPhaseStats {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BundleCleanupStats {
-    pub events: CleanupPhaseStats,
     pub line_offsets: CleanupPhaseStats,
     pub fts_segments: CleanupPhaseStats,
     pub segments: CleanupPhaseStats,
@@ -34,11 +33,7 @@ pub struct BundleCleanupStats {
 
 impl BundleCleanupStats {
     pub fn total_rows(self) -> u64 {
-        self.events.rows
-            + self.line_offsets.rows
-            + self.fts_segments.rows
-            + self.segments.rows
-            + self.files.rows
+        self.line_offsets.rows + self.fts_segments.rows + self.segments.rows + self.files.rows
     }
 }
 
@@ -91,14 +86,6 @@ pub async fn cleanup_bundle_content_batched(
     }
 
     let stats = BundleCleanupStats {
-        events: delete_bundle_rows_in_batches(
-            pool,
-            bundle_id,
-            batch_size,
-            "log_events",
-            "DELETE FROM log_events WHERE rowid IN (SELECT rowid FROM log_events WHERE bundle_id = ? LIMIT ?)",
-        )
-        .await?,
         line_offsets: delete_bundle_rows_in_batches(
             pool,
             bundle_id,
@@ -331,23 +318,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS log_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bundle_id TEXT NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
-            file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
-            segment_id INTEGER REFERENCES log_segments(id) ON DELETE CASCADE,
-            line_number INTEGER,
-            timestamp TEXT,
-            level TEXT,
-            component TEXT,
-            message TEXT NOT NULL,
-            raw TEXT NOT NULL,
-            parser_name TEXT NOT NULL,
-            parser_confidence REAL NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        "#,
+        "DROP TABLE IF EXISTS log_events",
         r#"
         CREATE TABLE IF NOT EXISTS log_line_offsets (
             file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -392,8 +363,6 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)",
         "CREATE INDEX IF NOT EXISTS idx_logs_bundle_timeline ON log_segments (bundle_id, timeline)",
         "CREATE INDEX IF NOT EXISTS idx_logs_file_chunk ON log_segments (file_id, chunk_index)",
-        "CREATE INDEX IF NOT EXISTS idx_events_bundle_level ON log_events (bundle_id, level)",
-        "CREATE INDEX IF NOT EXISTS idx_events_file_line ON log_events (file_id, line_number)",
         "CREATE INDEX IF NOT EXISTS idx_line_offsets_file_line ON log_line_offsets (file_id, line_number)",
         "CREATE INDEX IF NOT EXISTS idx_temp_results_expiry ON temp_results (expires_at)",
     ];
@@ -564,5 +533,27 @@ mod tests {
                 .await
                 .expect("load content size");
         assert_eq!(content_size, 30);
+    }
+
+    #[tokio::test]
+    async fn schema_does_not_create_structured_event_storage() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+
+        for object in [
+            "log_events",
+            "idx_events_bundle_level",
+            "idx_events_file_line",
+        ] {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?)")
+                    .bind(object)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("inspect schema");
+            assert!(!exists, "{object} should not exist");
+        }
     }
 }

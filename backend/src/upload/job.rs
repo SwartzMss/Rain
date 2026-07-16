@@ -6,10 +6,7 @@ use tracing::error;
 use crate::{
     config::{ArchiveConfig, IndexingConfig},
     error::AppError,
-    ingest::{
-        ArchiveBudget, EventBudget, IssueQuota, ProcessFileOptions,
-        limits::MAX_STRUCTURED_EVENTS_PER_BUNDLE, process_uploaded_file,
-    },
+    ingest::{ArchiveBudget, IssueQuota, ProcessFileOptions, process_uploaded_file},
 };
 
 use super::{
@@ -85,7 +82,6 @@ pub fn spawn_upload_job(job: UploadJob) {
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
     let archive_budget = ArchiveBudget::new(job.archive_config.clone());
-    let event_budget = EventBudget::new(MAX_STRUCTURED_EVENTS_PER_BUNDLE);
     let issue_quota = IssueQuota::new(
         job.pool.clone(),
         &job.issue_code,
@@ -105,7 +101,6 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
             source_path: &uploaded.temp_path,
             size_bytes: uploaded.size_bytes,
             archive_budget: archive_budget.clone(),
-            event_budget: event_budget.clone(),
             issue_quota: issue_quota.clone(),
             indexing: &job.indexing_config,
         })

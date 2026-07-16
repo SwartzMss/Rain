@@ -62,22 +62,6 @@
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 - 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`；全文检索走 `log_segments_fts`。
 
-## 表：log_events
-
-- `id` INTEGER PK AUTOINCREMENT。
-- `bundle_id` TEXT：关联 `bundles.id`，级联删除。
-- `file_id` INTEGER：关联 `files.id`，级联删除。
-- `segment_id` INTEGER：关联 `log_segments.id`，级联删除。
-- `line_number` INTEGER：事件所在原始行号，从 0 开始。
-- `timestamp` TEXT：基础解析出的时间戳，可为空。
-- `level` TEXT：基础解析出的日志级别，如 `INFO`、`WARN`、`ERROR`。
-- `component` TEXT：基础解析出的组件名，可为空。
-- `message` TEXT：去掉时间戳/级别/组件后的消息。
-- `raw` TEXT：原始日志行。
-- `parser_name` TEXT：解析器名称，当前为 `basic-log-line`。
-- `parser_confidence` REAL：基础置信度，供后续 AI/规则层判断可靠性。
-- 索引：`idx_events_bundle_level`、`idx_events_file_line`。
-
 ## 表：log_line_offsets
 
 - `file_id` INTEGER：关联 `files.id`，级联删除。
@@ -101,8 +85,7 @@
 - Bundle -> Files：单文件上传会形成一个顶层 file 节点；每一层 `.zip`、`.tar.gz`、`.tgz`、`.gz` 都保留原始压缩包节点，并在其下挂载一个 `{archive_name}_extracted` 解压目录。
 - Files -> Log Segments：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会流式读取并按 chunk 写入 `log_segments` 供搜索；非文本文件仅保留 `files` 记录。
 - Files -> Line Offsets：文本类文件会每 1000 行记录一次 byte offset，用于 `/lines` 分页读取。
-- 单行读取上限为 1 MB，超过后会丢弃到下一个换行符，并在索引/分页内容中追加 `[line truncated]` 标记。
-- Log Segments -> Log Events：基础解析器会从日志行中提取 timestamp/level/component/message，写入 `log_events`，为后续聚合和 AI 分析准备。
+- 单行默认读取上限为 8 MiB，超过后会丢弃到下一个换行符，并在索引/分页内容中追加 `[line truncated]` 标记。
 
 ## 上传流程
 
@@ -127,8 +110,7 @@ flowchart TD
     M -->|是| N[流式读取并写 line offsets]
     M -->|否| O[仅 files 记录]
     N --> P[按 chunk 写完整 log_segments/FTS]
-    P --> Q[基础解析写 log_events]
-    Q --> R[Bundle 标记 READY]
+    P --> R[Bundle 标记 READY]
 ```
 
-递归解压、文本扫描和索引全部在 `.tmp/{task_id}/staging/{bundle_hash}` 中完成。嵌套深度、条目总数和解压总字节数由同一 bundle 共享预算；任一层损坏或超过安全限制时，任务标记为 `FAILED`，并删除 staging 文件及该 bundle 的 `files`、行偏移、FTS 和事件半成品记录。
+递归解压、文本扫描和索引全部在 `.tmp/{task_id}/staging/{bundle_hash}` 中完成。嵌套深度、条目总数和 Issue 内容容量由同一 bundle 共享预算；任一层损坏或超过安全限制时，任务标记为 `FAILED`，并删除 staging 文件及该 bundle 的 `files`、行偏移和 FTS 半成品记录。

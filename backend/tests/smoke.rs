@@ -510,23 +510,21 @@ async fn upload_search_tree_and_delete_issue() {
             .expect("numeric binary probe id"),
     ];
     for file_id in binary_file_ids {
-        let artifacts = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        let artifacts = sqlx::query_as::<_, (i64, i64, i64)>(
             r#"
             SELECT
                 (SELECT COUNT(*) FROM log_line_offsets WHERE file_id = ?),
                 (SELECT COUNT(*) FROM log_segments WHERE file_id = ?),
-                (SELECT COUNT(*) FROM log_segments_fts WHERE file_id = ?),
-                (SELECT COUNT(*) FROM log_events WHERE file_id = ?)
+                (SELECT COUNT(*) FROM log_segments_fts WHERE file_id = ?)
             "#,
         )
-        .bind(file_id)
         .bind(file_id)
         .bind(file_id)
         .bind(file_id)
         .fetch_one(&pool)
         .await
         .expect("count binary index artifacts");
-        assert_eq!(artifacts, (0, 0, 0, 0));
+        assert_eq!(artifacts, (0, 0, 0));
     }
 
     let delete_dir_boundary = format!("rain-{}", Uuid::new_v4().simple());
@@ -676,18 +674,6 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(failed_tree.status(), StatusCode::CONFLICT);
-
-    let parsed_events: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*)
-        FROM log_events
-        WHERE level = 'ERROR' AND message LIKE '%smoke works%'
-        "#,
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("count parsed log events");
-    assert_eq!(parsed_events, 3);
 
     let tree: Value = test::call_and_read_body_json(
         &app,
@@ -1363,25 +1349,14 @@ async fn bundle_content_cleanup_runs_in_batches_and_preserves_bundle() {
         .execute(&pool)
         .await
         .expect("insert fts segment");
-        sqlx::query(
-            "INSERT INTO log_events (bundle_id, file_id, segment_id, message, raw, parser_name, parser_confidence) VALUES ('cleanup', ?, ?, 'cleanup', 'cleanup', 'test', 1.0)",
-        )
-        .bind(file_id)
-        .bind(segment_id)
-        .execute(&pool)
-        .await
-        .expect("insert event");
     }
 
     let stats = db::cleanup_bundle_content_batched(&pool, "cleanup", 2)
         .await
         .expect("cleanup bundle content");
-    assert_eq!(stats.events.rows, 3);
-    assert_eq!(stats.events.batches, 2);
     assert_eq!(stats.files.rows, 3);
 
     for table in [
-        "log_events",
         "log_line_offsets",
         "log_segments_fts",
         "log_segments",

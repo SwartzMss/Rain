@@ -202,7 +202,6 @@ pub async fn delete_index_rows_for_file(
 ) -> Result<(), AppError> {
     for statement in [
         "DELETE FROM log_line_offsets WHERE file_id = ?",
-        "DELETE FROM log_events WHERE file_id = ?",
         "DELETE FROM log_segments_fts WHERE file_id = ?",
         "DELETE FROM log_segments WHERE file_id = ?",
     ] {
