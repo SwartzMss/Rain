@@ -7,6 +7,7 @@ import { BinaryFileInfo } from './BinaryFileInfo';
 import { SearchTokenEditor } from './SearchTokenEditor';
 import { canPreviewText, isArchiveNode, isBinaryNode } from './filePresentation';
 import { shouldShowFilenameClear } from './filenameSearch';
+import { getSearchHitSource } from './searchHitSource';
 import { uploadFailureMessage } from './uploadFailure';
 import {
   canFinalizeSearch,
@@ -130,6 +131,7 @@ export function BundleView(props?: BundleViewProps) {
   const [fileSearchError, setFileSearchError] = useState<string | null>(null);
   const [fileSearchExecuted, setFileSearchExecuted] = useState(false);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
+  const [sourceActionMessage, setSourceActionMessage] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const filenameInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestGenerationRef = useRef(0);
@@ -608,6 +610,35 @@ export function BundleView(props?: BundleViewProps) {
     }
   };
 
+  const openSearchHitSource = async (hit: IssueLogSearchHit) => {
+    const source = getSearchHitSource(hit);
+    if (!source) {
+      setSourceActionMessage('来源文件信息不可用');
+      return;
+    }
+    try {
+      await handleNodeClick(source.nodeId, source.line, { preserveSearch: true });
+      setSourceActionMessage(
+        source.line === null ? '已打开文件，原始行号不可用' : null
+      );
+    } catch (error) {
+      setSourceActionMessage(normalizeApiError(error));
+    }
+  };
+
+  const copySearchHitPath = async (hit: IssueLogSearchHit) => {
+    if (!hit.path) {
+      setSourceActionMessage('文件路径不可用');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(hit.path);
+      setSourceActionMessage('已复制文件路径');
+    } catch {
+      setSourceActionMessage('复制文件路径失败');
+    }
+  };
+
   const activateViewerTabWithState = (tab: ViewerTab) => {
     if (activeViewerTabId && contentRef.current) {
       const scrollTop = contentRef.current.scrollTop;
@@ -907,13 +938,10 @@ export function BundleView(props?: BundleViewProps) {
     if (!contentRef.current) return;
     if (targetLine === null || targetLine === undefined) return;
     if (!fileLines) return;
-    const pre = contentRef.current;
-    const lineHeightPx = 20;
-    const clampedIndex = Math.min(
-      Math.max(targetLine - (fileLines.start ?? 0), 0),
-      Math.max(fileLines.lines.length - 1, 0)
+    const target = contentRef.current.querySelector<HTMLElement>(
+      `[data-source-line="${targetLine}"]`
     );
-    pre.scrollTop = Math.max(0, clampedIndex * lineHeightPx);
+    target?.scrollIntoView({ block: 'center' });
   }, [fileLines, targetLine]);
 
   useEffect(() => {
@@ -1128,6 +1156,12 @@ export function BundleView(props?: BundleViewProps) {
               onTogglePinned={togglePinnedViewerTab}
               onClose={closeTab}
             />
+            <p
+              aria-live="polite"
+              className={`px-4 py-1 text-xs ${sourceActionMessage ? 'text-slate-600' : 'sr-only'}`}
+            >
+              {sourceActionMessage ?? ''}
+            </p>
             <div className="flex min-h-0 flex-1 flex-col p-4">
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm shadow-slate-100">
                 {activeViewerTab?.kind === 'file' && selectedNode &&
@@ -1249,6 +1283,8 @@ export function BundleView(props?: BundleViewProps) {
                     }}
                     highlightTerm={resultFilterHighlightTerm}
                     renderHighlightedText={highlightText}
+                    onOpenSource={openSearchHitSource}
+                    onCopySourcePath={copySearchHitPath}
                   />
                 ) : activeViewerTab?.kind !== 'file' || !selectedNode ? (
                   <p className="py-8 text-center text-sm text-slate-500">
@@ -1272,6 +1308,7 @@ export function BundleView(props?: BundleViewProps) {
                       lines={fileLines.lines}
                       contentRef={contentRef}
                       lineNumberOffset={fileLines.start}
+                      targetLine={targetLine}
                     />
                     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
                       <label className="flex items-center gap-2">

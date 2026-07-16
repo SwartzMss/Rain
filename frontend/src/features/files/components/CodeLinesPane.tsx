@@ -7,6 +7,7 @@ type CodeLinesPaneProps = {
   contentRef?: React.RefObject<HTMLDivElement>;
   renderLine?: (line: FileLine, index: number) => React.ReactNode;
   className?: string;
+  targetLine?: number | null;
 };
 
 export function CodeLinesPane({
@@ -14,7 +15,8 @@ export function CodeLinesPane({
   lineNumberOffset = 0,
   contentRef,
   renderLine,
-  className = ''
+  className = '',
+  targetLine = null
 }: CodeLinesPaneProps) {
   return (
     <div
@@ -24,14 +26,25 @@ export function CodeLinesPane({
       <div className="grid min-h-full grid-cols-[58px_1fr] font-mono">
         <div className="select-none border-r border-slate-100 bg-slate-50 px-3 py-3 text-right text-slate-500">
           {lines.map((line, index) => (
-            <div key={`line-number:${line.line_number}:${index}`}>
+            <div
+              key={`line-number:${line.line_number}:${index}`}
+              className={line.line_number === targetLine ? 'bg-amber-100 font-semibold text-amber-900' : ''}
+            >
               {lineNumberOffset + index + 1}
             </div>
           ))}
         </div>
         <div className="px-4 py-3">
           {lines.map((line, index) => (
-            <div key={`line-content:${line.line_number}:${index}`} className="whitespace-pre">
+            <div
+              key={`line-content:${line.line_number}:${index}`}
+              data-source-line={line.line_number}
+              className={`whitespace-pre ${
+                line.line_number === targetLine
+                  ? 'bg-amber-100 ring-1 ring-inset ring-amber-300'
+                  : ''
+              }`}
+            >
               {renderLine ? renderLine(line, index) : line.content}
             </div>
           ))}

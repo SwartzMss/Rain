@@ -110,9 +110,15 @@ export function SearchResultViewer({
                   type="button"
                   title={source ? '打开原文件' : '来源文件信息不可用'}
                   aria-label={`打开原文件：${displayPath}，${displayLine}`}
-                  disabled={!source}
-                  className="group w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-left transition hover:border-sky-200 hover:bg-sky-50/50 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-slate-50"
-                  onClick={() => onOpenSource?.(hit)}
+                  aria-disabled={!source}
+                  className={`group w-full rounded-md border px-3 py-2 text-left transition focus:outline-none focus:ring-2 focus:ring-sky-100 ${
+                    source
+                      ? 'border-slate-200 bg-white hover:border-sky-200 hover:bg-sky-50/50 focus:border-sky-300'
+                      : 'cursor-not-allowed border-slate-200 bg-slate-50 text-slate-500'
+                  }`}
+                  onClick={() => {
+                    if (source) onOpenSource?.(hit);
+                  }}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     setContextMenu({ x: event.clientX, y: event.clientY, hit });

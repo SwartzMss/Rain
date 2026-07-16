@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -92,6 +93,32 @@ try {
   assert.match(markup, /app\.log/);
   assert.match(markup, /第 18 行/);
 
+  const missingSourceMarkup = renderToStaticMarkup(
+    React.createElement(SearchResultViewer, {
+      activeViewerTab: {
+        id: 'search:2', kind: 'search', resultId: 'result-2', expression: 'ERROR',
+        title: 'ERROR', pinned: false, scrollTop: 0, hits: [], total: 1,
+        from: 0, pageSize: 1000, source: { kind: 'issue', issueCode: 'ISSUE' }
+      },
+      results: [{ file_id: 42, path: 'orphan.log', snippet: 'ERROR' }],
+      resultFilterTokens: [], resultFilterDraft: '',
+      onResultFilterTokensChange: () => undefined,
+      onResultFilterDraftChange: () => undefined,
+      onClearResultFilter: () => undefined,
+      onSearchWithinResults: () => undefined,
+      canRunResultFilter: false, searchLoading: false,
+      contentRef: { current: null }, pageSizeOptions: [1000],
+      onLoadPage: () => undefined, highlightTerm: '',
+      renderHighlightedText: (text) => text,
+      onOpenSource: () => undefined, onCopySourcePath: () => undefined
+    })
+  );
+  assert.match(missingSourceMarkup, /aria-disabled="true"/);
+  assert.doesNotMatch(
+    missingSourceMarkup,
+    /<button[^>]*title="来源文件信息不可用"[^>]*disabled=""/
+  );
+
   const menuMarkup = renderToStaticMarkup(
     React.createElement(SearchHitContextMenu, {
       x: 100,
@@ -106,6 +133,25 @@ try {
   assert.match(menuMarkup, /role="menu"/);
   assert.match(menuMarkup, /在原文件中打开/);
   assert.match(menuMarkup, /复制文件路径/);
+
+  const filesView = await readFile(
+    new URL('../src/features/files/FilesView.tsx', import.meta.url),
+    'utf8'
+  );
+  const codeLinesPane = await readFile(
+    new URL('../src/features/files/components/CodeLinesPane.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(filesView, /const openSearchHitSource = async/);
+  assert.match(filesView, /getSearchHitSource\(hit\)/);
+  assert.match(filesView, /handleNodeClick\(source\.nodeId, source\.line, \{ preserveSearch: true \}\)/);
+  assert.match(filesView, /navigator\.clipboard\.writeText\(hit\.path\)/);
+  assert.match(filesView, /onOpenSource=\{openSearchHitSource\}/);
+  assert.match(filesView, /onCopySourcePath=\{copySearchHitPath\}/);
+  assert.match(filesView, /scrollIntoView\(\{ block: 'center' \}\)/);
+  assert.match(codeLinesPane, /targetLine/);
+  assert.match(codeLinesPane, /data-source-line/);
+  assert.match(codeLinesPane, /bg-amber-100/);
 } finally {
   await server.close();
 }
