@@ -346,7 +346,8 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             segment_id UNINDEXED,
             bundle_id UNINDEXED,
             file_id UNINDEXED,
-            timeline UNINDEXED
+            timeline UNINDEXED,
+            tokenize='trigram'
         )
         "#,
         r#"
@@ -373,6 +374,8 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             .await
             .map_err(AppError::Database)?;
     }
+
+    ensure_trigram_fts(pool).await?;
 
     let has_failure_reason: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bundles') WHERE name = 'failure_reason')",
@@ -403,6 +406,67 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         backfill_bundle_content_sizes(pool).await?;
     }
 
+    Ok(())
+}
+
+async fn ensure_trigram_fts(pool: &SqlitePool) -> Result<(), AppError> {
+    let schema: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'log_segments_fts'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let Some(schema) = schema else {
+        return Err(AppError::Database(sqlx::Error::RowNotFound));
+    };
+    if schema.contains("tokenize='trigram'") {
+        return Ok(());
+    }
+
+    let segment_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM log_segments")
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Database)?;
+    let started = std::time::Instant::now();
+    tracing::info!(
+        segment_count,
+        "rebuilding full-text index with trigram tokenizer"
+    );
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    sqlx::query("DROP TABLE log_segments_fts")
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE log_segments_fts USING fts5(
+            content,
+            segment_id UNINDEXED,
+            bundle_id UNINDEXED,
+            file_id UNINDEXED,
+            timeline UNINDEXED,
+            tokenize='trigram'
+        )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+    sqlx::query(
+        r#"
+        INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
+        SELECT content, id, bundle_id, file_id, timeline FROM log_segments
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+    tx.commit().await.map_err(AppError::Database)?;
+    tracing::info!(
+        segment_count,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "trigram full-text index rebuild completed"
+    );
     Ok(())
 }
 
@@ -555,5 +619,85 @@ mod tests {
                     .expect("inspect schema");
             assert!(!exists, "{object} should not exist");
         }
+    }
+
+    #[tokio::test]
+    async fn schema_uses_trigram_fts_for_substring_matches() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        let schema: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'log_segments_fts'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load fts schema");
+        assert!(schema.contains("tokenize='trigram'"), "{schema}");
+
+        sqlx::query(
+            "INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id) VALUES ('requestId=abcdef123456', 1, 'bundle', 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert fts content");
+        let matches: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'def123'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("search trigram substring");
+        assert_eq!(matches, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_fts_is_rebuilt_from_authoritative_segments() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('SEARCH', 'Search')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query(
+            "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('bundle', 'SEARCH', 'search-hash', 'Search', 'READY')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('bundle', 'app.log', '/app.log', 0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert file");
+        sqlx::query("INSERT INTO log_segments (bundle_id, file_id, content) VALUES ('bundle', ?, 'prefix-abcdef-suffix')")
+            .bind(file_id)
+            .execute(&pool)
+            .await
+            .expect("insert segment");
+        sqlx::query("DROP TABLE log_segments_fts")
+            .execute(&pool)
+            .await
+            .expect("drop trigram fts");
+        sqlx::query(
+            "CREATE VIRTUAL TABLE log_segments_fts USING fts5(content, segment_id UNINDEXED, bundle_id UNINDEXED, file_id UNINDEXED, timeline UNINDEXED)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy fts");
+
+        super::prepare_schema(&pool, false)
+            .await
+            .expect("migrate schema");
+
+        let matches: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'cdef'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("search rebuilt fts");
+        assert_eq!(matches, 1);
     }
 }
