@@ -27,7 +27,7 @@ use indexing::clean_log_line;
 pub use indexing::line_reader::{decode_log_line, read_line_bytes_limited};
 use limits::{
     INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES, INDEX_COMMIT_MAX_LINES,
-    LINE_OFFSET_INTERVAL,
+    INDEX_COMMIT_TARGET_BYTES, LINE_OFFSET_INTERVAL,
 };
 
 const LINE_OFFSET_BATCH_SIZE: usize = 500;
@@ -502,6 +502,7 @@ async fn ingest_text_file(
     let mut pending_chunks = Vec::new();
     let mut line = Vec::new();
     let mut offsets = Vec::new();
+    let mut budget = IndexBatchBudget::default();
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
 
     loop {
@@ -532,6 +533,7 @@ async fn ingest_text_file(
             chunk.push(line_number, cleaned);
 
             if chunk.reached_target(INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES) {
+                budget.record_chunk(chunk.byte_len());
                 pending_chunks.push(chunk);
                 chunk_index += 1;
                 chunk = LogChunk::new(chunk_index, INDEX_CHUNK_TARGET_BYTES);
@@ -539,8 +541,10 @@ async fn ingest_text_file(
         }
 
         line_number += 1;
-        if line_number % INDEX_COMMIT_MAX_LINES == 0 {
+        budget.record_line();
+        if budget.should_commit() {
             if !chunk.is_empty() {
+                budget.record_chunk(chunk.byte_len());
                 pending_chunks.push(chunk);
                 chunk_index += 1;
                 chunk = LogChunk::new(chunk_index, INDEX_CHUNK_TARGET_BYTES);
@@ -549,10 +553,12 @@ async fn ingest_text_file(
             pending_chunks.clear();
             tx.commit().await.map_err(AppError::Database)?;
             tx = pool.begin().await.map_err(AppError::Database)?;
+            budget.reset();
         }
     }
 
     if !chunk.is_empty() {
+        budget.record_chunk(chunk.byte_len());
         pending_chunks.push(chunk);
     }
     flush_log_chunks(&mut tx, bundle_id, file_id, &pending_chunks).await?;
@@ -608,6 +614,32 @@ struct LogChunk {
     line_count: usize,
 }
 
+#[derive(Default)]
+struct IndexBatchBudget {
+    lines_since_commit: i64,
+    pending_bytes: usize,
+}
+
+impl IndexBatchBudget {
+    fn record_line(&mut self) {
+        self.lines_since_commit = self.lines_since_commit.saturating_add(1);
+    }
+
+    fn record_chunk(&mut self, bytes: usize) {
+        self.pending_bytes = self.pending_bytes.saturating_add(bytes);
+    }
+
+    fn should_commit(&self) -> bool {
+        self.lines_since_commit >= INDEX_COMMIT_MAX_LINES
+            || self.pending_bytes >= INDEX_COMMIT_TARGET_BYTES
+    }
+
+    fn reset(&mut self) {
+        self.lines_since_commit = 0;
+        self.pending_bytes = 0;
+    }
+}
+
 impl LogChunk {
     fn new(chunk_index: i64, content_capacity: usize) -> Self {
         Self {
@@ -634,6 +666,7 @@ impl LogChunk {
         self.line_count = self.line_count.saturating_add(1);
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.line_count
     }
@@ -744,12 +777,47 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        ArchiveBudget, IssueQuota, LogChunk, PreparedDirectoryEntry, archive_parent_depth,
-        extract_gzip_file, extracted_directory_meta, extracted_entry_meta, flush_log_chunks,
-        gzip_output_name, insert_directory_children, insert_line_offsets, sanitize_archive_path,
-        uploaded_file_meta, validate_extracted_path,
+        ArchiveBudget, IndexBatchBudget, IssueQuota, LogChunk, PreparedDirectoryEntry,
+        archive_parent_depth, extract_gzip_file, extracted_directory_meta, extracted_entry_meta,
+        flush_log_chunks, gzip_output_name, insert_directory_children, insert_line_offsets,
+        sanitize_archive_path, uploaded_file_meta, validate_extracted_path,
     };
-    use super::limits::{INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES};
+    use super::limits::{
+        INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES, INDEX_COMMIT_MAX_LINES,
+        INDEX_COMMIT_TARGET_BYTES,
+    };
+
+    #[test]
+    fn index_batch_budget_commits_at_byte_target_and_resets() {
+        let mut budget = IndexBatchBudget::default();
+        budget.record_line();
+        budget.record_chunk(INDEX_COMMIT_TARGET_BYTES);
+
+        assert!(budget.should_commit());
+        budget.reset();
+        assert!(!budget.should_commit());
+    }
+
+    #[test]
+    fn index_batch_budget_commits_at_line_target() {
+        let mut budget = IndexBatchBudget::default();
+        for _ in 0..INDEX_COMMIT_MAX_LINES {
+            budget.record_line();
+        }
+
+        assert!(budget.should_commit());
+        assert_eq!(budget.pending_bytes, 0);
+    }
+
+    #[test]
+    fn index_batch_budget_saturates_pending_bytes() {
+        let mut budget = IndexBatchBudget::default();
+        budget.record_chunk(usize::MAX);
+        budget.record_chunk(1);
+
+        assert_eq!(budget.pending_bytes, usize::MAX);
+        assert!(budget.should_commit());
+    }
 
     #[test]
     fn log_chunk_tracks_utf8_content_bytes_and_reuses_content() {
