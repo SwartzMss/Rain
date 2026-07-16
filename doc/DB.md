@@ -28,6 +28,7 @@
 - `name` TEXT：bundle 显示名（当前为 `bundle-{hash}`）。
 - `status` TEXT：上传/解析状态，上传后为 `PROCESSING`，后台处理成功后为 `READY`，失败为 `FAILED`。
 - `size_bytes` INTEGER：本次上传总字节数。
+- `content_size_bytes` INTEGER：计入 Issue 配额的最终可浏览文件总字节数；压缩包和目录本身不重复计入。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 - 索引：`idx_bundles_issue (issue_code, created_at DESC)`。
 

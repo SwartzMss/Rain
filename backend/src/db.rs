@@ -297,6 +297,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             process_stage TEXT NOT NULL DEFAULT 'PENDING',
             failure_reason TEXT,
             size_bytes INTEGER,
+            content_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (content_size_bytes >= 0),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
@@ -417,6 +418,48 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             .map_err(AppError::Database)?;
     }
 
+    let has_content_size: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bundles') WHERE name = 'content_size_bytes')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if !has_content_size {
+        sqlx::query(
+            "ALTER TABLE bundles ADD COLUMN content_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (content_size_bytes >= 0)",
+        )
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+        backfill_bundle_content_sizes(pool).await?;
+    }
+
+    Ok(())
+}
+
+async fn backfill_bundle_content_sizes(pool: &SqlitePool) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE bundles
+        SET content_size_bytes = CASE
+            WHEN status = 'READY' THEN (
+                SELECT COALESCE(SUM(CASE
+                    WHEN COALESCE(files.size_bytes, 0) > 0
+                    THEN files.size_bytes
+                    ELSE 0
+                END), 0)
+                FROM files
+                WHERE files.bundle_id = bundles.id
+                  AND files.is_dir = 0
+                  AND COALESCE(json_extract(files.meta, '$.preview_kind'), '') <> 'archive'
+            )
+            ELSE 0
+        END
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
     Ok(())
 }
 
@@ -437,7 +480,7 @@ fn ensure_sqlite_parent(database_url: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::checkpoint_wal;
+    use super::{backfill_bundle_content_sizes, checkpoint_wal};
 
     #[tokio::test]
     async fn checkpoint_returns_sqlite_page_counts() {
@@ -450,5 +493,76 @@ mod tests {
         assert!(stats.busy >= 0);
         assert!(stats.log_pages >= -1);
         assert!(stats.checkpointed_pages >= -1);
+    }
+
+    #[tokio::test]
+    async fn backfill_counts_only_final_browsable_files() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('QUOTA', 'Quota')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query(
+            "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('bundle', 'QUOTA', 'hash', 'bundle', 'READY')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+        for (name, path, is_dir, size, meta) in [
+            (
+                "direct.log",
+                "/direct.log",
+                false,
+                Some(10_i64),
+                r#"{"preview_kind":"text"}"#,
+            ),
+            (
+                "logs.zip",
+                "/logs.zip",
+                false,
+                Some(5_i64),
+                r#"{"preview_kind":"archive"}"#,
+            ),
+            (
+                "expanded",
+                "/expanded",
+                true,
+                None,
+                r#"{"preview_kind":"directory"}"#,
+            ),
+            (
+                "nested.log",
+                "/expanded/nested.log",
+                false,
+                Some(20_i64),
+                r#"{"preview_kind":"text"}"#,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO files (bundle_id, name, path, is_dir, size_bytes, meta) VALUES ('bundle', ?, ?, ?, ?, ?)",
+            )
+            .bind(name)
+            .bind(path)
+            .bind(is_dir)
+            .bind(size)
+            .bind(meta)
+            .execute(&pool)
+            .await
+            .expect("insert file");
+        }
+
+        backfill_bundle_content_sizes(&pool)
+            .await
+            .expect("backfill content sizes");
+
+        let content_size: i64 =
+            sqlx::query_scalar("SELECT content_size_bytes FROM bundles WHERE id = 'bundle'")
+                .fetch_one(&pool)
+                .await
+                .expect("load content size");
+        assert_eq!(content_size, 30);
     }
 }
