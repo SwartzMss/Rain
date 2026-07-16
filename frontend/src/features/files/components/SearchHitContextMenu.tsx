@@ -4,20 +4,14 @@ import { placeContextMenu } from '../searchHitSource';
 type SearchHitContextMenuProps = {
   x: number;
   y: number;
-  canOpen: boolean;
-  canCopy: boolean;
   onOpen: () => void;
-  onCopyPath: () => void;
   onClose: () => void;
 };
 
 export function SearchHitContextMenu({
   x,
   y,
-  canOpen,
-  canCopy,
   onOpen,
-  onCopyPath,
   onClose
 }: SearchHitContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -82,20 +76,10 @@ export function SearchHitContextMenu({
       <button
         type="button"
         role="menuitem"
-        disabled={!canOpen}
-        className="block w-full rounded px-3 py-2 text-left text-slate-700 hover:bg-sky-50 hover:text-sky-800 focus:bg-sky-50 focus:outline-none disabled:text-slate-300"
+        className="block w-full rounded px-3 py-2 text-left text-slate-700 hover:bg-sky-50 hover:text-sky-800 focus:bg-sky-50 focus:outline-none"
         onClick={() => run(onOpen)}
       >
         在原文件中打开
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        disabled={!canCopy}
-        className="block w-full rounded px-3 py-2 text-left text-slate-700 hover:bg-sky-50 hover:text-sky-800 focus:bg-sky-50 focus:outline-none disabled:text-slate-300"
-        onClick={() => run(onCopyPath)}
-      >
-        复制文件路径
       </button>
     </div>
   );
