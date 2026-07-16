@@ -169,7 +169,7 @@ pub async fn delete_file_node(
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
     let _record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
-    delete_file_tree(&state.pool, &bundle.id, parsed_id).await?;
+    delete_file_tree(&state.pool, &data_root(&state), &bundle.id, parsed_id).await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

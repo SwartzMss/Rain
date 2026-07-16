@@ -42,6 +42,36 @@ pub struct ProcessFileOptions<'a> {
     pub indexing: &'a IndexingConfig,
 }
 
+fn uploaded_file_meta(
+    original_name: &str,
+    display_name: &str,
+    storage_name: &str,
+    preview_kind: PreviewKind,
+) -> serde_json::Value {
+    serde_json::json!({
+        "original_name": original_name,
+        "display_name": display_name,
+        "storage_name": storage_name,
+        "kind": "uploaded_file",
+        "preview_kind": preview_kind.as_str()
+    })
+}
+
+fn extracted_entry_meta(kind: &str, preview_kind: PreviewKind) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "preview_kind": preview_kind.as_str()
+    })
+}
+
+fn extracted_directory_meta(source: &str, storage_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "source": source,
+        "storage_name": storage_name,
+        "kind": "extracted_dir"
+    })
+}
+
 pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<(), AppError> {
     let ProcessFileOptions {
         pool,
@@ -73,14 +103,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     }
 
     let relative_path = format!("/{bundle_hash}/{storage_name}");
-    let meta = serde_json::json!({
-        "original_name": original_name,
-        "display_name": display_name,
-        "storage_name": storage_name,
-        "storage_path": disk_path.to_string_lossy(),
-        "kind": "uploaded_file",
-        "preview_kind": preview_kind.as_str()
-    });
+    let meta = uploaded_file_meta(original_name, display_name, storage_name, preview_kind);
 
     let file_id = insert_file_record(
         pool,
@@ -117,12 +140,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         .await?;
 
         let extracted_relative_path = format!("/{bundle_hash}/{extracted_dir_name}");
-        let dir_meta = serde_json::json!({
-            "source": original_name,
-            "storage_name": extracted_dir_name,
-            "storage_path": extracted_dir.to_string_lossy(),
-            "kind": "extracted_dir"
-        });
+        let dir_meta = extracted_directory_meta(original_name, extracted_dir_name.as_str());
 
         let dir_id = insert_file_record(
             pool,
@@ -218,11 +236,14 @@ fn ingest_directory<'a>(
             if !is_dir && preview_kind != PreviewKind::Archive {
                 issue_quota.reserve(metadata.len()).await?;
             }
-            let meta = serde_json::json!({
-                "storage_path": disk_path.to_string_lossy(),
-                "kind": if is_dir { "extracted_dir" } else { "extracted_file" },
-                "preview_kind": preview_kind.as_str()
-            });
+            let meta = extracted_entry_meta(
+                if is_dir {
+                    "extracted_dir"
+                } else {
+                    "extracted_file"
+                },
+                preview_kind,
+            );
 
             let record_id = insert_file_record(
                 pool,
@@ -298,12 +319,7 @@ fn ingest_directory<'a>(
                 extract_archive(&name, &disk_path, &extracted_dir, archive_budget.clone()).await?;
 
                 let extracted_db_path = format!("{db_path}_extracted");
-                let dir_meta = serde_json::json!({
-                    "source": name,
-                    "storage_name": extracted_dir_name,
-                    "storage_path": extracted_dir.to_string_lossy(),
-                    "kind": "extracted_dir"
-                });
+                let dir_meta = extracted_directory_meta(name.as_str(), extracted_dir_name.as_str());
                 let dir_id = insert_file_record(
                     pool,
                     bundle_id,
@@ -604,9 +620,32 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        ArchiveBudget, IssueQuota, archive_parent_depth, extract_gzip_file, gzip_output_name,
-        sanitize_archive_path, validate_extracted_path,
+        ArchiveBudget, IssueQuota, archive_parent_depth, extract_gzip_file,
+        extracted_directory_meta, extracted_entry_meta, gzip_output_name, sanitize_archive_path,
+        uploaded_file_meta, validate_extracted_path,
     };
+
+    #[test]
+    fn new_file_metadata_uses_stable_database_paths() {
+        let uploaded = uploaded_file_meta(
+            "source.log",
+            "Source",
+            "stored.log",
+            crate::file_classification::PreviewKind::Text,
+        );
+        let extracted = extracted_entry_meta(
+            "extracted_file",
+            crate::file_classification::PreviewKind::Text,
+        );
+        let directory = extracted_directory_meta("archive.zip", "archive.zip_extracted");
+
+        for metadata in [&uploaded, &extracted, &directory] {
+            assert!(metadata.get("storage_path").is_none());
+        }
+        assert_eq!(uploaded["storage_name"], "stored.log");
+        assert_eq!(extracted["preview_kind"], "text");
+        assert_eq!(directory["source"], "archive.zip");
+    }
 
     async fn quota_fixture(issue: &str, bundles: &[&str]) -> sqlx::SqlitePool {
         let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");

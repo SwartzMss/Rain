@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::{
     error::AppError,
     repositories::files::{
@@ -8,6 +10,7 @@ use crate::{
 
 pub async fn delete_file_tree(
     pool: &sqlx::SqlitePool,
+    data_root: &Path,
     bundle_id: &str,
     root_file_id: i64,
 ) -> Result<(), AppError> {
@@ -23,7 +26,7 @@ pub async fn delete_file_tree(
         }
     }
 
-    let disk_paths = fetch_storage_paths_for_ids(&mut tx, bundle_id, &file_ids).await?;
+    let disk_paths = fetch_storage_paths_for_ids(&mut tx, data_root, bundle_id, &file_ids).await?;
 
     for file_id in &file_ids {
         delete_index_rows_for_file(&mut tx, *file_id).await?;

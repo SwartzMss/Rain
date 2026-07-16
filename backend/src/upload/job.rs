@@ -119,12 +119,6 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
         fs::create_dir_all(parent).await.map_err(AppError::Io)?;
     }
     move_bundle_directory_with_retry(&staging_bundle_dir, &final_bundle_dir).await?;
-    finalize_bundle_ready_with_retry(
-        &job.pool,
-        &job.bundle_id,
-        &staging_bundle_dir,
-        &final_bundle_dir,
-    )
-    .await?;
+    finalize_bundle_ready_with_retry(&job.pool, &job.bundle_id).await?;
     Ok(())
 }

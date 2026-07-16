@@ -165,6 +165,7 @@ pub async fn fetch_extracted_child_ids(
 
 pub async fn fetch_storage_paths_for_ids(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    data_root: &std::path::Path,
     bundle_id: &str,
     file_ids: &[i64],
 ) -> Result<Vec<PathBuf>, AppError> {
@@ -184,10 +185,8 @@ pub async fn fetch_storage_paths_for_ids(
         .await
         .map_err(AppError::Database)?;
 
-        if let Some(row) = row
-            && let Some(path) = storage_path_from_meta(&row.meta)
-        {
-            paths.push(path);
+        if let Some(row) = row {
+            paths.push(validated_storage_path(&row, data_root)?);
         }
     }
 
@@ -310,17 +309,19 @@ pub fn resolve_file_path(
     record: &FileRow,
     data_root: &std::path::Path,
 ) -> Result<PathBuf, AppError> {
-    let meta_path = record
-        .meta
-        .as_deref()
-        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-        .as_ref()
-        .and_then(|meta| meta.get("storage_path"))
-        .and_then(|value| value.as_str())
-        .map(std::path::PathBuf::from);
+    validated_storage_path(record, data_root)
+}
 
-    let fallback_path = data_root.join(record.path.trim_start_matches('/'));
-    let candidate = meta_path.unwrap_or(fallback_path);
+fn storage_path_candidate(record: &FileRow, data_root: &std::path::Path) -> PathBuf {
+    storage_path_from_meta(&record.meta)
+        .unwrap_or_else(|| data_root.join(record.path.trim_start_matches('/')))
+}
+
+fn validated_storage_path(
+    record: &FileRow,
+    data_root: &std::path::Path,
+) -> Result<PathBuf, AppError> {
+    let candidate = storage_path_candidate(record, data_root);
 
     let canonical_data_root = std::fs::canonicalize(data_root).map_err(AppError::Io)?;
     let canonical_candidate = std::fs::canonicalize(&candidate).map_err(AppError::Io)?;
@@ -332,4 +333,48 @@ pub fn resolve_file_path(
     }
 
     Ok(canonical_candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{FileRow, storage_path_candidate};
+
+    fn row(path: &str, meta: Option<&str>) -> FileRow {
+        FileRow {
+            id: 1,
+            name: "app.log".into(),
+            path: path.into(),
+            is_dir: false,
+            size_bytes: Some(1),
+            line_count: Some(1),
+            mime_type: Some("text/plain".into()),
+            status: None,
+            meta: meta.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn stable_file_path_is_used_when_metadata_has_no_storage_path() {
+        let record = row("/bundle/logs/app.log", Some(r#"{"kind":"extracted_file"}"#));
+
+        assert_eq!(
+            storage_path_candidate(&record, Path::new("/data")),
+            PathBuf::from("/data/bundle/logs/app.log")
+        );
+    }
+
+    #[test]
+    fn legacy_storage_path_remains_preferred() {
+        let record = row(
+            "/bundle/logs/app.log",
+            Some(r#"{"storage_path":"/legacy/bundle/app.log"}"#),
+        );
+
+        assert_eq!(
+            storage_path_candidate(&record, Path::new("/data")),
+            PathBuf::from("/legacy/bundle/app.log")
+        );
+    }
 }

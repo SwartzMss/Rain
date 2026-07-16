@@ -198,12 +198,10 @@ pub async fn finalize_bundle_failed(
 pub async fn finalize_bundle_ready_with_retry(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
-    staging_bundle_dir: &Path,
-    final_bundle_dir: &Path,
 ) -> Result<(), AppError> {
     let mut last_error: Option<AppError> = None;
     for attempt in 1..=3 {
-        match finalize_bundle_ready(pool, bundle_id, staging_bundle_dir, final_bundle_dir).await {
+        match finalize_bundle_ready(pool, bundle_id).await {
             Ok(()) => return Ok(()),
             Err(error) => {
                 error!(
@@ -221,65 +219,8 @@ pub async fn finalize_bundle_ready_with_retry(
     Err(last_error.unwrap_or_else(|| AppError::Database(sqlx::Error::RowNotFound)))
 }
 
-async fn finalize_bundle_ready(
-    pool: &sqlx::SqlitePool,
-    bundle_id: &str,
-    staging_bundle_dir: &Path,
-    final_bundle_dir: &Path,
-) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    let rows = sqlx::query_as::<_, FileMetaRow>(
-        r#"
-        SELECT id, meta
-        FROM files
-        WHERE bundle_id = ?
-        "#,
-    )
-    .bind(bundle_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-
-    for row in rows {
-        let Some(meta_text) = row.meta else {
-            continue;
-        };
-        let mut meta: serde_json::Value = serde_json::from_str(&meta_text)
-            .map_err(|err| AppError::BadRequest(format!("invalid file metadata: {err}")))?;
-        let Some(storage_path) = meta.get("storage_path").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        let current_path = PathBuf::from(storage_path);
-        if !current_path.starts_with(staging_bundle_dir) {
-            continue;
-        }
-        let relative = current_path
-            .strip_prefix(staging_bundle_dir)
-            .map_err(|err| AppError::BadRequest(format!("invalid staging path: {err}")))?;
-        let final_path = final_bundle_dir.join(relative);
-        if let Some(object) = meta.as_object_mut() {
-            object.insert(
-                "storage_path".to_string(),
-                serde_json::Value::String(final_path.to_string_lossy().to_string()),
-            );
-        }
-        sqlx::query("UPDATE files SET meta = ? WHERE id = ?")
-            .bind(meta.to_string())
-            .bind(row.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-    }
-    sqlx::query(
-        "UPDATE bundles SET status = 'READY', process_stage = 'READY', failure_reason = NULL WHERE id = ?",
-    )
-        .bind(bundle_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-
-    tx.commit().await.map_err(AppError::Database)?;
-    Ok(())
+async fn finalize_bundle_ready(pool: &sqlx::SqlitePool, bundle_id: &str) -> Result<(), AppError> {
+    update_bundle_status(pool, bundle_id, "READY", "READY", None).await
 }
 
 async fn cleanup_failed_bundle_database_artifacts(
@@ -288,12 +229,6 @@ async fn cleanup_failed_bundle_database_artifacts(
 ) -> Result<(), AppError> {
     cleanup_bundle_content_batched(pool, bundle_id, CLEANUP_BATCH_SIZE).await?;
     Ok(())
-}
-
-#[derive(sqlx::FromRow)]
-struct FileMetaRow {
-    id: i64,
-    meta: Option<String>,
 }
 
 #[cfg(test)]
@@ -308,7 +243,51 @@ mod tests {
         },
     };
 
-    use super::move_bundle_directory_with_retry_using;
+    use super::{finalize_bundle_ready, move_bundle_directory_with_retry_using};
+
+    #[tokio::test]
+    async fn ready_finalization_updates_only_the_bundle() {
+        let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");
+        crate::db::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('FINAL', 'Final')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO bundles (id, issue_code, hash, name, status, process_stage) VALUES ('bundle', 'FINAL', 'hash', 'bundle', 'PROCESSING', 'INDEXING')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for index in 0..100 {
+            sqlx::query(
+                "INSERT INTO files (bundle_id, name, path, is_dir, meta) VALUES ('bundle', ?, ?, 0, '{invalid-json')",
+            )
+            .bind(format!("{index}.log"))
+            .bind(format!("/hash/{index}.log"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        finalize_bundle_ready(&pool, "bundle").await.unwrap();
+
+        let state: (String, String) =
+            sqlx::query_as("SELECT status, process_stage FROM bundles WHERE id = 'bundle'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let unchanged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM files WHERE bundle_id = 'bundle' AND meta = '{invalid-json'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, ("READY".into(), "READY".into()));
+        assert_eq!(unchanged, 100);
+    }
 
     #[tokio::test]
     async fn retries_windows_sharing_violations_until_move_succeeds() {
