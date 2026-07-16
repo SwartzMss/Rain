@@ -71,9 +71,10 @@ jobs:
           chmod +x rain
           tar -czf ../../dist/rain-linux-x64.tar.gz rain .env
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: dist/*
-          generate_release_notes: true
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" dist/* --generate-notes --verify-tag \
+            || gh release upload "$TAG_NAME" dist/* --clobber
