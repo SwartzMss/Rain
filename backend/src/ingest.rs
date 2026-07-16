@@ -25,7 +25,10 @@ use archive::{archive_parent_depth, extract_gzip_file, gzip_output_name, sanitiz
 use archive::{extract_archive, validate_extracted_path};
 use indexing::clean_log_line;
 pub use indexing::line_reader::{decode_log_line, read_line_bytes_limited};
-use limits::{INDEX_CHUNK_LINES, INDEX_COMMIT_LINES, LINE_OFFSET_INTERVAL};
+use limits::{
+    INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES, INDEX_COMMIT_MAX_LINES,
+    LINE_OFFSET_INTERVAL,
+};
 
 const LINE_OFFSET_BATCH_SIZE: usize = 500;
 const SEGMENT_BATCH_SIZE: usize = 100;
@@ -495,7 +498,7 @@ async fn ingest_text_file(
     let mut line_number = 0i64;
     let mut bytes_scanned = 0u64;
     let mut chunk_index = 0i64;
-    let mut chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
+    let mut chunk = LogChunk::new(chunk_index, INDEX_CHUNK_TARGET_BYTES);
     let mut pending_chunks = Vec::new();
     let mut line = Vec::new();
     let mut offsets = Vec::new();
@@ -528,19 +531,19 @@ async fn ingest_text_file(
         if !cleaned.is_empty() {
             chunk.push(line_number, cleaned);
 
-            if chunk.len() >= INDEX_CHUNK_LINES {
+            if chunk.reached_target(INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES) {
                 pending_chunks.push(chunk);
                 chunk_index += 1;
-                chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
+                chunk = LogChunk::new(chunk_index, INDEX_CHUNK_TARGET_BYTES);
             }
         }
 
         line_number += 1;
-        if line_number % INDEX_COMMIT_LINES == 0 {
+        if line_number % INDEX_COMMIT_MAX_LINES == 0 {
             if !chunk.is_empty() {
                 pending_chunks.push(chunk);
                 chunk_index += 1;
-                chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
+                chunk = LogChunk::new(chunk_index, INDEX_CHUNK_TARGET_BYTES);
             }
             flush_log_chunks(&mut tx, bundle_id, file_id, &pending_chunks).await?;
             pending_chunks.clear();
@@ -600,20 +603,20 @@ struct LogChunk {
     chunk_index: i64,
     line_start: Option<i64>,
     line_end: Option<i64>,
-    lines: Vec<LogLine>,
-}
-
-struct LogLine {
     content: String,
+    content_bytes: usize,
+    line_count: usize,
 }
 
 impl LogChunk {
-    fn new(chunk_index: i64, capacity: usize) -> Self {
+    fn new(chunk_index: i64, content_capacity: usize) -> Self {
         Self {
             chunk_index,
             line_start: None,
             line_end: None,
-            lines: Vec::with_capacity(capacity),
+            content: String::with_capacity(content_capacity),
+            content_bytes: 0,
+            line_count: 0,
         }
     }
 
@@ -622,23 +625,33 @@ impl LogChunk {
             self.line_start = Some(line_number);
         }
         self.line_end = Some(line_number);
-        self.lines.push(LogLine { content });
+        if self.line_count > 0 {
+            self.content.push('\n');
+            self.content_bytes = self.content_bytes.saturating_add(1);
+        }
+        self.content_bytes = self.content_bytes.saturating_add(content.len());
+        self.content.push_str(&content);
+        self.line_count = self.line_count.saturating_add(1);
     }
 
     fn len(&self) -> usize {
-        self.lines.len()
+        self.line_count
+    }
+
+    fn byte_len(&self) -> usize {
+        self.content_bytes
     }
 
     fn is_empty(&self) -> bool {
-        self.lines.is_empty()
+        self.line_count == 0
     }
 
-    fn content(&self) -> String {
-        self.lines
-            .iter()
-            .map(|line| line.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+    fn content(&self) -> &str {
+        &self.content
+    }
+
+    fn reached_target(&self, max_lines: usize, target_bytes: usize) -> bool {
+        self.line_count >= max_lines || self.content_bytes >= target_bytes
     }
 }
 
@@ -736,6 +749,38 @@ mod tests {
         gzip_output_name, insert_directory_children, insert_line_offsets, sanitize_archive_path,
         uploaded_file_meta, validate_extracted_path,
     };
+    use super::limits::{INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES};
+
+    #[test]
+    fn log_chunk_tracks_utf8_content_bytes_and_reuses_content() {
+        let mut chunk = LogChunk::new(0, 2);
+        chunk.push(0, "alpha".into());
+        chunk.push(1, "世界".into());
+
+        assert_eq!(chunk.len(), 2);
+        assert_eq!(chunk.byte_len(), "alpha\n世界".len());
+        assert_eq!(chunk.content(), "alpha\n世界");
+    }
+
+    #[test]
+    fn log_chunk_reaches_byte_target_independently() {
+        let mut chunk = LogChunk::new(0, 1);
+        chunk.push(0, "x".repeat(INDEX_CHUNK_TARGET_BYTES));
+
+        assert!(chunk.reached_target(INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES));
+        assert_eq!(chunk.len(), 1);
+    }
+
+    #[test]
+    fn log_chunk_reaches_line_target_independently() {
+        let mut chunk = LogChunk::new(0, INDEX_CHUNK_MAX_LINES);
+        for line in 0..INDEX_CHUNK_MAX_LINES {
+            chunk.push(line as i64, "x".into());
+        }
+
+        assert!(chunk.reached_target(INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES));
+        assert!(chunk.byte_len() < INDEX_CHUNK_TARGET_BYTES);
+    }
 
     fn prepared_entry(name: &str, path: &str) -> PreparedDirectoryEntry {
         PreparedDirectoryEntry {
