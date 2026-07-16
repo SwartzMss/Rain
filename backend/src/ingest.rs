@@ -506,9 +506,10 @@ async fn ingest_text_file(
         let Some((read, truncated)) = read_line_bytes_limited(
             &mut reader,
             &mut line,
-            usize::try_from(indexing.max_line_size).map_err(|_| {
+            usize::try_from(indexing.max_indexed_line_size).map_err(|_| {
                 AppError::Config(
-                    "RAIN_INDEXING_MAX_LINE_SIZE cannot be represented on this platform".into(),
+                    "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE cannot be represented on this platform"
+                        .into(),
                 )
             })?,
         )

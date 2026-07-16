@@ -49,7 +49,8 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     let app_pool = pool.clone();
     let mut limits = AppLimits::default();
-    limits.indexing.max_line_size = 64 * 1024;
+    limits.indexing.max_indexed_line_size = 64;
+    limits.api.max_preview_line_size = 256;
 
     let app = test::init_service(
         App::new()
@@ -1041,7 +1042,10 @@ async fn upload_search_tree_and_delete_issue() {
     assert_eq!(bad_utf8_search["total"], 1);
 
     let long_line_boundary = format!("rain-{}", Uuid::new_v4().simple());
-    let mut long_line = vec![b'a'; 64 * 1024 + 128];
+    let mut long_line = b"INDEX_PREFIX ".to_vec();
+    long_line.extend(std::iter::repeat_n(b'a', 80));
+    long_line.extend_from_slice(b" INDEX_SUFFIX ");
+    long_line.extend(std::iter::repeat_n(b'b', 240));
     long_line.extend_from_slice(b"\nERROR after long line\n");
     let long_line_body = multipart_body_bytes(
         &long_line_boundary,
@@ -1085,13 +1089,41 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
+    let indexed_prefix: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/LONGLINE/search?q=INDEX_PREFIX&size=10")
+            .to_request(),
+    )
+    .await;
+    let omitted_suffix: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/LONGLINE/search?q=INDEX_SUFFIX&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(indexed_prefix["total"], 1);
+    assert_eq!(omitted_suffix["total"], 0);
     assert_eq!(long_line_lines["lines"][0]["truncated"], true);
-    assert!(
-        long_line_lines["lines"][0]["content"]
-            .as_str()
-            .expect("long line content")
-            .ends_with("[line truncated]")
-    );
+    let previewed_long_line = long_line_lines["lines"][0]["content"]
+        .as_str()
+        .expect("long line content");
+    assert!(previewed_long_line.len() > 64);
+    assert!(previewed_long_line.len() <= 256 + " ... [line truncated]".len());
+    assert!(previewed_long_line.ends_with("[line truncated]"));
+    let following_lines: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{long_line_bundle}/files/{long_line_file}/lines?start=1&limit=1"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(following_lines["lines"][0]["line_number"], 1);
+    assert_eq!(following_lines["lines"][0]["content"], "ERROR after long line");
+    assert_eq!(following_lines["lines"][0]["truncated"], false);
 
     let collision_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let collision_upload_body = multipart_body_multi(

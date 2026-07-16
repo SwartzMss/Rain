@@ -121,7 +121,7 @@ pub async fn get_file_lines(
         &state.pool,
         &record,
         &data_root(&state),
-        &state.limits.indexing,
+        &state.limits.api,
         start,
         limit,
     )

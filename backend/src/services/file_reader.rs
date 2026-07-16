@@ -6,7 +6,7 @@ use tokio::{
 };
 
 use crate::{
-    config::{ApiConfig, IndexingConfig},
+    config::ApiConfig,
     error::AppError,
     ingest::{decode_log_line, read_line_bytes_limited},
     repositories::files::{FileRow, ensure_text_preview, nearest_line_offset, resolve_file_path},
@@ -69,7 +69,7 @@ pub async fn read_file_lines(
     pool: &sqlx::SqlitePool,
     record: &FileRow,
     data_root: &std::path::Path,
-    indexing: &IndexingConfig,
+    api: &ApiConfig,
     start: i64,
     limit: i64,
 ) -> Result<FileLinesResponse, AppError> {
@@ -95,9 +95,9 @@ pub async fn read_file_lines(
         let Some((_read, truncated)) = read_line_bytes_limited(
             &mut reader,
             &mut buffer,
-            usize::try_from(indexing.max_line_size).map_err(|_| {
+            usize::try_from(api.max_preview_line_size).map_err(|_| {
                 AppError::Config(
-                    "RAIN_INDEXING_MAX_LINE_SIZE cannot be represented on this platform".into(),
+                    "RAIN_API_MAX_PREVIEW_LINE_SIZE cannot be represented on this platform".into(),
                 )
             })?,
         )

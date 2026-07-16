@@ -56,13 +56,13 @@ impl ArchiveConfig {
 
 #[derive(Debug, Clone)]
 pub struct IndexingConfig {
-    pub max_line_size: u64,
+    pub max_indexed_line_size: u64,
 }
 
 impl Default for IndexingConfig {
     fn default() -> Self {
         Self {
-            max_line_size: 8 * MIB,
+            max_indexed_line_size: 256 * KIB,
         }
     }
 }
@@ -70,6 +70,7 @@ impl Default for IndexingConfig {
 #[derive(Debug, Clone)]
 pub struct ApiConfig {
     pub file_preview_size: u64,
+    pub max_preview_line_size: u64,
     pub default_line_page_size: i64,
     pub max_line_page_size: i64,
     pub default_search_results: i64,
@@ -80,6 +81,7 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             file_preview_size: 64 * KIB,
+            max_preview_line_size: 8 * MIB,
             default_line_page_size: 1000,
             max_line_page_size: 3000,
             default_search_results: 50,
@@ -174,15 +176,19 @@ impl AppLimits {
                 )?,
             },
             indexing: IndexingConfig {
-                max_line_size: env_size(
-                    "RAIN_INDEXING_MAX_LINE_SIZE",
-                    defaults.indexing.max_line_size,
+                max_indexed_line_size: env_size(
+                    "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE",
+                    defaults.indexing.max_indexed_line_size,
                 )?,
             },
             api: ApiConfig {
                 file_preview_size: env_size(
                     "RAIN_API_FILE_PREVIEW_SIZE",
                     defaults.api.file_preview_size,
+                )?,
+                max_preview_line_size: env_size(
+                    "RAIN_API_MAX_PREVIEW_LINE_SIZE",
+                    defaults.api.max_preview_line_size,
                 )?,
                 default_line_page_size: env_value(
                     "RAIN_API_DEFAULT_LINE_PAGE_SIZE",
@@ -222,8 +228,15 @@ impl AppLimits {
             self.upload.concurrent_processing_tasks,
             "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS"
         );
-        positive!(self.indexing.max_line_size, "RAIN_INDEXING_MAX_LINE_SIZE");
+        positive!(
+            self.indexing.max_indexed_line_size,
+            "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE"
+        );
         positive!(self.api.file_preview_size, "RAIN_API_FILE_PREVIEW_SIZE");
+        positive!(
+            self.api.max_preview_line_size,
+            "RAIN_API_MAX_PREVIEW_LINE_SIZE"
+        );
         positive!(
             self.api.default_line_page_size,
             "RAIN_API_DEFAULT_LINE_PAGE_SIZE"
@@ -246,9 +259,15 @@ impl AppLimits {
                     .into(),
             ));
         }
-        usize::try_from(self.indexing.max_line_size).map_err(|_| {
+        usize::try_from(self.indexing.max_indexed_line_size).map_err(|_| {
             AppError::Config(
-                "RAIN_INDEXING_MAX_LINE_SIZE cannot be represented on this platform".into(),
+                "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE cannot be represented on this platform"
+                    .into(),
+            )
+        })?;
+        usize::try_from(self.api.max_preview_line_size).map_err(|_| {
+            AppError::Config(
+                "RAIN_API_MAX_PREVIEW_LINE_SIZE cannot be represented on this platform".into(),
             )
         })?;
         Ok(())
@@ -367,8 +386,9 @@ mod tests {
         let limits = AppLimits::default();
         assert_eq!(limits.issue_max_content_size, 4 * 1024_u64.pow(3));
         assert_eq!(limits.upload.concurrent_processing_tasks, 4);
-        assert_eq!(limits.indexing.max_line_size, 8 * 1024_u64.pow(2));
+        assert_eq!(limits.indexing.max_indexed_line_size, 256 * 1024);
         assert_eq!(limits.api.file_preview_size, 64 * 1024);
+        assert_eq!(limits.api.max_preview_line_size, 8 * 1024_u64.pow(2));
     }
 
     #[test]
@@ -409,6 +429,56 @@ mod tests {
             None => unsafe { std::env::remove_var(name) },
         }
         assert_eq!(limits.api.file_preview_size, 4 * 1024_u64.pow(3));
+    }
+
+    #[test]
+    fn environment_values_override_indexed_and_preview_line_limits() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let indexed_name = "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE";
+        let preview_name = "RAIN_API_MAX_PREVIEW_LINE_SIZE";
+        let previous_indexed = std::env::var_os(indexed_name);
+        let previous_preview = std::env::var_os(preview_name);
+        unsafe {
+            std::env::set_var(indexed_name, "512 KiB");
+            std::env::set_var(preview_name, "4 MiB");
+        }
+
+        let limits = AppLimits::from_env().unwrap();
+
+        match previous_indexed {
+            Some(value) => unsafe { std::env::set_var(indexed_name, value) },
+            None => unsafe { std::env::remove_var(indexed_name) },
+        }
+        match previous_preview {
+            Some(value) => unsafe { std::env::set_var(preview_name, value) },
+            None => unsafe { std::env::remove_var(preview_name) },
+        }
+        assert_eq!(limits.indexing.max_indexed_line_size, 512 * 1024);
+        assert_eq!(limits.api.max_preview_line_size, 4 * 1024_u64.pow(2));
+    }
+
+    #[test]
+    fn rejects_zero_indexed_and_preview_line_limits() {
+        let mut limits = AppLimits::default();
+        limits.indexing.max_indexed_line_size = 0;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_INDEXING_MAX_INDEXED_LINE_SIZE")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.api.max_preview_line_size = 0;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_API_MAX_PREVIEW_LINE_SIZE")
+        );
     }
 
     #[test]

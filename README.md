@@ -132,7 +132,7 @@ Linux/macOS:
 
 ### 可配置限制
 
-Issue 容量、后台处理并发、单行读取上限和 API 限制使用同一个 `.env` 文件；不需要额外的 TOML 配置。程序优先读取可执行文件同目录的 `.env`，找不到时读取当前工作目录的 `.env`，而系统环境变量始终优先。未设置的项目使用下表默认值。压缩条目数、递归深度、路径和压缩比等安全防护采用程序内安全值，不需要部署者逐项配置。
+Issue 容量、后台处理并发、索引单行上限、预览单行上限和 API 限制使用同一个 `.env` 文件；不需要额外的 TOML 配置。程序优先读取可执行文件同目录的 `.env`，找不到时读取当前工作目录的 `.env`，而系统环境变量始终优先。未设置的项目使用下表默认值。压缩条目数、递归深度、路径和压缩比等安全防护采用程序内安全值，不需要部署者逐项配置。
 
 字节大小可写成纯字节数或二进制单位 `KiB`、`MiB`、`GiB`、`TiB`，单位不区分大小写，例如 `64 KiB`、`4 GiB`。所有大小和数量必须大于零。启动时还会验证 API 默认页大小不大于对应最大值；错误配置会阻止启动并指出变量名称。
 
@@ -140,8 +140,9 @@ Issue 容量、后台处理并发、单行读取上限和 API 限制使用同一
 | --- | ---: | --- |
 | `RAIN_ISSUE_MAX_CONTENT_SIZE` | `4 GiB` | 每个 Issue 最终可浏览文件总量；压缩包按解压后内容计算 |
 | `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` | `4` | 并发后台处理任务 |
-| `RAIN_INDEXING_MAX_LINE_SIZE` | `8 MiB` | 索引及读取的单行大小 |
+| `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
+| `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
 | `RAIN_API_DEFAULT_LINE_PAGE_SIZE` | `1000` | 默认行分页大小 |
 | `RAIN_API_MAX_LINE_PAGE_SIZE` | `3000` | 最大行分页大小 |
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
