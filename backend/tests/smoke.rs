@@ -48,14 +48,12 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     let app_pool = pool.clone();
+    let mut limits = AppLimits::default();
+    limits.indexing.max_line_size = 64 * 1024;
 
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(AppState::new(
-                app_pool,
-                data_root,
-                AppLimits::default(),
-            )))
+            .app_data(web::Data::new(AppState::new(app_pool, data_root, limits)))
             .configure(routes::register),
     )
     .await;
@@ -950,7 +948,7 @@ async fn upload_search_tree_and_delete_issue() {
     assert_eq!(bad_utf8_search["total"], 1);
 
     let long_line_boundary = format!("rain-{}", Uuid::new_v4().simple());
-    let mut long_line = vec![b'a'; 1024 * 1024 + 128];
+    let mut long_line = vec![b'a'; 64 * 1024 + 128];
     long_line.extend_from_slice(b"\nERROR after long line\n");
     let long_line_body = multipart_body_bytes(
         &long_line_boundary,

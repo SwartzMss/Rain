@@ -31,7 +31,7 @@ pub async fn upload_logs(
     let temp_dir = state.data_root.join(".tmp").join(&upload_id);
     fs::create_dir_all(&temp_dir).await.map_err(AppError::Io)?;
 
-    let upload = match collect_multipart_upload(payload, &temp_dir, &state.limits.upload).await {
+    let upload = match collect_multipart_upload(payload, &temp_dir).await {
         Ok(upload) => upload,
         Err(error) => {
             let _ = fs::remove_dir_all(&temp_dir).await;
@@ -74,7 +74,7 @@ pub async fn upload_logs(
         temp_dir,
         staging_root,
         processing_permits: state.processing_permits.clone(),
-        archive_config: state.limits.archive.clone(),
+        archive_config: crate::config::ArchiveConfig::default(),
         indexing_config: state.limits.indexing.clone(),
         bundle_id: bundle_id.clone(),
         bundle_hash: bundle_hash.clone(),

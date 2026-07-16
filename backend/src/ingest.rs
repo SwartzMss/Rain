@@ -18,6 +18,7 @@ use crate::{
 
 mod archive;
 mod indexing;
+pub(crate) mod limits;
 
 pub use archive::ArchiveBudget;
 #[cfg(test)]
@@ -27,6 +28,7 @@ use archive::{extract_archive, validate_extracted_path};
 use indexing::event_parser::split_timestamp;
 pub use indexing::line_reader::{decode_log_line, read_line_bytes_limited};
 use indexing::{clean_log_line, parse_log_event};
+use limits::{INDEX_CHUNK_LINES, INDEX_COMMIT_LINES, LINE_OFFSET_INTERVAL};
 
 #[derive(Clone)]
 pub struct EventBudget {
@@ -458,7 +460,7 @@ async fn ingest_text_file(
     let mut line_number = 0i64;
     let mut bytes_scanned = 0u64;
     let mut chunk_index = 0i64;
-    let mut chunk = LogChunk::new(chunk_index, indexing.chunk_lines);
+    let mut chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
     let mut line = Vec::new();
     let mut offsets = Vec::new();
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
@@ -480,7 +482,7 @@ async fn ingest_text_file(
             break;
         };
 
-        if line_number % indexing.line_offset_interval == 0 {
+        if line_number % LINE_OFFSET_INTERVAL == 0 {
             offsets.push((line_number, line_offset as i64));
         }
         bytes_scanned = bytes_scanned.saturating_add(read as u64);
@@ -489,19 +491,19 @@ async fn ingest_text_file(
         if !cleaned.is_empty() {
             chunk.push(line_number, cleaned);
 
-            if chunk.len() >= indexing.chunk_lines {
+            if chunk.len() >= INDEX_CHUNK_LINES {
                 flush_log_chunk(&mut tx, bundle_id, file_id, &chunk, event_budget).await?;
                 chunk_index += 1;
-                chunk = LogChunk::new(chunk_index, indexing.chunk_lines);
+                chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
             }
         }
 
         line_number += 1;
-        if line_number % indexing.commit_lines == 0 {
+        if line_number % INDEX_COMMIT_LINES == 0 {
             if !chunk.is_empty() {
                 flush_log_chunk(&mut tx, bundle_id, file_id, &chunk, event_budget).await?;
                 chunk_index += 1;
-                chunk = LogChunk::new(chunk_index, indexing.chunk_lines);
+                chunk = LogChunk::new(chunk_index, INDEX_CHUNK_LINES);
             }
             tx.commit().await.map_err(AppError::Database)?;
             tx = pool.begin().await.map_err(AppError::Database)?;

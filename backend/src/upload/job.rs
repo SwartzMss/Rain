@@ -6,7 +6,10 @@ use tracing::error;
 use crate::{
     config::{ArchiveConfig, IndexingConfig},
     error::AppError,
-    ingest::{ArchiveBudget, EventBudget, ProcessFileOptions, process_uploaded_file},
+    ingest::{
+        ArchiveBudget, EventBudget, ProcessFileOptions, limits::MAX_STRUCTURED_EVENTS_PER_BUNDLE,
+        process_uploaded_file,
+    },
 };
 
 use super::{
@@ -80,7 +83,7 @@ pub fn spawn_upload_job(job: UploadJob) {
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
     let archive_budget = ArchiveBudget::new(job.archive_config.clone());
-    let event_budget = EventBudget::new(job.indexing_config.max_events_per_bundle);
+    let event_budget = EventBudget::new(MAX_STRUCTURED_EVENTS_PER_BUNDLE);
     for uploaded in &job.files {
         process_uploaded_file(ProcessFileOptions {
             pool: &job.pool,

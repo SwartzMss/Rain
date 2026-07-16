@@ -4,7 +4,10 @@ use actix_multipart::{Field, Multipart};
 use futures_util::TryStreamExt;
 use tokio::{fs, io::AsyncWriteExt};
 
-use crate::{config::UploadConfig, error::AppError};
+use crate::{
+    error::AppError,
+    ingest::limits::{MAX_MULTIPART_TEXT_FIELD_SIZE, MAX_UPLOAD_FILES},
+};
 
 use super::filename::{format_bytes, sanitize_filename, unique_storage_name};
 
@@ -25,7 +28,6 @@ pub struct MultipartUpload {
 pub async fn collect_multipart_upload(
     mut payload: Multipart,
     temp_dir: &Path,
-    limits: &UploadConfig,
 ) -> Result<MultipartUpload, AppError> {
     let mut files: Vec<UploadedFile> = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -40,7 +42,7 @@ pub async fn collect_multipart_upload(
 
         match field_name.as_str() {
             "issue_code" => {
-                collect_text_field(&mut field, limits.max_text_field_size).await?;
+                collect_text_field(&mut field, MAX_MULTIPART_TEXT_FIELD_SIZE).await?;
             }
             "files" => {
                 let filename = content_disposition
@@ -54,23 +56,16 @@ pub async fn collect_multipart_upload(
                 let temp_name = format!("{}-{storage_name}", files.len());
                 let temp_path = temp_dir.join(temp_name);
                 let size_bytes =
-                    collect_file_field(&mut field, &temp_path, limits.max_file_size, &filename)
-                        .await?;
+                    collect_file_field(&mut field, &temp_path, u64::MAX, &filename).await?;
 
                 if size_bytes > 0 {
-                    if files.len() >= limits.max_files {
+                    if files.len() >= MAX_UPLOAD_FILES {
                         return Err(AppError::BadRequest(format!(
                             "too many files; max {} files per upload",
-                            limits.max_files
+                            MAX_UPLOAD_FILES
                         )));
                     }
                     total_bytes = total_bytes.saturating_add(size_bytes);
-                    if total_bytes > limits.max_total_size {
-                        return Err(AppError::BadRequest(format!(
-                            "upload is too large; max total size is {}",
-                            format_bytes(limits.max_total_size)
-                        )));
-                    }
                     files.push(UploadedFile {
                         original_name: filename,
                         display_name,
@@ -85,7 +80,8 @@ pub async fn collect_multipart_upload(
             }
             _ => {
                 // Ignore unknown fields.
-                collect_binary_field(&mut field, limits.max_text_field_size, &field_name).await?;
+                collect_binary_field(&mut field, MAX_MULTIPART_TEXT_FIELD_SIZE, &field_name)
+                    .await?;
             }
         }
     }

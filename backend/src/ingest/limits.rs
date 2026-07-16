@@ -1,0 +1,11 @@
+pub const MAX_UPLOAD_FILES: usize = 100;
+pub const MAX_MULTIPART_TEXT_FIELD_SIZE: u64 = 64 * 1024;
+pub const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+pub const MAX_ARCHIVE_PATH_DEPTH: usize = 16;
+pub const MAX_ARCHIVE_RECURSION_DEPTH: usize = 16;
+pub const MAX_ARCHIVE_OUTPUT_PATH_CHARS: usize = 1024;
+pub const MAX_ARCHIVE_COMPRESSION_RATIO: u64 = 100;
+pub const INDEX_CHUNK_LINES: usize = 200;
+pub const INDEX_COMMIT_LINES: i64 = 5_000;
+pub const LINE_OFFSET_INTERVAL: i64 = 1_000;
+pub const MAX_STRUCTURED_EVENTS_PER_BUNDLE: usize = 250_000;
