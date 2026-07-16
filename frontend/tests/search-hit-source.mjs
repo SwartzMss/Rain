@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 
 const server = await createServer({
@@ -46,6 +48,64 @@ try {
     ),
     { left: 812, top: 704 }
   );
+
+  const { SearchResultViewer } = await server.ssrLoadModule(
+    '/src/features/files/components/SearchResultViewer.tsx'
+  );
+  const { SearchHitContextMenu } = await server.ssrLoadModule(
+    '/src/features/files/components/SearchHitContextMenu.tsx'
+  );
+  const hit = {
+    bundle_hash: 'bundle-a',
+    file_id: 42,
+    path: 'app.log',
+    snippet: 'ERROR connection failed',
+    line_number: 17
+  };
+  const markup = renderToStaticMarkup(
+    React.createElement(SearchResultViewer, {
+      activeViewerTab: {
+        id: 'search:1', kind: 'search', resultId: 'result-1', expression: 'ERROR',
+        title: 'ERROR', pinned: false, scrollTop: 0, hits: [hit], total: 1,
+        from: 0, pageSize: 1000, source: { kind: 'issue', issueCode: 'ISSUE' }
+      },
+      results: [hit],
+      resultFilterTokens: [],
+      resultFilterDraft: '',
+      onResultFilterTokensChange: () => undefined,
+      onResultFilterDraftChange: () => undefined,
+      onClearResultFilter: () => undefined,
+      onSearchWithinResults: () => undefined,
+      canRunResultFilter: false,
+      searchLoading: false,
+      contentRef: { current: null },
+      pageSizeOptions: [1000],
+      onLoadPage: () => undefined,
+      highlightTerm: 'ERROR',
+      renderHighlightedText: (text) => text,
+      onOpenSource: () => undefined,
+      onCopySourcePath: () => undefined
+    })
+  );
+  assert.match(markup, /aria-label="打开原文件：app\.log，第 18 行"/);
+  assert.match(markup, /title="打开原文件"/);
+  assert.match(markup, /app\.log/);
+  assert.match(markup, /第 18 行/);
+
+  const menuMarkup = renderToStaticMarkup(
+    React.createElement(SearchHitContextMenu, {
+      x: 100,
+      y: 100,
+      canOpen: true,
+      canCopy: true,
+      onOpen: () => undefined,
+      onCopyPath: () => undefined,
+      onClose: () => undefined
+    })
+  );
+  assert.match(menuMarkup, /role="menu"/);
+  assert.match(menuMarkup, /在原文件中打开/);
+  assert.match(menuMarkup, /复制文件路径/);
 } finally {
   await server.close();
 }

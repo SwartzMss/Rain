@@ -1,9 +1,11 @@
-import React from 'react';
-import type { IssueLogSearchHit, FileLine } from '../../../api/types';
+import React, { useState } from 'react';
+import type { IssueLogSearchHit } from '../../../api/types';
 import type { SearchToken } from '../searchTokens';
 import type { SearchViewerTab, TempViewerTab } from '../viewerTabs';
 import { SearchTokenEditor } from '../SearchTokenEditor';
-import { CodeLinesPane } from './CodeLinesPane';
+import { SearchHitContextMenu } from './SearchHitContextMenu';
+import { getSearchHitSource } from '../searchHitSource';
+import { formatHitPath } from '../treeModel';
 
 type SearchResultViewerProps = {
   activeViewerTab: SearchViewerTab | TempViewerTab;
@@ -21,6 +23,8 @@ type SearchResultViewerProps = {
   onLoadPage: (tab: SearchViewerTab | TempViewerTab, from: number, pageSize: number) => void;
   highlightTerm: string;
   renderHighlightedText: (text: string, keyword: string) => React.ReactNode;
+  onOpenSource?: (hit: IssueLogSearchHit) => void;
+  onCopySourcePath?: (hit: IssueLogSearchHit) => void;
 };
 
 export function SearchResultViewer({
@@ -38,8 +42,15 @@ export function SearchResultViewer({
   pageSizeOptions,
   onLoadPage,
   highlightTerm,
-  renderHighlightedText
+  renderHighlightedText,
+  onOpenSource,
+  onCopySourcePath
 }: SearchResultViewerProps) {
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    hit: IssueLogSearchHit;
+  } | null>(null);
   if (searchLoading && results.length === 0) {
     return <p className="py-8 text-center text-sm text-slate-500">正在搜索...</p>;
   }
@@ -47,11 +58,6 @@ export function SearchResultViewer({
   if (results.length === 0) {
     return <p className="py-8 text-center text-sm text-slate-500">未搜索到相关日志。</p>;
   }
-
-  const lines: FileLine[] = results.map((hit, index) => ({
-    line_number: activeViewerTab.from + index,
-    content: hit.snippet
-  }));
 
   return (
     <>
@@ -90,13 +96,40 @@ export function SearchResultViewer({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-2">
-        <CodeLinesPane
-          lines={lines}
-          contentRef={contentRef}
-          lineNumberOffset={activeViewerTab.from}
-          className="font-mono"
-          renderLine={(line) => renderHighlightedText(line.content, highlightTerm)}
-        />
+        <div ref={contentRef} className="min-h-[70vh] flex-1 overflow-auto bg-white px-3 py-3">
+          <div className="space-y-2">
+            {results.map((hit, index) => {
+              const source = getSearchHitSource(hit);
+              const displayPath = formatHitPath(hit.path) || hit.path || '未知文件';
+              const displayLine = source?.line === null || source?.line === undefined
+                ? '行号未知'
+                : `第 ${source.line + 1} 行`;
+              return (
+                <button
+                  key={`${hit.bundle_hash ?? 'bundle'}:${hit.file_id}:${hit.line_number ?? index}:${index}`}
+                  type="button"
+                  title={source ? '打开原文件' : '来源文件信息不可用'}
+                  aria-label={`打开原文件：${displayPath}，${displayLine}`}
+                  disabled={!source}
+                  className="group w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-left transition hover:border-sky-200 hover:bg-sky-50/50 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:bg-slate-50"
+                  onClick={() => onOpenSource?.(hit)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setContextMenu({ x: event.clientX, y: event.clientY, hit });
+                  }}
+                >
+                  <span className="flex items-center justify-between gap-3 text-[11px] text-slate-500">
+                    <span className="truncate">{displayPath}</span>
+                    <span className="shrink-0">{displayLine}</span>
+                  </span>
+                  <span className="mt-1 block truncate font-mono text-xs text-slate-900">
+                    {renderHighlightedText(hit.snippet, highlightTerm)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
           <label className="flex items-center gap-2">
             <span>每页</span>
@@ -130,6 +163,17 @@ export function SearchResultViewer({
           </button>
         </div>
       </div>
+      {contextMenu ? (
+        <SearchHitContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          canOpen={getSearchHitSource(contextMenu.hit) !== null}
+          canCopy={Boolean(contextMenu.hit.path)}
+          onOpen={() => onOpenSource?.(contextMenu.hit)}
+          onCopyPath={() => onCopySourcePath?.(contextMenu.hit)}
+          onClose={() => setContextMenu(null)}
+        />
+      ) : null}
     </>
   );
 }
