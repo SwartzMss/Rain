@@ -53,7 +53,11 @@ async fn upload_search_tree_and_delete_issue() {
 
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(AppState::new(app_pool, data_root, limits)))
+            .app_data(web::Data::new(AppState::new(
+                app_pool,
+                data_root.clone(),
+                limits,
+            )))
             .configure(routes::register),
     )
     .await;
@@ -748,11 +752,46 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(temporary_preview["total"], 1);
+    let preview_result_id = temporary_preview["result_id"]
+        .as_str()
+        .expect("preview result id");
     assert_eq!(temporary_preview["lines"][0]["line_number"], 1);
     assert_eq!(
         temporary_preview["lines"][0]["content"],
         "ERROR smoke works requestId=abcdef123456 中文连续文本"
     );
+    let preview_lines: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/temp-results/{preview_result_id}/lines?start=0&limit=1000"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(preview_lines["lines"][0]["bundle_hash"], bundle_hash);
+    assert_eq!(
+        preview_lines["lines"][0]["file_id"],
+        app_file_id.to_string()
+    );
+    assert_eq!(preview_lines["lines"][0]["line_number"], 1);
+    let preview_base = data_root
+        .join("temp-results")
+        .join(format!("{preview_result_id}.log"));
+    assert!(preview_base.exists());
+    assert!(preview_base.with_extension("meta").exists());
+    assert!(preview_base.with_extension("idx").exists());
+    let delete_preview = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/api/temp-results/{preview_result_id}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete_preview.status(), StatusCode::NO_CONTENT);
+    assert!(!preview_base.exists());
+    assert!(!preview_base.with_extension("meta").exists());
+    assert!(!preview_base.with_extension("idx").exists());
 
     let literal_phrase_preview: Value = test::call_and_read_body_json(
         &app,

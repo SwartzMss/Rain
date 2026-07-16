@@ -17,6 +17,7 @@ export type FileViewerTab = ViewerTabBase & {
 
 export type SearchViewerTab = ViewerTabBase & {
   kind: 'search';
+  resultId: string;
   expression: string;
   hits: IssueLogSearchHit[];
   total: number;

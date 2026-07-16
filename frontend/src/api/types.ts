@@ -138,10 +138,15 @@ export interface TempResultLinesResponse {
   limit: number;
   line_count: number;
   next_start?: number | null;
-  lines: FileLine[];
+  lines: Array<FileLine & {
+    bundle_hash?: string | null;
+    file_id?: string | null;
+    path?: string | null;
+  }>;
 }
 
 export interface TempResultPreviewResponse {
+  result_id: string;
   total: number;
   lines: Array<FileLine & {
     bundle_hash?: string;

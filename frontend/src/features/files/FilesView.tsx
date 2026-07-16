@@ -10,7 +10,6 @@ import { shouldShowFilenameClear } from './filenameSearch';
 import { uploadFailureMessage } from './uploadFailure';
 import {
   canFinalizeSearch,
-  combineSearchExpressions,
   finalizeSearchTokens,
   formatSearchTokens,
   getSearchTerms,
@@ -313,6 +312,7 @@ export function BundleView(props?: BundleViewProps) {
         openViewerTab({
           id,
           kind: 'search',
+          resultId: response.result_id,
           title,
           pinned: false,
           scrollTop: 0,
@@ -721,6 +721,7 @@ export function BundleView(props?: BundleViewProps) {
         openViewerTab({
           id,
           kind: 'search',
+          resultId: response.result_id,
           title,
           pinned: false,
           scrollTop: 0,
@@ -754,32 +755,21 @@ export function BundleView(props?: BundleViewProps) {
     }
     const nestedExpression = serializeSearchTokens(finalizedTokens);
     const title = formatSearchTokens(finalizedTokens);
-    const expression = activeViewerTab.kind === 'search'
-      ? combineSearchExpressions(activeViewerTab.expression, nestedExpression)
-      : nestedExpression;
-    const source = activeViewerTab.kind === 'search'
-      ? activeViewerTab.source
-      : { kind: 'temp' as const, resultId: activeViewerTab.resultId };
+    const expression = nestedExpression;
+    const source = {
+      kind: 'temp' as const,
+      resultId: activeViewerTab.resultId
+    };
 
     setSearchLoading(true);
     setSearchError(null);
     try {
-      const payload = source.kind === 'issue'
-        ? { expression, issue_code: source.issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] }
-        : source.kind === 'file'
-          ? {
-              expression,
-              bundle_hash: source.bundleHash,
-              file_id: source.fileId,
-              from: 0,
-              size: LINE_PAGE_SIZE_OPTIONS[0]
-            }
-          : {
-              expression,
-              source_temp_id: source.resultId,
-              from: 0,
-              size: LINE_PAGE_SIZE_OPTIONS[0]
-            };
+      const payload = {
+        expression,
+        source_temp_id: source.resultId,
+        from: 0,
+        size: LINE_PAGE_SIZE_OPTIONS[0]
+      };
       const response = await rainApi.previewTempResult(payload);
       const hits = response.lines.map((line) => ({
         bundle_hash: line.bundle_hash,
@@ -793,6 +783,7 @@ export function BundleView(props?: BundleViewProps) {
       openViewerTab({
         id: `search:${Date.now()}`,
         kind: 'search',
+        resultId: response.result_id,
         title,
         pinned: false,
         scrollTop: 0,
@@ -832,32 +823,26 @@ export function BundleView(props?: BundleViewProps) {
         return;
       }
       if (tab.kind !== 'search') return;
-      const payload = tab.source.kind === 'issue'
-        ? { expression: tab.expression, issue_code: tab.source.issueCode, from, size: pageSize }
-        : tab.source.kind === 'file'
-          ? {
-            expression: tab.expression,
-            bundle_hash: tab.source.bundleHash,
-            file_id: tab.source.fileId,
-            from,
-            size: pageSize
-          }
-          : {
-              expression: tab.expression,
-              source_temp_id: tab.source.resultId,
-              from,
-              size: pageSize
-            };
-      const response = await rainApi.previewTempResult(payload);
+      const response = await rainApi.fetchTempResultLines(tab.resultId, {
+        start: from,
+        limit: pageSize
+      });
       const hits = response.lines.map((line) => ({
-        bundle_hash: line.bundle_hash,
+        bundle_hash: line.bundle_hash ?? undefined,
         file_id: line.file_id ?? '',
-        path: line.path,
+        path: line.path ?? '',
         snippet: line.content,
         line_number: line.line_number
       }));
       updateViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'search'
-        ? { ...item, hits, total: response.total, from, pageSize, scrollTop: 0 }
+        ? {
+            ...item,
+            hits,
+            total: response.line_count,
+            from: response.start,
+            pageSize: response.limit,
+            scrollTop: 0
+          }
         : item));
     } catch (error) {
       setSearchError(normalizeApiError(error));
