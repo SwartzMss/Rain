@@ -19,6 +19,7 @@ use crate::{
 mod archive;
 mod indexing;
 pub(crate) mod limits;
+mod quota;
 
 pub use archive::ArchiveBudget;
 #[cfg(test)]
@@ -29,6 +30,7 @@ use indexing::event_parser::split_timestamp;
 pub use indexing::line_reader::{decode_log_line, read_line_bytes_limited};
 use indexing::{clean_log_line, parse_log_event};
 use limits::{INDEX_CHUNK_LINES, INDEX_COMMIT_LINES, LINE_OFFSET_INTERVAL};
+pub use quota::IssueQuota;
 
 #[derive(Clone)]
 pub struct EventBudget {
@@ -709,9 +711,73 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::{
-        ArchiveBudget, archive_parent_depth, extract_gzip_file, gzip_output_name,
+        ArchiveBudget, IssueQuota, archive_parent_depth, extract_gzip_file, gzip_output_name,
         sanitize_archive_path, split_timestamp, validate_extracted_path,
     };
+
+    async fn quota_fixture(issue: &str, bundles: &[&str]) -> sqlx::SqlitePool {
+        let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");
+        crate::db::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues (code, name) VALUES (?, ?)")
+            .bind(issue)
+            .bind(issue)
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        for bundle in bundles {
+            sqlx::query(
+                "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES (?, ?, ?, ?, 'PROCESSING')",
+            )
+            .bind(bundle)
+            .bind(issue)
+            .bind(format!("{bundle}-hash"))
+            .bind(bundle)
+            .execute(&pool)
+            .await
+            .expect("insert bundle");
+        }
+        pool
+    }
+
+    #[tokio::test]
+    async fn issue_quota_accepts_exact_limit_and_rejects_overflow() {
+        let pool = quota_fixture("LIMIT", &["first", "second"]).await;
+        let first = IssueQuota::new(pool.clone(), "LIMIT", "first", 100);
+        let second = IssueQuota::new(pool.clone(), "LIMIT", "second", 100);
+
+        first.reserve(100).await.expect("reserve exact limit");
+        let error = second.reserve(1).await.expect_err("reject overflow");
+
+        assert!(error.to_string().contains("100 B"));
+        assert_eq!(first.reserved_bytes().await.unwrap(), 100);
+        assert_eq!(second.reserved_bytes().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn issue_quota_serializes_concurrent_bundle_reservations() {
+        let pool = quota_fixture("RACE", &["left", "right"]).await;
+        let left = IssueQuota::new(pool.clone(), "RACE", "left", 100);
+        let right = IssueQuota::new(pool.clone(), "RACE", "right", 100);
+
+        let (left_result, right_result) = tokio::join!(left.reserve(60), right.reserve(60));
+
+        assert_eq!(
+            [left_result.is_ok(), right_result.is_ok()]
+                .into_iter()
+                .filter(|succeeded| *succeeded)
+                .count(),
+            1
+        );
+        let used: i64 = sqlx::query_scalar(
+            "SELECT SUM(content_size_bytes) FROM bundles WHERE issue_code = 'RACE'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load usage");
+        assert_eq!(used, 60);
+    }
 
     #[test]
     fn archive_depth_counts_only_parent_directories() {
