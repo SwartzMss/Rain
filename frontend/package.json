@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "node tests/binary-file-info.mjs && node tests/search-tokens.mjs && node tests/filename-search.mjs && node tests/upload-failure.mjs"
+    "test": "node tests/binary-file-info.mjs && node tests/search-tokens.mjs && node tests/filename-search.mjs && node tests/upload-failure.mjs && node tests/search-hit-source.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
