@@ -626,19 +626,6 @@ export function BundleView(props?: BundleViewProps) {
     }
   };
 
-  const copySearchHitPath = async (hit: IssueLogSearchHit) => {
-    if (!hit.path) {
-      setSourceActionMessage('文件路径不可用');
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(hit.path);
-      setSourceActionMessage('已复制文件路径');
-    } catch {
-      setSourceActionMessage('复制文件路径失败');
-    }
-  };
-
   const activateViewerTabWithState = (tab: ViewerTab) => {
     if (activeViewerTabId && contentRef.current) {
       const scrollTop = contentRef.current.scrollTop;
@@ -1285,7 +1272,6 @@ export function BundleView(props?: BundleViewProps) {
                     highlightTerm={resultFilterHighlightTerm}
                     renderHighlightedText={highlightText}
                     onOpenSource={openSearchHitSource}
-                    onCopySourcePath={copySearchHitPath}
                   />
                 ) : activeViewerTab?.kind !== 'file' || !selectedNode ? (
                   <p className="py-8 text-center text-sm text-slate-500">
