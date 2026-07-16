@@ -96,6 +96,16 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     assert_eq!(task_status["task_id"], bundle_hash);
     wait_for_issue_ready(&pool, "SMOKE").await;
+    let direct_content_size: i64 = sqlx::query_scalar(
+        "SELECT content_size_bytes FROM bundles WHERE issue_code = 'SMOKE' AND status = 'READY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load direct content size");
+    assert_eq!(
+        direct_content_size,
+        "INFO boot\nERROR smoke works\n".len() as i64
+    );
     let completed_task: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()
@@ -136,7 +146,8 @@ async fn upload_search_tree_and_delete_issue() {
     assert_eq!(search["hits"][0]["chunk_index"], 0);
 
     let gz_boundary = format!("rain-{}", Uuid::new_v4().simple());
-    let gz_bytes = gzip_bytes("INFO gzip\nERROR compressed smoke works\n");
+    let gz_content = "INFO gzip\nERROR compressed smoke works\n";
+    let gz_bytes = gzip_bytes(gz_content);
     let gz_upload_body = multipart_body_bytes(
         &gz_boundary,
         "GZIP",
@@ -158,6 +169,13 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     assert_eq!(gz_upload["issue_code"], "GZIP");
     wait_for_issue_ready(&pool, "GZIP").await;
+    let gzip_content_size: i64 = sqlx::query_scalar(
+        "SELECT content_size_bytes FROM bundles WHERE issue_code = 'GZIP' AND status = 'READY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load gzip content size");
+    assert_eq!(gzip_content_size, gz_content.len() as i64);
 
     let gz_search: Value = test::call_and_read_body_json(
         &app,
@@ -1061,6 +1079,72 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+async fn issue_quota_overflow_fails_and_releases_bundle_content() {
+    let test_dir = TestDir::new("rain-quota-overflow");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let data_root = test_dir.path.join("uploads");
+    fs::create_dir_all(&data_root).expect("create data root");
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    insert_issues(&pool, &["QUOTAFAIL"]).await;
+    let mut limits = AppLimits::default();
+    limits.issue_max_content_size = 16;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                data_root,
+                limits,
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/QUOTAFAIL/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            ))
+            .set_payload(multipart_body(
+                &boundary,
+                "QUOTAFAIL",
+                "too-large.log",
+                "12345678901234567",
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    wait_for_issue_status(&pool, "QUOTAFAIL", "FAILED").await;
+
+    let (content_size, failure_reason): (i64, Option<String>) = sqlx::query_as(
+        "SELECT content_size_bytes, failure_reason FROM bundles WHERE issue_code = 'QUOTAFAIL'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load failed bundle");
+    let file_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE bundle_id IN (SELECT id FROM bundles WHERE issue_code = 'QUOTAFAIL')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count failed files");
+    assert_eq!(content_size, 0);
+    assert_eq!(file_count, 0);
+    assert!(
+        failure_reason
+            .expect("quota failure reason")
+            .contains("16 B")
+    );
 }
 
 #[actix_web::test]

@@ -7,8 +7,8 @@ use crate::{
     config::{ArchiveConfig, IndexingConfig},
     error::AppError,
     ingest::{
-        ArchiveBudget, EventBudget, ProcessFileOptions, limits::MAX_STRUCTURED_EVENTS_PER_BUNDLE,
-        process_uploaded_file,
+        ArchiveBudget, EventBudget, IssueQuota, ProcessFileOptions,
+        limits::MAX_STRUCTURED_EVENTS_PER_BUNDLE, process_uploaded_file,
     },
 };
 
@@ -27,6 +27,8 @@ pub struct UploadJob {
     pub processing_permits: Arc<Semaphore>,
     pub archive_config: ArchiveConfig,
     pub indexing_config: IndexingConfig,
+    pub issue_code: String,
+    pub issue_max_content_size: u64,
     pub bundle_id: String,
     pub bundle_hash: String,
     pub files: Vec<UploadedFile>,
@@ -84,6 +86,12 @@ pub fn spawn_upload_job(job: UploadJob) {
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
     let archive_budget = ArchiveBudget::new(job.archive_config.clone());
     let event_budget = EventBudget::new(MAX_STRUCTURED_EVENTS_PER_BUNDLE);
+    let issue_quota = IssueQuota::new(
+        job.pool.clone(),
+        &job.issue_code,
+        &job.bundle_id,
+        job.issue_max_content_size,
+    );
     for uploaded in &job.files {
         process_uploaded_file(ProcessFileOptions {
             pool: &job.pool,
@@ -98,6 +106,7 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
             size_bytes: uploaded.size_bytes,
             archive_budget: archive_budget.clone(),
             event_budget: event_budget.clone(),
+            issue_quota: issue_quota.clone(),
             indexing: &job.indexing_config,
         })
         .await?;

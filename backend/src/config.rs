@@ -36,9 +36,15 @@ pub struct ArchiveConfig {
 
 impl Default for ArchiveConfig {
     fn default() -> Self {
+        Self::for_content_limit(4 * GIB)
+    }
+}
+
+impl ArchiveConfig {
+    pub fn for_content_limit(content_limit: u64) -> Self {
         Self {
-            max_extracted_size: 500 * MIB,
-            max_entry_size: 100 * MIB,
+            max_extracted_size: content_limit,
+            max_entry_size: content_limit,
             max_entries: MAX_ARCHIVE_ENTRIES,
             max_path_depth: MAX_ARCHIVE_PATH_DEPTH,
             max_recursion_depth: MAX_ARCHIVE_RECURSION_DEPTH,
@@ -329,7 +335,7 @@ impl AppConfig {
 mod tests {
     use std::{path::Path, sync::Mutex};
 
-    use super::{AppLimits, dotenv_path_for_executable, parse_byte_size};
+    use super::{AppLimits, ArchiveConfig, dotenv_path_for_executable, parse_byte_size};
 
     #[test]
     fn resolves_dotenv_next_to_executable() {
@@ -363,6 +369,15 @@ mod tests {
         assert_eq!(limits.upload.concurrent_processing_tasks, 4);
         assert_eq!(limits.indexing.max_line_size, 8 * 1024_u64.pow(2));
         assert_eq!(limits.api.file_preview_size, 64 * 1024);
+    }
+
+    #[test]
+    fn archive_working_budget_uses_issue_content_limit() {
+        let limit = 4 * 1024_u64.pow(3);
+        let archive = ArchiveConfig::for_content_limit(limit);
+
+        assert_eq!(archive.max_extracted_size, limit);
+        assert_eq!(archive.max_entry_size, limit);
     }
 
     #[test]

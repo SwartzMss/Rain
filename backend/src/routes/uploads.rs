@@ -74,8 +74,12 @@ pub async fn upload_logs(
         temp_dir,
         staging_root,
         processing_permits: state.processing_permits.clone(),
-        archive_config: crate::config::ArchiveConfig::default(),
+        archive_config: crate::config::ArchiveConfig::for_content_limit(
+            state.limits.issue_max_content_size,
+        ),
         indexing_config: state.limits.indexing.clone(),
+        issue_code: issue_code.clone(),
+        issue_max_content_size: state.limits.issue_max_content_size,
         bundle_id: bundle_id.clone(),
         bundle_hash: bundle_hash.clone(),
         files: upload.files,

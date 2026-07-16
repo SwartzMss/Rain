@@ -167,6 +167,18 @@ pub async fn finalize_bundle_failed(
             "failed to clean database artifacts for failed upload"
         );
     }
+    if let Err(error) = sqlx::query("UPDATE bundles SET content_size_bytes = 0 WHERE id = ?")
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+    {
+        error!(
+            bundle_id,
+            bundle_hash,
+            error = %error,
+            "failed to release Issue content quota for failed upload"
+        );
+    }
 
     for path in [staging_root.join(bundle_hash), data_root.join(bundle_hash)] {
         match fs::remove_dir_all(&path).await {

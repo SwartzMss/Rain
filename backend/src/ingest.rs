@@ -96,6 +96,7 @@ pub struct ProcessFileOptions<'a> {
     pub size_bytes: u64,
     pub archive_budget: ArchiveBudget,
     pub event_budget: EventBudget,
+    pub issue_quota: IssueQuota,
     pub indexing: &'a IndexingConfig,
 }
 
@@ -113,6 +114,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         size_bytes,
         archive_budget,
         event_budget,
+        issue_quota,
         indexing,
     } = options;
 
@@ -125,6 +127,9 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     move_or_copy_file(source_path, &disk_path).await?;
     let mime_type = effective_mime_type(original_name, content_type);
     let preview_kind = classify_file(&disk_path, original_name, mime_type.as_deref()).await?;
+    if preview_kind != PreviewKind::Archive {
+        issue_quota.reserve(size_bytes).await?;
+    }
 
     let relative_path = format!("/{bundle_hash}/{storage_name}");
     let meta = serde_json::json!({
@@ -209,6 +214,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             format!("{}/{extracted_dir_name}", bundle_hash),
             archive_budget,
             event_budget,
+            issue_quota,
             indexing,
             1,
         )
@@ -241,6 +247,7 @@ fn ingest_directory<'a>(
     relative_root: String,
     archive_budget: ArchiveBudget,
     event_budget: EventBudget,
+    issue_quota: IssueQuota,
     indexing: &'a IndexingConfig,
     archive_depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
@@ -278,6 +285,9 @@ fn ingest_directory<'a>(
             } else {
                 classify_file(&disk_path, &name, mime_type.as_deref()).await?
             };
+            if !is_dir && preview_kind != PreviewKind::Archive {
+                issue_quota.reserve(metadata.len()).await?;
+            }
             let meta = serde_json::json!({
                 "storage_path": disk_path.to_string_lossy(),
                 "kind": if is_dir { "extracted_dir" } else { "extracted_file" },
@@ -306,6 +316,7 @@ fn ingest_directory<'a>(
                     format!("{relative_root}/{name}"),
                     archive_budget.clone(),
                     event_budget.clone(),
+                    issue_quota.clone(),
                     indexing,
                     archive_depth,
                 )
@@ -385,6 +396,7 @@ fn ingest_directory<'a>(
                     extracted_db_path.trim_start_matches('/').to_string(),
                     archive_budget.clone(),
                     event_budget.clone(),
+                    issue_quota.clone(),
                     indexing,
                     archive_depth + 1,
                 )
