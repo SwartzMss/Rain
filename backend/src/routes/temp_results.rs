@@ -565,7 +565,7 @@ async fn read_indexed_lines(
     }
     let checkpoints = index_content
         .lines()
-        .map(|line| decode_sidecar::<SparseCheckpoint>(line))
+        .map(decode_sidecar::<SparseCheckpoint>)
         .collect::<Result<Vec<_>, _>>()?;
     let checkpoint = select_checkpoint(&checkpoints, start).ok_or_else(|| {
         AppError::Io(std::io::Error::new(
