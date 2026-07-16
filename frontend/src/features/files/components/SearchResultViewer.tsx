@@ -109,7 +109,7 @@ export function SearchResultViewer({
                   }}
                 >
                   <span className="select-none text-right text-slate-500">
-                    {(source?.line ?? activeViewerTab.from + index) + 1}
+                    {activeViewerTab.from + index + 1}
                   </span>
                   <span className="select-text whitespace-pre text-slate-900">
                     {renderHighlightedText(hit.snippet, highlightTerm)}
