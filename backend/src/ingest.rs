@@ -850,6 +850,15 @@ mod tests {
         assert!(chunk.byte_len() < INDEX_CHUNK_TARGET_BYTES);
     }
 
+    #[test]
+    fn log_chunk_byte_accounting_saturates() {
+        let mut chunk = LogChunk::new(0, 1);
+        chunk.content_bytes = usize::MAX;
+        chunk.push(0, "x".into());
+
+        assert_eq!(chunk.byte_len(), usize::MAX);
+    }
+
     fn prepared_entry(name: &str, path: &str) -> PreparedDirectoryEntry {
         PreparedDirectoryEntry {
             disk_path: PathBuf::from(name),

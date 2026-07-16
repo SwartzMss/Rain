@@ -1104,6 +1104,9 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(indexed_prefix["total"], 1);
+    assert_eq!(indexed_prefix["hits"][0]["bundle_hash"], long_line_bundle);
+    assert_eq!(indexed_prefix["hits"][0]["file_id"], long_line_file);
+    assert_eq!(indexed_prefix["hits"][0]["line_number"], 0);
     assert_eq!(omitted_suffix["total"], 0);
     assert_eq!(long_line_lines["lines"][0]["truncated"], true);
     let previewed_long_line = long_line_lines["lines"][0]["content"]

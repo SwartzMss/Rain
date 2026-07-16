@@ -480,6 +480,30 @@ mod tests {
         );
     }
 
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn platform_size_errors_name_the_split_line_limits() {
+        let mut limits = AppLimits::default();
+        limits.indexing.max_indexed_line_size = u64::MAX;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_INDEXING_MAX_INDEXED_LINE_SIZE")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.api.max_preview_line_size = u64::MAX;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_API_MAX_PREVIEW_LINE_SIZE")
+        );
+    }
+
     #[test]
     fn issue_content_limit_environment_value_overrides_default() {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
