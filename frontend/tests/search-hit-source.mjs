@@ -63,36 +63,46 @@ try {
     snippet: 'ERROR connection failed',
     line_number: 17
   };
-  const markup = renderToStaticMarkup(
-    React.createElement(SearchResultViewer, {
-      activeViewerTab: {
-        id: 'search:1', kind: 'search', resultId: 'result-1', expression: 'ERROR',
-        title: 'ERROR', pinned: false, scrollTop: 0, hits: [hit], total: 1,
-        from: 0, pageSize: 1000, source: { kind: 'issue', issueCode: 'ISSUE' }
-      },
-      results: [hit],
-      resultFilterTokens: [],
-      resultFilterDraft: '',
-      onResultFilterTokensChange: () => undefined,
-      onResultFilterDraftChange: () => undefined,
-      onClearResultFilter: () => undefined,
-      onSearchWithinResults: () => undefined,
-      canRunResultFilter: false,
-      searchLoading: false,
-      contentRef: { current: null },
-      pageSizeOptions: [1000],
-      onLoadPage: () => undefined,
-      highlightTerm: 'ERROR',
-      renderHighlightedText: (text) => text,
-      onOpenSource: () => undefined
-    })
-  );
+  const viewerProps = {
+    activeViewerTab: {
+      id: 'search:1', kind: 'search', resultId: 'result-1', expression: 'ERROR',
+      title: 'ERROR', pinned: false, scrollTop: 0, hits: [hit], total: 2000,
+      from: 0, pageSize: 1000, source: { kind: 'issue', issueCode: 'ISSUE' }
+    },
+    results: [hit],
+    resultFilterTokens: [],
+    resultFilterDraft: '',
+    onResultFilterTokensChange: () => undefined,
+    onResultFilterDraftChange: () => undefined,
+    onClearResultFilter: () => undefined,
+    onSearchWithinResults: () => undefined,
+    canRunResultFilter: false,
+    searchLoading: false,
+    contentRef: { current: null },
+    pageSizeOptions: [1000],
+    onLoadPage: () => undefined,
+    highlightTerm: 'ERROR',
+    renderHighlightedText: (text) => text,
+    onOpenSource: () => undefined
+  };
+  const markup = renderToStaticMarkup(React.createElement(SearchResultViewer, viewerProps));
   assert.match(markup, /data-search-results-log="true"/);
   assert.match(markup, /data-source-line="17"/);
-  assert.match(markup, />18<\/span>/);
+  assert.match(markup, />1<\/span>/);
+  assert.doesNotMatch(markup, />18<\/span>/);
   assert.match(markup, /select-text/);
   assert.doesNotMatch(markup, /aria-label="打开原文件/);
   assert.doesNotMatch(markup, /title="打开原文件"/);
+
+  const secondPageMarkup = renderToStaticMarkup(
+    React.createElement(SearchResultViewer, {
+      ...viewerProps,
+      activeViewerTab: { ...viewerProps.activeViewerTab, from: 1000 }
+    })
+  );
+  assert.match(secondPageMarkup, /data-source-line="17"/);
+  assert.match(secondPageMarkup, />1001<\/span>/);
+  assert.doesNotMatch(secondPageMarkup, />18<\/span>/);
 
   const missingSourceMarkup = renderToStaticMarkup(
     React.createElement(SearchResultViewer, {
