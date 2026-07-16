@@ -61,9 +61,35 @@ pub async fn search_logs(
         .size
         .unwrap_or(state.limits.api.default_search_results)
         .clamp(1, state.limits.api.max_search_results);
+    let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
+    let short_pattern = format!("%{}%", escape_like_pattern(search_term));
 
-    let total: i64 = sqlx::query_scalar(
-        r#"
+    let total: i64 = if search_term.chars().count() < 3 {
+        sqlx::query_scalar(
+            r#"
+        SELECT COUNT(*) FROM log_segments ls
+        JOIN files f ON f.id = ls.file_id
+        WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
+          AND ls.bundle_id = ?
+          AND (? IS NULL OR ls.timeline = ?)
+          AND (? IS NULL OR f.path LIKE ?)
+          AND (? IS NULL OR ls.file_id = ?)
+        "#,
+        )
+        .bind(&short_pattern)
+        .bind(&bundle.id)
+        .bind(&timeline)
+        .bind(&timeline)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(file_id)
+        .bind(file_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    } else {
+        sqlx::query_scalar(
+            r#"
         SELECT COUNT(*) FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN files f ON f.id = ls.file_id
@@ -73,28 +99,59 @@ pub async fn search_logs(
           AND (? IS NULL OR f.path LIKE ?)
           AND (? IS NULL OR ls.file_id = ?)
         "#,
-    )
-    .bind(&fts_query)
-    .bind(&bundle.id)
-    .bind(&timeline)
-    .bind(&timeline)
-    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
-    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
-    .bind(file_id)
-    .bind(file_id)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
+        )
+        .bind(&fts_query)
+        .bind(&bundle.id)
+        .bind(&timeline)
+        .bind(&timeline)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(file_id)
+        .bind(file_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    };
 
-    let rows = sqlx::query_as::<_, LogRow>(
-        r#"
+    let rows = if search_term.chars().count() < 3 {
+        sqlx::query_as::<_, LogRow>(
+            r#"
+        SELECT ls.file_id, f.path, ls.timeline, ls.line_offset AS offset,
+               ls.line_end, ls.chunk_index, ls.content
+        FROM log_segments ls
+        JOIN files f ON f.id = ls.file_id
+        WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
+          AND ls.bundle_id = ?
+          AND (? IS NULL OR ls.timeline = ?)
+          AND (? IS NULL OR f.path LIKE ?)
+          AND (? IS NULL OR ls.file_id = ?)
+        ORDER BY ls.line_offset NULLS FIRST, ls.id
+        LIMIT ? OFFSET ?
+        "#,
+        )
+        .bind(&short_pattern)
+        .bind(&bundle.id)
+        .bind(&timeline)
+        .bind(&timeline)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(size)
+        .bind(from)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    } else {
+        sqlx::query_as::<_, LogRow>(
+            r#"
         SELECT ls.file_id,
                f.path,
                ls.timeline,
                ls.line_offset AS offset,
                ls.line_end,
                ls.chunk_index,
-               snippet(log_segments_fts, 0, '', '', ' ... ', 24) AS content
+               ls.content AS content
         FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN files f ON f.id = ls.file_id
@@ -106,20 +163,21 @@ pub async fn search_logs(
         ORDER BY ls.line_offset NULLS FIRST, ls.id
         LIMIT ? OFFSET ?
         "#,
-    )
-    .bind(&fts_query)
-    .bind(&bundle.id)
-    .bind(&timeline)
-    .bind(&timeline)
-    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
-    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
-    .bind(file_id)
-    .bind(file_id)
-    .bind(size)
-    .bind(from)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
+        )
+        .bind(&fts_query)
+        .bind(&bundle.id)
+        .bind(&timeline)
+        .bind(&timeline)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(size)
+        .bind(from)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    };
 
     let hits = rows
         .into_iter()
@@ -127,7 +185,7 @@ pub async fn search_logs(
             file_id: row.file_id.to_string(),
             path: row.path,
             bundle_hash: Some(bundle.hash.clone()),
-            snippet: row.content,
+            snippet: literal_snippet(&row.content, search_term),
             timeline: row.timeline,
             offset: row.offset,
             line_end: row.line_end,
@@ -199,9 +257,31 @@ pub async fn search_issue_logs(
         .size
         .unwrap_or(state.limits.api.default_search_results)
         .clamp(1, state.limits.api.max_search_results);
+    let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
+    let short_pattern = format!("%{}%", escape_like_pattern(search_term));
 
-    let total: i64 = sqlx::query_scalar(
-        r#"
+    let total: i64 = if search_term.chars().count() < 3 {
+        sqlx::query_scalar(
+            r#"
+        SELECT COUNT(*) FROM log_segments ls
+        JOIN bundles b ON b.id = ls.bundle_id
+        JOIN files f ON f.id = ls.file_id
+        WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
+          AND b.issue_code = ?
+          AND b.status = 'READY'
+          AND (? IS NULL OR f.path LIKE ?)
+        "#,
+        )
+        .bind(&short_pattern)
+        .bind(&issue_code)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    } else {
+        sqlx::query_scalar(
+            r#"
         SELECT COUNT(*) FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
@@ -211,23 +291,50 @@ pub async fn search_issue_logs(
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
         "#,
-    )
-    .bind(&fts_query)
-    .bind(&issue_code)
-    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
-    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
-    .fetch_one(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
+        )
+        .bind(&fts_query)
+        .bind(&issue_code)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    };
 
-    let rows = sqlx::query_as::<_, IssueLogRow>(
-        r#"
+    let rows = if search_term.chars().count() < 3 {
+        sqlx::query_as::<_, IssueLogRow>(
+            r#"
+        SELECT ls.file_id, f.path, ls.line_offset AS offset, ls.line_end,
+               ls.chunk_index, ls.content, b.hash AS bundle_hash
+        FROM log_segments ls
+        JOIN bundles b ON b.id = ls.bundle_id
+        JOIN files f ON f.id = ls.file_id
+        WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
+          AND b.issue_code = ?
+          AND b.status = 'READY'
+          AND (? IS NULL OR f.path LIKE ?)
+        ORDER BY ls.line_offset NULLS FIRST, ls.id
+        LIMIT ? OFFSET ?
+        "#,
+        )
+        .bind(&short_pattern)
+        .bind(&issue_code)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(size)
+        .bind(from)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    } else {
+        sqlx::query_as::<_, IssueLogRow>(
+            r#"
         SELECT ls.file_id,
                f.path,
                ls.line_offset AS offset,
                ls.line_end,
                ls.chunk_index,
-               snippet(log_segments_fts, 0, '', '', ' ... ', 24) AS content,
+               ls.content AS content,
                b.hash as bundle_hash
         FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
@@ -240,16 +347,17 @@ pub async fn search_issue_logs(
         ORDER BY ls.line_offset NULLS FIRST, ls.id
         LIMIT ? OFFSET ?
         "#,
-    )
-    .bind(&fts_query)
-    .bind(&issue_code)
-    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
-    .bind(path_like.as_ref().map(|value| format!("%{}%", value)))
-    .bind(size)
-    .bind(from)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
+        )
+        .bind(&fts_query)
+        .bind(&issue_code)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(size)
+        .bind(from)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    };
 
     let hits = rows
         .into_iter()
@@ -257,7 +365,7 @@ pub async fn search_issue_logs(
             file_id: row.file_id.to_string(),
             path: row.path,
             bundle_hash: Some(row.bundle_hash),
-            snippet: row.content,
+            snippet: literal_snippet(&row.content, search_term),
             timeline: None,
             offset: row.offset,
             line_end: row.line_end,
@@ -397,9 +505,38 @@ fn escape_like_pattern(value: &str) -> String {
 }
 
 fn build_fts_query(search_term: &str) -> String {
-    search_term
-        .split_whitespace()
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" AND ")
+    format!("\"{}\"", search_term.replace('"', "\"\""))
+}
+
+fn literal_snippet(content: &str, search_term: &str) -> String {
+    const MAX_CHARS: usize = 400;
+    const CONTEXT_BEFORE: usize = 120;
+    let content_chars: Vec<char> = content.chars().collect();
+    if content_chars.len() <= MAX_CHARS {
+        return content.to_string();
+    }
+    let term_chars: Vec<char> = search_term.chars().collect();
+    let match_start = if term_chars.is_empty() {
+        0
+    } else {
+        content_chars
+            .windows(term_chars.len())
+            .position(|window| {
+                window
+                    .iter()
+                    .zip(&term_chars)
+                    .all(|(left, right)| left.eq_ignore_ascii_case(right))
+            })
+            .unwrap_or(0)
+    };
+    let start = match_start.saturating_sub(CONTEXT_BEFORE);
+    let end = (start + MAX_CHARS).min(content_chars.len());
+    let mut snippet: String = content_chars[start..end].iter().collect();
+    if start > 0 {
+        snippet.insert_str(0, "... ");
+    }
+    if end < content_chars.len() {
+        snippet.push_str(" ...");
+    }
+    snippet
 }

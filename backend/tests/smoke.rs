@@ -63,7 +63,7 @@ async fn upload_search_tree_and_delete_issue() {
         &boundary,
         "SMOKE",
         "app.log",
-        "INFO boot\nERROR smoke works\n",
+        "INFO boot\nERROR smoke works requestId=abcdef123456 中文连续文本\n",
     );
     let upload_response = test::call_service(
         &app,
@@ -104,7 +104,7 @@ async fn upload_search_tree_and_delete_issue() {
     .expect("load direct content size");
     assert_eq!(
         direct_content_size,
-        "INFO boot\nERROR smoke works\n".len() as i64
+        "INFO boot\nERROR smoke works requestId=abcdef123456 中文连续文本\n".len() as i64
     );
     let completed_task: Value = test::call_and_read_body_json(
         &app,
@@ -144,6 +144,30 @@ async fn upload_search_tree_and_delete_issue() {
     assert_eq!(search["hits"][0]["line_number"], 0);
     assert_eq!(search["hits"][0]["line_end"], 1);
     assert_eq!(search["hits"][0]["chunk_index"], 0);
+
+    let substring_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/SMOKE/search?q=def123&mode=content&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(substring_search["total"], 1);
+    assert!(
+        substring_search["hits"][0]["snippet"]
+            .as_str()
+            .expect("substring snippet")
+            .contains("abcdef123456")
+    );
+
+    let short_search: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/SMOKE/search?q=ER&mode=content&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(short_search["total"], 1);
 
     let gz_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let gz_content = "INFO gzip\nERROR compressed smoke works\n";
@@ -727,7 +751,7 @@ async fn upload_search_tree_and_delete_issue() {
     assert_eq!(temporary_preview["lines"][0]["line_number"], 1);
     assert_eq!(
         temporary_preview["lines"][0]["content"],
-        "ERROR smoke works"
+        "ERROR smoke works requestId=abcdef123456 中文连续文本"
     );
 
     let literal_phrase_preview: Value = test::call_and_read_body_json(
@@ -797,7 +821,10 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(temporary_lines["lines"][0]["content"], "ERROR smoke works");
+    assert_eq!(
+        temporary_lines["lines"][0]["content"],
+        "ERROR smoke works requestId=abcdef123456 中文连续文本"
+    );
 
     let temporary_download = test::call_and_read_body(
         &app,
@@ -806,7 +833,10 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(temporary_download, "ERROR smoke works\n");
+    assert_eq!(
+        temporary_download,
+        "ERROR smoke works requestId=abcdef123456 中文连续文本\n"
+    );
 
     let delete_temporary_result = test::call_service(
         &app,
@@ -837,7 +867,10 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     assert_eq!(lines["line_count"], 2);
     assert_eq!(lines["lines"][0]["line_number"], 1);
-    assert_eq!(lines["lines"][0]["content"], "ERROR smoke works");
+    assert_eq!(
+        lines["lines"][0]["content"],
+        "ERROR smoke works requestId=abcdef123456 中文连续文本"
+    );
 
     let download = test::call_and_read_body(
         &app,
@@ -848,7 +881,10 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(download, "INFO boot\nERROR smoke works\n");
+    assert_eq!(
+        download,
+        "INFO boot\nERROR smoke works requestId=abcdef123456 中文连续文本\n"
+    );
 
     let large_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let mut large_log = String::new();
