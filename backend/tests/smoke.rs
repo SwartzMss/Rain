@@ -1167,6 +1167,73 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
             .expect("quota failure reason")
             .contains("16 B")
     );
+
+    let exact_boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let exact_upload: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/QUOTAFAIL/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={exact_boundary}"),
+            ))
+            .set_payload(multipart_body(
+                &exact_boundary,
+                "QUOTAFAIL",
+                "exact.log",
+                "1234567890123456",
+            ))
+            .to_request(),
+    )
+    .await;
+    wait_for_issue_ready(&pool, "QUOTAFAIL").await;
+    let exact_hash = exact_upload["bundle_hash"]
+        .as_str()
+        .expect("exact bundle hash");
+    let ready_size: i64 = sqlx::query_scalar(
+        "SELECT content_size_bytes FROM bundles WHERE issue_code = 'QUOTAFAIL' AND status = 'READY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load exact bundle size");
+    assert_eq!(ready_size, 16);
+
+    let delete = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/api/issues/QUOTAFAIL/bundles/{exact_hash}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+    let replacement_boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let replacement = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/QUOTAFAIL/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={replacement_boundary}"),
+            ))
+            .set_payload(multipart_body(
+                &replacement_boundary,
+                "QUOTAFAIL",
+                "replacement.log",
+                "abcdefghijklmnop",
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(replacement.status(), StatusCode::ACCEPTED);
+    wait_for_issue_ready(&pool, "QUOTAFAIL").await;
+    let replacement_size: i64 = sqlx::query_scalar(
+        "SELECT content_size_bytes FROM bundles WHERE issue_code = 'QUOTAFAIL' AND status = 'READY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load replacement size");
+    assert_eq!(replacement_size, 16);
 }
 
 #[actix_web::test]

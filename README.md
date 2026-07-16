@@ -132,28 +132,15 @@ Linux/macOS:
 
 ### 可配置限制
 
-所有上传、解压、索引和 API 限制也使用同一个 `.env` 文件；不需要额外的 TOML 配置。程序优先读取可执行文件同目录的 `.env`，找不到时读取当前工作目录的 `.env`，而系统环境变量始终优先。未设置的项目使用下表默认值。
+Issue 容量、后台处理并发、单行读取上限和 API 限制使用同一个 `.env` 文件；不需要额外的 TOML 配置。程序优先读取可执行文件同目录的 `.env`，找不到时读取当前工作目录的 `.env`，而系统环境变量始终优先。未设置的项目使用下表默认值。压缩条目数、递归深度、路径和压缩比等安全防护采用程序内安全值，不需要部署者逐项配置。
 
-字节大小可写成纯字节数或二进制单位 `KiB`、`MiB`、`GiB`、`TiB`，单位不区分大小写，例如 `64 KiB`、`4 GiB`。所有大小和数量必须大于零。启动时还会验证单个 archive entry 不大于 bundle 解压总量、单文件上传不大于单次上传总量，以及 API 默认页大小不大于对应最大值；错误配置会阻止启动并指出变量名称。
+字节大小可写成纯字节数或二进制单位 `KiB`、`MiB`、`GiB`、`TiB`，单位不区分大小写，例如 `64 KiB`、`4 GiB`。所有大小和数量必须大于零。启动时还会验证 API 默认页大小不大于对应最大值；错误配置会阻止启动并指出变量名称。
 
 | 环境变量 | 默认值 | 用途 |
 | --- | ---: | --- |
-| `RAIN_UPLOAD_MAX_FILES` | `100` | 单次上传文件数 |
-| `RAIN_UPLOAD_MAX_FILE_SIZE` | `512 MiB` | 单个上传文件大小 |
-| `RAIN_UPLOAD_MAX_TOTAL_SIZE` | `2 GiB` | 单次上传总大小 |
-| `RAIN_UPLOAD_MAX_TEXT_FIELD_SIZE` | `64 KiB` | multipart 文本字段大小 |
-| `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` | `2` | 并发后台处理任务 |
-| `RAIN_ARCHIVE_MAX_EXTRACTED_SIZE` | `500 MiB` | 每个 bundle 累计解压大小 |
-| `RAIN_ARCHIVE_MAX_ENTRY_SIZE` | `100 MiB` | 单个 archive entry 大小 |
-| `RAIN_ARCHIVE_MAX_ENTRIES` | `10000` | 每个 bundle 的 archive entry 数 |
-| `RAIN_ARCHIVE_MAX_PATH_DEPTH` | `16` | archive entry 路径深度 |
-| `RAIN_ARCHIVE_MAX_RECURSION_DEPTH` | `16` | 嵌套 archive 递归深度 |
-| `RAIN_ARCHIVE_MAX_OUTPUT_PATH_CHARS` | `1024` | 输出路径 UTF-16 字符数 |
-| `RAIN_ARCHIVE_MAX_COMPRESSION_RATIO` | `100` | 最大压缩比 |
-| `RAIN_INDEXING_MAX_LINE_SIZE` | `1 MiB` | 索引及读取的单行大小 |
-| `RAIN_INDEXING_CHUNK_LINES` | `200` | 每个全文索引 chunk 行数 |
-| `RAIN_INDEXING_COMMIT_LINES` | `5000` | 索引事务提交间隔 |
-| `RAIN_INDEXING_LINE_OFFSET_INTERVAL` | `1000` | 行偏移索引间隔 |
+| `RAIN_ISSUE_MAX_CONTENT_SIZE` | `4 GiB` | 每个 Issue 最终可浏览文件总量；压缩包按解压后内容计算 |
+| `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` | `4` | 并发后台处理任务 |
+| `RAIN_INDEXING_MAX_LINE_SIZE` | `8 MiB` | 索引及读取的单行大小 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
 | `RAIN_API_DEFAULT_LINE_PAGE_SIZE` | `1000` | 默认行分页大小 |
 | `RAIN_API_MAX_LINE_PAGE_SIZE` | `3000` | 最大行分页大小 |
@@ -184,12 +171,12 @@ Linux/macOS:
 - `.log`、`.txt` 等文本文件索引。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 后台递归解压并写入文件树，内层日志同样会建立索引和支持分页查看。
 - `.exe`、Office、图片等二进制文件保留在文件树中，显示类型与大小并支持显式下载，但不会文字预览或建立搜索索引。
-- 上传安全限制默认是单文件 512 MiB、单次 2 GiB、最多 100 个文件，可通过 `.env` 调整。
-- 压缩包防护按整个 bundle 累计，默认最多 16 层嵌套压缩、10000 个条目、500 MiB 解压内容；单条目最多 100 MiB、条目路径最多 16 层、完整输出路径最多 1024 个 UTF-16 字符、压缩比上限 100:1，均可通过 `.env` 调整。
+- 每个 Issue 默认最多包含 4 GiB 最终可浏览文件；普通文件按实际大小计算，压缩包只计算解压后的最终文件，失败或删除 Bundle 会释放容量。
+- 压缩包仍有固定的条目数量、嵌套深度、路径、压缩比和路径穿越防护，这些安全细节不需要通过 `.env` 调整。
 - 文件树浏览。
 - 文本文件分页读取，后端按行偏移索引快速跳转。
-- 单行默认超过 1 MiB 时索引和分页展示会截断该行，并标记 `[line truncated]`；该限制可配置。
-- Issue 范围和 bundle 范围关键词搜索，文本文件会完整建立 SQLite FTS5 chunk 索引；搜索结果返回命中附近摘要，默认 50 条、最多 100 条。
+- 单行默认超过 8 MiB 时索引和分页展示会截断该行，并标记 `[line truncated]`；该限制可配置。
+- Issue 范围和 bundle 范围采用 SQLite FTS5 trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符时使用有界回退搜索。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
 - 原始文件下载。
 - 删除 Issue、Bundle、单个文件节点。
 - 可选过期清理：设置 `RAIN_RETENTION_DAYS` 后启动时清理过期上传。
