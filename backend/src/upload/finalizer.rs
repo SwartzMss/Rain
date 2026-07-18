@@ -13,7 +13,7 @@ use crate::{
     error::AppError,
 };
 
-use super::lifecycle::{advance_bundle_stage, failure_details};
+use super::lifecycle::{failure_details, set_bundle_stage};
 
 const FAILURE_STATUS_RETRY_DELAYS_MS: [u64; 2] = [100, 250];
 
@@ -115,7 +115,7 @@ pub async fn finalize_bundle_failed(
             UPDATE bundles
             SET failure_stage = process_stage,
                 failure_code = ?, failure_reason = ?, retryable = ?,
-                status = 'FAILED', process_stage = 'FAILED'
+                status = 'FAILED'
             WHERE id = ?
             "#,
         )
@@ -220,8 +220,13 @@ pub async fn finalize_bundle_ready_with_retry(
 }
 
 async fn finalize_bundle_ready(pool: &sqlx::SqlitePool, bundle_id: &str) -> Result<(), AppError> {
-    advance_bundle_stage(pool, bundle_id, "PUBLISHING").await?;
-    advance_bundle_stage(pool, bundle_id, "READY").await
+    set_bundle_stage(pool, bundle_id, "PUBLISHING").await?;
+    sqlx::query("UPDATE bundles SET status = 'READY' WHERE id = ? AND status = 'PROCESSING'")
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(())
 }
 
 async fn cleanup_failed_bundle_database_artifacts(
@@ -286,7 +291,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(state, ("READY".into(), "READY".into()));
+        assert_eq!(state, ("READY".into(), "PUBLISHING".into()));
         assert_eq!(unchanged, 100);
     }
 

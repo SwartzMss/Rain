@@ -1231,7 +1231,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
         App::new()
             .app_data(web::Data::new(AppState::new(
                 pool.clone(),
-                data_root,
+                data_root.clone(),
                 limits,
             )))
             .configure(routes::register),
@@ -1308,6 +1308,21 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     .await
     .expect("load exact bundle size");
     assert_eq!(ready_size, 16);
+    let exact_bundle_id: String = sqlx::query_scalar("SELECT id FROM bundles WHERE hash = ?")
+        .bind(exact_hash)
+        .fetch_one(&pool)
+        .await
+        .expect("load exact bundle id");
+    let legacy_bundle_dir = data_root.join(exact_hash);
+    fs::create_dir_all(&legacy_bundle_dir).expect("create legacy bundle directory");
+    let legacy_file = legacy_bundle_dir.join("legacy.log");
+    fs::write(&legacy_file, "legacy").expect("write legacy bundle file");
+    sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir) VALUES (?, 'legacy.log', ?, 0)")
+        .bind(&exact_bundle_id)
+        .bind(format!("/{exact_hash}/legacy.log"))
+        .execute(&pool)
+        .await
+        .expect("insert legacy bundle file record");
 
     let delete = test::call_service(
         &app,
@@ -1317,6 +1332,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     )
     .await;
     assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    wait_for_bundle_status(&pool, exact_hash, "DELETED").await;
     let deleted_bundle: (String, Option<String>) =
         sqlx::query_as("SELECT status, deleted_at FROM bundles WHERE hash = ?")
             .bind(exact_hash)
@@ -1333,6 +1349,8 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     .await
     .expect("count deleted bundle file references");
     assert_eq!(deleted_bundle_files, 0);
+    assert!(!legacy_file.exists());
+    assert!(!legacy_bundle_dir.exists());
 
     let replacement_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let replacement = test::call_service(
@@ -1500,15 +1518,33 @@ async fn issue_creation_and_upload_require_existing_issue() {
     assert_eq!(upload.status(), StatusCode::ACCEPTED);
     wait_for_issue_ready(&pool, "NEW001").await;
 
+    let expiring: (String, String) =
+        sqlx::query_as("SELECT id, hash FROM bundles WHERE issue_code = 'NEW001'")
+            .fetch_one(&pool)
+            .await
+            .expect("load expiring bundle");
+    let expired_legacy_dir = data_root.join(&expiring.1);
+    fs::create_dir_all(&expired_legacy_dir).expect("create expired legacy directory");
+    let expired_legacy_file = expired_legacy_dir.join("legacy.log");
+    fs::write(&expired_legacy_file, "legacy").expect("write expired legacy file");
+    sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir) VALUES (?, 'legacy.log', ?, 0)")
+        .bind(&expiring.0)
+        .bind(format!("/{}/legacy.log", expiring.1))
+        .execute(&pool)
+        .await
+        .expect("insert expired legacy file record");
+
     sqlx::query("UPDATE bundles SET created_at = datetime('now', '-2 days') WHERE issue_code = ?")
         .bind("NEW001")
         .execute(&pool)
         .await
         .expect("age bundle");
-    let removed = db::cleanup_expired_bundles(&pool, 1)
+    let removed = db::cleanup_expired_bundles(&pool, &data_root, 1)
         .await
         .expect("cleanup expired bundles");
     assert_eq!(removed, 1);
+    assert!(!expired_legacy_file.exists());
+    assert!(!expired_legacy_dir.exists());
     let still_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issues WHERE code = ?)")
             .bind("NEW001")
@@ -1629,7 +1665,7 @@ async fn startup_recovery_marks_processing_bundle_failed_with_reason() {
     .await
     .expect("read recovered bundle");
     assert_eq!(recovered.0, "FAILED");
-    assert_eq!(recovered.1, "FAILED");
+    assert_eq!(recovered.1, "PENDING");
     assert!(recovered.2.is_some_and(|reason| reason.contains("重启")));
 }
 
@@ -1776,6 +1812,22 @@ async fn wait_for_issue_status(pool: &sqlx::SqlitePool, issue_code: &str, status
             .await
             .expect("inspect timed out issue status");
     panic!("issue {issue_code} did not become {status}; observed {states:?}");
+}
+
+async fn wait_for_bundle_status(pool: &sqlx::SqlitePool, bundle_hash: &str, status: &str) {
+    for _ in 0..100 {
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT status FROM bundles WHERE hash = ?")
+                .bind(bundle_hash)
+                .fetch_optional(pool)
+                .await
+                .expect("poll bundle status");
+        if current.as_deref() == Some(status) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("bundle {bundle_hash} did not become {status}");
 }
 
 fn multipart_body(boundary: &str, issue_code: &str, filename: &str, content: &str) -> Vec<u8> {

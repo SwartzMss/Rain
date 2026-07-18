@@ -130,18 +130,23 @@ pub async fn get_issue_bundles(
         name: issue.name,
         log_bundles: rows
             .into_iter()
-            .map(|bundle| crate::models::issues::UploadSummary {
-                hash: bundle.hash,
-                name: bundle.name,
-                status: UploadStatusWrapper {
-                    upload_status: UploadStatus::from_db_value(&bundle.status),
-                },
-                stage: UploadStage::from_db_value(&bundle.process_stage),
-                failure_reason: bundle.failure_reason,
-                failure_stage: bundle.failure_stage,
-                failure_code: bundle.failure_code,
-                retryable: bundle.retryable,
-                size_bytes: bundle.size_bytes.map(|size| size.max(0) as u64),
+            .map(|bundle| {
+                let upload_status = UploadStatus::from_db_value(&bundle.status);
+                crate::models::issues::UploadSummary {
+                    hash: bundle.hash,
+                    name: bundle.name,
+                    status: UploadStatusWrapper { upload_status },
+                    stage: match upload_status {
+                        UploadStatus::Ready => UploadStage::Ready,
+                        UploadStatus::Failed => UploadStage::Failed,
+                        _ => UploadStage::from_db_value(&bundle.process_stage),
+                    },
+                    failure_reason: bundle.failure_reason,
+                    failure_stage: bundle.failure_stage,
+                    failure_code: bundle.failure_code,
+                    retryable: bundle.retryable,
+                    size_bytes: bundle.size_bytes.map(|size| size.max(0) as u64),
+                }
             })
             .collect(),
     };
@@ -222,16 +227,21 @@ pub async fn delete_issue_bundle(
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("bundle {bundle_hash}")))?;
     reject_processing_bundle(&bundle)?;
-
-    cleanup_bundle_content_batched(&state.pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
-
     sqlx::query(
-        "UPDATE bundles SET status = 'DELETED', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+        "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
     )
     .bind(&bundle.id)
     .execute(&state.pool)
     .await
     .map_err(AppError::Database)?;
+    let pool = state.pool.clone();
+    let data_root = state.data_root.clone();
+    let bundle_id = bundle.id.clone();
+    tokio::spawn(async move {
+        if let Err(error) = crate::db::finish_bundle_deletion(&pool, &data_root, &bundle_id).await {
+            tracing::error!(bundle_id, %error, "background bundle deletion failed; it will be retried at startup");
+        }
+    });
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -315,6 +325,12 @@ fn reject_processing_bundles(bundles: &[BundleIdRow]) -> Result<(), AppError> {
 fn is_active_bundle_status(status: &str) -> bool {
     matches!(
         status.to_ascii_uppercase().as_str(),
-        "PENDING" | "PROCESSING" | "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
+        "PENDING"
+            | "PROCESSING"
+            | "DELETING"
+            | "RECEIVING"
+            | "EXTRACTING"
+            | "INDEXING"
+            | "PUBLISHING"
     )
 }

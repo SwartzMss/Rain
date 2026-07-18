@@ -11,7 +11,7 @@ pub async fn create_processing_bundle(
     sqlx::query(
         r#"
         INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, size_bytes)
-        VALUES (?, ?, ?, ?, 'RECEIVING', 'RECEIVING', ?)
+        VALUES (?, ?, ?, ?, 'PROCESSING', 'RECEIVING', ?)
         "#,
     )
     .bind(bundle_id)
@@ -25,33 +25,18 @@ pub async fn create_processing_bundle(
     Ok(())
 }
 
-pub(crate) async fn advance_bundle_stage(
+pub(crate) async fn set_bundle_stage(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
     stage: &str,
 ) -> Result<(), AppError> {
-    let rank = |value: &str| match value {
-        "PENDING" => 0,
-        "RECEIVING" => 1,
-        "EXTRACTING" => 2,
-        "INDEXING" => 3,
-        "PUBLISHING" => 4,
-        "READY" => 5,
-        _ => -1,
-    };
-    let current: String = sqlx::query_scalar("SELECT process_stage FROM bundles WHERE id = ?")
-        .bind(bundle_id)
-        .fetch_one(pool)
-        .await
-        .map_err(AppError::Database)?;
-    if rank(stage) < rank(&current) {
-        return Ok(());
-    }
-    if rank(stage) < 0 {
+    if !matches!(
+        stage,
+        "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
+    ) {
         return Err(AppError::Config(format!("invalid bundle stage: {stage}")));
     }
-    sqlx::query("UPDATE bundles SET status = ?, process_stage = ? WHERE id = ?")
-        .bind(stage)
+    sqlx::query("UPDATE bundles SET process_stage = ? WHERE id = ? AND status = 'PROCESSING'")
         .bind(stage)
         .bind(bundle_id)
         .execute(pool)
@@ -95,7 +80,31 @@ mod tests {
 
     use crate::error::AppError;
 
-    use super::user_facing_failure_reason;
+    use super::{set_bundle_stage, user_facing_failure_reason};
+
+    #[tokio::test]
+    async fn stage_tracks_current_operation_even_when_it_moves_back_to_extracting() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('MIXED', 'Mixed')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status, process_stage) VALUES ('mixed', 'MIXED', 'mixed-hash', 'mixed', 'PROCESSING', 'INDEXING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        set_bundle_stage(&pool, "mixed", "EXTRACTING")
+            .await
+            .unwrap();
+        let state: (String, String) =
+            sqlx::query_as("SELECT status, process_stage FROM bundles WHERE id = 'mixed'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, ("PROCESSING".into(), "EXTRACTING".into()));
+    }
 
     #[test]
     fn preserves_actionable_bad_request_failure_reason() {

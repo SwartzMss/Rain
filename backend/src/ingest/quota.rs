@@ -41,11 +41,11 @@ impl IssueQuota {
             SET content_size_bytes = content_size_bytes + ?
             WHERE id = ?
               AND issue_code = ?
-              AND status IN ('RECEIVING', 'EXTRACTING', 'INDEXING', 'PUBLISHING', 'PROCESSING')
+              AND status = 'PROCESSING'
               AND (
                 SELECT COALESCE(SUM(content_size_bytes), 0)
                 FROM bundles
-                WHERE issue_code = ? AND status IN ('READY', 'RECEIVING', 'EXTRACTING', 'INDEXING', 'PUBLISHING', 'PROCESSING')
+                WHERE issue_code = ? AND status IN ('READY', 'PROCESSING')
               ) <= ? - ?
             "#,
         )
@@ -64,7 +64,7 @@ impl IssueQuota {
         }
 
         let usage: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(content_size_bytes), 0) FROM bundles WHERE issue_code = ? AND status IN ('READY', 'RECEIVING', 'EXTRACTING', 'INDEXING', 'PUBLISHING', 'PROCESSING')",
+            "SELECT COALESCE(SUM(content_size_bytes), 0) FROM bundles WHERE issue_code = ? AND status IN ('READY', 'PROCESSING')",
         )
         .bind(&self.issue_code)
         .fetch_one(&self.pool)

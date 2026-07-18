@@ -143,7 +143,11 @@ pub async fn get_upload_task(
         issue_code: row.issue_code,
         bundle_hash: row.hash,
         status,
-        stage: UploadStage::from_db_value(&row.process_stage),
+        stage: match status {
+            UploadStatus::Ready => UploadStage::Ready,
+            UploadStatus::Failed => UploadStage::Failed,
+            _ => UploadStage::from_db_value(&row.process_stage),
+        },
         failure_reason: row.failure_reason,
         failure_stage: row.failure_stage,
         failure_code: row.failure_code,

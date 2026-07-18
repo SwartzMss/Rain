@@ -11,7 +11,10 @@ use backend::{
         BlobStore, LocalCasBlobStore, audit_local_blobs, recover_pending_blobs, spawn_blob_gc,
     },
     config::AppConfig,
-    db::{cleanup_expired_bundles, fail_stale_processing_bundles, init_pool, prepare_schema},
+    db::{
+        cleanup_expired_bundles, fail_stale_processing_bundles, init_pool, prepare_schema,
+        resume_deleting_bundles,
+    },
     routes::register,
 };
 use tracing::{error, info, warn};
@@ -83,6 +86,13 @@ async fn main() -> std::io::Result<()> {
     .await;
 
     run_optional_recovery_stage(
+        "deleting-bundle-recovery",
+        STARTUP_RECOVERY_TIMEOUT,
+        resume_deleting_bundles(&pool, &config.data_root),
+    )
+    .await;
+
+    run_optional_recovery_stage(
         "pending-blob-recovery",
         STARTUP_RECOVERY_TIMEOUT,
         recover_pending_blobs(&pool, blob_store.as_ref()),
@@ -100,7 +110,7 @@ async fn main() -> std::io::Result<()> {
         run_optional_recovery_stage(
             "expired-bundle-cleanup",
             STARTUP_RECOVERY_TIMEOUT,
-            cleanup_expired_bundles(&pool, retention_days),
+            cleanup_expired_bundles(&pool, &config.data_root, retention_days),
         )
         .await;
     }

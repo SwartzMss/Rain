@@ -205,6 +205,81 @@ pub async fn fetch_storage_paths_for_ids(
     Ok(paths)
 }
 
+pub async fn fetch_legacy_bundle_paths(
+    pool: &sqlx::SqlitePool,
+    data_root: &std::path::Path,
+    bundle_id: &str,
+) -> Result<Vec<PathBuf>, AppError> {
+    let rows = sqlx::query_as::<_, FileRow>(
+        r#"
+        SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+               f.status, f.meta, f.blob_id, NULL AS storage_backend,
+               NULL AS storage_key, NULL AS blob_state
+        FROM files f
+        WHERE f.bundle_id = ? AND f.blob_id IS NULL
+        "#,
+    )
+    .bind(bundle_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut paths = rows
+        .iter()
+        .map(|row| validated_storage_path(row, data_root))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !rows.is_empty() {
+        let bundle_hash: String = sqlx::query_scalar("SELECT hash FROM bundles WHERE id = ?")
+            .bind(bundle_id)
+            .fetch_one(pool)
+            .await
+            .map_err(AppError::Database)?;
+        let hash_path = std::path::Path::new(&bundle_hash);
+        if hash_path.is_absolute()
+            || hash_path.components().count() != 1
+            || hash_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(AppError::BadRequest(
+                "invalid legacy bundle hash path".into(),
+            ));
+        }
+        let bundle_root = data_root.join(hash_path);
+        let canonical_data_root = std::fs::canonicalize(data_root).map_err(AppError::Io)?;
+        let boundary = canonicalize_existing_ancestor(&bundle_root)?;
+        if !boundary.starts_with(&canonical_data_root) {
+            return Err(AppError::BadRequest(
+                "legacy bundle path is outside data root".into(),
+            ));
+        }
+        paths.push(bundle_root);
+    }
+    paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    paths.dedup();
+    Ok(paths)
+}
+
+pub async fn remove_legacy_paths(paths: Vec<PathBuf>) -> Result<(), AppError> {
+    for path in paths {
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) if metadata.is_dir() => {
+                tokio::fs::remove_dir_all(path)
+                    .await
+                    .map_err(AppError::Io)?;
+            }
+            Ok(_) => {
+                tokio::fs::remove_file(path).await.map_err(AppError::Io)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
 pub async fn delete_index_rows_for_file(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     file_id: i64,

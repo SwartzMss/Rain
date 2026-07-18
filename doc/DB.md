@@ -26,8 +26,8 @@
 - `issue_code` TEXT：关联 `issues.code`，级联删除。
 - `hash` TEXT UNIQUE：bundle 的公开 ID，前端和 API 使用它定位 bundle。
 - `name` TEXT：bundle 显示名（当前为 `bundle-{hash}`）。
-- `status` TEXT：持久化处理阶段；正常流程为 `PENDING → RECEIVING → EXTRACTING → INDEXING → PUBLISHING → READY`，失败为 `FAILED`，逻辑删除为 `DELETED`。
-- `process_stage` TEXT：当前或最终处理阶段。
+- `status` TEXT：Bundle 生命周期，只使用 `PENDING / PROCESSING / READY / FAILED / DELETING / DELETED`。
+- `process_stage` TEXT：处理中的当前操作，只使用 `RECEIVING / EXTRACTING / INDEXING / PUBLISHING`；完成或失败后保留最后一次操作。
 - `failure_stage`、`failure_code`、`failure_reason`、`retryable`：结构化失败诊断。
 - `deleted_at` TEXT：Bundle 逻辑删除时间；未删除时为 NULL。
 - `size_bytes` INTEGER：本次上传总字节数。
@@ -89,20 +89,22 @@
 - `storage_backend`：当前为 `local`，为远程对象存储预留扩展点。
 - `storage_key`：本地为 `blobs/<hash前两位>/<完整hash>`，不包含 Bundle UUID。
 - `state` 状态机：`STAGING → READY → PENDING_DELETE`；完整性检查会把丢失对象标记为 `MISSING`，大小不一致对象标记为 `CORRUPTED`。
+- 重复上传不会把已被引用的 `READY` Blob 降级；`PENDING_DELETE/MISSING/CORRUPTED` 必须经过物理对象重新发布及存在性、大小校验后，才能从 `STAGING` 回到 `READY`。
 - `files.blob_id` 引用 Blob；目录和升级前的兼容记录可为空。
 - `files.path` 是逻辑路径（保留现有 API 字段名），不再用于定位新上传文件的物理位置。
 - 删除文件、Bundle 或 Issue 后，仅回收已经没有任何 `files` 引用的 READY Blob。
 - 字节存储通过统一的 `BlobStore` 接口访问：`put`、`open`、`materialize`、`exists`、`delete`。当前实现为 `LocalCasBlobStore`。
 - 路由、读取器、上传流程和回收流程只依赖 `Arc<dyn BlobStore>`；本地根目录与路径拼接被封装在本地实现内部，为缓存式 MinIO/S3 或 IPFS 实现预留替换点。
-- Bundle 删除是逻辑删除：请求内先清理日志索引与 `files` 引用，再写入 `status='DELETED'` 和 `deleted_at`，不直接删除 Blob 或递归删除 Bundle 目录。
+- Bundle 删除先原子写入 `status='DELETING'` 和 `deleted_at`，使所有查询立即隐藏，再由后台幂等清理索引、文件引用和旧目录；全部完成后写入 `DELETED`，服务重启会恢复未完成的删除。
 - 后台 Blob GC 每小时扫描一次，始终使用 `NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)` 确认无引用，不维护易失真的引用计数。
 - 首次发现无引用时写入 `unreferenced_at`；默认宽限 24 小时。宽限期内重新出现引用会清除该时间，超过宽限期才进入 `PENDING_DELETE` 并删除物理对象。
+- 删除升级前 `blob_id IS NULL` 的 Bundle 时，会先收集并删除受 data-root 边界保护的旧路径，再清理数据库记录；若物理删除失败则保留 `DELETING` 与文件行，便于安全重试。过期 Bundle 清理使用相同流程。
 
 ## Bundle 处理状态机
 
-- 正常状态按 `PENDING → RECEIVING → EXTRACTING → INDEXING → PUBLISHING → READY` 单向推进；无须执行实际解压的上传也会经过逻辑上的 `EXTRACTING` 阶段。
-- `status` 与 `process_stage` 对新任务保持一致；API 为兼容前端，将所有处理中状态映射为 `PROCESSING`。
-- 失败后 `status/process_stage` 为 `FAILED`，并额外记录 `failure_stage`、`failure_code`、`failure_reason` 和 `retryable`。
+- 生命周期为 `PENDING → PROCESSING → READY`；失败进入 `FAILED`，删除经过 `DELETING → DELETED`。
+- `process_stage` 独立记录 `RECEIVING / EXTRACTING / INDEXING / PUBLISHING`。混合文件和嵌套压缩包逐项处理时允许按当前实际操作切换，例如 `INDEXING → EXTRACTING`，不会再被单向 rank 规则忽略。
+- 失败后仅将 `status` 设为 `FAILED`，`process_stage` 保留最后操作，并额外记录 `failure_stage`、`failure_code`、`failure_reason` 和 `retryable`。
 - 服务启动时发现未完成任务，会记录 `PROCESS_INTERRUPTED`，保留中断阶段并标记为可重试。
 
 ## 关系与典型上传

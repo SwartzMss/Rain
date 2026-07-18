@@ -13,7 +13,7 @@ use crate::{
     config::IndexingConfig,
     error::AppError,
     file_classification::{PreviewKind, classify_file, effective_mime_type},
-    upload::lifecycle::advance_bundle_stage,
+    upload::lifecycle::set_bundle_stage,
 };
 
 mod archive;
@@ -143,7 +143,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         Some(blob_id),
     )
     .await?;
-    mark_blob_ready(pool, blob_id).await?;
+    mark_blob_ready(pool, blob_store.as_ref(), blob_id).await?;
 
     update_process_stage(pool, bundle_id, "EXTRACTING").await?;
     if preview_kind == PreviewKind::Text {
@@ -209,7 +209,7 @@ async fn update_process_stage(
     bundle_id: &str,
     stage: &str,
 ) -> Result<(), AppError> {
-    advance_bundle_stage(pool, bundle_id, stage).await
+    set_bundle_stage(pool, bundle_id, stage).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -292,6 +292,9 @@ fn ingest_directory<'a>(
 
         let record_ids =
             insert_directory_children(pool, bundle_id, Some(parent_id), &prepared).await?;
+        for blob_id in prepared.iter().filter_map(|entry| entry.blob_id) {
+            mark_blob_ready(pool, blob_store.as_ref(), blob_id).await?;
+        }
         for (entry, record_id) in prepared.into_iter().zip(record_ids) {
             let PreparedDirectoryEntry {
                 disk_path,
@@ -417,9 +420,6 @@ async fn insert_directory_children(
         }
     }
     tx.commit().await.map_err(AppError::Database)?;
-    for blob_id in entries.iter().filter_map(|entry| entry.blob_id) {
-        mark_blob_ready(pool, blob_id).await?;
-    }
     Ok(ids)
 }
 

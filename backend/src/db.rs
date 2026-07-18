@@ -5,7 +5,10 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
-use crate::error::AppError;
+use crate::{
+    error::AppError,
+    repositories::files::{fetch_legacy_bundle_paths, remove_legacy_paths},
+};
 
 pub const CLEANUP_BATCH_SIZE: u64 = 10_000;
 const LARGE_CLEANUP_CHECKPOINT_ROWS: u64 = 10_000;
@@ -173,6 +176,7 @@ async fn delete_bundle_rows_in_batches(
 
 pub async fn cleanup_expired_bundles(
     pool: &SqlitePool,
+    data_root: &Path,
     retention_days: u64,
 ) -> Result<u64, AppError> {
     let cutoff = format!("-{retention_days} days");
@@ -180,7 +184,9 @@ pub async fn cleanup_expired_bundles(
         r#"
         SELECT id
         FROM bundles
-        WHERE deleted_at IS NULL AND datetime(created_at) < datetime('now', ?)
+        WHERE deleted_at IS NULL
+          AND status IN ('READY', 'FAILED')
+          AND datetime(created_at) < datetime('now', ?)
         "#,
     )
     .bind(cutoff)
@@ -193,18 +199,46 @@ pub async fn cleanup_expired_bundles(
     }
 
     for bundle in &bundles {
-        cleanup_bundle_content_batched(pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
-
         sqlx::query(
-            "UPDATE bundles SET status = 'DELETED', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
         )
         .bind(&bundle.id)
         .execute(pool)
         .await
         .map_err(AppError::Database)?;
+        finish_bundle_deletion(pool, data_root, &bundle.id).await?;
     }
 
     Ok(bundles.len() as u64)
+}
+
+pub async fn finish_bundle_deletion(
+    pool: &SqlitePool,
+    data_root: &Path,
+    bundle_id: &str,
+) -> Result<(), AppError> {
+    let legacy_paths = fetch_legacy_bundle_paths(pool, data_root, bundle_id).await?;
+    // Keep the database rows until legacy removal succeeds so a retry can reconstruct every path.
+    remove_legacy_paths(legacy_paths).await?;
+    cleanup_bundle_content_batched(pool, bundle_id, CLEANUP_BATCH_SIZE).await?;
+    sqlx::query("UPDATE bundles SET status = 'DELETED' WHERE id = ? AND status = 'DELETING'")
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(())
+}
+
+pub async fn resume_deleting_bundles(pool: &SqlitePool, data_root: &Path) -> Result<u64, AppError> {
+    let bundle_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM bundles WHERE status = 'DELETING'")
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Database)?;
+    for bundle_id in &bundle_ids {
+        finish_bundle_deletion(pool, data_root, bundle_id).await?;
+    }
+    Ok(bundle_ids.len() as u64)
 }
 
 pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
@@ -215,7 +249,6 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
             failure_code = 'PROCESS_INTERRUPTED',
             retryable = 1,
             status = 'FAILED',
-            process_stage = 'FAILED',
             failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
         WHERE status IN ('PENDING', 'PROCESSING', 'RECEIVING', 'EXTRACTING', 'INDEXING', 'PUBLISHING')
         "#,
@@ -475,6 +508,15 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         .map_err(AppError::Database)?;
         backfill_bundle_content_sizes(pool).await?;
     }
+
+    // Earlier releases stored the operation stage in both columns. Keep status as
+    // lifecycle only; process_stage remains the detailed operation.
+    sqlx::query(
+        "UPDATE bundles SET status = 'PROCESSING' WHERE status IN ('RECEIVING', 'EXTRACTING', 'INDEXING', 'PUBLISHING')",
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
 
     Ok(())
 }
