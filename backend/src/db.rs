@@ -295,6 +295,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             code TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             description TEXT,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
@@ -324,7 +325,8 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             storage_backend TEXT NOT NULL,
             storage_key TEXT NOT NULL UNIQUE,
             state TEXT NOT NULL,
-            unreferenced_at TEXT
+            unreferenced_at TEXT,
+            verified_at TEXT
         )
         "#,
         r#"
@@ -488,6 +490,31 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
     .map_err(AppError::Database)?;
     if !has_blob_unreferenced_at {
         sqlx::query("ALTER TABLE blobs ADD COLUMN unreferenced_at TEXT")
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+    let has_blob_verified_at: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('blobs') WHERE name = 'verified_at')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if !has_blob_verified_at {
+        sqlx::query("ALTER TABLE blobs ADD COLUMN verified_at TEXT")
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+
+    let has_issue_status: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('issues') WHERE name = 'status')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if !has_issue_status {
+        sqlx::query("ALTER TABLE issues ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
             .execute(pool)
             .await
             .map_err(AppError::Database)?;

@@ -8,7 +8,7 @@ use actix_web::{App, HttpServer, middleware::from_fn, web};
 use backend::{
     AppState,
     blob_store::{
-        BlobStore, LocalCasBlobStore, audit_local_blobs, recover_pending_blobs, spawn_blob_gc,
+        BlobStore, LocalCasBlobStore, recover_pending_blobs, spawn_blob_audit, spawn_blob_gc,
     },
     config::AppConfig,
     db::{
@@ -99,13 +99,6 @@ async fn main() -> std::io::Result<()> {
     )
     .await;
 
-    run_optional_recovery_stage(
-        "blob-integrity-audit",
-        STARTUP_RECOVERY_TIMEOUT,
-        audit_local_blobs(&pool, blob_store.as_ref()),
-    )
-    .await;
-
     if let Some(retention_days) = config.retention_days {
         run_optional_recovery_stage(
             "expired-bundle-cleanup",
@@ -124,6 +117,7 @@ async fn main() -> std::io::Result<()> {
     let bind_addr = format!("{}:{}", config.host, config.port);
     info!(limits = ?config.limits, "effective application limits");
     spawn_blob_gc(pool.clone(), blob_store.clone());
+    spawn_blob_audit(pool.clone(), blob_store.clone());
     let shared_state = web::Data::new(AppState::with_blob_store(
         pool,
         config.data_root.clone(),

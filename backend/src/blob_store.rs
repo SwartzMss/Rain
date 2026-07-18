@@ -1,6 +1,8 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::{Arc, Mutex, Weak},
 };
 
 use async_trait::async_trait;
@@ -39,14 +41,32 @@ pub trait BlobStore: Send + Sync {
 
 pub struct LocalCasBlobStore {
     root: PathBuf,
+    publish_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl LocalCasBlobStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            publish_locks: Mutex::new(HashMap::new()),
+        }
     }
     fn path_for_key(&self, key: &str) -> Result<PathBuf, AppError> {
         local_blob_path(&self.root, key)
+    }
+
+    fn publish_lock(&self, content_hash: &str) -> Result<Arc<tokio::sync::Mutex<()>>, AppError> {
+        let mut locks = self
+            .publish_locks
+            .lock()
+            .map_err(|_| AppError::Config("blob publication lock was poisoned".into()))?;
+        if let Some(lock) = locks.get(content_hash).and_then(Weak::upgrade) {
+            return Ok(lock);
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(content_hash.to_owned(), Arc::downgrade(&lock));
+        locks.retain(|_, weak| weak.strong_count() > 0);
+        Ok(lock)
     }
 }
 
@@ -74,12 +94,22 @@ impl BlobStore for LocalCasBlobStore {
             fs::create_dir_all(parent).await.map_err(AppError::Io)?;
             let temporary = parent.join(format!(".{}.tmp", Uuid::new_v4().simple()));
             fs::copy(source, &temporary).await.map_err(AppError::Io)?;
-            if fs::metadata(&destination).await.is_ok() {
-                fs::remove_file(&destination).await.map_err(AppError::Io)?;
+            let temporary_valid = hash_file(&temporary).await?;
+            if temporary_valid != (content_hash.clone(), size_bytes) {
+                let _ = fs::remove_file(&temporary).await;
+                return Err(AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "temporary blob publication verification failed",
+                )));
             }
-            fs::rename(&temporary, &destination)
-                .await
-                .map_err(AppError::Io)?;
+            let publish_lock = self.publish_lock(&content_hash)?;
+            let _guard = publish_lock.lock().await;
+            if self.verify(&storage_key, &content_hash, size_bytes).await? {
+                fs::remove_file(&temporary).await.map_err(AppError::Io)?;
+            } else if let Err(error) = atomic_replace(&temporary, &destination).await {
+                let _ = fs::remove_file(&temporary).await;
+                return Err(AppError::Io(error));
+            }
         }
         Ok(StoredBlob {
             content_hash,
@@ -139,6 +169,41 @@ impl BlobStore for LocalCasBlobStore {
             Err(error) => Err(AppError::Io(error)),
         }
     }
+}
+
+#[cfg(not(windows))]
+async fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination).await
+}
+
+#[cfg(windows)]
+async fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    tokio::task::spawn_blocking(move || {
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 async fn hash_file(path: &Path) -> Result<(String, u64), AppError> {
@@ -275,7 +340,7 @@ pub async fn mark_blob_ready(
             "blob failed READY publication verification",
         )));
     }
-    sqlx::query("UPDATE blobs SET state = 'READY' WHERE id = ? AND state = 'STAGING'")
+    sqlx::query("UPDATE blobs SET state = 'READY', verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'STAGING'")
         .bind(blob_id)
         .execute(pool)
         .await
@@ -305,7 +370,10 @@ pub async fn recover_pending_blobs(
         } else {
             "MISSING"
         };
-        sqlx::query("UPDATE blobs SET state = ? WHERE id = ? AND state = 'STAGING'")
+        sqlx::query(
+            "UPDATE blobs SET state = ?, verified_at = CASE WHEN ? = 'READY' THEN CURRENT_TIMESTAMP ELSE verified_at END WHERE id = ? AND state = 'STAGING'",
+        )
+            .bind(state)
             .bind(state)
             .bind(id)
             .execute(pool)
@@ -316,19 +384,41 @@ pub async fn recover_pending_blobs(
 }
 
 pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Result<u64, AppError> {
+    const AUDIT_BATCH_SIZE: i64 = 100;
+    const AUDIT_BYTE_BUDGET: u64 = 5 * 1024 * 1024 * 1024;
     let rows: Vec<(i64, String, i64, String)> = sqlx::query_as(
-        "SELECT id, content_hash, size_bytes, storage_key FROM blobs WHERE storage_backend = ? AND state = 'READY'",
+        r#"
+        SELECT id, content_hash, size_bytes, storage_key
+        FROM blobs
+        WHERE storage_backend = ? AND state = 'READY'
+        ORDER BY verified_at IS NOT NULL, datetime(verified_at), id
+        LIMIT ?
+        "#,
     )
     .bind(store.backend_name())
+    .bind(AUDIT_BATCH_SIZE)
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
     let mut unhealthy = 0u64;
+    let mut audited_bytes = 0u64;
     for (id, expected_hash, expected_size, storage_key) in rows {
+        let expected_size = expected_size.max(0) as u64;
+        if audited_bytes > 0 && audited_bytes.saturating_add(expected_size) > AUDIT_BYTE_BUDGET {
+            break;
+        }
+        audited_bytes = audited_bytes.saturating_add(expected_size);
         if store
-            .verify(&storage_key, &expected_hash, expected_size.max(0) as u64)
+            .verify(&storage_key, &expected_hash, expected_size)
             .await?
         {
+            sqlx::query(
+                "UPDATE blobs SET verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'",
+            )
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
             continue;
         }
         let state = if store.exists(&storage_key).await? {
@@ -336,7 +426,7 @@ pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Resu
         } else {
             "MISSING"
         };
-        sqlx::query("UPDATE blobs SET state = ? WHERE id = ? AND state = 'READY'")
+        sqlx::query("UPDATE blobs SET state = ?, verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'")
             .bind(state)
             .bind(id)
             .execute(pool)
@@ -345,6 +435,22 @@ pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Resu
         unhealthy += 1;
     }
     Ok(unhealthy)
+}
+
+pub fn spawn_blob_audit(pool: SqlitePool, store: Arc<dyn BlobStore>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(3600),
+        );
+        loop {
+            interval.tick().await;
+            match audit_local_blobs(&pool, store.as_ref()).await {
+                Ok(unhealthy) => tracing::info!(unhealthy, "blob integrity audit batch completed"),
+                Err(error) => tracing::warn!(%error, "blob integrity audit batch failed"),
+            }
+        }
+    });
 }
 
 fn local_blob_path(data_root: &Path, storage_key: &str) -> Result<PathBuf, AppError> {
@@ -539,6 +645,38 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[tokio::test]
+    async fn concurrent_publication_of_one_hash_is_serialized_and_atomic() {
+        let root = std::env::temp_dir().join(format!(
+            "rain-blob-publish-lock-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).await.unwrap();
+        let first = root.join("first.log");
+        let second = root.join("second.log");
+        fs::write(&first, b"same content").await.unwrap();
+        fs::write(&second, b"same content").await.unwrap();
+        let (content_hash, size_bytes) = hash_file(&first).await.unwrap();
+        let storage_key = format!("blobs/{}/{}", &content_hash[..2], content_hash);
+        let destination = local_blob_path(&root, &storage_key).unwrap();
+        fs::create_dir_all(destination.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&destination, b"evil content").await.unwrap();
+        let store = Arc::new(LocalCasBlobStore::new(root.clone()));
+
+        let (left, right) = tokio::join!(store.put(&first), store.put(&second));
+        left.unwrap();
+        right.unwrap();
+        assert!(
+            store
+                .verify(&storage_key, &content_hash, size_bytes)
+                .await
+                .unwrap()
+        );
+        let _ = fs::remove_dir_all(root).await;
+    }
 
     struct DeleteAfterFirstPutStore {
         inner: LocalCasBlobStore,
@@ -797,6 +935,13 @@ mod tests {
         assert_eq!(shared_state, "READY");
         fs::write(&blob_path, b"evil content").await.unwrap();
         assert_eq!(audit_local_blobs(&pool, &store).await.unwrap(), 1);
+        let verified_at: Option<String> =
+            sqlx::query_scalar("SELECT verified_at FROM blobs WHERE id = ?")
+                .bind(first_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(verified_at.is_some());
         let state: String = sqlx::query_scalar("SELECT state FROM blobs WHERE id = ?")
             .bind(first_id)
             .fetch_one(&pool)

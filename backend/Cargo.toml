@@ -35,3 +35,6 @@ tar = "0.4"
 walkdir = "2"
 sha2 = "0.10"
 async-trait = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }

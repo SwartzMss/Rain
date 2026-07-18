@@ -8,20 +8,27 @@ pub async fn create_processing_bundle(
     bundle_name: &str,
     total_bytes: u64,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, size_bytes)
-        VALUES (?, ?, ?, ?, 'PROCESSING', 'RECEIVING', ?)
+        SELECT ?, code, ?, ?, 'PROCESSING', 'RECEIVING', ?
+        FROM issues
+        WHERE code = ? AND status = 'ACTIVE'
         "#,
     )
     .bind(bundle_id)
-    .bind(issue_code)
     .bind(bundle_hash)
     .bind(bundle_name)
     .bind(Some(total_bytes as i64))
+    .bind(issue_code)
     .execute(pool)
     .await
     .map_err(AppError::Database)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::Conflict(format!(
+            "issue {issue_code} is missing or being deleted"
+        )));
+    }
     Ok(())
 }
 
@@ -80,7 +87,28 @@ mod tests {
 
     use crate::error::AppError;
 
-    use super::{set_bundle_stage, user_facing_failure_reason};
+    use super::{create_processing_bundle, set_bundle_stage, user_facing_failure_reason};
+
+    #[tokio::test]
+    async fn bundle_creation_requires_an_active_issue_atomically() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues (code, name, status) VALUES ('RACE', 'Race', 'DELETING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            create_processing_bundle(&pool, "bundle", "RACE", "hash", "name", 1)
+                .await
+                .is_err()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bundles")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
 
     #[tokio::test]
     async fn stage_tracks_current_operation_even_when_it_moves_back_to_extracting() {

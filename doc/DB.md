@@ -15,6 +15,9 @@
 
 ## 表：issues
 
+- `status` TEXT：Issue 生命周期，正常为 `ACTIVE`，删除开始时切换为 `DELETING`。
+- 上传创建 Bundle 使用 `INSERT ... SELECT FROM issues WHERE status='ACTIVE'`，把存在性与状态检查合并为一个原子数据库操作。
+
 - `code` TEXT PK：Issue 编号（上传归属键）。
 - `name` TEXT：显示名称（默认与 `code` 相同）。
 - `description` TEXT：描述。
@@ -95,6 +98,7 @@
 - 删除文件、Bundle 或 Issue 后，仅回收已经没有任何 `files` 引用的 READY Blob。
 - 字节存储通过统一的 `BlobStore` 接口访问：`put`、`open`、`materialize`、`exists`、`verify_size`、`verify`、`delete`。当前实现为 `LocalCasBlobStore`。
 - `verify` 先检查字节数，再流式计算 SHA-256 并与 `content_hash` 比较；`STAGING → READY`、启动恢复和完整性审计必须使用完整校验，普通读取不重复计算哈希。
+- 同一 `content_hash` 的发布使用进程内异步锁串行化；临时对象先做完整校验，锁内再次验证目标，目标正确则丢弃临时文件，否则使用平台原子替换（Windows 使用 `MoveFileExW`）。
 - `put` 已完整确认内容后，数据库 claim 后仅用 `verify_size` 复查对象仍存在且大小一致，以防上传/GC 竞态，同时避免正常重复上传对已有 Blob 再做第二次完整 Hash；若对象消失并重新发布，仍执行完整 `verify`。
 - 路由、读取器、上传流程和回收流程只依赖 `Arc<dyn BlobStore>`；本地根目录与路径拼接被封装在本地实现内部，为缓存式 MinIO/S3 或 IPFS 实现预留替换点。
 - 读取 Blob 前必须确认记录的 `storage_backend` 与当前 `BlobStore::backend_name()` 一致；多后端并存时应由后续 `BlobStoreRegistry` 按 backend 路由。
@@ -102,6 +106,7 @@
 - Issue 删除同步复用每个 Bundle 的 `finish_bundle_deletion`；所有 Bundle 清理成功后才删除 Issue，失败后可再次请求从 `DELETING` 继续。
 - 后台 Blob GC 每小时扫描一次，始终使用 `NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)` 确认无引用，不维护易失真的引用计数。
 - 无引用的 `MISSING` Blob 直接删除数据库记录；无引用的 `CORRUPTED` Blob 删除物理对象后再删除记录，两者不永久滞留。
+- `verified_at` 记录最近一次完整 SHA-256 审计时间。全量审计不阻塞 HTTP 启动；后台每小时按最久未校验优先处理，单批最多 100 个 Blob 或 5 GiB。
 - 首次发现无引用时写入 `unreferenced_at`；默认宽限 24 小时。宽限期内重新出现引用会清除该时间，超过宽限期才进入 `PENDING_DELETE` 并删除物理对象。
 - 删除升级前 `blob_id IS NULL` 的 Bundle 时，会先收集并删除受 data-root 边界保护的旧路径，再清理数据库记录；若物理删除失败则保留 `DELETING` 与文件行，便于安全重试。过期 Bundle 清理使用相同流程。
 

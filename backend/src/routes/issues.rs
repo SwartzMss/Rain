@@ -42,6 +42,7 @@ pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, App
             name,
             (SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code AND b.deleted_at IS NULL) AS bundle_count
         FROM issues
+        WHERE status = 'ACTIVE'
         ORDER BY code DESC
         LIMIT 200
         "#,
@@ -109,13 +110,14 @@ pub async fn get_issue_bundles(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
-    let issue =
-        sqlx::query_as::<_, IssueRow>("SELECT code, name FROM issues WHERE code = ? LIMIT 1")
-            .bind(&issue_code)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(AppError::Database)?
-            .ok_or_else(|| AppError::NotFound(format!("issue {issue_code}")))?;
+    let issue = sqlx::query_as::<_, IssueRow>(
+        "SELECT code, name FROM issues WHERE code = ? AND status = 'ACTIVE' LIMIT 1",
+    )
+    .bind(&issue_code)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::NotFound(format!("issue {issue_code}")))?;
 
     let rows = sqlx::query_as::<_, BundleRow>(
         "SELECT hash, name, status, process_stage, failure_stage, failure_code, failure_reason, retryable, size_bytes FROM bundles WHERE issue_code = ? AND deleted_at IS NULL ORDER BY created_at DESC",
@@ -160,7 +162,7 @@ pub async fn require_issue_exists(pool: &sqlx::SqlitePool, code: &str) -> Result
         SELECT EXISTS(
             SELECT 1
             FROM issues
-            WHERE code = ?
+            WHERE code = ? AND status = 'ACTIVE'
         )
         "#,
     )
@@ -250,6 +252,30 @@ pub async fn delete_issue(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
+    let claimed =
+        sqlx::query("UPDATE issues SET status = 'DELETING' WHERE code = ? AND status = 'ACTIVE'")
+            .bind(&issue_code)
+            .execute(&state.pool)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected();
+    let newly_claimed = claimed == 1;
+    if claimed == 0 {
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM issues WHERE code = ?")
+            .bind(&issue_code)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(AppError::Database)?;
+        match status.as_deref() {
+            None => return Ok(HttpResponse::NoContent().finish()),
+            Some("DELETING") => {} // Resume a previous synchronous deletion attempt.
+            Some(status) => {
+                return Err(AppError::Conflict(format!(
+                    "issue {issue_code} cannot be deleted from {status}"
+                )));
+            }
+        }
+    }
     let bundles: Vec<BundleIdRow> = sqlx::query_as(
         r#"
         SELECT id, issue_code, status
@@ -271,7 +297,18 @@ pub async fn delete_issue(
         return Ok(HttpResponse::NoContent().finish());
     }
 
-    reject_processing_bundles(&bundles)?;
+    if let Err(error) = reject_processing_bundles(&bundles) {
+        if newly_claimed {
+            sqlx::query(
+                "UPDATE issues SET status = 'ACTIVE' WHERE code = ? AND status = 'DELETING'",
+            )
+            .bind(&issue_code)
+            .execute(&state.pool)
+            .await
+            .map_err(AppError::Database)?;
+        }
+        return Err(error);
+    }
 
     for bundle in &bundles {
         if bundle.status == "DELETED" {
