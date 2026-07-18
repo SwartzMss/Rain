@@ -60,10 +60,7 @@ impl UploadStatus {
             UploadStatus::Ready
         } else if value.eq_ignore_ascii_case("FAILED") {
             UploadStatus::Failed
-        } else if matches!(
-            value.to_ascii_uppercase().as_str(),
-            "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING" | "PROCESSING"
-        ) {
+        } else if value.eq_ignore_ascii_case("PROCESSING") {
             UploadStatus::Processing
         } else {
             UploadStatus::Pending

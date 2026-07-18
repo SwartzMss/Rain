@@ -172,114 +172,6 @@ pub async fn fetch_extracted_child_ids(
         .collect())
 }
 
-pub async fn fetch_storage_paths_for_ids(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    data_root: &std::path::Path,
-    bundle_id: &str,
-    file_ids: &[i64],
-) -> Result<Vec<PathBuf>, AppError> {
-    let mut paths = Vec::new();
-    for file_id in file_ids {
-        let row = sqlx::query_as::<_, FileRow>(
-            r#"
-            SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
-                   f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
-            FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
-            WHERE f.bundle_id = ? AND f.id = ? AND f.blob_id IS NULL
-            LIMIT 1
-            "#,
-        )
-        .bind(bundle_id)
-        .bind(file_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(AppError::Database)?;
-
-        if let Some(row) = row {
-            paths.push(validated_storage_path(&row, data_root)?);
-        }
-    }
-
-    paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    paths.dedup();
-    Ok(paths)
-}
-
-pub async fn fetch_legacy_bundle_paths(
-    pool: &sqlx::SqlitePool,
-    data_root: &std::path::Path,
-    bundle_id: &str,
-) -> Result<Vec<PathBuf>, AppError> {
-    let rows = sqlx::query_as::<_, FileRow>(
-        r#"
-        SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
-               f.status, f.meta, f.blob_id, NULL AS storage_backend,
-               NULL AS storage_key, NULL AS blob_state
-        FROM files f
-        WHERE f.bundle_id = ? AND f.blob_id IS NULL
-        "#,
-    )
-    .bind(bundle_id)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)?;
-    let mut paths = rows
-        .iter()
-        .map(|row| validated_storage_path(row, data_root))
-        .collect::<Result<Vec<_>, _>>()?;
-    if !rows.is_empty() {
-        let bundle_hash: String = sqlx::query_scalar("SELECT hash FROM bundles WHERE id = ?")
-            .bind(bundle_id)
-            .fetch_one(pool)
-            .await
-            .map_err(AppError::Database)?;
-        let hash_path = std::path::Path::new(&bundle_hash);
-        if hash_path.is_absolute()
-            || hash_path.components().count() != 1
-            || hash_path.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
-                )
-            })
-        {
-            return Err(AppError::BadRequest(
-                "invalid legacy bundle hash path".into(),
-            ));
-        }
-        let bundle_root = data_root.join(hash_path);
-        let canonical_data_root = std::fs::canonicalize(data_root).map_err(AppError::Io)?;
-        let boundary = canonicalize_existing_ancestor(&bundle_root)?;
-        if !boundary.starts_with(&canonical_data_root) {
-            return Err(AppError::BadRequest(
-                "legacy bundle path is outside data root".into(),
-            ));
-        }
-        paths.push(bundle_root);
-    }
-    paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    paths.dedup();
-    Ok(paths)
-}
-
-pub async fn remove_legacy_paths(paths: Vec<PathBuf>) -> Result<(), AppError> {
-    for path in paths {
-        match tokio::fs::metadata(&path).await {
-            Ok(metadata) if metadata.is_dir() => {
-                tokio::fs::remove_dir_all(path)
-                    .await
-                    .map_err(AppError::Io)?;
-            }
-            Ok(_) => {
-                tokio::fs::remove_file(path).await.map_err(AppError::Io)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(AppError::Io(error)),
-        }
-    }
-    Ok(())
-}
-
 pub async fn delete_index_rows_for_file(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     file_id: i64,
@@ -319,17 +211,6 @@ fn meta_kind(meta: &Option<String>) -> Option<String> {
                 .get("kind")
                 .and_then(|kind| kind.as_str())
                 .map(str::to_string)
-        })
-}
-
-fn storage_path_from_meta(meta: &Option<String>) -> Option<PathBuf> {
-    meta.as_deref()
-        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-        .and_then(|value| {
-            value
-                .get("storage_path")
-                .and_then(|path| path.as_str())
-                .map(PathBuf::from)
         })
 }
 
@@ -392,7 +273,6 @@ fn append_line_count_meta(
 pub async fn resolve_file_path(
     record: &FileRow,
     blob_store: &dyn BlobStore,
-    data_root: &std::path::Path,
 ) -> Result<PathBuf, AppError> {
     if let Some(storage_key) = record.storage_key.as_deref() {
         let storage_backend = record.storage_backend.as_deref().ok_or_else(|| {
@@ -412,76 +292,17 @@ pub async fn resolve_file_path(
         }
         return blob_store.materialize(storage_key).await;
     }
-    validated_storage_path(record, data_root)
-}
-
-fn storage_path_candidate(record: &FileRow, data_root: &std::path::Path) -> PathBuf {
-    storage_path_from_meta(&record.meta)
-        .unwrap_or_else(|| data_root.join(record.path.trim_start_matches('/')))
-}
-
-fn validated_storage_path(
-    record: &FileRow,
-    data_root: &std::path::Path,
-) -> Result<PathBuf, AppError> {
-    let candidate = match (
-        record.storage_backend.as_deref(),
-        record.storage_key.as_deref(),
-    ) {
-        (Some(_), Some(_)) => {
-            return Err(AppError::Config(
-                "blob path must be resolved through BlobStore".into(),
-            ));
-        }
-        (Some(backend), _) => {
-            return Err(AppError::BadRequest(format!(
-                "unsupported blob storage backend: {backend}"
-            )));
-        }
-        _ => storage_path_candidate(record, data_root),
-    };
-
-    let canonical_data_root = std::fs::canonicalize(data_root).map_err(AppError::Io)?;
-    let (resolved_path, canonical_boundary) = match std::fs::canonicalize(&candidate) {
-        Ok(path) => (path.clone(), path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
-            candidate.clone(),
-            canonicalize_existing_ancestor(&candidate)?,
-        ),
-        Err(error) => return Err(AppError::Io(error)),
-    };
-
-    if !canonical_boundary.starts_with(&canonical_data_root) {
-        return Err(AppError::BadRequest(
-            "file path is outside data root".into(),
-        ));
-    }
-
-    Ok(resolved_path)
-}
-
-fn canonicalize_existing_ancestor(path: &std::path::Path) -> Result<PathBuf, AppError> {
-    let mut ancestor = path.to_path_buf();
-    loop {
-        match std::fs::canonicalize(&ancestor) {
-            Ok(path) => return Ok(path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if !ancestor.pop() {
-                    return Err(AppError::Io(error));
-                }
-            }
-            Err(error) => return Err(AppError::Io(error)),
-        }
-    }
+    Err(AppError::Config(format!(
+        "file {} has no content-addressed blob",
+        record.id
+    )))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
     use crate::blob_store::LocalCasBlobStore;
 
-    use super::{FileRow, resolve_file_path, storage_path_candidate, validated_storage_path};
+    use super::{FileRow, resolve_file_path};
 
     fn row(path: &str, meta: Option<&str>) -> FileRow {
         FileRow {
@@ -501,66 +322,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn stable_file_path_is_used_when_metadata_has_no_storage_path() {
-        let record = row("/bundle/logs/app.log", Some(r#"{"kind":"extracted_file"}"#));
-
-        assert_eq!(
-            storage_path_candidate(&record, Path::new("/data")),
-            PathBuf::from("/data/bundle/logs/app.log")
-        );
-    }
-
-    #[test]
-    fn legacy_storage_path_remains_preferred() {
-        let record = row(
-            "/bundle/logs/app.log",
-            Some(r#"{"storage_path":"/legacy/bundle/app.log"}"#),
-        );
-
-        assert_eq!(
-            storage_path_candidate(&record, Path::new("/data")),
-            PathBuf::from("/legacy/bundle/app.log")
-        );
-    }
-
-    #[test]
-    fn missing_file_path_can_still_be_selected_for_database_cleanup() {
-        let root = std::env::temp_dir().join(format!(
-            "rain-missing-storage-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(root.join("bundle")).unwrap();
-        let record = row("/bundle/missing.log", None);
-
-        let selected = validated_storage_path(&record, &root).unwrap();
-
-        assert_eq!(selected, root.join("bundle/missing.log"));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn existing_legacy_path_outside_data_root_is_rejected() {
-        let root = std::env::temp_dir().join(format!(
-            "rain-storage-root-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let outside = std::env::temp_dir().join(format!(
-            "rain-storage-outside-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&outside, "outside").unwrap();
-        let meta = serde_json::json!({ "storage_path": outside }).to_string();
-        let record = row("/bundle/app.log", Some(&meta));
-
-        let error = validated_storage_path(&record, &root).unwrap_err();
-
-        assert!(error.to_string().contains("outside data root"));
-        let _ = std::fs::remove_dir_all(root);
-        let _ = std::fs::remove_file(outside);
-    }
-
     #[tokio::test]
     async fn blob_path_rejects_the_wrong_active_backend() {
         let root = std::env::temp_dir().join(format!(
@@ -575,7 +336,7 @@ mod tests {
         record.blob_state = Some("READY".into());
         let store = LocalCasBlobStore::new(root.clone());
 
-        let error = resolve_file_path(&record, &store, &root).await.unwrap_err();
+        let error = resolve_file_path(&record, &store).await.unwrap_err();
         assert!(error.to_string().contains("storage backend s3"));
         let _ = std::fs::remove_dir_all(root);
     }

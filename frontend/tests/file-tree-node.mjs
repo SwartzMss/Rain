@@ -62,9 +62,10 @@ try {
   assert.match(markup, /application-production\.log/);
   assert.match(markup, /title="very-long-diagnostic-bundle\.zip"/);
   assert.match(markup, /aria-label="very-long-diagnostic-bundle\.zip"/);
-  assert.match(markup, />ZIP</);
-  assert.match(markup, />TXT</);
-  assert.match(markup, /⌄/);
+  assert.match(markup, /text-violet-500/);
+  assert.match(markup, /text-slate-500/);
+  assert.match(markup, /rotate-90/);
+  assert.doesNotMatch(markup, />ZIP<|>TXT<|□|▣/);
   assert.doesNotMatch(markup, /1 子节点/);
   assert.doesNotMatch(markup, /text\/plain/);
   assert.doesNotMatch(markup, /4\.0 KB/);

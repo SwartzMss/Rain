@@ -88,7 +88,7 @@ async fn main() -> std::io::Result<()> {
     run_optional_recovery_stage(
         "deleting-bundle-recovery",
         STARTUP_RECOVERY_TIMEOUT,
-        resume_deleting_bundles(&pool, &config.data_root),
+        resume_deleting_bundles(&pool),
     )
     .await;
 
@@ -103,7 +103,7 @@ async fn main() -> std::io::Result<()> {
         run_optional_recovery_stage(
             "expired-bundle-cleanup",
             STARTUP_RECOVERY_TIMEOUT,
-            cleanup_expired_bundles(&pool, &config.data_root, retention_days),
+            cleanup_expired_bundles(&pool, retention_days),
         )
         .await;
     }

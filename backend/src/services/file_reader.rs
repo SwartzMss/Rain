@@ -34,7 +34,6 @@ struct FileLine {
 pub async fn read_file_preview(
     record: &FileRow,
     blob_store: &dyn BlobStore,
-    data_root: &std::path::Path,
     api: &ApiConfig,
 ) -> Result<serde_json::Value, AppError> {
     if record.is_dir {
@@ -42,7 +41,7 @@ pub async fn read_file_preview(
     }
     ensure_text_preview(record)?;
 
-    let disk_path = resolve_file_path(record, blob_store, data_root).await?;
+    let disk_path = resolve_file_path(record, blob_store).await?;
     let metadata = tokio::fs::metadata(&disk_path)
         .await
         .map_err(AppError::Io)?;
@@ -71,7 +70,6 @@ pub async fn read_file_lines(
     pool: &sqlx::SqlitePool,
     record: &FileRow,
     blob_store: &dyn BlobStore,
-    data_root: &std::path::Path,
     api: &ApiConfig,
     start: i64,
     limit: i64,
@@ -82,7 +80,7 @@ pub async fn read_file_lines(
     ensure_text_preview(record)?;
 
     let (base_line, byte_offset) = nearest_line_offset(pool, record.id, start).await?;
-    let disk_path = resolve_file_path(record, blob_store, data_root).await?;
+    let disk_path = resolve_file_path(record, blob_store).await?;
 
     let mut file = File::open(&disk_path).await.map_err(AppError::Io)?;
     file.seek(std::io::SeekFrom::Start(byte_offset as u64))

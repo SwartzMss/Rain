@@ -1,4 +1,4 @@
-import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom';
+import { Link, Route, Routes } from 'react-router-dom';
 import { BundleView } from './features/files/FilesView';
 import { HomeView } from './features/files/HomeView';
 import { TempResultView } from './features/files/TempResultView';
@@ -31,18 +31,11 @@ function App() {
           <Route path="/" element={<HomeView />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />
           <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
-          <Route path="/bundle/:bundleHash" element={<RedirectLegacyBundle />} />
           <Route path="/temp-results/:resultId" element={<TempResultView />} />
         </Routes>
       </main>
     </div>
   );
-}
-
-function RedirectLegacyBundle() {
-  const { bundleHash = '' } = useParams<{ bundleHash: string }>();
-  const state = useLocation().state;
-  return <BundleView legacyBundleHash={bundleHash} legacyState={state} />;
 }
 
 export default App;

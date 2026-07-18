@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-use super::helpers::{data_root, ensure_bundle_ready, load_bundle};
+use super::helpers::{ensure_bundle_ready, load_bundle};
 
 #[derive(Deserialize)]
 struct FilePath {
@@ -94,13 +94,7 @@ pub async fn get_file_content(
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
     let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
-    let preview = read_file_preview(
-        &record,
-        state.blob_store.as_ref(),
-        &data_root(&state),
-        &state.limits.api,
-    )
-    .await?;
+    let preview = read_file_preview(&record, state.blob_store.as_ref(), &state.limits.api).await?;
     Ok(HttpResponse::Ok().json(preview))
 }
 
@@ -126,7 +120,6 @@ pub async fn get_file_lines(
         &state.pool,
         &record,
         state.blob_store.as_ref(),
-        &data_root(&state),
         &state.limits.api,
         start,
         limit,
@@ -152,8 +145,7 @@ pub async fn download_file(
         return Err(AppError::BadRequest("cannot download directory".into()));
     }
 
-    let disk_path =
-        resolve_file_path(&record, state.blob_store.as_ref(), &data_root(&state)).await?;
+    let disk_path = resolve_file_path(&record, state.blob_store.as_ref()).await?;
     let named = NamedFile::open_async(disk_path)
         .await
         .map_err(AppError::Io)?
@@ -176,7 +168,7 @@ pub async fn delete_file_node(
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
     let _record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
-    delete_file_tree(&state.pool, &data_root(&state), &bundle.id, parsed_id).await?;
+    delete_file_tree(&state.pool, &bundle.id, parsed_id).await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

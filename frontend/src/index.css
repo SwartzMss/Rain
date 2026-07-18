@@ -20,6 +20,40 @@ body {
   color: #112235;
 }
 
+/* Stormglass code palette, tuned to remain legible on the light file viewer. */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link { color: #7c3aed; }
+.hljs-string,
+.hljs-attr,
+.hljs-template-tag,
+.hljs-template-variable { color: #047857; }
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-selector-id { color: #0369a1; }
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-variable,
+.hljs-variable.constant_ { color: #b45309; }
+.hljs-comment,
+.hljs-quote,
+.hljs-meta { color: #64748b; font-style: italic; }
+.hljs-built_in,
+.hljs-type,
+.hljs-params { color: #0e7490; }
+.hljs-tag,
+.hljs-name,
+.hljs-selector-class { color: #be123c; }
+.hljs-regexp,
+.hljs-addition { color: #15803d; }
+.hljs-deletion { color: #dc2626; }
+.hljs-strong { font-weight: 700; }
+.hljs-emphasis { font-style: italic; }
+
 ::selection {
   background: rgb(34 211 238 / 0.28);
   color: #071522;

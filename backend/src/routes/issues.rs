@@ -235,10 +235,9 @@ pub async fn delete_issue_bundle(
     .await
     .map_err(AppError::Database)?;
     let pool = state.pool.clone();
-    let data_root = state.data_root.clone();
     let bundle_id = bundle.id.clone();
     tokio::spawn(async move {
-        if let Err(error) = crate::db::finish_bundle_deletion(&pool, &data_root, &bundle_id).await {
+        if let Err(error) = crate::db::finish_bundle_deletion(&pool, &bundle_id).await {
             tracing::error!(bundle_id, %error, "background bundle deletion failed; it will be retried at startup");
         }
     });
@@ -323,7 +322,7 @@ pub async fn delete_issue(
             .await
             .map_err(AppError::Database)?;
         }
-        finish_bundle_deletion(&state.pool, &state.data_root, &bundle.id).await?;
+        finish_bundle_deletion(&state.pool, &bundle.id).await?;
     }
 
     sqlx::query("DELETE FROM issues WHERE code = ?")
@@ -359,19 +358,13 @@ fn reject_processing_bundles(bundles: &[BundleIdRow]) -> Result<(), AppError> {
 fn is_processing_bundle_status(status: &str) -> bool {
     matches!(
         status.to_ascii_uppercase().as_str(),
-        "PENDING" | "PROCESSING" | "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
+        "PENDING" | "PROCESSING"
     )
 }
 
 fn is_active_bundle_status(status: &str) -> bool {
     matches!(
         status.to_ascii_uppercase().as_str(),
-        "PENDING"
-            | "PROCESSING"
-            | "DELETING"
-            | "RECEIVING"
-            | "EXTRACTING"
-            | "INDEXING"
-            | "PUBLISHING"
+        "PENDING" | "PROCESSING" | "DELETING"
     )
 }

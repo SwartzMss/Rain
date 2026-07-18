@@ -233,9 +233,19 @@ pub async fn create_temp_result(
         .await
         .map_err(AppError::Io)?;
     let output_path = directory.join(format!("{id}.log"));
+    let meta_path = output_path.with_extension("meta");
+    let index_path = output_path.with_extension("idx");
     let mut output = File::create(&output_path).await.map_err(AppError::Io)?;
-    let matching_lines =
-        TempResultExecutor::write_matches(&sources, &expression, &mut output).await?;
+    let mut metadata_output = File::create(&meta_path).await.map_err(AppError::Io)?;
+    let mut index_output = File::create(&index_path).await.map_err(AppError::Io)?;
+    let matching_lines = TempResultExecutor::write_matches(
+        &sources,
+        &expression,
+        &mut output,
+        &mut metadata_output,
+        &mut index_output,
+    )
+    .await?;
 
     let metadata = tokio::fs::metadata(&output_path)
         .await
@@ -263,7 +273,7 @@ pub async fn create_temp_result(
     .execute(&state.pool)
     .await;
     if let Err(error) = insert_result {
-        let _ = tokio::fs::remove_file(&output_path).await;
+        remove_result_files(&output_path).await?;
         return Err(AppError::Database(error));
     }
 
@@ -303,52 +313,20 @@ pub async fn get_temp_result_lines(
     let has_index = tokio::fs::try_exists(&index_path)
         .await
         .map_err(AppError::Io)?;
-    if has_meta != has_index {
+    if !has_meta || !has_index {
         return Err(invalid_sidecar(
-            "temporary result metadata and index must either both exist or both be absent",
+            "temporary result metadata or index is missing",
         ));
     }
-    if has_meta {
-        let lines = read_indexed_lines(
-            &result_path,
-            &meta_path,
-            &index_path,
-            start,
-            limit,
-            result.line_count,
-        )
-        .await?;
-        let next_start =
-            (start + (lines.len() as i64) < result.line_count).then_some(start + limit);
-        return Ok(HttpResponse::Ok().json(TempResultLines {
-            start,
-            limit,
-            line_count: result.line_count,
-            next_start,
-            lines,
-        }));
-    }
-    let file = File::open(&result_path).await.map_err(AppError::Io)?;
-    let mut reader = BufReader::new(file);
-    let mut content = String::new();
-    let mut current = 0_i64;
-    let mut lines = Vec::new();
-    while reader.read_line(&mut content).await.map_err(AppError::Io)? > 0 {
-        if current >= start && current < start + limit {
-            lines.push(TempLine {
-                bundle_hash: None,
-                file_id: None,
-                path: None,
-                line_number: current,
-                content: content.trim_end_matches(['\r', '\n']).to_string(),
-            });
-        }
-        current += 1;
-        content.clear();
-        if current >= start + limit {
-            break;
-        }
-    }
+    let lines = read_indexed_lines(
+        &result_path,
+        &meta_path,
+        &index_path,
+        start,
+        limit,
+        result.line_count,
+    )
+    .await?;
     let next_start = (start + (lines.len() as i64) < result.line_count).then_some(start + limit);
     Ok(HttpResponse::Ok().json(TempResultLines {
         start,
@@ -424,14 +402,14 @@ async fn resolve_sources(
         let has_index = tokio::fs::try_exists(&index_path)
             .await
             .map_err(AppError::Io)?;
-        if has_meta != has_index {
+        if !has_meta || !has_index {
             return Err(invalid_sidecar(
-                "temporary result metadata and index must either both exist or both be absent",
+                "temporary result metadata or index is missing",
             ));
         }
         return Ok(vec![TempSource {
             path,
-            metadata_path: has_meta.then_some(meta_path),
+            metadata_path: Some(meta_path),
             label: source.name,
             bundle_hash: None,
             file_id: None,
@@ -475,8 +453,7 @@ async fn resolve_sources(
                 blob_state: row.blob_state,
             };
             sources.push(TempSource {
-                path: resolve_file_path(&file, state.blob_store.as_ref(), &data_root(state))
-                    .await?,
+                path: resolve_file_path(&file, state.blob_store.as_ref()).await?,
                 metadata_path: None,
                 label: file.name.clone(),
                 bundle_hash: Some(row.bundle_hash),
@@ -504,7 +481,7 @@ async fn resolve_sources(
     ensure_bundle_ready(&bundle)?;
     let file = fetch_file(&state.pool, &bundle.id, file_id).await?;
     ensure_text_preview(&file)?;
-    let path = resolve_file_path(&file, state.blob_store.as_ref(), &data_root(state)).await?;
+    let path = resolve_file_path(&file, state.blob_store.as_ref()).await?;
     Ok(vec![TempSource {
         path,
         metadata_path: None,

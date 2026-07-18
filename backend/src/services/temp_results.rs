@@ -165,12 +165,24 @@ impl TempResultExecutor {
         sources: &[TempSource],
         expression: &Expression,
         output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
     ) -> Result<i64, AppError> {
         let mut matching_lines = 0_i64;
+        let mut log_offset = 0_u64;
+        let mut meta_offset = 0_u64;
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
+            let mut source_metadata_reader = match source.metadata_path.as_ref() {
+                Some(path) => Some(BufReader::new(
+                    File::open(path).await.map_err(AppError::Io)?,
+                )),
+                None => None,
+            };
             let mut bytes = Vec::new();
+            let mut source_metadata_line = String::new();
+            let mut source_line = 0_i64;
             loop {
                 bytes.clear();
                 if reader
@@ -182,16 +194,57 @@ impl TempResultExecutor {
                     break;
                 }
                 let line = String::from_utf8_lossy(&bytes);
+                let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
+                    source_metadata_line.clear();
+                    if reader
+                        .read_line(&mut source_metadata_line)
+                        .await
+                        .map_err(AppError::Io)?
+                        == 0
+                    {
+                        return Err(invalid_sidecar(
+                            "temporary result metadata ended before its content",
+                        ));
+                    }
+                    Some(decode_json_line::<MatchMetadata>(
+                        source_metadata_line.trim_end(),
+                    )?)
+                } else {
+                    None
+                };
                 if expression.matches(line.trim_end_matches(['\r', '\n'])) {
+                    let metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
+                        bundle_hash: source.bundle_hash.clone(),
+                        file_id: source.file_id.clone(),
+                        path: source.label.clone(),
+                        line_number: source_line,
+                    });
+                    if matching_lines % 1_000 == 0 {
+                        write_json_line(
+                            index_output,
+                            &SparseCheckpoint {
+                                result_line: matching_lines,
+                                log_offset,
+                                meta_offset,
+                            },
+                        )
+                        .await?;
+                    }
                     output.write_all(&bytes).await.map_err(AppError::Io)?;
+                    log_offset += bytes.len() as u64;
                     if !bytes.ends_with(b"\n") {
                         output.write_all(b"\n").await.map_err(AppError::Io)?;
+                        log_offset += 1;
                     }
+                    meta_offset += write_json_line(metadata_output, &metadata).await?;
                     matching_lines += 1;
                 }
+                source_line += 1;
             }
         }
         output.flush().await.map_err(AppError::Io)?;
+        metadata_output.flush().await.map_err(AppError::Io)?;
+        index_output.flush().await.map_err(AppError::Io)?;
         Ok(matching_lines)
     }
 }

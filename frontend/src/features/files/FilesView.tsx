@@ -30,6 +30,7 @@ import {
 import { useViewerTabs } from './hooks/useViewerTabs';
 import { useFileContent } from './hooks/useFileContent';
 import { ViewerTabBar } from './components/ViewerTabBar';
+import { FileIcon } from './components/FileIcons';
 import { CodeLinesPane } from './components/CodeLinesPane';
 import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
@@ -37,7 +38,7 @@ import { SearchResultViewer } from './components/SearchResultViewer';
 const LINE_PAGE_SIZE_OPTIONS = [1000, 3000] as const;
 const DEFAULT_TREE_PANEL_WIDTH = 330;
 const MIN_TREE_PANEL_WIDTH = 260;
-const MAX_TREE_PANEL_WIDTH = 720;
+const MAX_TREE_PANEL_WIDTH = 560;
 const TREE_PANEL_WIDTH_STORAGE_KEY = 'rain.fileTreePanelWidth';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
@@ -87,19 +88,12 @@ function highlightText(text: string, keyword: string): React.ReactNode {
   return parts;
 }
 
-type BundleViewProps = {
-  legacyBundleHash?: string;
-  legacyState?: unknown;
-};
-
-export function BundleView(props?: BundleViewProps) {
+export function BundleView() {
   const params = useParams<{ issueCode?: string; bundleHash?: string }>();
-  const bundleHash = params.bundleHash || props?.legacyBundleHash || '';
+  const bundleHash = params.bundleHash || '';
   const issueCodeFromRoute = params.issueCode;
   const location = useLocation();
-  const locationState = (location.state as { issue?: string; bundleName?: string } | null) ?? (props?.legacyState as
-    | { issue?: string; bundleName?: string }
-    | null);
+  const locationState = location.state as { issue?: string; bundleName?: string } | null;
   const issueCode = issueCodeFromRoute || locationState?.issue || '';
 
   const activeBundle: BundleInfo = {
@@ -143,6 +137,7 @@ export function BundleView(props?: BundleViewProps) {
       : DEFAULT_TREE_PANEL_WIDTH;
   });
   const [resizingTreePanel, setResizingTreePanel] = useState(false);
+  const treeResizeStartRef = useRef<{ pointerX: number; panelWidth: number } | null>(null);
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const filenameInputRef = useRef<HTMLInputElement | null>(null);
@@ -210,14 +205,19 @@ export function BundleView(props?: BundleViewProps) {
     document.body.style.userSelect = 'none';
     const resize = (event: PointerEvent) => {
       const layout = layoutRef.current;
-      if (!layout) return;
+      const start = treeResizeStartRef.current;
+      if (!layout || !start) return;
       const bounds = layout.getBoundingClientRect();
       const availableMaximum = Math.max(MIN_TREE_PANEL_WIDTH, bounds.width - 420);
+      const nextWidth = start.panelWidth + event.clientX - start.pointerX;
       setTreePanelWidth(
-        Math.min(MAX_TREE_PANEL_WIDTH, availableMaximum, Math.max(MIN_TREE_PANEL_WIDTH, event.clientX - bounds.left))
+        Math.min(MAX_TREE_PANEL_WIDTH, availableMaximum, Math.max(MIN_TREE_PANEL_WIDTH, nextWidth))
       );
     };
-    const stop = () => setResizingTreePanel(false);
+    const stop = () => {
+      treeResizeStartRef.current = null;
+      setResizingTreePanel(false);
+    };
     window.addEventListener('pointermove', resize);
     window.addEventListener('pointerup', stop, { once: true });
     window.addEventListener('pointercancel', stop, { once: true });
@@ -704,6 +704,24 @@ export function BundleView(props?: BundleViewProps) {
     }
   };
 
+  const closeTabs = (ids: string[]) => {
+    if (ids.length === 0) return;
+    const closing = new Set(ids);
+    const activeIndex = viewerTabs.findIndex((tab) => tab.id === activeViewerTabId);
+    const remaining = viewerTabs.filter((tab) => !closing.has(tab.id));
+    const activeRemains = activeViewerTabId
+      ? remaining.find((tab) => tab.id === activeViewerTabId) ?? null
+      : null;
+    const next = activeRemains ?? remaining[Math.min(Math.max(activeIndex, 0), remaining.length - 1)] ?? null;
+    setViewerTabsState(remaining, next?.id ?? null);
+    if (next?.kind === 'file') {
+      setSelectedNodeId(next.nodeId);
+      setLineStart(next.lineStart);
+      setLinePageSize(next.pageSize);
+      setTargetLine(next.targetLine);
+    }
+  };
+
   useEffect(() => {
     if (viewerInitializedRef.current) return;
     if (!selectedNode || selectedNode.is_dir || isArchiveNode(selectedNode)) return;
@@ -1001,7 +1019,7 @@ export function BundleView(props?: BundleViewProps) {
 
   return (
     <div className="space-y-5">
-      <section className="panel overflow-hidden !p-0">
+      <section className="panel overflow-hidden !p-0 lg:h-[calc(100vh-104px)]">
         {treeError ? (
           <p className="m-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-600">
             {treeError}
@@ -1010,7 +1028,7 @@ export function BundleView(props?: BundleViewProps) {
 
         <div
           ref={layoutRef}
-          className="bundle-layout min-h-[calc(100vh-104px)] gap-0"
+          className="bundle-layout min-h-[calc(100vh-104px)] gap-0 lg:h-full lg:min-h-0 lg:overflow-hidden"
           style={{ '--tree-panel-width': `${treePanelWidth}px` } as React.CSSProperties}
         >
           <div className="relative flex min-h-0 flex-col border-r border-slate-200 bg-white">
@@ -1133,9 +1151,7 @@ export function BundleView(props?: BundleViewProps) {
                           handleNodeClick(targetId, null, { preserveSearch: true }).catch(() => undefined);
                         }}
                       >
-                        <span className="flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-[10px] font-semibold text-slate-600 shadow-sm shadow-slate-100">
-                          □
-                        </span>
+                        <FileIcon name={hit.path} />
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[13px] font-medium leading-4">
                             {highlightText(hit.snippet, searchHighlightTerm)}
@@ -1197,6 +1213,10 @@ export function BundleView(props?: BundleViewProps) {
               onPointerDown={(event) => {
                 if (event.button !== 0) return;
                 event.preventDefault();
+                treeResizeStartRef.current = {
+                  pointerX: event.clientX,
+                  panelWidth: treePanelWidth
+                };
                 setResizingTreePanel(true);
               }}
               onDoubleClick={() => setTreePanelWidth(DEFAULT_TREE_PANEL_WIDTH)}
@@ -1220,13 +1240,14 @@ export function BundleView(props?: BundleViewProps) {
             </div>
           </div>
 
-          <div className="flex min-h-[calc(100vh-104px)] flex-col bg-slate-50 text-sm text-slate-700">
+          <div className="flex min-h-[calc(100vh-104px)] flex-col bg-slate-50 text-sm text-slate-700 lg:h-full lg:min-h-0 lg:overflow-hidden">
             <ViewerTabBar
               tabs={viewerTabs}
               activeTabId={activeViewerTabId}
               onActivate={activateViewerTabWithState}
               onTogglePinned={togglePinnedViewerTab}
               onClose={closeTab}
+              onCloseMany={closeTabs}
             />
             <p
               aria-live="polite"
@@ -1380,6 +1401,7 @@ export function BundleView(props?: BundleViewProps) {
                       contentRef={contentRef}
                       lineNumberOffset={fileLines.start}
                       targetLine={targetLine}
+                      fileName={selectedNode.name}
                     />
                     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
                       <label className="flex items-center gap-2">

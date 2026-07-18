@@ -1,5 +1,6 @@
 import { isArchiveNode, isBinaryNode } from '../filePresentation';
 import { isExtractionFolder, type TreeNode } from '../treeModel';
+import { FileIcon, FolderIcon } from './FileIcons';
 
 type FileTreeNodeProps = {
   nodeId: string;
@@ -43,14 +44,6 @@ export function FileTreeNode({
   const isExpanded = expandedNodes.has(nodeId);
   const isSelected = selectedNodeId === nodeId;
   const canExpand = node.is_dir || isArchiveNode(node);
-  const typeIcon = node.is_dir ? '▣' : isArchiveNode(node) ? 'ZIP' : isBinaryNode(node) ? 'BIN' : 'TXT';
-  const iconClass = node.is_dir
-    ? 'text-cyan-700'
-    : isArchiveNode(node)
-      ? 'text-sky-700'
-      : isBinaryNode(node)
-        ? 'text-amber-700'
-        : 'text-slate-600';
   return (
     <div>
       <button
@@ -63,12 +56,18 @@ export function FileTreeNode({
         ].join(' ')}
         style={{ paddingLeft: `${8 + depth * 16}px` }}
       >
-        <span className="w-3 shrink-0 text-slate-500">
-          {canExpand ? (isExpanded ? '⌄' : '›') : ''}
+        <span className="flex h-4 w-3 shrink-0 items-center justify-center text-slate-400">
+          {canExpand ? (
+            <svg aria-hidden="true" viewBox="0 0 12 12" className={`h-3 w-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="currentColor">
+              <path d="m4 2 4 4-4 4V2Z" />
+            </svg>
+          ) : null}
         </span>
-        <span className={`flex h-5 w-6 shrink-0 items-center justify-center rounded border border-slate-200 bg-white text-[10px] font-semibold shadow-sm shadow-slate-100 ${iconClass}`}>
-          {typeIcon}
-        </span>
+        {node.is_dir ? (
+          <FolderIcon open={isExpanded} className="text-amber-400" />
+        ) : (
+          <FileIcon name={node.name} binary={isBinaryNode(node)} />
+        )}
         <span
           className="min-w-0 flex-1 truncate text-[13px] font-medium leading-4"
           title={node.name}

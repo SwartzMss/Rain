@@ -632,7 +632,7 @@ async fn upload_search_tree_and_delete_issue() {
         .await
         .expect("load target metadata");
     assert!(!target_meta.contains("storage_path"));
-    assert!(!data_root.join(&delete_dir_bundle).exists());
+    assert!(!data_root.join(delete_dir_bundle).exists());
     assert!(dirs.iter().any(|node| node["name"] == "axb"));
     let delete_dir_response = test::call_service(
         &app,
@@ -1195,22 +1195,6 @@ async fn upload_search_tree_and_delete_issue() {
         .expect("second storage");
     assert_ne!(first_storage, second_storage);
 
-    let legacy_compat_dir = data_root.join("legacy-compatible-location");
-    fs::create_dir_all(&legacy_compat_dir).expect("create alternate legacy directory");
-    let legacy_compat_file = legacy_compat_dir.join("old.log");
-    fs::write(&legacy_compat_file, "legacy issue content").expect("write alternate legacy file");
-    let smoke_bundle_id: String =
-        sqlx::query_scalar("SELECT id FROM bundles WHERE issue_code = 'SMOKE'")
-            .fetch_one(&pool)
-            .await
-            .expect("load smoke bundle id");
-    sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir, meta) VALUES (?, 'old.log', '/legacy-old.log', 0, ?)")
-        .bind(&smoke_bundle_id)
-        .bind(serde_json::json!({ "storage_path": legacy_compat_file }).to_string())
-        .execute(&pool)
-        .await
-        .expect("insert alternate legacy record");
-
     let delete_response = test::call_service(
         &app,
         test::TestRequest::delete()
@@ -1219,8 +1203,6 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
-    assert!(!legacy_compat_file.exists());
-
     let missing_response = test::call_service(
         &app,
         test::TestRequest::get()
@@ -1250,8 +1232,10 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
         .await
         .expect("prepare schema");
     insert_issues(&pool, &["QUOTAFAIL"]).await;
-    let mut limits = AppLimits::default();
-    limits.issue_max_content_size = 16;
+    let limits = AppLimits {
+        issue_max_content_size: 16,
+        ..AppLimits::default()
+    };
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
@@ -1333,22 +1317,6 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     .await
     .expect("load exact bundle size");
     assert_eq!(ready_size, 16);
-    let exact_bundle_id: String = sqlx::query_scalar("SELECT id FROM bundles WHERE hash = ?")
-        .bind(exact_hash)
-        .fetch_one(&pool)
-        .await
-        .expect("load exact bundle id");
-    let legacy_bundle_dir = data_root.join(exact_hash);
-    fs::create_dir_all(&legacy_bundle_dir).expect("create legacy bundle directory");
-    let legacy_file = legacy_bundle_dir.join("legacy.log");
-    fs::write(&legacy_file, "legacy").expect("write legacy bundle file");
-    sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir) VALUES (?, 'legacy.log', ?, 0)")
-        .bind(&exact_bundle_id)
-        .bind(format!("/{exact_hash}/legacy.log"))
-        .execute(&pool)
-        .await
-        .expect("insert legacy bundle file record");
-
     let delete = test::call_service(
         &app,
         test::TestRequest::delete()
@@ -1374,8 +1342,6 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     .await
     .expect("count deleted bundle file references");
     assert_eq!(deleted_bundle_files, 0);
-    assert!(!legacy_file.exists());
-    assert!(!legacy_bundle_dir.exists());
     let issues_after_bundle_delete: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get().uri("/api/issues").to_request(),
@@ -1563,33 +1529,15 @@ async fn issue_creation_and_upload_require_existing_issue() {
     assert_eq!(upload.status(), StatusCode::ACCEPTED);
     wait_for_issue_ready(&pool, "NEW001").await;
 
-    let expiring: (String, String) =
-        sqlx::query_as("SELECT id, hash FROM bundles WHERE issue_code = 'NEW001'")
-            .fetch_one(&pool)
-            .await
-            .expect("load expiring bundle");
-    let expired_legacy_dir = data_root.join(&expiring.1);
-    fs::create_dir_all(&expired_legacy_dir).expect("create expired legacy directory");
-    let expired_legacy_file = expired_legacy_dir.join("legacy.log");
-    fs::write(&expired_legacy_file, "legacy").expect("write expired legacy file");
-    sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir) VALUES (?, 'legacy.log', ?, 0)")
-        .bind(&expiring.0)
-        .bind(format!("/{}/legacy.log", expiring.1))
-        .execute(&pool)
-        .await
-        .expect("insert expired legacy file record");
-
     sqlx::query("UPDATE bundles SET created_at = datetime('now', '-2 days') WHERE issue_code = ?")
         .bind("NEW001")
         .execute(&pool)
         .await
         .expect("age bundle");
-    let removed = db::cleanup_expired_bundles(&pool, &data_root, 1)
+    let removed = db::cleanup_expired_bundles(&pool, 1)
         .await
         .expect("cleanup expired bundles");
     assert_eq!(removed, 1);
-    assert!(!expired_legacy_file.exists());
-    assert!(!expired_legacy_dir.exists());
     let still_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issues WHERE code = ?)")
             .bind("NEW001")

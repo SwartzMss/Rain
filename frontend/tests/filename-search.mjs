@@ -13,6 +13,9 @@ try {
   const { shouldShowFilenameClear } = await server.ssrLoadModule(
     '/src/features/files/filenameSearch.ts'
   );
+  const { formatHitPath } = await server.ssrLoadModule(
+    '/src/features/files/treeModel.ts'
+  );
 
   const idle = {
     query: '',
@@ -28,6 +31,11 @@ try {
   assert.equal(shouldShowFilenameClear({ ...idle, resultCount: 2 }), true);
   assert.equal(shouldShowFilenameClear({ ...idle, loading: true }), true);
   assert.equal(shouldShowFilenameClear({ ...idle, error: 'network failed' }), true);
+  assert.equal(
+    formatHitPath('/bundle/da3f956aee7549908f7dfcba7a754e03.zip_extracted/TickerOneStock/README.md'),
+    'TickerOneStock/README.md'
+  );
+  assert.equal(formatHitPath('/bundle/project/src/main.ts'), 'project/src/main.ts');
 
   const filesView = await readFile(
     new URL('../src/features/files/FilesView.tsx', import.meta.url),

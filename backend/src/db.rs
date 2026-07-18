@@ -5,10 +5,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
-use crate::{
-    error::AppError,
-    repositories::files::{fetch_legacy_bundle_paths, remove_legacy_paths},
-};
+use crate::error::AppError;
 
 pub const CLEANUP_BATCH_SIZE: u64 = 10_000;
 const LARGE_CLEANUP_CHECKPOINT_ROWS: u64 = 10_000;
@@ -176,7 +173,6 @@ async fn delete_bundle_rows_in_batches(
 
 pub async fn cleanup_expired_bundles(
     pool: &SqlitePool,
-    data_root: &Path,
     retention_days: u64,
 ) -> Result<u64, AppError> {
     let cutoff = format!("-{retention_days} days");
@@ -206,20 +202,13 @@ pub async fn cleanup_expired_bundles(
         .execute(pool)
         .await
         .map_err(AppError::Database)?;
-        finish_bundle_deletion(pool, data_root, &bundle.id).await?;
+        finish_bundle_deletion(pool, &bundle.id).await?;
     }
 
     Ok(bundles.len() as u64)
 }
 
-pub async fn finish_bundle_deletion(
-    pool: &SqlitePool,
-    data_root: &Path,
-    bundle_id: &str,
-) -> Result<(), AppError> {
-    let legacy_paths = fetch_legacy_bundle_paths(pool, data_root, bundle_id).await?;
-    // Keep the database rows until legacy removal succeeds so a retry can reconstruct every path.
-    remove_legacy_paths(legacy_paths).await?;
+pub async fn finish_bundle_deletion(pool: &SqlitePool, bundle_id: &str) -> Result<(), AppError> {
     cleanup_bundle_content_batched(pool, bundle_id, CLEANUP_BATCH_SIZE).await?;
     sqlx::query("UPDATE bundles SET status = 'DELETED' WHERE id = ? AND status = 'DELETING'")
         .bind(bundle_id)
@@ -229,14 +218,14 @@ pub async fn finish_bundle_deletion(
     Ok(())
 }
 
-pub async fn resume_deleting_bundles(pool: &SqlitePool, data_root: &Path) -> Result<u64, AppError> {
+pub async fn resume_deleting_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
     let bundle_ids: Vec<String> =
         sqlx::query_scalar("SELECT id FROM bundles WHERE status = 'DELETING'")
             .fetch_all(pool)
             .await
             .map_err(AppError::Database)?;
     for bundle_id in &bundle_ids {
-        finish_bundle_deletion(pool, data_root, bundle_id).await?;
+        finish_bundle_deletion(pool, bundle_id).await?;
     }
     Ok(bundle_ids.len() as u64)
 }
@@ -250,7 +239,7 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
             retryable = 1,
             status = 'FAILED',
             failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
-        WHERE status IN ('PENDING', 'PROCESSING', 'RECEIVING', 'EXTRACTING', 'INDEXING', 'PUBLISHING')
+        WHERE status IN ('PENDING', 'PROCESSING')
         "#,
     )
     .execute(pool)
@@ -269,7 +258,6 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
         "DROP TABLE IF EXISTS log_segments_fts",
         "DROP TABLE IF EXISTS temp_results",
-        "DROP TABLE IF EXISTS log_events",
         "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
@@ -360,7 +348,6 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
-        "DROP TABLE IF EXISTS log_events",
         r#"
         CREATE TABLE IF NOT EXISTS log_line_offsets (
             file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -425,213 +412,14 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             .map_err(AppError::Database)?;
     }
 
-    ensure_trigram_fts(pool).await?;
-
-    let has_blob_id: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name = 'blob_id')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-    if !has_blob_id {
-        sqlx::query("ALTER TABLE files ADD COLUMN blob_id INTEGER REFERENCES blobs(id)")
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
-    }
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_files_blob ON files (blob_id)")
         .execute(pool)
         .await
         .map_err(AppError::Database)?;
-
-    let has_failure_reason: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bundles') WHERE name = 'failure_reason')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-    if !has_failure_reason {
-        sqlx::query("ALTER TABLE bundles ADD COLUMN failure_reason TEXT")
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
-    }
-    for (column, definition) in [
-        ("failure_stage", "TEXT"),
-        ("failure_code", "TEXT"),
-        ("retryable", "INTEGER"),
-        ("deleted_at", "TEXT"),
-    ] {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bundles') WHERE name = ?)",
-        )
-        .bind(column)
-        .fetch_one(pool)
-        .await
-        .map_err(AppError::Database)?;
-        if !exists {
-            sqlx::query(&format!(
-                "ALTER TABLE bundles ADD COLUMN {column} {definition}"
-            ))
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
-        }
-    }
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_bundles_deleted ON bundles (deleted_at)")
         .execute(pool)
         .await
         .map_err(AppError::Database)?;
-    let has_blob_unreferenced_at: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('blobs') WHERE name = 'unreferenced_at')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-    if !has_blob_unreferenced_at {
-        sqlx::query("ALTER TABLE blobs ADD COLUMN unreferenced_at TEXT")
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
-    }
-    let has_blob_verified_at: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('blobs') WHERE name = 'verified_at')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-    if !has_blob_verified_at {
-        sqlx::query("ALTER TABLE blobs ADD COLUMN verified_at TEXT")
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
-    }
-
-    let has_issue_status: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('issues') WHERE name = 'status')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-    if !has_issue_status {
-        sqlx::query("ALTER TABLE issues ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
-    }
-
-    let has_content_size: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bundles') WHERE name = 'content_size_bytes')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-    if !has_content_size {
-        sqlx::query(
-            "ALTER TABLE bundles ADD COLUMN content_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (content_size_bytes >= 0)",
-        )
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
-        backfill_bundle_content_sizes(pool).await?;
-    }
-
-    // Earlier releases stored the operation stage in both columns. Keep status as
-    // lifecycle only; process_stage remains the detailed operation.
-    sqlx::query(
-        "UPDATE bundles SET status = 'PROCESSING' WHERE status IN ('RECEIVING', 'EXTRACTING', 'INDEXING', 'PUBLISHING')",
-    )
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    Ok(())
-}
-
-async fn ensure_trigram_fts(pool: &SqlitePool) -> Result<(), AppError> {
-    let schema: Option<String> = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'log_segments_fts'",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(AppError::Database)?;
-    let Some(schema) = schema else {
-        return Err(AppError::Database(sqlx::Error::RowNotFound));
-    };
-    if schema.contains("tokenize='trigram'")
-        && schema.contains("content='log_segments'")
-        && schema.contains("content_rowid='id'")
-    {
-        return Ok(());
-    }
-
-    let segment_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM log_segments")
-        .fetch_one(pool)
-        .await
-        .map_err(AppError::Database)?;
-    let started = std::time::Instant::now();
-    tracing::info!(
-        segment_count,
-        "rebuilding full-text index with trigram tokenizer"
-    );
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    sqlx::query("DROP TABLE log_segments_fts")
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-    sqlx::query(
-        r#"
-        CREATE VIRTUAL TABLE log_segments_fts USING fts5(
-            content,
-            content='log_segments',
-            content_rowid='id',
-            tokenize='trigram'
-        )
-        "#,
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-    sqlx::query(
-        r#"
-        INSERT INTO log_segments_fts(log_segments_fts) VALUES('rebuild')
-        "#,
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-    tx.commit().await.map_err(AppError::Database)?;
-    tracing::info!(
-        segment_count,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "trigram full-text index rebuild completed"
-    );
-    Ok(())
-}
-
-async fn backfill_bundle_content_sizes(pool: &SqlitePool) -> Result<(), AppError> {
-    sqlx::query(
-        r#"
-        UPDATE bundles
-        SET content_size_bytes = CASE
-            WHEN status = 'READY' THEN (
-                SELECT COALESCE(SUM(CASE
-                    WHEN COALESCE(files.size_bytes, 0) > 0
-                    THEN files.size_bytes
-                    ELSE 0
-                END), 0)
-                FROM files
-                WHERE files.bundle_id = bundles.id
-                  AND files.is_dir = 0
-                  AND COALESCE(json_extract(files.meta, '$.preview_kind'), '') <> 'archive'
-            )
-            ELSE 0
-        END
-        "#,
-    )
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
     Ok(())
 }
 
@@ -652,7 +440,7 @@ fn ensure_sqlite_parent(database_url: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backfill_bundle_content_sizes, checkpoint_wal};
+    use super::checkpoint_wal;
 
     #[tokio::test]
     async fn checkpoint_returns_sqlite_page_counts() {
@@ -665,77 +453,6 @@ mod tests {
         assert!(stats.busy >= 0);
         assert!(stats.log_pages >= -1);
         assert!(stats.checkpointed_pages >= -1);
-    }
-
-    #[tokio::test]
-    async fn backfill_counts_only_final_browsable_files() {
-        let pool = super::init_pool("sqlite::memory:").expect("init pool");
-        super::prepare_schema(&pool, true)
-            .await
-            .expect("prepare schema");
-        sqlx::query("INSERT INTO issues (code, name) VALUES ('QUOTA', 'Quota')")
-            .execute(&pool)
-            .await
-            .expect("insert issue");
-        sqlx::query(
-            "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('bundle', 'QUOTA', 'hash', 'bundle', 'READY')",
-        )
-        .execute(&pool)
-        .await
-        .expect("insert bundle");
-        for (name, path, is_dir, size, meta) in [
-            (
-                "direct.log",
-                "/direct.log",
-                false,
-                Some(10_i64),
-                r#"{"preview_kind":"text"}"#,
-            ),
-            (
-                "logs.zip",
-                "/logs.zip",
-                false,
-                Some(5_i64),
-                r#"{"preview_kind":"archive"}"#,
-            ),
-            (
-                "expanded",
-                "/expanded",
-                true,
-                None,
-                r#"{"preview_kind":"directory"}"#,
-            ),
-            (
-                "nested.log",
-                "/expanded/nested.log",
-                false,
-                Some(20_i64),
-                r#"{"preview_kind":"text"}"#,
-            ),
-        ] {
-            sqlx::query(
-                "INSERT INTO files (bundle_id, name, path, is_dir, size_bytes, meta) VALUES ('bundle', ?, ?, ?, ?, ?)",
-            )
-            .bind(name)
-            .bind(path)
-            .bind(is_dir)
-            .bind(size)
-            .bind(meta)
-            .execute(&pool)
-            .await
-            .expect("insert file");
-        }
-
-        backfill_bundle_content_sizes(&pool)
-            .await
-            .expect("backfill content sizes");
-
-        let content_size: i64 =
-            sqlx::query_scalar("SELECT content_size_bytes FROM bundles WHERE id = 'bundle'")
-                .fetch_one(&pool)
-                .await
-                .expect("load content size");
-        assert_eq!(content_size, 30);
     }
 
     #[tokio::test]
@@ -799,66 +516,6 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("search trigram substring");
-        assert_eq!(matches, 1);
-    }
-
-    #[tokio::test]
-    async fn legacy_fts_is_rebuilt_from_authoritative_segments() {
-        let pool = super::init_pool("sqlite::memory:").expect("init pool");
-        super::prepare_schema(&pool, true)
-            .await
-            .expect("prepare schema");
-        sqlx::query("INSERT INTO issues (code, name) VALUES ('SEARCH', 'Search')")
-            .execute(&pool)
-            .await
-            .expect("insert issue");
-        sqlx::query(
-            "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('bundle', 'SEARCH', 'search-hash', 'Search', 'READY')",
-        )
-        .execute(&pool)
-        .await
-        .expect("insert bundle");
-        let file_id: i64 = sqlx::query_scalar(
-            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('bundle', 'app.log', '/app.log', 0) RETURNING id",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("insert file");
-        sqlx::query("INSERT INTO log_segments (bundle_id, file_id, content) VALUES ('bundle', ?, 'prefix-abcdef-suffix')")
-            .bind(file_id)
-            .execute(&pool)
-            .await
-            .expect("insert segment");
-        sqlx::query("DROP TABLE log_segments_fts")
-            .execute(&pool)
-            .await
-            .expect("drop trigram fts");
-        sqlx::query(
-            "CREATE VIRTUAL TABLE log_segments_fts USING fts5(content, segment_id UNINDEXED, bundle_id UNINDEXED, file_id UNINDEXED, timeline UNINDEXED)",
-        )
-        .execute(&pool)
-        .await
-        .expect("create legacy fts");
-
-        super::prepare_schema(&pool, false)
-            .await
-            .expect("migrate schema");
-
-        let schema: String = sqlx::query_scalar(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'log_segments_fts'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("load migrated fts schema");
-        assert!(schema.contains("content='log_segments'"), "{schema}");
-        assert!(schema.contains("content_rowid='id'"), "{schema}");
-
-        let matches: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'cdef'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("search rebuilt fts");
         assert_eq!(matches, 1);
     }
 }

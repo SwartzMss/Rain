@@ -1,5 +1,6 @@
 import React from 'react';
 import type { FileLine } from '../../../api/types';
+import { getSyntaxLanguage, SyntaxHighlightedLine } from '../syntaxHighlight';
 
 type CodeLinesPaneProps = {
   lines: FileLine[];
@@ -8,6 +9,7 @@ type CodeLinesPaneProps = {
   renderLine?: (line: FileLine, index: number) => React.ReactNode;
   className?: string;
   targetLine?: number | null;
+  fileName?: string;
 };
 
 export function CodeLinesPane({
@@ -16,12 +18,14 @@ export function CodeLinesPane({
   contentRef,
   renderLine,
   className = '',
-  targetLine = null
+  targetLine = null,
+  fileName = ''
 }: CodeLinesPaneProps) {
+  const syntaxLanguage = getSyntaxLanguage(fileName);
   return (
     <div
       ref={contentRef}
-      className={`min-h-[70vh] flex-1 overflow-auto bg-white p-0 text-xs leading-5 text-slate-900 ${className}`}
+      className={`min-h-[70vh] flex-1 overflow-auto bg-white p-0 text-xs leading-5 text-slate-900 lg:min-h-0 ${className}`}
     >
       <div className="grid min-h-full grid-cols-[58px_1fr] font-mono">
         <div className="select-none border-r border-slate-100 bg-slate-50 px-3 py-3 text-right text-slate-500">
@@ -45,7 +49,11 @@ export function CodeLinesPane({
                   : ''
               }`}
             >
-              {renderLine ? renderLine(line, index) : line.content}
+              {renderLine
+                ? renderLine(line, index)
+                : syntaxLanguage
+                  ? <SyntaxHighlightedLine content={line.content} language={syntaxLanguage} />
+                  : line.content}
             </div>
           ))}
         </div>

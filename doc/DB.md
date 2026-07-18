@@ -6,12 +6,12 @@
 
 - SQLite 适合当前本地 MVP：部署简单、无需单独数据库服务、方便重新启动项目。
 - SQLite 连接启用 WAL、`synchronous=NORMAL` 和 30 秒 `busy_timeout`，降低读写互相阻塞的概率。
-- 当前搜索使用 SQLite FTS5 trigram external-content 索引。文本日志按 chunk 建索引，正文仅存于 `log_segments.content`；启动时会将旧 FTS 结构迁移并从权威 segment 数据重建索引。
+- 当前搜索使用 SQLite FTS5 trigram external-content 索引。文本日志按 chunk 建索引，正文仅存于 `log_segments.content`。
 - 上传请求只负责接收文件；解压、内容寻址 Blob 写入、行偏移和 FTS 在 `.tmp/{task_id}/staging` 后台执行。
 - 后台任务完成 Blob 发布与索引后标记 `READY` 并清理 staging；失败时清理半成品 file/index 记录，并保留带结构化失败信息的 Bundle 状态。
 - 后台解析使用流式读取和事务批量写入，日志索引每 5000 行提交一次，避免大文件一次性读入内存、逐行零散提交和过长写事务。
 - 当前 `meta` 以 JSON 字符串存储在 TEXT 列中；后续如要对象存储或多节点部署，关键存储路径应提升为明确列。
-- 生产化前建议引入迁移工具，不要长期依赖启动时建表。
+- 首个正式版本发布前不维护历史 Schema 兼容层；开发阶段结构变化后应重建本地数据库。正式发布后再引入版本化迁移工具。
 
 ## 表：issues
 
@@ -43,7 +43,7 @@
 - `id` INTEGER PK AUTOINCREMENT。
 - `bundle_id` TEXT：关联 `bundles.id`，级联删除。
 - `parent_id` INTEGER：自关联父节点，级联删除。
-- `blob_id` INTEGER：关联 `blobs.id`；目录与旧版兼容记录可为 NULL。
+- `blob_id` INTEGER：关联 `blobs.id`；目录没有文件内容，因此可为 NULL，普通文件必须引用 Blob。
 - `name` TEXT：文件/目录名。
 - `path` TEXT：bundle 内路径，如 `/{bundle_hash}/{file_name}`。
 - `is_dir` INTEGER：是否目录，按 bool 读写。
@@ -51,7 +51,7 @@
 - `line_count` INTEGER：文本文件行数，用于分页展示。
 - `mime_type` TEXT：MIME。
 - `status` TEXT：状态标签（预留）。
-- `meta` TEXT：展示和分类元数据，例如原始文件名；`storage_path` 仅作为升级前旧记录的兼容字段读取。
+- `meta` TEXT：展示和分类元数据，例如原始文件名；不保存物理存储路径。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 - 约束：`UNIQUE (bundle_id, path)`。
 - 索引：`idx_files_parent`、`idx_files_bundle`、`idx_files_path`、`idx_files_blob`。
@@ -93,7 +93,7 @@
 - `storage_key`：本地为 `blobs/<hash前两位>/<完整hash>`，不包含 Bundle UUID。
 - `state` 状态机：`STAGING → READY → PENDING_DELETE`；完整性检查会把丢失对象标记为 `MISSING`，大小不一致对象标记为 `CORRUPTED`。
 - 重复上传不会把已被引用的 `READY` Blob 降级；`PENDING_DELETE/MISSING/CORRUPTED` 必须经过物理对象重新发布及存在性、大小校验后，才能从 `STAGING` 回到 `READY`。
-- `files.blob_id` 引用 Blob；目录和升级前的兼容记录可为空。
+- `files.blob_id` 引用 Blob；仅目录可为空。
 - `files.path` 是逻辑路径（保留现有 API 字段名），不再用于定位新上传文件的物理位置。
 - 删除文件、Bundle 或 Issue 后，仅回收已经没有任何 `files` 引用的 READY Blob。
 - 字节存储通过统一的 `BlobStore` 接口访问：`put`、`open`、`materialize`、`exists`、`verify_size`、`verify`、`delete`。当前实现为 `LocalCasBlobStore`。
@@ -102,13 +102,12 @@
 - `put` 已完整确认内容后，数据库 claim 后仅用 `verify_size` 复查对象仍存在且大小一致，以防上传/GC 竞态，同时避免正常重复上传对已有 Blob 再做第二次完整 Hash；若对象消失并重新发布，仍执行完整 `verify`。
 - 路由、读取器、上传流程和回收流程只依赖 `Arc<dyn BlobStore>`；本地根目录与路径拼接被封装在本地实现内部，为缓存式 MinIO/S3 或 IPFS 实现预留替换点。
 - 读取 Blob 前必须确认记录的 `storage_backend` 与当前 `BlobStore::backend_name()` 一致；多后端并存时应由后续 `BlobStoreRegistry` 按 backend 路由。
-- Bundle 删除先原子写入 `status='DELETING'` 和 `deleted_at`，使所有查询立即隐藏，再由后台幂等清理索引、文件引用和旧目录；全部完成后写入 `DELETED`，服务重启会恢复未完成的删除。
+- Bundle 删除先原子写入 `status='DELETING'` 和 `deleted_at`，使所有查询立即隐藏，再由后台幂等清理索引和文件引用；全部完成后写入 `DELETED`，服务重启会恢复未完成的删除。
 - Issue 删除同步复用每个 Bundle 的 `finish_bundle_deletion`；所有 Bundle 清理成功后才删除 Issue，失败后可再次请求从 `DELETING` 继续。
 - 后台 Blob GC 每小时扫描一次，始终使用 `NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)` 确认无引用，不维护易失真的引用计数。
 - 无引用的 `MISSING` Blob 直接删除数据库记录；无引用的 `CORRUPTED` Blob 删除物理对象后再删除记录，两者不永久滞留。
 - `verified_at` 记录最近一次完整 SHA-256 审计时间。全量审计不阻塞 HTTP 启动；后台每小时按最久未校验优先处理，单批最多 100 个 Blob 或 5 GiB。
 - 首次发现无引用时写入 `unreferenced_at`；默认宽限 24 小时。宽限期内重新出现引用会清除该时间，超过宽限期才进入 `PENDING_DELETE` 并删除物理对象。
-- 删除升级前 `blob_id IS NULL` 的 Bundle 时，会先收集并删除受 data-root 边界保护的旧路径，再清理数据库记录；若物理删除失败则保留 `DELETING` 与文件行，便于安全重试。过期 Bundle 清理使用相同流程。
 
 ## Bundle 处理状态机
 

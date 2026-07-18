@@ -93,7 +93,7 @@ export function SearchResultViewer({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-2">
-        <div ref={contentRef} className="min-h-[70vh] flex-1 overflow-auto bg-white px-3 py-3">
+        <div ref={contentRef} className="min-h-[70vh] flex-1 overflow-auto bg-white px-3 py-3 lg:min-h-0">
           <div data-search-results-log="true">
             {results.map((hit, index) => {
               const source = getSearchHitSource(hit);

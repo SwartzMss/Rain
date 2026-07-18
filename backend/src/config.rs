@@ -523,8 +523,10 @@ mod tests {
 
     #[test]
     fn rejects_zero_issue_content_limit() {
-        let mut limits = AppLimits::default();
-        limits.issue_max_content_size = 0;
+        let limits = AppLimits {
+            issue_max_content_size: 0,
+            ..AppLimits::default()
+        };
         assert!(
             limits
                 .validate()

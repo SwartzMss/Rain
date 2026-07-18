@@ -1,6 +1,7 @@
 import { rainApi } from '../../../api/client';
 import type { FileRow } from '../homeRows';
 import { formatBytes, stageClass, stageLabel } from '../homeRows';
+import { FileIcon } from './FileIcons';
 
 type UploadFileTableProps = {
   bundlesError: string | null;
@@ -39,7 +40,7 @@ export function UploadFileTable({
               return (
                 <tr key={row.key} className="transition hover:bg-slate-50/80">
                   <td className="max-w-[360px] truncate px-4 py-3">
-                    <span className="mr-2 text-slate-500">□</span>
+                    <FileIcon name={row.name} className="mr-2 inline-block align-middle" />
                     {row.name}
                   </td>
                   <td className="px-4 py-3">

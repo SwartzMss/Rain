@@ -33,12 +33,11 @@ export const formatHitPath = (raw: string) => {
   if (parts.length === 0) return raw;
   const [, ...rest] = parts;
   if (rest.length === 0) return raw.replace(/^\//, '');
-  const normalized = rest.map((segment, index) => {
-    if (index === 0 && segment.endsWith('_extracted')) {
-      return segment.replace(/_extracted$/, '');
-    }
-    return segment;
-  });
+  // The first extracted directory is an internal container named from the
+  // uploaded archive's storage hash. It is flattened in the file tree and
+  // should not leak into user-facing search paths either.
+  const visible = rest[0]?.toLowerCase().endsWith('_extracted') ? rest.slice(1) : rest;
+  const normalized = visible.map((segment) => segment.replace(/_extracted$/i, ''));
   return normalized.join('/');
 };
 

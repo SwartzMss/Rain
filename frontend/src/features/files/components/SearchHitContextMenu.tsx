@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { placeContextMenu } from '../searchHitSource';
 
 type SearchHitContextMenuProps = {
@@ -65,7 +66,7 @@ export function SearchHitContextMenu({
     onClose();
   };
 
-  return (
+  const menu = (
     <div
       ref={menuRef}
       role="menu"
@@ -83,4 +84,5 @@ export function SearchHitContextMenu({
       </button>
     </div>
   );
+  return typeof document === 'undefined' ? menu : createPortal(menu, document.body);
 }

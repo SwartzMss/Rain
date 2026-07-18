@@ -1,16 +1,12 @@
-use std::path::Path;
-
 use crate::{
     error::AppError,
     repositories::files::{
-        delete_file_row, delete_index_rows_for_file, fetch_extracted_child_ids,
-        fetch_storage_paths_for_ids, fetch_subtree_ids,
+        delete_file_row, delete_index_rows_for_file, fetch_extracted_child_ids, fetch_subtree_ids,
     },
 };
 
 pub async fn delete_file_tree(
     pool: &sqlx::SqlitePool,
-    data_root: &Path,
     bundle_id: &str,
     root_file_id: i64,
 ) -> Result<(), AppError> {
@@ -26,8 +22,6 @@ pub async fn delete_file_tree(
         }
     }
 
-    let disk_paths = fetch_storage_paths_for_ids(&mut tx, data_root, bundle_id, &file_ids).await?;
-
     for file_id in &file_ids {
         delete_index_rows_for_file(&mut tx, *file_id).await?;
     }
@@ -37,16 +31,6 @@ pub async fn delete_file_tree(
     }
 
     tx.commit().await.map_err(AppError::Database)?;
-
-    for disk_path in disk_paths {
-        if tokio::fs::metadata(&disk_path).await.is_ok() {
-            if disk_path.is_dir() {
-                let _ = tokio::fs::remove_dir_all(&disk_path).await;
-            } else {
-                let _ = tokio::fs::remove_file(&disk_path).await;
-            }
-        }
-    }
 
     Ok(())
 }
