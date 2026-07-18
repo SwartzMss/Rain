@@ -121,7 +121,7 @@ pub async fn get_upload_task(
         SELECT issue_code, hash, status, process_stage, failure_stage, failure_code,
                failure_reason, retryable, size_bytes
         FROM bundles
-        WHERE hash = ?
+        WHERE hash = ? AND deleted_at IS NULL
         LIMIT 1
         "#,
     )

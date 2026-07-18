@@ -395,6 +395,15 @@ pub async fn resolve_file_path(
     data_root: &std::path::Path,
 ) -> Result<PathBuf, AppError> {
     if let Some(storage_key) = record.storage_key.as_deref() {
+        let storage_backend = record.storage_backend.as_deref().ok_or_else(|| {
+            AppError::Config("blob storage key is missing its storage backend".into())
+        })?;
+        if storage_backend != blob_store.backend_name() {
+            return Err(AppError::Config(format!(
+                "blob uses storage backend {storage_backend}, but {} is active",
+                blob_store.backend_name()
+            )));
+        }
         if record.blob_state.as_deref() != Some("READY") {
             return Err(AppError::Conflict(format!(
                 "blob is not readable in state {}",
@@ -470,7 +479,9 @@ fn canonicalize_existing_ancestor(path: &std::path::Path) -> Result<PathBuf, App
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{FileRow, storage_path_candidate, validated_storage_path};
+    use crate::blob_store::LocalCasBlobStore;
+
+    use super::{FileRow, resolve_file_path, storage_path_candidate, validated_storage_path};
 
     fn row(path: &str, meta: Option<&str>) -> FileRow {
         FileRow {
@@ -548,5 +559,24 @@ mod tests {
         assert!(error.to_string().contains("outside data root"));
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_file(outside);
+    }
+
+    #[tokio::test]
+    async fn blob_path_rejects_the_wrong_active_backend() {
+        let root = std::env::temp_dir().join(format!(
+            "rain-backend-mismatch-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut record = row("/bundle/app.log", None);
+        record.blob_id = Some(1);
+        record.storage_backend = Some("s3".into());
+        record.storage_key = Some("blobs/aa/anything".into());
+        record.blob_state = Some("READY".into());
+        let store = LocalCasBlobStore::new(root.clone());
+
+        let error = resolve_file_path(&record, &store, &root).await.unwrap_err();
+        assert!(error.to_string().contains("storage backend s3"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

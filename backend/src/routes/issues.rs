@@ -1,11 +1,10 @@
 use actix_web::{HttpResponse, delete, get, post, web};
 use serde::Deserialize;
 use sqlx::FromRow;
-use tokio::fs;
 
 use crate::{
     AppState,
-    db::{CLEANUP_BATCH_SIZE, cleanup_bundle_content_batched},
+    db::finish_bundle_deletion,
     error::AppError,
     models::issues::{
         IssueBundlesResponse, IssueSummary, UploadStage, UploadStatus, UploadStatusWrapper,
@@ -41,7 +40,7 @@ pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, App
         SELECT
             code,
             name,
-            (SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code) AS bundle_count
+            (SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code AND b.deleted_at IS NULL) AS bundle_count
         FROM issues
         ORDER BY code DESC
         LIMIT 200
@@ -199,7 +198,6 @@ struct BundleRow {
 #[derive(FromRow)]
 struct BundleIdRow {
     id: String,
-    hash: String,
     #[allow(dead_code)]
     issue_code: String,
     status: String,
@@ -214,7 +212,7 @@ pub async fn delete_issue_bundle(
     let issue_code = normalize_issue_code(&issue_code)?;
     let bundle: BundleIdRow = sqlx::query_as(
         r#"
-        SELECT id, hash, issue_code, status
+        SELECT id, issue_code, status
         FROM bundles
         WHERE issue_code = ? AND hash = ?
         LIMIT 1
@@ -254,7 +252,7 @@ pub async fn delete_issue(
     let issue_code = normalize_issue_code(&path.into_inner())?;
     let bundles: Vec<BundleIdRow> = sqlx::query_as(
         r#"
-        SELECT id, hash, issue_code, status
+        SELECT id, issue_code, status
         FROM bundles
         WHERE issue_code = ?
         "#,
@@ -276,13 +274,19 @@ pub async fn delete_issue(
     reject_processing_bundles(&bundles)?;
 
     for bundle in &bundles {
-        cleanup_bundle_content_batched(&state.pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
-
-        sqlx::query("DELETE FROM bundles WHERE id = ?")
+        if bundle.status == "DELETED" {
+            continue;
+        }
+        if bundle.status != "DELETING" {
+            sqlx::query(
+                "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+            )
             .bind(&bundle.id)
             .execute(&state.pool)
             .await
             .map_err(AppError::Database)?;
+        }
+        finish_bundle_deletion(&state.pool, &state.data_root, &bundle.id).await?;
     }
 
     sqlx::query("DELETE FROM issues WHERE code = ?")
@@ -290,13 +294,6 @@ pub async fn delete_issue(
         .execute(&state.pool)
         .await
         .map_err(AppError::Database)?;
-
-    for bundle in bundles {
-        let dir = state.data_root.join(&bundle.hash);
-        if fs::metadata(&dir).await.is_ok() {
-            let _ = fs::remove_dir_all(&dir).await;
-        }
-    }
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -313,13 +310,20 @@ fn reject_processing_bundle(bundle: &BundleIdRow) -> Result<(), AppError> {
 fn reject_processing_bundles(bundles: &[BundleIdRow]) -> Result<(), AppError> {
     if bundles
         .iter()
-        .any(|bundle| is_active_bundle_status(&bundle.status))
+        .any(|bundle| is_processing_bundle_status(&bundle.status))
     {
         return Err(AppError::Conflict(
             "issue with processing bundles cannot be deleted".into(),
         ));
     }
     Ok(())
+}
+
+fn is_processing_bundle_status(status: &str) -> bool {
+    matches!(
+        status.to_ascii_uppercase().as_str(),
+        "PENDING" | "PROCESSING" | "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
+    )
 }
 
 fn is_active_bundle_status(status: &str) -> bool {

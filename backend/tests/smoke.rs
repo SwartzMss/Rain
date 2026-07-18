@@ -1195,6 +1195,22 @@ async fn upload_search_tree_and_delete_issue() {
         .expect("second storage");
     assert_ne!(first_storage, second_storage);
 
+    let legacy_compat_dir = data_root.join("legacy-compatible-location");
+    fs::create_dir_all(&legacy_compat_dir).expect("create alternate legacy directory");
+    let legacy_compat_file = legacy_compat_dir.join("old.log");
+    fs::write(&legacy_compat_file, "legacy issue content").expect("write alternate legacy file");
+    let smoke_bundle_id: String =
+        sqlx::query_scalar("SELECT id FROM bundles WHERE issue_code = 'SMOKE'")
+            .fetch_one(&pool)
+            .await
+            .expect("load smoke bundle id");
+    sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir, meta) VALUES (?, 'old.log', '/legacy-old.log', 0, ?)")
+        .bind(&smoke_bundle_id)
+        .bind(serde_json::json!({ "storage_path": legacy_compat_file }).to_string())
+        .execute(&pool)
+        .await
+        .expect("insert alternate legacy record");
+
     let delete_response = test::call_service(
         &app,
         test::TestRequest::delete()
@@ -1203,6 +1219,7 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    assert!(!legacy_compat_file.exists());
 
     let missing_response = test::call_service(
         &app,
@@ -1212,6 +1229,14 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+    let missing_task = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/uploads/{bundle_hash}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(missing_task.status(), StatusCode::NOT_FOUND);
 }
 
 #[actix_web::test]
@@ -1351,6 +1376,26 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     assert_eq!(deleted_bundle_files, 0);
     assert!(!legacy_file.exists());
     assert!(!legacy_bundle_dir.exists());
+    let issues_after_bundle_delete: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get().uri("/api/issues").to_request(),
+    )
+    .await;
+    let quota_issue = issues_after_bundle_delete
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "QUOTAFAIL")
+        .unwrap();
+    assert_eq!(quota_issue["bundle_count"], 1);
+    let deleted_upload_task = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/uploads/{exact_hash}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleted_upload_task.status(), StatusCode::NOT_FOUND);
 
     let replacement_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let replacement = test::call_service(

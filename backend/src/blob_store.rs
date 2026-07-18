@@ -27,6 +27,13 @@ pub trait BlobStore: Send + Sync {
     async fn open(&self, storage_key: &str) -> Result<BlobReader, AppError>;
     async fn materialize(&self, storage_key: &str) -> Result<PathBuf, AppError>;
     async fn exists(&self, storage_key: &str) -> Result<bool, AppError>;
+    async fn verify_size(&self, storage_key: &str, expected_size: u64) -> Result<bool, AppError>;
+    async fn verify(
+        &self,
+        storage_key: &str,
+        expected_hash: &str,
+        expected_size: u64,
+    ) -> Result<bool, AppError>;
     async fn delete(&self, storage_key: &str) -> Result<(), AppError>;
 }
 
@@ -100,6 +107,31 @@ impl BlobStore for LocalCasBlobStore {
             .map_err(AppError::Io)
     }
 
+    async fn verify_size(&self, storage_key: &str, expected_size: u64) -> Result<bool, AppError> {
+        match fs::metadata(self.path_for_key(storage_key)?).await {
+            Ok(metadata) => Ok(metadata.len() == expected_size),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(AppError::Io(error)),
+        }
+    }
+
+    async fn verify(
+        &self,
+        storage_key: &str,
+        expected_hash: &str,
+        expected_size: u64,
+    ) -> Result<bool, AppError> {
+        let path = self.path_for_key(storage_key)?;
+        match fs::metadata(&path).await {
+            Ok(metadata) if metadata.len() != expected_size => return Ok(false),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(AppError::Io(error)),
+        }
+        let (actual_hash, actual_size) = hash_file(&path).await?;
+        Ok(actual_size == expected_size && actual_hash == expected_hash)
+    }
+
     async fn delete(&self, storage_key: &str) -> Result<(), AppError> {
         match fs::remove_file(self.path_for_key(storage_key)?).await {
             Ok(()) => Ok(()),
@@ -157,7 +189,13 @@ pub async fn persist_blob(
     .await
     .map_err(AppError::Database)?;
 
-    if !stored_blob_is_valid(store, &stored).await? {
+    // `put` has already verified or published the content. After the database
+    // claim, recheck presence and size to close the upload/GC race without
+    // hashing the same existing object a second time on the normal path.
+    if !store
+        .verify_size(&stored.storage_key, stored.size_bytes)
+        .await?
+    {
         let republished = store.put(source).await?;
         if republished.content_hash != stored.content_hash
             || republished.size_bytes != stored.size_bytes
@@ -182,15 +220,9 @@ async fn stored_blob_is_valid(
     store: &dyn BlobStore,
     stored: &StoredBlob,
 ) -> Result<bool, AppError> {
-    if !store.exists(&stored.storage_key).await? {
-        return Ok(false);
-    }
-    let path = store.materialize(&stored.storage_key).await?;
-    match fs::metadata(path).await {
-        Ok(metadata) => Ok(metadata.len() == stored.size_bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(AppError::Io(error)),
-    }
+    store
+        .verify(&stored.storage_key, &stored.content_hash, stored.size_bytes)
+        .await
 }
 
 pub async fn mark_blob_ready(
@@ -255,20 +287,21 @@ pub async fn recover_pending_blobs(
     pool: &SqlitePool,
     store: &dyn BlobStore,
 ) -> Result<u64, AppError> {
-    let staging: Vec<(i64, i64, String)> = sqlx::query_as(
-        "SELECT id, size_bytes, storage_key FROM blobs WHERE state = 'STAGING' AND storage_backend = ?",
+    let staging: Vec<(i64, String, i64, String)> = sqlx::query_as(
+        "SELECT id, content_hash, size_bytes, storage_key FROM blobs WHERE state = 'STAGING' AND storage_backend = ?",
     )
     .bind(store.backend_name())
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
-    for (id, expected_size, storage_key) in staging {
-        let state = if store.exists(&storage_key).await?
-            && fs::metadata(store.materialize(&storage_key).await?)
-                .await
-                .is_ok_and(|metadata| metadata.len() == expected_size.max(0) as u64)
+    for (id, expected_hash, expected_size, storage_key) in staging {
+        let state = if store
+            .verify(&storage_key, &expected_hash, expected_size.max(0) as u64)
+            .await?
         {
             "READY"
+        } else if store.exists(&storage_key).await? {
+            "CORRUPTED"
         } else {
             "MISSING"
         };
@@ -283,21 +316,25 @@ pub async fn recover_pending_blobs(
 }
 
 pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Result<u64, AppError> {
-    let rows: Vec<(i64, i64, String)> = sqlx::query_as(
-        "SELECT id, size_bytes, storage_key FROM blobs WHERE storage_backend = ? AND state = 'READY'",
+    let rows: Vec<(i64, String, i64, String)> = sqlx::query_as(
+        "SELECT id, content_hash, size_bytes, storage_key FROM blobs WHERE storage_backend = ? AND state = 'READY'",
     )
     .bind(store.backend_name())
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
     let mut unhealthy = 0u64;
-    for (id, expected_size, storage_key) in rows {
-        let path = store.materialize(&storage_key).await?;
-        let state = match fs::metadata(path).await {
-            Ok(metadata) if metadata.len() == expected_size.max(0) as u64 => continue,
-            Ok(_) => "CORRUPTED",
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "MISSING",
-            Err(error) => return Err(AppError::Io(error)),
+    for (id, expected_hash, expected_size, storage_key) in rows {
+        if store
+            .verify(&storage_key, &expected_hash, expected_size.max(0) as u64)
+            .await?
+        {
+            continue;
+        }
+        let state = if store.exists(&storage_key).await? {
+            "CORRUPTED"
+        } else {
+            "MISSING"
         };
         sqlx::query("UPDATE blobs SET state = ? WHERE id = ? AND state = 'READY'")
             .bind(state)
@@ -340,6 +377,64 @@ pub async fn garbage_collect_unreferenced_blobs_with_grace(
     store: &dyn BlobStore,
     grace_hours: u64,
 ) -> Result<u64, AppError> {
+    let anomalies: Vec<(i64, String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, storage_key, state
+        FROM blobs b
+        WHERE storage_backend = ?
+          AND state IN ('MISSING', 'CORRUPTED')
+          AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
+        "#,
+    )
+    .bind(store.backend_name())
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut removed = 0u64;
+    for (id, storage_key, state) in anomalies {
+        if state == "MISSING" {
+            removed += sqlx::query(
+                "DELETE FROM blobs WHERE id = ? AND state = 'MISSING' AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)",
+            )
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected();
+            continue;
+        }
+
+        let mut delete_tx = pool.begin().await.map_err(AppError::Database)?;
+        let claimed = sqlx::query(
+            r#"
+            UPDATE blobs SET state = 'PENDING_DELETE'
+            WHERE id = ? AND state = 'CORRUPTED'
+              AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)
+            "#,
+        )
+        .bind(id)
+        .execute(&mut *delete_tx)
+        .await
+        .map_err(AppError::Database)?
+        .rows_affected();
+        if claimed == 0 {
+            delete_tx.rollback().await.map_err(AppError::Database)?;
+            continue;
+        }
+        if let Err(error) = store.delete(&storage_key).await {
+            delete_tx.rollback().await.map_err(AppError::Database)?;
+            tracing::warn!(storage_key, %error, "failed to remove unreferenced corrupted blob");
+            continue;
+        }
+        sqlx::query("DELETE FROM blobs WHERE id = ? AND state = 'PENDING_DELETE'")
+            .bind(id)
+            .execute(&mut *delete_tx)
+            .await
+            .map_err(AppError::Database)?;
+        delete_tx.commit().await.map_err(AppError::Database)?;
+        removed += 1;
+    }
+
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     sqlx::query(
         r#"
@@ -385,7 +480,6 @@ pub async fn garbage_collect_unreferenced_blobs_with_grace(
     }
     tx.commit().await.map_err(AppError::Database)?;
 
-    let mut removed = 0u64;
     for (id, storage_key) in &rows {
         let mut delete_tx = pool.begin().await.map_err(AppError::Database)?;
         let claimed = sqlx::query(
@@ -477,6 +571,25 @@ mod tests {
             self.inner.exists(storage_key).await
         }
 
+        async fn verify_size(
+            &self,
+            storage_key: &str,
+            expected_size: u64,
+        ) -> Result<bool, AppError> {
+            self.inner.verify_size(storage_key, expected_size).await
+        }
+
+        async fn verify(
+            &self,
+            storage_key: &str,
+            expected_hash: &str,
+            expected_size: u64,
+        ) -> Result<bool, AppError> {
+            self.inner
+                .verify(storage_key, expected_hash, expected_size)
+                .await
+        }
+
         async fn delete(&self, storage_key: &str) -> Result<(), AppError> {
             self.inner.delete(storage_key).await
         }
@@ -506,6 +619,128 @@ mod tests {
         assert!(store.exists(&storage_key).await.unwrap());
         assert_eq!(state, "STAGING");
         mark_blob_ready(&pool, &store, blob_id).await.unwrap();
+        let _ = fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn ready_publication_rejects_same_size_hash_mismatch() {
+        let root =
+            std::env::temp_dir().join(format!("rain-blob-ready-hash-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.log");
+        fs::write(&source, b"same content").await.unwrap();
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        let store = LocalCasBlobStore::new(root.clone());
+        let blob_id = persist_blob(&pool, &store, &source).await.unwrap();
+        let storage_key: String = sqlx::query_scalar("SELECT storage_key FROM blobs WHERE id = ?")
+            .bind(blob_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        fs::write(
+            local_blob_path(&root, &storage_key).unwrap(),
+            b"evil content",
+        )
+        .await
+        .unwrap();
+
+        assert!(mark_blob_ready(&pool, &store, blob_id).await.is_err());
+        let state: String = sqlx::query_scalar("SELECT state FROM blobs WHERE id = ?")
+            .bind(blob_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "CORRUPTED");
+        let _ = fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_rejects_same_size_hash_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "rain-blob-recovery-hash-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.log");
+        fs::write(&source, b"same content").await.unwrap();
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        let store = LocalCasBlobStore::new(root.clone());
+        let blob_id = persist_blob(&pool, &store, &source).await.unwrap();
+        let storage_key: String = sqlx::query_scalar("SELECT storage_key FROM blobs WHERE id = ?")
+            .bind(blob_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('RECOVERY', 'Recovery')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles (id, issue_code, hash, name) VALUES ('recovery-bundle', 'RECOVERY', 'recovery-hash', 'Recovery')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO files (bundle_id, blob_id, name, path, is_dir) VALUES ('recovery-bundle', ?, 'source.log', '/source.log', 0)")
+            .bind(blob_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        fs::write(
+            local_blob_path(&root, &storage_key).unwrap(),
+            b"evil content",
+        )
+        .await
+        .unwrap();
+
+        recover_pending_blobs(&pool, &store).await.unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM blobs WHERE id = ?")
+            .bind(blob_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "CORRUPTED");
+        let _ = fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn gc_removes_unreferenced_missing_and_corrupted_blobs() {
+        let root =
+            std::env::temp_dir().join(format!("rain-blob-anomaly-gc-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.log");
+        fs::write(&source, b"corrupted orphan").await.unwrap();
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        let store = LocalCasBlobStore::new(root.clone());
+        let corrupted = store.put(&source).await.unwrap();
+        let corrupted_path = local_blob_path(&root, &corrupted.storage_key).unwrap();
+        sqlx::query("INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES (?, ?, 'local', ?, 'CORRUPTED')")
+            .bind(&corrupted.content_hash)
+            .bind(corrupted.size_bytes as i64)
+            .bind(&corrupted.storage_key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES (?, 1, 'local', ?, 'MISSING')")
+            .bind("f".repeat(64))
+            .bind(format!("blobs/ff/{}", "f".repeat(64)))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            garbage_collect_unreferenced_blobs(&pool, &store)
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(!corrupted_path.exists());
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
         let _ = fs::remove_dir_all(root).await;
     }
 
@@ -560,7 +795,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(shared_state, "READY");
-        fs::write(&blob_path, b"wrong size").await.unwrap();
+        fs::write(&blob_path, b"evil content").await.unwrap();
         assert_eq!(audit_local_blobs(&pool, &store).await.unwrap(), 1);
         let state: String = sqlx::query_scalar("SELECT state FROM blobs WHERE id = ?")
             .bind(first_id)
