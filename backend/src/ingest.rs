@@ -9,9 +9,11 @@ use tokio::fs;
 use tokio::io::BufReader;
 
 use crate::{
+    blob_store::{BlobStore, mark_blob_ready, persist_blob},
     config::IndexingConfig,
     error::AppError,
     file_classification::{PreviewKind, classify_file, effective_mime_type},
+    upload::lifecycle::advance_bundle_stage,
 };
 
 mod archive;
@@ -39,6 +41,7 @@ pub struct ProcessFileOptions<'a> {
     pub bundle_id: &'a str,
     pub bundle_hash: &'a str,
     pub data_root: &'a Path,
+    pub blob_store: std::sync::Arc<dyn BlobStore>,
     pub storage_name: &'a str,
     pub original_name: &'a str,
     pub display_name: &'a str,
@@ -89,6 +92,7 @@ struct PreparedDirectoryEntry {
     mime_type: Option<String>,
     preview_kind: PreviewKind,
     meta: serde_json::Value,
+    blob_id: Option<i64>,
 }
 
 pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<(), AppError> {
@@ -97,6 +101,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         bundle_id,
         bundle_hash,
         data_root,
+        blob_store,
         storage_name,
         original_name,
         display_name,
@@ -123,6 +128,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
 
     let relative_path = format!("/{bundle_hash}/{storage_name}");
     let meta = uploaded_file_meta(original_name, display_name, storage_name, preview_kind);
+    let blob_id = persist_blob(pool, blob_store.as_ref(), &disk_path).await?;
 
     let file_id = insert_file_record(
         pool,
@@ -134,9 +140,12 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         Some(size_bytes as i64),
         mime_type.as_deref(),
         Some(meta),
+        Some(blob_id),
     )
     .await?;
+    mark_blob_ready(pool, blob_id).await?;
 
+    update_process_stage(pool, bundle_id, "EXTRACTING").await?;
     if preview_kind == PreviewKind::Text {
         update_process_stage(pool, bundle_id, "INDEXING").await?;
         ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes, indexing).await?;
@@ -171,6 +180,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             None,
             None,
             Some(dir_meta),
+            None,
         )
         .await?;
 
@@ -184,11 +194,13 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             archive_budget,
             issue_quota,
             indexing,
+            blob_store.clone(),
             1,
         )
         .await?;
     }
 
+    update_process_stage(pool, bundle_id, "INDEXING").await?;
     Ok(())
 }
 
@@ -197,13 +209,7 @@ async fn update_process_stage(
     bundle_id: &str,
     stage: &str,
 ) -> Result<(), AppError> {
-    sqlx::query("UPDATE bundles SET process_stage = ? WHERE id = ?")
-        .bind(stage)
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
-    Ok(())
+    advance_bundle_stage(pool, bundle_id, stage).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -216,6 +222,7 @@ fn ingest_directory<'a>(
     archive_budget: ArchiveBudget,
     issue_quota: IssueQuota,
     indexing: &'a IndexingConfig,
+    blob_store: std::sync::Arc<dyn BlobStore>,
     archive_depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
     Box::pin(async move {
@@ -264,6 +271,11 @@ fn ingest_directory<'a>(
                 },
                 preview_kind,
             );
+            let blob_id = if is_dir {
+                None
+            } else {
+                Some(persist_blob(pool, blob_store.as_ref(), &disk_path).await?)
+            };
 
             prepared.push(PreparedDirectoryEntry {
                 disk_path,
@@ -274,6 +286,7 @@ fn ingest_directory<'a>(
                 mime_type,
                 preview_kind,
                 meta,
+                blob_id,
             });
         }
 
@@ -300,6 +313,7 @@ fn ingest_directory<'a>(
                     archive_budget.clone(),
                     issue_quota.clone(),
                     indexing,
+                    blob_store.clone(),
                     archive_depth,
                 )
                 .await?;
@@ -362,6 +376,7 @@ fn ingest_directory<'a>(
                     None,
                     None,
                     Some(dir_meta),
+                    None,
                 )
                 .await?;
                 ingest_directory(
@@ -373,6 +388,7 @@ fn ingest_directory<'a>(
                     archive_budget.clone(),
                     issue_quota.clone(),
                     indexing,
+                    blob_store.clone(),
                     archive_depth + 1,
                 )
                 .await?;
@@ -401,6 +417,9 @@ async fn insert_directory_children(
         }
     }
     tx.commit().await.map_err(AppError::Database)?;
+    for blob_id in entries.iter().filter_map(|entry| entry.blob_id) {
+        mark_blob_ready(pool, blob_id).await?;
+    }
     Ok(ids)
 }
 
@@ -413,14 +432,15 @@ async fn insert_file_record_in_tx(
     sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO files (
-            bundle_id, parent_id, name, path, is_dir, size_bytes, mime_type, status, meta
+            bundle_id, parent_id, blob_id, name, path, is_dir, size_bytes, mime_type, status, meta
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         "#,
     )
     .bind(bundle_id)
     .bind(parent_id)
+    .bind(entry.blob_id)
     .bind(&entry.name)
     .bind(&entry.db_path)
     .bind(entry.is_dir)
@@ -444,18 +464,20 @@ async fn insert_file_record(
     size_bytes: Option<i64>,
     mime_type: Option<&str>,
     meta: Option<serde_json::Value>,
+    blob_id: Option<i64>,
 ) -> Result<i64, AppError> {
     let record_id = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO files (
-            bundle_id, parent_id, name, path, is_dir, size_bytes, mime_type, status, meta
+            bundle_id, parent_id, blob_id, name, path, is_dir, size_bytes, mime_type, status, meta
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         "#,
     )
     .bind(bundle_id)
     .bind(parent_id)
+    .bind(blob_id)
     .bind(name)
     .bind(path)
     .bind(is_dir)
@@ -735,21 +757,7 @@ async fn flush_log_chunks(
             )));
         }
 
-        let mut fts = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline) ",
-        );
-        fts.push_values(batch, |mut row, chunk| {
-            let segment_id = segment_ids[&chunk.chunk_index];
-            row.push_bind(chunk.content())
-                .push_bind(segment_id)
-                .push_bind(bundle_id)
-                .push_bind(file_id)
-                .push_bind("all");
-        });
-        fts.build()
-            .execute(&mut **tx)
-            .await
-            .map_err(AppError::Database)?;
+        // log_segments_fts is an external-content table maintained by triggers.
     }
 
     Ok(())
@@ -869,6 +877,7 @@ mod tests {
             mime_type: Some("text/plain".into()),
             preview_kind: crate::file_classification::PreviewKind::Text,
             meta: serde_json::json!({ "kind": "extracted_file" }),
+            blob_id: None,
         }
     }
 
@@ -939,8 +948,8 @@ mod tests {
             r#"
             SELECT COUNT(*)
             FROM log_segments ls
-            JOIN log_segments_fts fts ON fts.segment_id = ls.id
-            WHERE ls.file_id = ? AND fts.content = ls.content
+            JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
+            WHERE ls.file_id = ? AND log_segments_fts MATCH 'unique'
             "#,
         )
         .bind(file_id)

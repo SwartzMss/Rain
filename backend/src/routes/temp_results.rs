@@ -402,6 +402,10 @@ struct IssueSourceRow {
     mime_type: Option<String>,
     status: Option<String>,
     meta: Option<String>,
+    blob_id: Option<i64>,
+    storage_backend: Option<String>,
+    storage_key: Option<String>,
+    blob_state: Option<String>,
     bundle_hash: String,
 }
 
@@ -438,9 +442,12 @@ async fn resolve_sources(
         let rows = sqlx::query_as::<_, IssueSourceRow>(
             r#"
             SELECT f.id, f.name, f.path, f.size_bytes, f.line_count, f.mime_type,
-                   f.status, f.meta, b.hash AS bundle_hash
+                   f.status, f.meta, f.blob_id, bl.storage_backend, bl.storage_key,
+                   bl.state AS blob_state,
+                   b.hash AS bundle_hash
             FROM files f
             JOIN bundles b ON b.id = f.bundle_id
+            LEFT JOIN blobs bl ON bl.id = f.blob_id
             WHERE b.issue_code = ? AND b.status = 'READY' AND f.is_dir = 0
               AND EXISTS (SELECT 1 FROM log_segments ls WHERE ls.file_id = f.id)
             ORDER BY b.created_at, f.path
@@ -462,9 +469,14 @@ async fn resolve_sources(
                 mime_type: row.mime_type,
                 status: row.status,
                 meta: row.meta,
+                blob_id: row.blob_id,
+                storage_backend: row.storage_backend,
+                storage_key: row.storage_key,
+                blob_state: row.blob_state,
             };
             sources.push(TempSource {
-                path: resolve_file_path(&file, &data_root(state))?,
+                path: resolve_file_path(&file, state.blob_store.as_ref(), &data_root(state))
+                    .await?,
                 metadata_path: None,
                 label: file.name.clone(),
                 bundle_hash: Some(row.bundle_hash),
@@ -492,7 +504,7 @@ async fn resolve_sources(
     ensure_bundle_ready(&bundle)?;
     let file = fetch_file(&state.pool, &bundle.id, file_id).await?;
     ensure_text_preview(&file)?;
-    let path = resolve_file_path(&file, &data_root(state))?;
+    let path = resolve_file_path(&file, state.blob_store.as_ref(), &data_root(state)).await?;
     Ok(vec![TempSource {
         path,
         metadata_path: None,

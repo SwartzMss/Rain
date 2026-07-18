@@ -90,7 +90,7 @@ async fn upload_search_tree_and_delete_issue() {
         .expect("bundle hash");
     assert_eq!(upload["task_id"], bundle_hash);
     assert_eq!(upload["status"], "PROCESSING");
-    assert_eq!(upload["stage"], "PENDING");
+    assert_eq!(upload["stage"], "RECEIVING");
     assert_eq!(upload["issue_code"], "SMOKE");
     let task_status: Value = test::call_and_read_body_json(
         &app,
@@ -544,7 +544,8 @@ async fn upload_search_tree_and_delete_issue() {
             SELECT
                 (SELECT COUNT(*) FROM log_line_offsets WHERE file_id = ?),
                 (SELECT COUNT(*) FROM log_segments WHERE file_id = ?),
-                (SELECT COUNT(*) FROM log_segments_fts WHERE file_id = ?)
+                (SELECT COUNT(*) FROM log_segments_fts fts
+                 JOIN log_segments ls ON ls.id = fts.rowid WHERE ls.file_id = ?)
             "#,
         )
         .bind(file_id)
@@ -621,19 +622,17 @@ async fn upload_search_tree_and_delete_issue() {
         .find(|node| node["name"] == "a_b")
         .expect("a_b dir");
     let target_dir_id = target_dir["id"].as_str().expect("a_b dir id");
-    let target_disk_path = data_root.join(
-        target_dir["path"]
-            .as_str()
-            .expect("a_b dir path")
-            .trim_start_matches('/'),
-    );
+    let blobs_before_directory_delete: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs")
+        .fetch_one(&pool)
+        .await
+        .expect("count blobs before directory deletion");
     let target_meta: String = sqlx::query_scalar("SELECT meta FROM files WHERE id = ?")
         .bind(target_dir_id.parse::<i64>().expect("numeric file id"))
         .fetch_one(&pool)
         .await
         .expect("load target metadata");
     assert!(!target_meta.contains("storage_path"));
-    assert!(target_disk_path.exists());
+    assert!(!data_root.join(&delete_dir_bundle).exists());
     assert!(dirs.iter().any(|node| node["name"] == "axb"));
     let delete_dir_response = test::call_service(
         &app,
@@ -659,7 +658,25 @@ async fn upload_search_tree_and_delete_issue() {
         .expect("remaining dirs");
     assert!(remaining_dirs.iter().any(|node| node["name"] == "axb"));
     assert!(!remaining_dirs.iter().any(|node| node["name"] == "a_b"));
-    assert!(!target_disk_path.exists());
+    let blobs_after_directory_delete: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs")
+        .fetch_one(&pool)
+        .await
+        .expect("count blobs after directory deletion");
+    assert_eq!(blobs_after_directory_delete, blobs_before_directory_delete);
+    let gc_store = backend::blob_store::LocalCasBlobStore::new(data_root.clone());
+    assert_eq!(
+        backend::blob_store::garbage_collect_unreferenced_blobs(&pool, &gc_store)
+            .await
+            .expect("scan unreferenced blobs within grace period"),
+        0
+    );
+    let grace_candidates: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM blobs WHERE unreferenced_at IS NOT NULL AND state = 'READY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count blobs in GC grace period");
+    assert!(grace_candidates > 0);
 
     let failed_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let failed_bytes = tar_gz_multi(&[
@@ -698,6 +715,9 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     assert_eq!(failed_task["status"], "FAILED");
     assert!(failed_task["failure_reason"].is_string());
+    assert!(failed_task["failure_stage"].is_string());
+    assert!(failed_task["failure_code"].is_string());
+    assert!(failed_task["retryable"].is_boolean());
     let failed_issue: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()
@@ -1297,6 +1317,22 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     )
     .await;
     assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    let deleted_bundle: (String, Option<String>) =
+        sqlx::query_as("SELECT status, deleted_at FROM bundles WHERE hash = ?")
+            .bind(exact_hash)
+            .fetch_one(&pool)
+            .await
+            .expect("load logically deleted bundle");
+    assert_eq!(deleted_bundle.0, "DELETED");
+    assert!(deleted_bundle.1.is_some());
+    let deleted_bundle_files: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files WHERE bundle_id = (SELECT id FROM bundles WHERE hash = ?)",
+    )
+    .bind(exact_hash)
+    .fetch_one(&pool)
+    .await
+    .expect("count deleted bundle file references");
+    assert_eq!(deleted_bundle_files, 0);
 
     let replacement_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let replacement = test::call_service(
@@ -1469,7 +1505,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
         .execute(&pool)
         .await
         .expect("age bundle");
-    let removed = db::cleanup_expired_bundles(&pool, &data_root, 1)
+    let removed = db::cleanup_expired_bundles(&pool, 1)
         .await
         .expect("cleanup expired bundles");
     assert_eq!(removed, 1);
@@ -1526,7 +1562,7 @@ async fn bundle_content_cleanup_runs_in_batches_and_preserves_bundle() {
         .execute(&pool)
         .await
         .expect("insert offset");
-        let segment_id: i64 = sqlx::query_scalar(
+        let _segment_id: i64 = sqlx::query_scalar(
             "INSERT INTO log_segments (bundle_id, file_id, content) VALUES ('cleanup', ?, ?) RETURNING id",
         )
         .bind(file_id)
@@ -1534,15 +1570,6 @@ async fn bundle_content_cleanup_runs_in_batches_and_preserves_bundle() {
         .fetch_one(&pool)
         .await
         .expect("insert segment");
-        sqlx::query(
-            "INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id) VALUES (?, ?, 'cleanup', ?)",
-        )
-        .bind(format!("ERROR cleanup {index}"))
-        .bind(segment_id)
-        .bind(file_id)
-        .execute(&pool)
-        .await
-        .expect("insert fts segment");
     }
 
     let stats = db::cleanup_bundle_content_batched(&pool, "cleanup", 2)
@@ -1646,7 +1673,7 @@ async fn processing_bundles_cannot_be_deleted() {
     .fetch_one(&pool)
     .await
     .expect("insert processing file");
-    let segment_id: i64 = sqlx::query_scalar(
+    let _segment_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO log_segments (bundle_id, file_id, content, line_offset, line_end, chunk_index)
         VALUES (?, ?, ?, 0, 1, 0)
@@ -1659,19 +1686,6 @@ async fn processing_bundles_cannot_be_deleted() {
     .fetch_one(&pool)
     .await
     .expect("insert processing segment");
-    sqlx::query(
-        r#"
-        INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
-        VALUES (?, ?, ?, ?, NULL)
-        "#,
-    )
-    .bind("ERROR processing partial index")
-    .bind(segment_id)
-    .bind("busy-bundle")
-    .bind(file_id)
-    .execute(&pool)
-    .await
-    .expect("insert processing fts");
 
     let app = test::init_service(
         App::new()

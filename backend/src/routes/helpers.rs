@@ -12,7 +12,7 @@ pub struct BundleRow {
 
 pub async fn load_bundle(pool: &sqlx::SqlitePool, hash: &str) -> Result<BundleRow, AppError> {
     sqlx::query_as::<_, BundleRow>(
-        "SELECT id, hash, name, status FROM bundles WHERE hash = ? LIMIT 1",
+        "SELECT id, hash, name, status FROM bundles WHERE hash = ? AND deleted_at IS NULL LIMIT 1",
     )
     .bind(hash)
     .fetch_optional(pool)
@@ -26,7 +26,11 @@ pub fn ensure_bundle_ready(bundle: &BundleRow) -> Result<(), AppError> {
         status if status.eq_ignore_ascii_case("READY") => Ok(()),
         status
             if status.eq_ignore_ascii_case("PROCESSING")
-                || status.eq_ignore_ascii_case("PENDING") =>
+                || status.eq_ignore_ascii_case("PENDING")
+                || matches!(
+                    status,
+                    "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
+                ) =>
         {
             Err(AppError::Conflict("bundle is still processing".into()))
         }

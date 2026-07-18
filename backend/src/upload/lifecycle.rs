@@ -11,7 +11,7 @@ pub async fn create_processing_bundle(
     sqlx::query(
         r#"
         INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, size_bytes)
-        VALUES (?, ?, ?, ?, 'PROCESSING', 'PENDING', ?)
+        VALUES (?, ?, ?, ?, 'RECEIVING', 'RECEIVING', ?)
         "#,
     )
     .bind(bundle_id)
@@ -25,24 +25,61 @@ pub async fn create_processing_bundle(
     Ok(())
 }
 
-pub(crate) async fn update_bundle_status(
+pub(crate) async fn advance_bundle_stage(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
-    status: &str,
     stage: &str,
-    failure_reason: Option<&str>,
 ) -> Result<(), AppError> {
-    sqlx::query(
-        "UPDATE bundles SET status = ?, process_stage = ?, failure_reason = ? WHERE id = ?",
-    )
-    .bind(status)
-    .bind(stage)
-    .bind(failure_reason)
-    .bind(bundle_id)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
+    let rank = |value: &str| match value {
+        "PENDING" => 0,
+        "RECEIVING" => 1,
+        "EXTRACTING" => 2,
+        "INDEXING" => 3,
+        "PUBLISHING" => 4,
+        "READY" => 5,
+        _ => -1,
+    };
+    let current: String = sqlx::query_scalar("SELECT process_stage FROM bundles WHERE id = ?")
+        .bind(bundle_id)
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Database)?;
+    if rank(stage) < rank(&current) {
+        return Ok(());
+    }
+    if rank(stage) < 0 {
+        return Err(AppError::Config(format!("invalid bundle stage: {stage}")));
+    }
+    sqlx::query("UPDATE bundles SET status = ?, process_stage = ? WHERE id = ?")
+        .bind(stage)
+        .bind(stage)
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
     Ok(())
+}
+
+pub(crate) struct FailureDetails {
+    pub code: &'static str,
+    pub reason: String,
+    pub retryable: bool,
+}
+
+pub(crate) fn failure_details(error: &AppError) -> FailureDetails {
+    let (code, retryable) = match error {
+        AppError::Config(_) => ("CONFIGURATION_ERROR", false),
+        AppError::Database(_) => ("DATABASE_UNAVAILABLE", true),
+        AppError::Io(_) => ("STORAGE_IO_ERROR", true),
+        AppError::NotFound(_) => ("RESOURCE_NOT_FOUND", false),
+        AppError::BadRequest(_) => ("INVALID_CONTENT", false),
+        AppError::Conflict(_) => ("CONFLICT", true),
+    };
+    FailureDetails {
+        code,
+        reason: user_facing_failure_reason(error),
+        retryable,
+    }
 }
 
 pub(crate) fn user_facing_failure_reason(error: &AppError) -> String {

@@ -4,6 +4,7 @@ use serde_json::json;
 use sqlx::FromRow;
 
 use crate::{
+    blob_store::BlobStore,
     error::AppError,
     file_classification::{PreviewKind, effective_mime_type, preview_kind_from_metadata},
     models::files::FileNode,
@@ -20,6 +21,10 @@ pub struct FileRow {
     pub mime_type: Option<String>,
     pub status: Option<String>,
     pub meta: Option<String>,
+    pub blob_id: Option<i64>,
+    pub storage_backend: Option<String>,
+    pub storage_key: Option<String>,
+    pub blob_state: Option<String>,
 }
 
 pub async fn fetch_file(
@@ -29,9 +34,10 @@ pub async fn fetch_file(
 ) -> Result<FileRow, AppError> {
     sqlx::query_as::<_, FileRow>(
         r#"
-        SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
-        FROM files
-        WHERE bundle_id = ? AND id = ?
+        SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+               f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
+        FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
+        WHERE f.bundle_id = ? AND f.id = ?
         LIMIT 1
         "#,
     )
@@ -51,9 +57,10 @@ pub async fn fetch_children(
     if let Some(parent) = parent_id {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
-            FROM files
-            WHERE bundle_id = ? AND parent_id = ?
+            SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+                   f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
+            FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
+            WHERE f.bundle_id = ? AND f.parent_id = ?
             ORDER BY is_dir DESC, name ASC
             "#,
         )
@@ -64,9 +71,10 @@ pub async fn fetch_children(
     } else {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
-            FROM files
-            WHERE bundle_id = ? AND parent_id IS NULL
+            SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+                   f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
+            FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
+            WHERE f.bundle_id = ? AND f.parent_id IS NULL
             ORDER BY is_dir DESC, name ASC
             "#,
         )
@@ -145,9 +153,10 @@ pub async fn fetch_extracted_child_ids(
 ) -> Result<Vec<i64>, AppError> {
     let rows = sqlx::query_as::<_, FileRow>(
         r#"
-        SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
-        FROM files
-        WHERE bundle_id = ? AND parent_id = ?
+        SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+               f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
+        FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
+        WHERE f.bundle_id = ? AND f.parent_id = ?
         "#,
     )
     .bind(bundle_id)
@@ -173,9 +182,10 @@ pub async fn fetch_storage_paths_for_ids(
     for file_id in file_ids {
         let row = sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT id, name, path, is_dir, size_bytes, line_count, mime_type, status, meta
-            FROM files
-            WHERE bundle_id = ? AND id = ?
+            SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+                   f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
+            FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
+            WHERE f.bundle_id = ? AND f.id = ? AND f.blob_id IS NULL
             LIMIT 1
             "#,
         )
@@ -201,7 +211,6 @@ pub async fn delete_index_rows_for_file(
 ) -> Result<(), AppError> {
     for statement in [
         "DELETE FROM log_line_offsets WHERE file_id = ?",
-        "DELETE FROM log_segments_fts WHERE file_id = ?",
         "DELETE FROM log_segments WHERE file_id = ?",
     ] {
         sqlx::query(statement)
@@ -305,10 +314,20 @@ fn append_line_count_meta(
     Some(value)
 }
 
-pub fn resolve_file_path(
+pub async fn resolve_file_path(
     record: &FileRow,
+    blob_store: &dyn BlobStore,
     data_root: &std::path::Path,
 ) -> Result<PathBuf, AppError> {
+    if let Some(storage_key) = record.storage_key.as_deref() {
+        if record.blob_state.as_deref() != Some("READY") {
+            return Err(AppError::Conflict(format!(
+                "blob is not readable in state {}",
+                record.blob_state.as_deref().unwrap_or("UNKNOWN")
+            )));
+        }
+        return blob_store.materialize(storage_key).await;
+    }
     validated_storage_path(record, data_root)
 }
 
@@ -321,7 +340,22 @@ fn validated_storage_path(
     record: &FileRow,
     data_root: &std::path::Path,
 ) -> Result<PathBuf, AppError> {
-    let candidate = storage_path_candidate(record, data_root);
+    let candidate = match (
+        record.storage_backend.as_deref(),
+        record.storage_key.as_deref(),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(AppError::Config(
+                "blob path must be resolved through BlobStore".into(),
+            ));
+        }
+        (Some(backend), _) => {
+            return Err(AppError::BadRequest(format!(
+                "unsupported blob storage backend: {backend}"
+            )));
+        }
+        _ => storage_path_candidate(record, data_root),
+    };
 
     let canonical_data_root = std::fs::canonicalize(data_root).map_err(AppError::Io)?;
     let (resolved_path, canonical_boundary) = match std::fs::canonicalize(&candidate) {
@@ -374,6 +408,10 @@ mod tests {
             mime_type: Some("text/plain".into()),
             status: None,
             meta: meta.map(str::to_string),
+            blob_id: None,
+            storage_backend: None,
+            storage_key: None,
+            blob_state: None,
         }
     }
 

@@ -1,42 +1,23 @@
-use std::{
-    future::Future,
-    io,
-    path::{Path, PathBuf},
-};
+use std::{io, path::Path};
+
+#[cfg(test)]
+use std::{future::Future, path::PathBuf};
 
 use tokio::fs;
-use tracing::{error, warn};
+use tracing::error;
+#[cfg(test)]
+use tracing::warn;
 
 use crate::{
     db::{CLEANUP_BATCH_SIZE, cleanup_bundle_content_batched},
     error::AppError,
 };
 
-use super::lifecycle::{update_bundle_status, user_facing_failure_reason};
+use super::lifecycle::{advance_bundle_stage, failure_details};
 
-const WINDOWS_MOVE_RETRY_DELAYS_MS: [u64; 7] = [100, 200, 400, 800, 1600, 3200, 5000];
-const DEFAULT_MOVE_RETRY_DELAYS_MS: [u64; 3] = [150, 300, 600];
 const FAILURE_STATUS_RETRY_DELAYS_MS: [u64; 2] = [100, 250];
 
-pub(crate) async fn move_bundle_directory_with_retry(
-    source: &Path,
-    destination: &Path,
-) -> Result<(), AppError> {
-    let retry_delays = if cfg!(windows) {
-        WINDOWS_MOVE_RETRY_DELAYS_MS.as_slice()
-    } else {
-        DEFAULT_MOVE_RETRY_DELAYS_MS.as_slice()
-    };
-    move_bundle_directory_with_retry_using(
-        source,
-        destination,
-        retry_delays,
-        cfg!(windows),
-        fs::rename,
-    )
-    .await
-}
-
+#[cfg(test)]
 async fn move_bundle_directory_with_retry_using<R, Fut>(
     source: &Path,
     destination: &Path,
@@ -100,11 +81,13 @@ where
     unreachable!("bundle move retry loop always returns")
 }
 
+#[cfg(test)]
 fn is_retryable_bundle_move_error(error: &io::Error, windows: bool) -> bool {
     error.kind() == io::ErrorKind::PermissionDenied
         || (windows && matches!(error.raw_os_error(), Some(5 | 32 | 33)))
 }
 
+#[cfg(test)]
 fn absolute_diagnostic_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
@@ -122,12 +105,29 @@ pub async fn finalize_bundle_failed(
     bundle_hash: &str,
     failure: &AppError,
 ) {
-    let reason = user_facing_failure_reason(failure);
+    let failure = failure_details(failure);
     let max_attempts = FAILURE_STATUS_RETRY_DELAYS_MS.len() + 1;
     let mut terminal_state_persisted = false;
 
     for attempt in 1..=max_attempts {
-        match update_bundle_status(pool, bundle_id, "FAILED", "FAILED", Some(&reason)).await {
+        let result = sqlx::query(
+            r#"
+            UPDATE bundles
+            SET failure_stage = process_stage,
+                failure_code = ?, failure_reason = ?, retryable = ?,
+                status = 'FAILED', process_stage = 'FAILED'
+            WHERE id = ?
+            "#,
+        )
+        .bind(failure.code)
+        .bind(&failure.reason)
+        .bind(failure.retryable)
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(AppError::Database);
+        match result {
             Ok(()) => {
                 terminal_state_persisted = true;
                 break;
@@ -220,7 +220,8 @@ pub async fn finalize_bundle_ready_with_retry(
 }
 
 async fn finalize_bundle_ready(pool: &sqlx::SqlitePool, bundle_id: &str) -> Result<(), AppError> {
-    update_bundle_status(pool, bundle_id, "READY", "READY", None).await
+    advance_bundle_stage(pool, bundle_id, "PUBLISHING").await?;
+    advance_bundle_stage(pool, bundle_id, "READY").await
 }
 
 async fn cleanup_failed_bundle_database_artifacts(

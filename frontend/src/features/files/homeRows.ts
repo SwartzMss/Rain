@@ -33,8 +33,10 @@ export const formatBytes = (bytes?: number | null) => {
 export const stageLabel = (stage: FileRow['stage'], progressPercent?: number) => {
   if (stage === 'UPLOADING') return `上传中 ${progressPercent ?? 0}%`;
   if (stage === 'PENDING') return '等待处理';
+  if (stage === 'RECEIVING') return '接收文件';
   if (stage === 'EXTRACTING') return '解压中';
   if (stage === 'INDEXING') return '建立索引';
+  if (stage === 'PUBLISHING') return '发布中';
   if (stage === 'READY') return '已完成';
   return '失败';
 };

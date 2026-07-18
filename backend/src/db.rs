@@ -94,14 +94,8 @@ pub async fn cleanup_bundle_content_batched(
             "DELETE FROM log_line_offsets WHERE rowid IN (SELECT rowid FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?) LIMIT ?)",
         )
         .await?,
-        fts_segments: delete_bundle_rows_in_batches(
-            pool,
-            bundle_id,
-            batch_size,
-            "log_segments_fts",
-            "DELETE FROM log_segments_fts WHERE rowid IN (SELECT rowid FROM log_segments_fts WHERE bundle_id = ? LIMIT ?)",
-        )
-        .await?,
+        // The external-content FTS index is maintained by log_segments triggers.
+        fts_segments: CleanupPhaseStats::default(),
         segments: delete_bundle_rows_in_batches(
             pool,
             bundle_id,
@@ -179,15 +173,14 @@ async fn delete_bundle_rows_in_batches(
 
 pub async fn cleanup_expired_bundles(
     pool: &SqlitePool,
-    data_root: &Path,
     retention_days: u64,
 ) -> Result<u64, AppError> {
     let cutoff = format!("-{retention_days} days");
     let bundles = sqlx::query_as::<_, ExpiredBundle>(
         r#"
-        SELECT id, hash
+        SELECT id
         FROM bundles
-        WHERE datetime(created_at) < datetime('now', ?)
+        WHERE deleted_at IS NULL AND datetime(created_at) < datetime('now', ?)
         "#,
     )
     .bind(cutoff)
@@ -202,18 +195,13 @@ pub async fn cleanup_expired_bundles(
     for bundle in &bundles {
         cleanup_bundle_content_batched(pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
 
-        sqlx::query("DELETE FROM bundles WHERE id = ?")
-            .bind(&bundle.id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
-    }
-
-    for bundle in &bundles {
-        let bundle_dir = data_root.join(&bundle.hash);
-        if tokio::fs::metadata(&bundle_dir).await.is_ok() {
-            let _ = tokio::fs::remove_dir_all(&bundle_dir).await;
-        }
+        sqlx::query(
+            "UPDATE bundles SET status = 'DELETED', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(&bundle.id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
     }
 
     Ok(bundles.len() as u64)
@@ -223,10 +211,13 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
     let result = sqlx::query(
         r#"
         UPDATE bundles
-        SET status = 'FAILED',
+        SET failure_stage = process_stage,
+            failure_code = 'PROCESS_INTERRUPTED',
+            retryable = 1,
+            status = 'FAILED',
             process_stage = 'FAILED',
             failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
-        WHERE status = 'PROCESSING'
+        WHERE status IN ('PENDING', 'PROCESSING', 'RECEIVING', 'EXTRACTING', 'INDEXING', 'PUBLISHING')
         "#,
     )
     .execute(pool)
@@ -239,7 +230,6 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
 #[derive(FromRow)]
 struct ExpiredBundle {
     id: String,
-    hash: String,
 }
 
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
@@ -250,6 +240,7 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
+        "DROP TABLE IF EXISTS blobs",
         "DROP TABLE IF EXISTS bundles",
         "DROP TABLE IF EXISTS issues",
     ];
@@ -282,10 +273,25 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             name TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'PENDING',
             process_stage TEXT NOT NULL DEFAULT 'PENDING',
+            failure_stage TEXT,
+            failure_code TEXT,
             failure_reason TEXT,
+            retryable INTEGER,
+            deleted_at TEXT,
             size_bytes INTEGER,
             content_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (content_size_bytes >= 0),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS blobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_hash TEXT NOT NULL UNIQUE,
+            size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+            storage_backend TEXT NOT NULL,
+            storage_key TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL,
+            unreferenced_at TEXT
         )
         "#,
         r#"
@@ -293,6 +299,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             bundle_id TEXT NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
             parent_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
+            blob_id INTEGER REFERENCES blobs(id),
             name TEXT NOT NULL,
             path TEXT NOT NULL,
             is_dir INTEGER NOT NULL,
@@ -343,20 +350,28 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         r#"
         CREATE VIRTUAL TABLE IF NOT EXISTS log_segments_fts USING fts5(
             content,
-            segment_id UNINDEXED,
-            bundle_id UNINDEXED,
-            file_id UNINDEXED,
-            timeline UNINDEXED,
+            content='log_segments',
+            content_rowid='id',
             tokenize='trigram'
         )
         "#,
         r#"
-        INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
-        SELECT ls.content, ls.id, ls.bundle_id, ls.file_id, ls.timeline
-        FROM log_segments ls
-        WHERE NOT EXISTS (
-            SELECT 1 FROM log_segments_fts fts WHERE fts.segment_id = ls.id
-        )
+        CREATE TRIGGER IF NOT EXISTS log_segments_fts_ai AFTER INSERT ON log_segments BEGIN
+            INSERT INTO log_segments_fts(rowid, content) VALUES (new.id, new.content);
+        END
+        "#,
+        r#"
+        CREATE TRIGGER IF NOT EXISTS log_segments_fts_ad AFTER DELETE ON log_segments BEGIN
+            INSERT INTO log_segments_fts(log_segments_fts, rowid, content)
+            VALUES ('delete', old.id, old.content);
+        END
+        "#,
+        r#"
+        CREATE TRIGGER IF NOT EXISTS log_segments_fts_au AFTER UPDATE OF content ON log_segments BEGIN
+            INSERT INTO log_segments_fts(log_segments_fts, rowid, content)
+            VALUES ('delete', old.id, old.content);
+            INSERT INTO log_segments_fts(rowid, content) VALUES (new.id, new.content);
+        END
         "#,
         "CREATE INDEX IF NOT EXISTS idx_bundles_issue ON bundles (issue_code, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_files_parent ON files (parent_id)",
@@ -377,6 +392,23 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
 
     ensure_trigram_fts(pool).await?;
 
+    let has_blob_id: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('files') WHERE name = 'blob_id')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if !has_blob_id {
+        sqlx::query("ALTER TABLE files ADD COLUMN blob_id INTEGER REFERENCES blobs(id)")
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_files_blob ON files (blob_id)")
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+
     let has_failure_reason: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bundles') WHERE name = 'failure_reason')",
     )
@@ -385,6 +417,44 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
     .map_err(AppError::Database)?;
     if !has_failure_reason {
         sqlx::query("ALTER TABLE bundles ADD COLUMN failure_reason TEXT")
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+    for (column, definition) in [
+        ("failure_stage", "TEXT"),
+        ("failure_code", "TEXT"),
+        ("retryable", "INTEGER"),
+        ("deleted_at", "TEXT"),
+    ] {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('bundles') WHERE name = ?)",
+        )
+        .bind(column)
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Database)?;
+        if !exists {
+            sqlx::query(&format!(
+                "ALTER TABLE bundles ADD COLUMN {column} {definition}"
+            ))
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+        }
+    }
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_bundles_deleted ON bundles (deleted_at)")
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+    let has_blob_unreferenced_at: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('blobs') WHERE name = 'unreferenced_at')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if !has_blob_unreferenced_at {
+        sqlx::query("ALTER TABLE blobs ADD COLUMN unreferenced_at TEXT")
             .execute(pool)
             .await
             .map_err(AppError::Database)?;
@@ -419,7 +489,10 @@ async fn ensure_trigram_fts(pool: &SqlitePool) -> Result<(), AppError> {
     let Some(schema) = schema else {
         return Err(AppError::Database(sqlx::Error::RowNotFound));
     };
-    if schema.contains("tokenize='trigram'") {
+    if schema.contains("tokenize='trigram'")
+        && schema.contains("content='log_segments'")
+        && schema.contains("content_rowid='id'")
+    {
         return Ok(());
     }
 
@@ -441,10 +514,8 @@ async fn ensure_trigram_fts(pool: &SqlitePool) -> Result<(), AppError> {
         r#"
         CREATE VIRTUAL TABLE log_segments_fts USING fts5(
             content,
-            segment_id UNINDEXED,
-            bundle_id UNINDEXED,
-            file_id UNINDEXED,
-            timeline UNINDEXED,
+            content='log_segments',
+            content_rowid='id',
             tokenize='trigram'
         )
         "#,
@@ -454,8 +525,7 @@ async fn ensure_trigram_fts(pool: &SqlitePool) -> Result<(), AppError> {
     .map_err(AppError::Database)?;
     sqlx::query(
         r#"
-        INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id, timeline)
-        SELECT content, id, bundle_id, file_id, timeline FROM log_segments
+        INSERT INTO log_segments_fts(log_segments_fts) VALUES('rebuild')
         "#,
     )
     .execute(&mut *tx)
@@ -634,13 +704,26 @@ mod tests {
         .await
         .expect("load fts schema");
         assert!(schema.contains("tokenize='trigram'"), "{schema}");
+        assert!(schema.contains("content='log_segments'"), "{schema}");
+        assert!(schema.contains("content_rowid='id'"), "{schema}");
 
-        sqlx::query(
-            "INSERT INTO log_segments_fts (content, segment_id, bundle_id, file_id) VALUES ('requestId=abcdef123456', 1, 'bundle', 1)",
-        )
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('SEARCH', 'Search')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('bundle', 'SEARCH', 'hash', 'Search', 'READY')")
         .execute(&pool)
         .await
-        .expect("insert fts content");
+        .expect("insert bundle");
+        let file_id: i64 = sqlx::query_scalar("INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('bundle', 'app.log', '/app.log', 0) RETURNING id")
+        .fetch_one(&pool)
+        .await
+        .expect("insert file");
+        sqlx::query("INSERT INTO log_segments (bundle_id, file_id, content) VALUES ('bundle', ?, 'requestId=abcdef123456')")
+        .bind(file_id)
+        .execute(&pool)
+        .await
+        .expect("insert segment content");
         let matches: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'def123'",
         )
@@ -691,6 +774,15 @@ mod tests {
         super::prepare_schema(&pool, false)
             .await
             .expect("migrate schema");
+
+        let schema: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'log_segments_fts'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load migrated fts schema");
+        assert!(schema.contains("content='log_segments'"), "{schema}");
+        assert!(schema.contains("content_rowid='id'"), "{schema}");
 
         let matches: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'cdef'",

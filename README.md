@@ -185,17 +185,16 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 ## 当前限制
 
 - 暂不支持 `.rar`、`.7z` 解压。
-- 上传传输有前端进度；解压和索引在后台任务执行，当前有 `PROCESSING/READY/FAILED` 状态轮询，没有细粒度解析百分比。
-- 后台处理先在 `.tmp/{task_id}/staging` 中完成；成功后移动到正式目录，失败会清理半成品文件和索引，只保留失败任务状态。
+- 上传传输有前端进度；后台任务通过 `RECEIVING/EXTRACTING/INDEXING/PUBLISHING` 阶段提供处理状态，暂未提供阶段内百分比。
+- 后台处理在 `.tmp/{task_id}/staging` 中完成解压和索引；真实文件同步写入内容寻址 BlobStore，完成或失败后 staging 工作区会被清理。
 - SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务最多 2 个并发。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。
-- 搜索使用 SQLite FTS5，并按日志 chunk 建完整索引。
+- 搜索使用 SQLite FTS5 trigram external-content 索引；日志 chunk 正文仅存于 `log_segments.content`，FTS 不保存正文副本。
+- 真实文件使用 SHA-256 内容寻址 Blob 存储，保存到数据根目录下的 `blobs/<hash前两位>/<完整hash>`；多个 Bundle 中的相同内容只保存一份。
+- 文件字节访问统一经过 `BlobStore` 接口；当前使用 `LocalCasBlobStore`，上层业务不依赖本地物理路径。
+- Bundle 使用逻辑删除；无引用 Blob 由后台 GC 基于数据库实际引用扫描，并在 24 小时宽限期后回收。
 - timeline 目前固定为 `all`。
-- 已有基础结构化日志事件提取，事件查询和 AI 分析能力尚未接入。
-
-## Windows staging 移动验证
-
-后台完成解压和索引后，只重试 staging bundle 到正式目录的移动，不会重复处理内容。Windows 的访问拒绝、sharing violation（错误码 32）和 lock violation（错误码 33）会按 100、200、400、800、1600、3200、5000 ms 退避重试；日志包含 attempt、`ErrorKind`、原始 OS 错误码、下一次等待时间及完整来源/目标路径。重试耗尽后沿用现有 `FAILED` 状态和半成品清理流程。
+- 当前聚焦原始日志分块搜索；结构化事件查询和 AI 分析能力尚未接入。
 
 自动测试：
 

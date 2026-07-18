@@ -119,7 +119,7 @@ pub async fn get_issue_bundles(
             .ok_or_else(|| AppError::NotFound(format!("issue {issue_code}")))?;
 
     let rows = sqlx::query_as::<_, BundleRow>(
-        "SELECT hash, name, status, process_stage, failure_reason, size_bytes FROM bundles WHERE issue_code = ? ORDER BY created_at DESC",
+        "SELECT hash, name, status, process_stage, failure_stage, failure_code, failure_reason, retryable, size_bytes FROM bundles WHERE issue_code = ? AND deleted_at IS NULL ORDER BY created_at DESC",
     )
     .bind(&issue.code)
     .fetch_all(&state.pool)
@@ -138,6 +138,9 @@ pub async fn get_issue_bundles(
                 },
                 stage: UploadStage::from_db_value(&bundle.process_stage),
                 failure_reason: bundle.failure_reason,
+                failure_stage: bundle.failure_stage,
+                failure_code: bundle.failure_code,
+                retryable: bundle.retryable,
                 size_bytes: bundle.size_bytes.map(|size| size.max(0) as u64),
             })
             .collect(),
@@ -182,6 +185,9 @@ struct BundleRow {
     status: String,
     process_stage: String,
     failure_reason: Option<String>,
+    failure_stage: Option<String>,
+    failure_code: Option<String>,
+    retryable: Option<bool>,
     size_bytes: Option<i64>,
 }
 
@@ -219,16 +225,13 @@ pub async fn delete_issue_bundle(
 
     cleanup_bundle_content_batched(&state.pool, &bundle.id, CLEANUP_BATCH_SIZE).await?;
 
-    sqlx::query("DELETE FROM bundles WHERE id = ?")
-        .bind(&bundle.id)
-        .execute(&state.pool)
-        .await
-        .map_err(AppError::Database)?;
-
-    let bundle_dir = state.data_root.join(&bundle.hash);
-    if fs::metadata(&bundle_dir).await.is_ok() {
-        let _ = fs::remove_dir_all(&bundle_dir).await;
-    }
+    sqlx::query(
+        "UPDATE bundles SET status = 'DELETED', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(&bundle.id)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -289,7 +292,7 @@ pub async fn delete_issue(
 }
 
 fn reject_processing_bundle(bundle: &BundleIdRow) -> Result<(), AppError> {
-    if bundle.status.eq_ignore_ascii_case("PROCESSING") {
+    if is_active_bundle_status(&bundle.status) {
         return Err(AppError::Conflict(
             "processing bundle cannot be deleted".into(),
         ));
@@ -300,11 +303,18 @@ fn reject_processing_bundle(bundle: &BundleIdRow) -> Result<(), AppError> {
 fn reject_processing_bundles(bundles: &[BundleIdRow]) -> Result<(), AppError> {
     if bundles
         .iter()
-        .any(|bundle| bundle.status.eq_ignore_ascii_case("PROCESSING"))
+        .any(|bundle| is_active_bundle_status(&bundle.status))
     {
         return Err(AppError::Conflict(
             "issue with processing bundles cannot be deleted".into(),
         ));
     }
     Ok(())
+}
+
+fn is_active_bundle_status(status: &str) -> bool {
+    matches!(
+        status.to_ascii_uppercase().as_str(),
+        "PENDING" | "PROCESSING" | "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
+    )
 }

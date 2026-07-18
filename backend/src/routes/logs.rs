@@ -91,7 +91,7 @@ pub async fn search_logs(
         sqlx::query_scalar(
             r#"
         SELECT COUNT(*) FROM log_segments ls
-        JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
+        JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
         JOIN files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND ls.bundle_id = ?
@@ -153,7 +153,7 @@ pub async fn search_logs(
                ls.chunk_index,
                ls.content AS content
         FROM log_segments ls
-        JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
+        JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
         JOIN files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND ls.bundle_id = ?
@@ -283,7 +283,7 @@ pub async fn search_issue_logs(
         sqlx::query_scalar(
             r#"
         SELECT COUNT(*) FROM log_segments ls
-        JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
+        JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
@@ -337,7 +337,7 @@ pub async fn search_issue_logs(
                ls.content AS content,
                b.hash as bundle_hash
         FROM log_segments ls
-        JOIN log_segments_fts ON log_segments_fts.segment_id = ls.id
+        JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?

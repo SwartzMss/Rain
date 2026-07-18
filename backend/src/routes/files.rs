@@ -56,8 +56,7 @@ pub async fn get_file_node(
             status: Some("READY".into()),
             meta: Some(json!({
                 "bundle_hash": bundle.hash,
-                "bundle_name": bundle.name,
-                "storage_root": data_root(&state).display().to_string()
+                "bundle_name": bundle.name
             })),
         }
     } else {
@@ -95,7 +94,13 @@ pub async fn get_file_content(
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
     let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
-    let preview = read_file_preview(&record, &data_root(&state), &state.limits.api).await?;
+    let preview = read_file_preview(
+        &record,
+        state.blob_store.as_ref(),
+        &data_root(&state),
+        &state.limits.api,
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(preview))
 }
 
@@ -120,6 +125,7 @@ pub async fn get_file_lines(
     let lines = read_file_lines(
         &state.pool,
         &record,
+        state.blob_store.as_ref(),
         &data_root(&state),
         &state.limits.api,
         start,
@@ -146,7 +152,8 @@ pub async fn download_file(
         return Err(AppError::BadRequest("cannot download directory".into()));
     }
 
-    let disk_path = resolve_file_path(&record, &data_root(&state))?;
+    let disk_path =
+        resolve_file_path(&record, state.blob_store.as_ref(), &data_root(&state)).await?;
     let named = NamedFile::open_async(disk_path)
         .await
         .map_err(AppError::Io)?

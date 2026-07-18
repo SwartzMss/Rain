@@ -71,6 +71,7 @@ pub async fn upload_logs(
     spawn_upload_job(UploadJob {
         pool: state.pool.clone(),
         data_root: state.data_root.clone(),
+        blob_store: state.blob_store.clone(),
         temp_dir,
         staging_root,
         processing_permits: state.processing_permits.clone(),
@@ -91,7 +92,7 @@ pub async fn upload_logs(
             issue_code,
             bundle_hash,
             status: UploadStatus::Processing,
-            stage: UploadStage::Pending,
+            stage: UploadStage::Receiving,
             file_count,
             total_bytes: upload.total_bytes,
         }),
@@ -117,7 +118,8 @@ pub async fn get_upload_task(
     let task_id = path.into_inner();
     let row = sqlx::query_as::<_, UploadTaskRow>(
         r#"
-        SELECT issue_code, hash, status, process_stage, failure_reason, size_bytes
+        SELECT issue_code, hash, status, process_stage, failure_stage, failure_code,
+               failure_reason, retryable, size_bytes
         FROM bundles
         WHERE hash = ?
         LIMIT 1
@@ -143,6 +145,9 @@ pub async fn get_upload_task(
         status,
         stage: UploadStage::from_db_value(&row.process_stage),
         failure_reason: row.failure_reason,
+        failure_stage: row.failure_stage,
+        failure_code: row.failure_code,
+        retryable: row.retryable,
         progress_percent,
         total_bytes: row.size_bytes.unwrap_or(0).max(0) as u64,
     }))
@@ -155,6 +160,9 @@ struct UploadTaskRow {
     status: String,
     process_stage: String,
     failure_reason: Option<String>,
+    failure_stage: Option<String>,
+    failure_code: Option<String>,
+    retryable: Option<bool>,
     size_bytes: Option<i64>,
 }
 
@@ -166,6 +174,9 @@ struct UploadTaskResponse {
     status: UploadStatus,
     stage: UploadStage,
     failure_reason: Option<String>,
+    failure_stage: Option<String>,
+    failure_code: Option<String>,
+    retryable: Option<bool>,
     progress_percent: u8,
     total_bytes: u64,
 }

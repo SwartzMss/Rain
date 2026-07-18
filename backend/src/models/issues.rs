@@ -14,8 +14,10 @@ pub enum UploadStatus {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum UploadStage {
     Pending,
+    Receiving,
     Extracting,
     Indexing,
+    Publishing,
     Ready,
     Failed,
 }
@@ -27,6 +29,9 @@ pub struct UploadSummary {
     pub status: UploadStatusWrapper,
     pub stage: UploadStage,
     pub failure_reason: Option<String>,
+    pub failure_stage: Option<String>,
+    pub failure_code: Option<String>,
+    pub retryable: Option<bool>,
     pub size_bytes: Option<u64>,
 }
 
@@ -53,10 +58,13 @@ impl UploadStatus {
     pub fn from_db_value(value: &str) -> Self {
         if value.eq_ignore_ascii_case("READY") {
             UploadStatus::Ready
-        } else if value.eq_ignore_ascii_case("PROCESSING") {
-            UploadStatus::Processing
         } else if value.eq_ignore_ascii_case("FAILED") {
             UploadStatus::Failed
+        } else if matches!(
+            value.to_ascii_uppercase().as_str(),
+            "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING" | "PROCESSING"
+        ) {
+            UploadStatus::Processing
         } else {
             UploadStatus::Pending
         }
@@ -65,10 +73,14 @@ impl UploadStatus {
 
 impl UploadStage {
     pub fn from_db_value(value: &str) -> Self {
-        if value.eq_ignore_ascii_case("EXTRACTING") {
+        if value.eq_ignore_ascii_case("RECEIVING") {
+            Self::Receiving
+        } else if value.eq_ignore_ascii_case("EXTRACTING") {
             Self::Extracting
         } else if value.eq_ignore_ascii_case("INDEXING") {
             Self::Indexing
+        } else if value.eq_ignore_ascii_case("PUBLISHING") {
+            Self::Publishing
         } else if value.eq_ignore_ascii_case("READY") {
             Self::Ready
         } else if value.eq_ignore_ascii_case("FAILED") {

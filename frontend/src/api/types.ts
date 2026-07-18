@@ -1,5 +1,5 @@
 export type UploadStatus = 'READY' | 'PROCESSING' | 'FAILED' | 'PENDING';
-export type UploadStage = 'PENDING' | 'EXTRACTING' | 'INDEXING' | 'READY' | 'FAILED';
+export type UploadStage = 'PENDING' | 'RECEIVING' | 'EXTRACTING' | 'INDEXING' | 'PUBLISHING' | 'READY' | 'FAILED';
 
 export interface UploadSummary {
   hash: string;
@@ -10,6 +10,9 @@ export interface UploadSummary {
   };
   stage: UploadStage;
   failure_reason?: string | null;
+  failure_stage?: string | null;
+  failure_code?: string | null;
+  retryable?: boolean | null;
   size_bytes?: number | null;
 }
 
@@ -79,6 +82,9 @@ export interface UploadTaskResponse {
   status: UploadStatus;
   stage: UploadStage;
   failure_reason?: string | null;
+  failure_stage?: string | null;
+  failure_code?: string | null;
+  retryable?: boolean | null;
   progress_percent: number;
   total_bytes: number;
 }

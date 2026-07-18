@@ -4,21 +4,21 @@ use tokio::{fs, sync::Semaphore};
 use tracing::error;
 
 use crate::{
+    blob_store::BlobStore,
     config::{ArchiveConfig, IndexingConfig},
     error::AppError,
     ingest::{ArchiveBudget, IssueQuota, ProcessFileOptions, process_uploaded_file},
 };
 
 use super::{
-    finalizer::{
-        finalize_bundle_failed, finalize_bundle_ready_with_retry, move_bundle_directory_with_retry,
-    },
+    finalizer::{finalize_bundle_failed, finalize_bundle_ready_with_retry},
     multipart::UploadedFile,
 };
 
 pub struct UploadJob {
     pub pool: sqlx::SqlitePool,
     pub data_root: PathBuf,
+    pub blob_store: Arc<dyn BlobStore>,
     pub temp_dir: PathBuf,
     pub staging_root: PathBuf,
     pub processing_permits: Arc<Semaphore>,
@@ -94,6 +94,7 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
             bundle_id: &job.bundle_id,
             bundle_hash: &job.bundle_hash,
             data_root: &job.staging_root,
+            blob_store: job.blob_store.clone(),
             storage_name: &uploaded.storage_name,
             original_name: &uploaded.original_name,
             display_name: &uploaded.display_name,
@@ -107,18 +108,7 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
         .await?;
     }
 
-    let staging_bundle_dir = job.staging_root.join(&job.bundle_hash);
-    let final_bundle_dir = job.data_root.join(&job.bundle_hash);
-    if fs::metadata(&final_bundle_dir).await.is_ok() {
-        return Err(AppError::BadRequest(format!(
-            "bundle directory already exists: {}",
-            final_bundle_dir.display()
-        )));
-    }
-    if let Some(parent) = final_bundle_dir.parent() {
-        fs::create_dir_all(parent).await.map_err(AppError::Io)?;
-    }
-    move_bundle_directory_with_retry(&staging_bundle_dir, &final_bundle_dir).await?;
     finalize_bundle_ready_with_retry(&job.pool, &job.bundle_id).await?;
+    let _ = fs::remove_dir_all(job.staging_root.join(&job.bundle_hash)).await;
     Ok(())
 }

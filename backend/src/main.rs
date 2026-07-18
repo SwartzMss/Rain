@@ -7,6 +7,9 @@ use actix_cors::Cors;
 use actix_web::{App, HttpServer, middleware::from_fn, web};
 use backend::{
     AppState,
+    blob_store::{
+        BlobStore, LocalCasBlobStore, audit_local_blobs, recover_pending_blobs, spawn_blob_gc,
+    },
     config::AppConfig,
     db::{cleanup_expired_bundles, fail_stale_processing_bundles, init_pool, prepare_schema},
     routes::register,
@@ -63,6 +66,8 @@ async fn main() -> std::io::Result<()> {
         fs::create_dir_all(&config.data_root).expect("failed to recreate data root");
     }
 
+    let blob_store: std::sync::Arc<dyn BlobStore> =
+        std::sync::Arc::new(LocalCasBlobStore::new(config.data_root.clone()));
     run_optional_recovery_stage(
         "stale-processing-bundles",
         STARTUP_RECOVERY_TIMEOUT,
@@ -77,11 +82,25 @@ async fn main() -> std::io::Result<()> {
     )
     .await;
 
+    run_optional_recovery_stage(
+        "pending-blob-recovery",
+        STARTUP_RECOVERY_TIMEOUT,
+        recover_pending_blobs(&pool, blob_store.as_ref()),
+    )
+    .await;
+
+    run_optional_recovery_stage(
+        "blob-integrity-audit",
+        STARTUP_RECOVERY_TIMEOUT,
+        audit_local_blobs(&pool, blob_store.as_ref()),
+    )
+    .await;
+
     if let Some(retention_days) = config.retention_days {
         run_optional_recovery_stage(
             "expired-bundle-cleanup",
             STARTUP_RECOVERY_TIMEOUT,
-            cleanup_expired_bundles(&pool, &config.data_root, retention_days),
+            cleanup_expired_bundles(&pool, retention_days),
         )
         .await;
     }
@@ -94,10 +113,12 @@ async fn main() -> std::io::Result<()> {
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     info!(limits = ?config.limits, "effective application limits");
-    let shared_state = web::Data::new(AppState::new(
+    spawn_blob_gc(pool.clone(), blob_store.clone());
+    let shared_state = web::Data::new(AppState::with_blob_store(
         pool,
         config.data_root.clone(),
         config.limits.clone(),
+        blob_store,
     ));
 
     HttpServer::new(move || {

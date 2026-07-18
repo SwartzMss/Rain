@@ -6,9 +6,9 @@
 
 - SQLite 适合当前本地 MVP：部署简单、无需单独数据库服务、方便重新启动项目。
 - SQLite 连接启用 WAL、`synchronous=NORMAL` 和 30 秒 `busy_timeout`，降低读写互相阻塞的概率。
-- 当前搜索使用 SQLite FTS5，文本日志按 chunk 建完整索引，启动时会回填尚未进入 FTS 索引的历史 `log_segments`。
-- 上传请求只负责接收并保存文件；解压、行偏移、FTS 和基础事件解析在 `.tmp/{task_id}/staging` 后台执行。
-- 后台任务全部成功后才移动到正式 bundle 目录并标记 `READY`；失败时清理 staging/正式目录和半成品 file/index/event 记录，仅保留 bundle 的 `FAILED` 状态。
+- 当前搜索使用 SQLite FTS5 trigram external-content 索引。文本日志按 chunk 建索引，正文仅存于 `log_segments.content`；启动时会将旧 FTS 结构迁移并从权威 segment 数据重建索引。
+- 上传请求只负责接收文件；解压、内容寻址 Blob 写入、行偏移和 FTS 在 `.tmp/{task_id}/staging` 后台执行。
+- 后台任务完成 Blob 发布与索引后标记 `READY` 并清理 staging；失败时清理半成品 file/index 记录，并保留带结构化失败信息的 Bundle 状态。
 - 后台解析使用流式读取和事务批量写入，日志索引每 5000 行提交一次，避免大文件一次性读入内存、逐行零散提交和过长写事务。
 - 当前 `meta` 以 JSON 字符串存储在 TEXT 列中；后续如要对象存储或多节点部署，关键存储路径应提升为明确列。
 - 生产化前建议引入迁移工具，不要长期依赖启动时建表。
@@ -26,7 +26,10 @@
 - `issue_code` TEXT：关联 `issues.code`，级联删除。
 - `hash` TEXT UNIQUE：bundle 的公开 ID，前端和 API 使用它定位 bundle。
 - `name` TEXT：bundle 显示名（当前为 `bundle-{hash}`）。
-- `status` TEXT：上传/解析状态，上传后为 `PROCESSING`，后台处理成功后为 `READY`，失败为 `FAILED`。
+- `status` TEXT：持久化处理阶段；正常流程为 `PENDING → RECEIVING → EXTRACTING → INDEXING → PUBLISHING → READY`，失败为 `FAILED`，逻辑删除为 `DELETED`。
+- `process_stage` TEXT：当前或最终处理阶段。
+- `failure_stage`、`failure_code`、`failure_reason`、`retryable`：结构化失败诊断。
+- `deleted_at` TEXT：Bundle 逻辑删除时间；未删除时为 NULL。
 - `size_bytes` INTEGER：本次上传总字节数。
 - `content_size_bytes` INTEGER：计入 Issue 配额的最终可浏览文件总字节数；压缩包和目录本身不重复计入。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
@@ -37,6 +40,7 @@
 - `id` INTEGER PK AUTOINCREMENT。
 - `bundle_id` TEXT：关联 `bundles.id`，级联删除。
 - `parent_id` INTEGER：自关联父节点，级联删除。
+- `blob_id` INTEGER：关联 `blobs.id`；目录与旧版兼容记录可为 NULL。
 - `name` TEXT：文件/目录名。
 - `path` TEXT：bundle 内路径，如 `/{bundle_hash}/{file_name}`。
 - `is_dir` INTEGER：是否目录，按 bool 读写。
@@ -44,10 +48,10 @@
 - `line_count` INTEGER：文本文件行数，用于分页展示。
 - `mime_type` TEXT：MIME。
 - `status` TEXT：状态标签（预留）。
-- `meta` TEXT：JSON 字符串，存储 `storage_path`、原始文件名等元数据。
+- `meta` TEXT：展示和分类元数据，例如原始文件名；`storage_path` 仅作为升级前旧记录的兼容字段读取。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 - 约束：`UNIQUE (bundle_id, path)`。
-- 索引：`idx_files_parent`、`idx_files_bundle`、`idx_files_path`。
+- 索引：`idx_files_parent`、`idx_files_bundle`、`idx_files_path`、`idx_files_blob`。
 
 ## 表：log_segments
 
@@ -73,11 +77,33 @@
 ## 表：log_segments_fts
 
 - SQLite FTS5 虚表。
-- `content`：全文检索内容。
-- `segment_id` UNINDEXED：关联 `log_segments.id`。
-- `bundle_id` UNINDEXED：用于 bundle 范围过滤。
-- `file_id` UNINDEXED：用于文件删除时清理索引。
-- `timeline` UNINDEXED：预留 timeline 过滤。
+- 使用 `content='log_segments'` 与 `content_rowid='id'` 的 external-content 模式，FTS 仅维护倒排索引，不保存日志正文副本。
+- 唯一索引列为 `content`；FTS `rowid` 对应 `log_segments.id`。
+- bundle、Issue、文件与 timeline 范围过滤通过 `rowid` 关联 `log_segments`、`bundles` 和 `files` 完成。
+- `log_segments` 的插入、更新与删除触发器负责同步维护索引。
+
+## 表：blobs
+
+- `content_hash`：文件内容的 SHA-256，唯一。
+- `size_bytes`：Blob 实际字节数。
+- `storage_backend`：当前为 `local`，为远程对象存储预留扩展点。
+- `storage_key`：本地为 `blobs/<hash前两位>/<完整hash>`，不包含 Bundle UUID。
+- `state` 状态机：`STAGING → READY → PENDING_DELETE`；完整性检查会把丢失对象标记为 `MISSING`，大小不一致对象标记为 `CORRUPTED`。
+- `files.blob_id` 引用 Blob；目录和升级前的兼容记录可为空。
+- `files.path` 是逻辑路径（保留现有 API 字段名），不再用于定位新上传文件的物理位置。
+- 删除文件、Bundle 或 Issue 后，仅回收已经没有任何 `files` 引用的 READY Blob。
+- 字节存储通过统一的 `BlobStore` 接口访问：`put`、`open`、`materialize`、`exists`、`delete`。当前实现为 `LocalCasBlobStore`。
+- 路由、读取器、上传流程和回收流程只依赖 `Arc<dyn BlobStore>`；本地根目录与路径拼接被封装在本地实现内部，为缓存式 MinIO/S3 或 IPFS 实现预留替换点。
+- Bundle 删除是逻辑删除：请求内先清理日志索引与 `files` 引用，再写入 `status='DELETED'` 和 `deleted_at`，不直接删除 Blob 或递归删除 Bundle 目录。
+- 后台 Blob GC 每小时扫描一次，始终使用 `NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)` 确认无引用，不维护易失真的引用计数。
+- 首次发现无引用时写入 `unreferenced_at`；默认宽限 24 小时。宽限期内重新出现引用会清除该时间，超过宽限期才进入 `PENDING_DELETE` 并删除物理对象。
+
+## Bundle 处理状态机
+
+- 正常状态按 `PENDING → RECEIVING → EXTRACTING → INDEXING → PUBLISHING → READY` 单向推进；无须执行实际解压的上传也会经过逻辑上的 `EXTRACTING` 阶段。
+- `status` 与 `process_stage` 对新任务保持一致；API 为兼容前端，将所有处理中状态映射为 `PROCESSING`。
+- 失败后 `status/process_stage` 为 `FAILED`，并额外记录 `failure_stage`、`failure_code`、`failure_reason` 和 `retryable`。
+- 服务启动时发现未完成任务，会记录 `PROCESS_INTERRUPTED`，保留中断阶段并标记为可重试。
 
 ## 关系与典型上传
 
