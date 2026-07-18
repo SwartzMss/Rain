@@ -16,7 +16,7 @@ export function NavTabs<T extends string>({
   onChange
 }: NavTabsProps<T>) {
   return (
-    <nav className="flex gap-4 border-b border-slate-200 text-sm text-slate-500">
+    <nav className="flex gap-2 rounded-xl border border-slate-200 bg-slate-100/80 p-1 text-sm text-slate-500">
       {tabs.map((tab) => {
         const isActive = tab.id === activeId;
         return (
@@ -25,9 +25,8 @@ export function NavTabs<T extends string>({
             type="button"
             onClick={() => onChange(tab.id)}
             className={[
-              'py-3',
-              'border-b-2',
-              isActive ? 'border-brand-500 text-slate-950' : 'border-transparent hover:text-slate-900'
+              'rounded-lg px-4 py-2.5 transition',
+              isActive ? 'bg-white text-slate-950 shadow-sm' : 'hover:bg-white/60 hover:text-slate-900'
             ].join(' ')}
           >
             <div className="font-semibold">{tab.label}</div>

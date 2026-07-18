@@ -35,6 +35,10 @@ import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
 
 const LINE_PAGE_SIZE_OPTIONS = [1000, 3000] as const;
+const DEFAULT_TREE_PANEL_WIDTH = 330;
+const MIN_TREE_PANEL_WIDTH = 260;
+const MAX_TREE_PANEL_WIDTH = 720;
+const TREE_PANEL_WIDTH_STORAGE_KEY = 'rain.fileTreePanelWidth';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
@@ -132,6 +136,14 @@ export function BundleView(props?: BundleViewProps) {
   const [fileSearchExecuted, setFileSearchExecuted] = useState(false);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const [sourceActionMessage, setSourceActionMessage] = useState<string | null>(null);
+  const [treePanelWidth, setTreePanelWidth] = useState(() => {
+    const stored = Number.parseInt(localStorage.getItem(TREE_PANEL_WIDTH_STORAGE_KEY) ?? '', 10);
+    return Number.isFinite(stored)
+      ? Math.min(MAX_TREE_PANEL_WIDTH, Math.max(MIN_TREE_PANEL_WIDTH, stored))
+      : DEFAULT_TREE_PANEL_WIDTH;
+  });
+  const [resizingTreePanel, setResizingTreePanel] = useState(false);
+  const layoutRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const filenameInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestGenerationRef = useRef(0);
@@ -185,6 +197,38 @@ export function BundleView(props?: BundleViewProps) {
   useEffect(() => {
     treeNodesRef.current = treeNodes;
   }, [treeNodes]);
+
+  useEffect(() => {
+    localStorage.setItem(TREE_PANEL_WIDTH_STORAGE_KEY, String(treePanelWidth));
+  }, [treePanelWidth]);
+
+  useEffect(() => {
+    if (!resizingTreePanel) return;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const resize = (event: PointerEvent) => {
+      const layout = layoutRef.current;
+      if (!layout) return;
+      const bounds = layout.getBoundingClientRect();
+      const availableMaximum = Math.max(MIN_TREE_PANEL_WIDTH, bounds.width - 420);
+      setTreePanelWidth(
+        Math.min(MAX_TREE_PANEL_WIDTH, availableMaximum, Math.max(MIN_TREE_PANEL_WIDTH, event.clientX - bounds.left))
+      );
+    };
+    const stop = () => setResizingTreePanel(false);
+    window.addEventListener('pointermove', resize);
+    window.addEventListener('pointerup', stop, { once: true });
+    window.addEventListener('pointercancel', stop, { once: true });
+    return () => {
+      window.removeEventListener('pointermove', resize);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+    };
+  }, [resizingTreePanel]);
 
   const loadNode = useCallback(
     async (
@@ -964,8 +1008,12 @@ export function BundleView(props?: BundleViewProps) {
           </p>
         ) : null}
 
-        <div className="grid min-h-[calc(100vh-104px)] gap-0 lg:grid-cols-[330px_minmax(0,1fr)]">
-          <div className="flex min-h-0 flex-col border-r border-slate-200 bg-white">
+        <div
+          ref={layoutRef}
+          className="bundle-layout min-h-[calc(100vh-104px)] gap-0"
+          style={{ '--tree-panel-width': `${treePanelWidth}px` } as React.CSSProperties}
+        >
+          <div className="relative flex min-h-0 flex-col border-r border-slate-200 bg-white">
             <div className="border-b border-slate-200 px-4 py-4">
               <div className="mb-4 flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -1133,6 +1181,42 @@ export function BundleView(props?: BundleViewProps) {
             ) : (
               <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
             )}
+            </div>
+            <div
+              role="separator"
+              aria-label="调整文件树宽度"
+              aria-orientation="vertical"
+              aria-valuemin={MIN_TREE_PANEL_WIDTH}
+              aria-valuemax={MAX_TREE_PANEL_WIDTH}
+              aria-valuenow={treePanelWidth}
+              tabIndex={0}
+              className={`group absolute inset-y-0 right-[-4px] z-20 hidden w-2 cursor-col-resize touch-none outline-none lg:block ${
+                resizingTreePanel ? 'bg-sky-400/30' : 'hover:bg-sky-400/20 focus:bg-sky-400/30'
+              }`}
+              title="拖动调整文件树宽度；双击恢复默认宽度"
+              onPointerDown={(event) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                setResizingTreePanel(true);
+              }}
+              onDoubleClick={() => setTreePanelWidth(DEFAULT_TREE_PANEL_WIDTH)}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                  event.preventDefault();
+                  const direction = event.key === 'ArrowLeft' ? -1 : 1;
+                  setTreePanelWidth((width) =>
+                    Math.min(MAX_TREE_PANEL_WIDTH, Math.max(MIN_TREE_PANEL_WIDTH, width + direction * 20))
+                  );
+                } else if (event.key === 'Home') {
+                  event.preventDefault();
+                  setTreePanelWidth(MIN_TREE_PANEL_WIDTH);
+                } else if (event.key === 'End') {
+                  event.preventDefault();
+                  setTreePanelWidth(MAX_TREE_PANEL_WIDTH);
+                }
+              }}
+            >
+              <span className="absolute left-1/2 top-1/2 h-12 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-300 transition group-hover:bg-sky-400 group-focus:bg-sky-400" />
             </div>
           </div>
 

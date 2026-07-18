@@ -8,26 +8,25 @@ import './App.css';
 function App() {
   return (
     <div className="min-h-screen text-slate-900">
-      <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/90 shadow-sm shadow-slate-200/70 backdrop-blur">
+      <header className="sticky top-0 z-40 border-b border-white/10 bg-slate-950/95 shadow-lg shadow-slate-950/15 backdrop-blur-xl">
         <div className="mx-auto flex h-16 w-full max-w-none items-center justify-between gap-3 px-6">
-          <Link to="/" className="text-slate-950 no-underline">
+          <Link to="/" className="text-white no-underline">
             <div className="flex flex-wrap items-center gap-2.5">
-              <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-sky-200 bg-sky-100 text-lg text-sky-700 shadow-sm shadow-sky-100">☁</span>
-              <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Rain</h1>
-              <span className="rounded-md border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-300/30 bg-gradient-to-br from-cyan-300 to-teal-400 text-lg text-slate-950 shadow-lg shadow-cyan-950/30">☁</span>
+              <h1 className="text-2xl font-semibold tracking-tight text-white">Rain</h1>
+              <span className="rounded-full border border-cyan-300/25 bg-cyan-300/10 px-2.5 py-0.5 text-[11px] font-semibold tracking-wide text-cyan-200">
                 {APP_VERSION}
               </span>
             </div>
           </Link>
-          <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
+          <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm font-medium text-slate-200">
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]" />
             <span>服务正常</span>
-            <span className="text-slate-400">⌄</span>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-none px-5 py-4">
+      <main className="mx-auto w-full max-w-none px-5 py-5">
         <Routes>
           <Route path="/" element={<HomeView />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />

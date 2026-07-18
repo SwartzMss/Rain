@@ -13,8 +13,8 @@ type ConfirmDialogProps = {
 
 export function ConfirmDialog({ dialog, onBusyChange, onCancel, onClose }: ConfirmDialogProps) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-5 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-md">
+      <div className="w-full max-w-sm rounded-2xl border border-white/70 bg-white/95 p-5 shadow-2xl shadow-slate-950/25">
         <p className="text-sm text-slate-700">{dialog.message}</p>
         <div className="mt-4 flex justify-end gap-3">
           <button

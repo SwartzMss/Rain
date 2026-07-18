@@ -47,7 +47,7 @@ export function UploadPanel({
         }}
       />
       <div
-        className="flex min-h-24 items-center justify-between gap-4 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-5 py-4 text-sm transition aria-disabled:opacity-60"
+        className="flex min-h-28 items-center justify-between gap-4 rounded-xl border border-dashed border-slate-300 bg-gradient-to-br from-slate-50 to-sky-50/50 px-5 py-4 text-sm transition hover:border-sky-400 hover:shadow-[inset_0_0_0_1px_rgba(6,182,212,0.08)] aria-disabled:opacity-60"
         aria-disabled={uploadDisabled}
         onClick={() => {
           if (!uploadDisabled && !uploadingRef.current) {
@@ -68,7 +68,7 @@ export function UploadPanel({
         }}
       >
         <div className="flex min-w-0 items-center gap-4">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-sky-500/60 text-xl text-sky-700">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-950 text-xl text-cyan-300 shadow-md shadow-slate-900/15">
             ↑
           </div>
           <div>
@@ -88,7 +88,7 @@ export function UploadPanel({
         </div>
         <button
           type="button"
-          className="shrink-0 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 disabled:opacity-60"
+          className="shrink-0 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-sky-900/15 transition hover:-translate-y-0.5 hover:bg-sky-500 disabled:opacity-60"
           disabled={uploadDisabled}
           onClick={(event) => {
             event.stopPropagation();

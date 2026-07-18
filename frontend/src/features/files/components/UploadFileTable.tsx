@@ -18,7 +18,7 @@ export function UploadFileTable({
   onDeleteRow
 }: UploadFileTableProps) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4">
+    <div className="rounded-2xl border border-slate-200/90 bg-white/95 p-4 shadow-[0_18px_48px_rgba(7,21,34,0.08)] backdrop-blur">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h3 className="text-lg font-semibold text-slate-950">文件列表</h3>
         {bundlesError ? <span className="text-sm text-rose-600">{bundlesError}</span> : null}
@@ -37,7 +37,7 @@ export function UploadFileTable({
             {fileRows.map((row) => {
               const deleting = deletingKey === row.key;
               return (
-                <tr key={row.key}>
+                <tr key={row.key} className="transition hover:bg-slate-50/80">
                   <td className="max-w-[360px] truncate px-4 py-3">
                     <span className="mr-2 text-slate-500">□</span>
                     {row.name}

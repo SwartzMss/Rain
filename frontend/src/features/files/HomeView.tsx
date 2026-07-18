@@ -160,7 +160,7 @@ export function HomeView() {
       />
 
       <section className="min-w-0 space-y-4">
-        <div className="rounded-lg border border-slate-200 bg-white">
+        <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white/95 shadow-[0_18px_48px_rgba(7,21,34,0.08)] backdrop-blur">
           <div className="flex flex-col gap-3 border-b border-slate-200 p-4 md:flex-row md:items-start md:justify-between">
             <div>
               <h2 className="text-2xl font-semibold text-slate-950">
