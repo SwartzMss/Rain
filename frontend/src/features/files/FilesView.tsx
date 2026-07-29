@@ -6,6 +6,7 @@ import type { BundleInfo } from '../../lib/bundles';
 import { BinaryFileInfo } from './BinaryFileInfo';
 import { SearchTokenEditor } from './SearchTokenEditor';
 import { canPreviewText, isArchiveNode, isBinaryNode } from './filePresentation';
+import { isFileSearchConditionEmpty } from './fileSearchState';
 import { shouldShowFilenameClear } from './filenameSearch';
 import { getSearchHitSource } from './searchHitSource';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
@@ -758,6 +759,12 @@ export function BundleView() {
     setFileSearchError(null);
     setFileSearchExecuted(false);
   }, []);
+
+  useEffect(() => {
+    if (fileSearchExecuted && isFileSearchConditionEmpty(fileSearchTokens, fileSearchDraft)) {
+      clearFileSearch();
+    }
+  }, [clearFileSearch, fileSearchDraft, fileSearchExecuted, fileSearchTokens]);
 
   const runFileSearch = useCallback(async (from = 0) => {
     if (!selectedNode || !canPreviewText(selectedNode)) return;
