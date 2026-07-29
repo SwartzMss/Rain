@@ -10,6 +10,7 @@ import { buildFileRows, type FileRow } from './homeRows';
 import { useIssueBundles } from './hooks/useIssueBundles';
 import { useIssues } from './hooks/useIssues';
 import { useUploadTask } from './hooks/useUploadTask';
+import { shouldResetUploadAfterBundleDeletion } from './uploadDeletion';
 
 export function HomeView() {
   const navigate = useNavigate();
@@ -129,6 +130,14 @@ export function HomeView() {
               await bundles.loadBundleFiles(row.bundleHash);
             } else {
               await rainApi.deleteBundle(issues.currentIssueCode, row.bundleHash);
+              if (
+                shouldResetUploadAfterBundleDeletion(
+                  row.bundleHash,
+                  upload.uploadTask?.bundle_hash
+                )
+              ) {
+                upload.resetSelection();
+              }
               await bundles.loadBundles(issues.currentIssueCode);
             }
             await issues.loadIssues();
@@ -140,7 +149,7 @@ export function HomeView() {
         }
       });
     },
-    [bundles, issues]
+    [bundles, issues, upload]
   );
 
   return (
