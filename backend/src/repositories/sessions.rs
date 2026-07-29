@@ -4,6 +4,11 @@ use uuid::Uuid;
 
 use crate::{auth::AuthenticatedUser, error::AppError};
 
+pub struct ResolvedSessionUser {
+    pub user: AuthenticatedUser,
+    pub status: String,
+}
+
 pub async fn create_session(
     pool: &SqlitePool,
     user_id: &str,
@@ -32,22 +37,34 @@ pub async fn resolve_active_user(
     pool: &SqlitePool,
     token_hash: &str,
 ) -> Result<Option<AuthenticatedUser>, AppError> {
-    let user = sqlx::query_as::<_, (String, String)>(
+    Ok(resolve_session_user(pool, token_hash)
+        .await?
+        .filter(|resolved| resolved.status == "ACTIVE")
+        .map(|resolved| resolved.user))
+}
+
+pub async fn resolve_session_user(
+    pool: &SqlitePool,
+    token_hash: &str,
+) -> Result<Option<ResolvedSessionUser>, AppError> {
+    let user = sqlx::query_as::<_, (String, String, String)>(
         r#"
-        SELECT users.id, users.username
+        SELECT users.id, users.username, users.status
         FROM user_sessions
         JOIN users ON users.id = user_sessions.user_id
         WHERE user_sessions.token_hash = ?
           AND user_sessions.revoked_at IS NULL
           AND datetime(user_sessions.expires_at) > CURRENT_TIMESTAMP
-          AND users.status = 'ACTIVE'
         "#,
     )
     .bind(token_hash)
     .fetch_optional(pool)
     .await
     .map_err(AppError::Database)?
-    .map(|(id, username)| AuthenticatedUser { id, username });
+    .map(|(id, username, status)| ResolvedSessionUser {
+        user: AuthenticatedUser { id, username },
+        status,
+    });
 
     if user.is_some() {
         sqlx::query(

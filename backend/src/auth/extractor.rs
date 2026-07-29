@@ -1,6 +1,6 @@
 use std::future::{Ready, ready};
 
-use actix_web::{FromRequest, HttpRequest, dev::Payload, web};
+use actix_web::{FromRequest, HttpRequest, dev::Payload, http::StatusCode, web};
 use futures_util::future::LocalBoxFuture;
 
 use crate::{
@@ -45,13 +45,31 @@ impl FromRequest for RequireUser {
     type Future = LocalBoxFuture<'static, Result<Self, Self::Error>>;
 
     fn from_request(request: &HttpRequest, payload: &mut Payload) -> Self::Future {
-        let future = OptionalUser::from_request(request, payload);
+        let state = request.app_data::<web::Data<AppState>>().cloned();
+        let token = request
+            .cookie(SESSION_COOKIE_NAME)
+            .map(|cookie| cookie.value().to_owned());
+        let _ = payload;
         Box::pin(async move {
-            future
-                .await?
-                .0
-                .map(Self)
-                .ok_or_else(AppError::authentication_required)
+            let Some(state) = state else {
+                return Err(AppError::Config("missing application state".into()));
+            };
+            let Some(token) = token.filter(|value| !value.is_empty()) else {
+                return Err(AppError::authentication_required());
+            };
+            let Some(resolved) =
+                sessions::resolve_session_user(&state.pool, &hash_session_token(&token)).await?
+            else {
+                return Err(AppError::authentication_required());
+            };
+            if resolved.status != "ACTIVE" {
+                return Err(AppError::api(
+                    StatusCode::FORBIDDEN,
+                    "ACCOUNT_DISABLED",
+                    "账户已停用",
+                ));
+            }
+            Ok(Self(resolved.user))
         })
     }
 }
@@ -71,9 +89,16 @@ impl FromRequest for GuestOnly {
 mod tests {
     use std::path::PathBuf;
 
-    use actix_web::{App, HttpResponse, http::StatusCode, test, web};
+    use actix_web::{App, HttpResponse, cookie::Cookie, http::StatusCode, test, web};
+    use chrono::{Duration, Utc};
 
-    use crate::{AppState, config::AppLimits, db};
+    use crate::{
+        AppState,
+        auth::session::{SESSION_COOKIE_NAME, hash_session_token},
+        config::AppLimits,
+        db,
+        repositories::{sessions, users},
+    };
 
     use super::{OptionalUser, RequireUser};
 
@@ -110,5 +135,54 @@ mod tests {
         assert_eq!(required_response.status(), StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = test::read_body_json(required_response).await;
         assert_eq!(body["code"], "AUTHENTICATION_REQUIRED");
+    }
+
+    #[actix_web::test]
+    async fn disabled_session_is_forbidden_when_user_is_required() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "Disabled", "hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        let token = "disabled-session-token";
+        sessions::create_session(
+            &pool,
+            &user.id,
+            &hash_session_token(token),
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("session");
+        sqlx::query("UPDATE users SET status = 'DISABLED' WHERE id = ?")
+            .bind(&user.id)
+            .execute(&pool)
+            .await
+            .expect("disable user");
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState::new(
+                    pool,
+                    PathBuf::from("data"),
+                    AppLimits::default(),
+                )))
+                .route("/required", web::get().to(required)),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/required")
+                .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
