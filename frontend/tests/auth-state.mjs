@@ -35,6 +35,21 @@ try {
   assert.match(apiClient, /credentials:\s*'include'/);
   assert.match(apiClient, /xhr\.withCredentials\s*=\s*true/);
   assert.match(apiClient, /payload\.message/);
+
+  const app = await readFile(
+    new URL('../src/App.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(app, /path="\/login"/);
+  assert.match(app, /path="\/register"/);
+  assert.match(app, /只读模式/);
+  assert.match(app, /退出登录/);
+
+  const main = await readFile(
+    new URL('../src/main.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(main, /<AuthProvider>/);
 } finally {
   await server.close();
 }
