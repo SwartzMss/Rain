@@ -1,6 +1,7 @@
 import { Link, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext';
 import { AuthPage } from './features/auth/AuthPage';
+import { AccountPage } from './features/auth/AccountPage';
 import { BundleView } from './features/files/FilesView';
 import { HomeView } from './features/files/HomeView';
 import { TempResultView } from './features/files/TempResultView';
@@ -61,6 +62,7 @@ function App() {
                 <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1.5 text-cyan-100">
                   {auth.state.user.username}
                 </span>
+                <Link className="text-slate-300 no-underline hover:text-white" to="/account">账户</Link>
                 <button
                   className="text-slate-300 hover:text-white"
                   onClick={() => {
@@ -83,6 +85,7 @@ function App() {
           <Route path="/" element={<HomeView />} />
           <Route path="/login" element={<AuthPage mode="login" />} />
           <Route path="/register" element={<AuthPage mode="register" />} />
+          <Route path="/account" element={<AccountPage />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />
           <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
           <Route path="/temp-results/:resultId" element={<TempResultView />} />

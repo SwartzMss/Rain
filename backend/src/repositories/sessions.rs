@@ -103,13 +103,52 @@ pub async fn revoke_by_token_hash(pool: &SqlitePool, token_hash: &str) -> Result
     Ok(())
 }
 
+pub async fn revoke_all_for_user(pool: &SqlitePool, user_id: &str) -> Result<u64, AppError> {
+    Ok(sqlx::query(
+        "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?
+    .rows_affected())
+}
+
+pub async fn revoke_others_for_user(
+    pool: &SqlitePool,
+    user_id: &str,
+    current_token_hash: &str,
+) -> Result<u64, AppError> {
+    Ok(sqlx::query(
+        "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .bind(current_token_hash)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?
+    .rows_affected())
+}
+
+pub async fn cleanup_expired_or_revoked(pool: &SqlitePool) -> Result<u64, AppError> {
+    Ok(sqlx::query(
+        "DELETE FROM user_sessions WHERE datetime(expires_at) <= CURRENT_TIMESTAMP OR revoked_at IS NOT NULL",
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?
+    .rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
 
     use crate::{db, repositories::users};
 
-    use super::{create_session, resolve_active_user, revoke_by_token_hash};
+    use super::{
+        cleanup_expired_or_revoked, create_session, resolve_active_user, revoke_by_token_hash,
+    };
 
     #[tokio::test]
     async fn resolves_only_active_unexpired_unrevoked_sessions() {
@@ -168,5 +207,47 @@ mod tests {
                 .expect("resolve")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_expired_and_revoked_sessions() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "Cleaner", "hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        create_session(
+            &pool,
+            &user.id,
+            "expired",
+            Utc::now() - Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("expired");
+        create_session(
+            &pool,
+            &user.id,
+            "revoked",
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("revoked");
+        revoke_by_token_hash(&pool, "revoked")
+            .await
+            .expect("revoke");
+        assert_eq!(cleanup_expired_or_revoked(&pool).await.expect("cleanup"), 2);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 0);
     }
 }

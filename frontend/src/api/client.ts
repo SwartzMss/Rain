@@ -14,7 +14,9 @@ import type {
   UploadTaskResponse,
   AuthMeResponse,
   Credentials,
-  User
+  User,
+  SavedSearch,
+  SavedSearchPayload
 } from './types';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || window.location.origin).replace(/\/$/, '');
@@ -83,6 +85,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const text = await response.text();
 
   if (!response.ok) {
+    if (response.status === 401) {
+      try {
+        const payload = JSON.parse(text) as { code?: string };
+        if (payload.code === 'AUTHENTICATION_REQUIRED') {
+          window.dispatchEvent(new Event('rain:authentication-required'));
+        }
+      } catch {
+        // Non-JSON errors cannot identify an expired session reliably.
+      }
+    }
     throw new Error(parseErrorResponse(text, response.status));
   }
 
@@ -111,6 +123,37 @@ export const rainApi = {
   },
   logout() {
     return request<void>('/api/auth/logout', { method: 'POST' });
+  },
+  logoutAll() {
+    return request<void>('/api/auth/logout-all', { method: 'POST' });
+  },
+  changePassword(payload: { current_password: string; new_password: string }) {
+    return request<void>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  fetchSavedSearches(issueCode?: string) {
+    const query = issueCode ? `?issue_code=${encodeURIComponent(issueCode)}` : '';
+    return request<SavedSearch[]>(`/api/me/saved-searches${query}`);
+  },
+  createSavedSearch(payload: SavedSearchPayload) {
+    return request<SavedSearch>('/api/me/saved-searches', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  updateSavedSearch(id: string, payload: SavedSearchPayload) {
+    return request<SavedSearch>(`/api/me/saved-searches/${encodePathSegment(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+  },
+  deleteSavedSearch(id: string) {
+    return request<void>(`/api/me/saved-searches/${encodePathSegment(id)}`, { method: 'DELETE' });
+  },
+  markSavedSearchUsed(id: string) {
+    return request<void>(`/api/me/saved-searches/${encodePathSegment(id)}/use`, { method: 'POST' });
   },
   fetchIssues() {
     return request<IssueSummary[]>(`/api/issues`);

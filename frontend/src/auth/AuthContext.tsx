@@ -16,6 +16,7 @@ interface AuthContextValue {
   login(credentials: Credentials): Promise<User>;
   register(credentials: Credentials): Promise<User>;
   logout(): Promise<void>;
+  logoutAll(): Promise<void>;
   refresh(): Promise<void>;
 }
 
@@ -36,6 +37,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    const becomeGuest = () => setState({ status: 'GUEST' });
+    window.addEventListener('rain:authentication-required', becomeGuest);
+    return () => window.removeEventListener('rain:authentication-required', becomeGuest);
+  }, []);
+
   const login = useCallback(async (credentials: Credentials) => {
     const user = await rainApi.login(credentials);
     setState({ status: 'AUTHENTICATED', user });
@@ -51,9 +58,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setState({ status: 'GUEST' });
   }, []);
 
+  const logoutAll = useCallback(async () => {
+    await rainApi.logoutAll();
+    setState({ status: 'GUEST' });
+  }, []);
+
   const value = useMemo(
-    () => ({ state, login, register, logout, refresh }),
-    [state, login, register, logout, refresh]
+    () => ({ state, login, register, logout, logoutAll, refresh }),
+    [state, login, register, logout, logoutAll, refresh]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

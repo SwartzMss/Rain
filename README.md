@@ -151,6 +151,8 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
 | `RAIN_SESSION_TTL_SECONDS` | `604800` | 登录 Session 有效期（秒），默认 7 天 |
 | `RAIN_SESSION_COOKIE_SECURE` | `false` | 是否只通过 HTTPS 发送登录 Cookie；生产 HTTPS 环境必须设为 `true` |
+| `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
+| `RAIN_ALLOWED_ORIGINS` | 本机同源地址 | 允许携带认证 Cookie 的前端 Origin，逗号分隔 |
 
 默认配置会使用：
 
@@ -172,7 +174,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 
 ## 用户认证
 
-Rain 支持用户名和密码注册、登录、查询当前身份和退出登录。用户名长度为
+Rain 支持用户名和密码注册、登录、查询当前身份、修改密码、当前设备退出和全部设备退出。用户名长度为
 3～32，只允许字母、数字、`.`、`_`、`-`，且不区分大小写；密码长度为
 8～128 个字符。密码使用 Argon2id 保存，登录 Session 使用 HttpOnly Cookie，
 数据库只保存 Session Token 的 SHA-256 哈希。
@@ -188,6 +190,15 @@ RAIN_ALLOWED_ORIGINS=https://rain.example.com
 游客可以查看、下载和搜索；创建 Issue、上传、删除 Issue、删除 Bundle、删除文件节点
 以及删除临时搜索结果需要登录。详细搜索会生成可过期清理的临时结果文件，但仍属于
 游客可用的搜索流程。
+
+登录用户可以将文件名搜索或详细搜索保存为个人条件，选择全局或当前 Issue 范围，
+之后从“我的搜索条件”重新使用或删除。条件只保存查询与稳定选项，不保存会过期的
+临时结果 ID；所有查询、修改和删除均按当前用户隔离。游客点击“保存条件”时会先登录，
+返回原页面后恢复条件并继续保存。
+
+服务每小时删除过期或已撤销的 Session。可通过 `RAIN_ALLOW_REGISTRATION=false`
+关闭注册入口对应的后端能力；此时注册 API 返回 `REGISTRATION_DISABLED`，已有账户
+仍可正常登录。
 
 登录和注册接口默认启用 60 秒窗口限流，并限制 Argon2 并发，避免公开认证入口耗尽
 CPU 或 Actix blocking pool。跨域部署时需要通过 `RAIN_ALLOWED_ORIGINS` 显式配置

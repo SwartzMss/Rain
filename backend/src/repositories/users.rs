@@ -83,6 +83,22 @@ pub async fn mark_login(pool: &SqlitePool, id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub async fn change_password(
+    pool: &SqlitePool,
+    id: &str,
+    password_hash: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE users SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(password_hash)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{auth::password::normalize_username, db};

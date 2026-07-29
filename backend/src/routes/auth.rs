@@ -5,7 +5,7 @@ use std::time::{Duration as StdDuration, Instant};
 use crate::{
     AppState,
     auth::{
-        extractor::OptionalUser,
+        extractor::{OptionalUser, RequireUser},
         password::{
             PasswordError, hash_password, normalize_username, validate_password, validate_username,
             verify_dummy_password, verify_password,
@@ -16,7 +16,7 @@ use crate::{
         },
     },
     error::AppError,
-    models::auth::{AuthMeResponse, CredentialsRequest, PublicUser},
+    models::auth::{AuthMeResponse, ChangePasswordRequest, CredentialsRequest, PublicUser},
     repositories::{
         sessions,
         users::{self, CreateUserOutcome},
@@ -152,6 +152,13 @@ pub async fn register_user(
     state: web::Data<AppState>,
     payload: web::Json<CredentialsRequest>,
 ) -> Result<HttpResponse, AppError> {
+    if !state.auth.allow_registration {
+        return Err(AppError::api(
+            StatusCode::FORBIDDEN,
+            "REGISTRATION_DISABLED",
+            "当前未开放注册",
+        ));
+    }
     check_auth_rate_limit(
         &state,
         auth_rate_limit_keys(&request, "register", &payload.username),
@@ -263,6 +270,57 @@ pub async fn logout(
     if let Some(cookie) = request.cookie(SESSION_COOKIE_NAME) {
         sessions::revoke_by_token_hash(&state.pool, &hash_session_token(cookie.value())).await?;
     }
+    Ok(HttpResponse::NoContent()
+        .cookie(cleared_session_cookie(state.auth.session_cookie_secure))
+        .finish())
+}
+
+#[post("/auth/change-password")]
+pub async fn change_password(
+    request: HttpRequest,
+    user: RequireUser,
+    state: web::Data<AppState>,
+    payload: web::Json<ChangePasswordRequest>,
+) -> Result<HttpResponse, AppError> {
+    validate_password(&payload.new_password).map_err(validation_error)?;
+    let record = users::find_by_id(&state.pool, &user.0.id)
+        .await?
+        .ok_or_else(internal_auth_error)?;
+    let current = payload.current_password.clone();
+    let current_hash = record.password_hash;
+    let verified = run_argon2(&state, move || verify_password(&current, &current_hash))
+        .await
+        .map_err(|_| invalid_credentials())?;
+    if !verified {
+        return Err(AppError::api(
+            StatusCode::UNAUTHORIZED,
+            "CURRENT_PASSWORD_INVALID",
+            "当前密码错误",
+        ));
+    }
+    let new_password = payload.new_password.clone();
+    let new_hash = run_argon2(&state, move || hash_password(&new_password)).await?;
+    users::change_password(&state.pool, &user.0.id, &new_hash).await?;
+
+    if let Some(cookie) = request.cookie(SESSION_COOKIE_NAME) {
+        sessions::revoke_others_for_user(
+            &state.pool,
+            &user.0.id,
+            &hash_session_token(cookie.value()),
+        )
+        .await?;
+    } else {
+        sessions::revoke_all_for_user(&state.pool, &user.0.id).await?;
+    }
+    Ok(HttpResponse::NoContent().finish())
+}
+
+#[post("/auth/logout-all")]
+pub async fn logout_all(
+    user: RequireUser,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    sessions::revoke_all_for_user(&state.pool, &user.0.id).await?;
     Ok(HttpResponse::NoContent()
         .cookie(cleared_session_cookie(state.auth.session_cookie_secure))
         .finish())

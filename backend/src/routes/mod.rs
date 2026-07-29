@@ -6,6 +6,7 @@ mod health;
 mod helpers;
 mod issues;
 mod logs;
+mod saved_searches;
 mod temp_results;
 mod uploads;
 
@@ -16,6 +17,13 @@ pub fn register(cfg: &mut web::ServiceConfig) {
             .service(auth::login)
             .service(auth::me)
             .service(auth::logout)
+            .service(auth::change_password)
+            .service(auth::logout_all)
+            .service(saved_searches::list)
+            .service(saved_searches::create)
+            .service(saved_searches::update)
+            .service(saved_searches::delete)
+            .service(saved_searches::mark_used)
             .service(issues::list_issues)
             .service(issues::create_issue)
             .service(issues::get_issue_bundles)

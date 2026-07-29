@@ -35,6 +35,7 @@ try {
   assert.match(apiClient, /credentials:\s*'include'/);
   assert.match(apiClient, /xhr\.withCredentials\s*=\s*true/);
   assert.match(apiClient, /payload\.message/);
+  assert.match(apiClient, /rain:authentication-required/);
 
   const app = await readFile(
     new URL('../src/App.tsx', import.meta.url),
@@ -42,6 +43,7 @@ try {
   );
   assert.match(app, /path="\/login"/);
   assert.match(app, /path="\/register"/);
+  assert.match(app, /path="\/account"/);
   assert.match(app, /只读模式/);
   assert.match(app, /退出登录/);
 
@@ -77,6 +79,15 @@ try {
   );
   assert.match(uploadFileTable, /canWrite && row\.stage !== 'UPLOADING'/);
   assert.match(uploadFileTable, /登录后可删除/);
+
+  const filesView = await readFile(
+    new URL('../src/features/files/FilesView.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(filesView, /rain\.pendingSavedSearch/);
+  assert.match(filesView, /保存搜索条件/);
+  assert.match(filesView, /我的搜索条件/);
+  assert.match(filesView, /markSavedSearchUsed/);
 } finally {
   await server.close();
 }

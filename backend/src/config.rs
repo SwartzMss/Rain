@@ -100,6 +100,7 @@ pub struct AppLimits {
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
+    pub allow_registration: bool,
     pub session_ttl_seconds: u64,
     pub session_cookie_secure: bool,
     pub argon2_concurrency: usize,
@@ -112,6 +113,7 @@ const MAX_SESSION_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
+            allow_registration: true,
             session_ttl_seconds: 604_800,
             session_cookie_secure: false,
             argon2_concurrency: 2,
@@ -125,6 +127,7 @@ impl AuthConfig {
     fn from_env() -> Result<Self, AppError> {
         let defaults = Self::default();
         let config = Self {
+            allow_registration: env_value("RAIN_ALLOW_REGISTRATION", defaults.allow_registration)?,
             session_ttl_seconds: env_value(
                 "RAIN_SESSION_TTL_SECONDS",
                 defaults.session_ttl_seconds,

@@ -118,6 +118,7 @@ async fn main() -> std::io::Result<()> {
     info!(limits = ?config.limits, "effective application limits");
     spawn_blob_gc(pool.clone(), blob_store.clone());
     spawn_blob_audit(pool.clone(), blob_store.clone());
+    spawn_session_cleanup(pool.clone());
     let allowed_origins = config.cors.allowed_origins.clone();
     let shared_state = web::Data::new(AppState::with_blob_store_and_auth(
         pool,
@@ -130,7 +131,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         let cors = allowed_origins.iter().fold(
             Cors::default()
-                .allowed_methods(vec!["GET", "POST", "DELETE", "OPTIONS"])
+                .allowed_methods(vec!["GET", "POST", "PATCH", "DELETE", "OPTIONS"])
                 .allowed_headers(vec![header::CONTENT_TYPE, header::ACCEPT])
                 .supports_credentials()
                 .max_age(3600),
@@ -146,6 +147,20 @@ async fn main() -> std::io::Result<()> {
     .bind(bind_addr)?
     .run()
     .await
+}
+
+fn spawn_session_cleanup(pool: sqlx::SqlitePool) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+        loop {
+            interval.tick().await;
+            match backend::repositories::sessions::cleanup_expired_or_revoked(&pool).await {
+                Ok(removed) if removed > 0 => info!(removed, "expired sessions cleaned"),
+                Ok(_) => {}
+                Err(error) => warn!(%error, "expired session cleanup failed"),
+            }
+        }
+    });
 }
 
 async fn cleanup_temp_uploads(data_root: &std::path::Path) -> std::io::Result<u64> {
