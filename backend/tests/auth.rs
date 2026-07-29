@@ -366,12 +366,50 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
         &app,
         test::TestRequest::get()
             .uri("/api/me/saved-searches?issue_code=cn013")
-            .cookie(alice)
+            .cookie(alice.clone())
             .to_request(),
     )
     .await;
     let normalized_body: Value = test::read_body_json(normalized_list).await;
     assert_eq!(normalized_body.as_array().expect("array").len(), 2);
+
+    let nested = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/me/saved-searches")
+            .cookie(alice.clone())
+            .set_json(json!({
+                "name": "Nested detail",
+                "search_type": "DETAIL",
+                "query_text": "(ERROR OR WARN) AND \"tracking point\"",
+                "scope_type": "GLOBAL",
+                "scope_key": null,
+                "options": {"version": 1}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(nested.status(), StatusCode::CREATED);
+
+    let invalid_expression = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/me/saved-searches")
+            .cookie(alice)
+            .set_json(json!({
+                "name": "Broken detail",
+                "search_type": "DETAIL",
+                "query_text": "ERROR AND OR WARN",
+                "scope_type": "GLOBAL",
+                "scope_key": null,
+                "options": {"version": 1}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(invalid_expression.status(), StatusCode::BAD_REQUEST);
+    let invalid_body: Value = test::read_body_json(invalid_expression).await;
+    assert_eq!(invalid_body["code"], "SAVED_SEARCH_EXPRESSION_INVALID");
 }
 
 #[actix_web::test]

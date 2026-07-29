@@ -50,7 +50,11 @@ try {
     deserializeSearchTokens('"ERROR" OR NOT "request timeout"'),
     booleanTokens
   );
-  assert.throws(() => deserializeSearchTokens('(ERROR OR WARN)'));
+  assert.deepEqual(deserializeSearchTokens('ERROR AND WARN'), [
+    { kind: 'term', value: 'ERROR' },
+    { kind: 'operator', value: 'AND' },
+    { kind: 'term', value: 'WARN' }
+  ]);
 
   assert.deepEqual(validateSearchTokens([{ kind: 'operator', value: 'AND' }]), {
     valid: false,

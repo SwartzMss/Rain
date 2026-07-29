@@ -26,6 +26,14 @@ fn normalize_and_validate(payload: &SavedSearchPayload) -> Result<SavedSearchPay
             "搜索条件无效",
         ));
     }
+    if payload.search_type == "DETAIL" && crate::log_expression::parse(&payload.query_text).is_err()
+    {
+        return Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "SAVED_SEARCH_EXPRESSION_INVALID",
+            "详细搜索表达式语法无效",
+        ));
+    }
     let mut normalized = payload.clone();
     normalized.scope_key = match payload.scope_type.as_str() {
         "ISSUE" => Some(normalize_issue_code(

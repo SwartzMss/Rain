@@ -37,12 +37,18 @@ try {
     { ...pending, query_text: 42 },
     { ...pending, options: null },
     { ...pending, options: {} },
+    { ...pending, options: { version: 1, tokens: [null] } },
+    { ...pending, options: { version: 1, tokens: [{ kind: 'operator', value: 'AND' }] } },
     { ...pending, scope_key: 42 }
   ]) {
     values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(corrupted));
     assert.equal(takePendingSavedSearch(storage, true, 'CN013'), null);
     assert.equal(values.has(PENDING_SAVED_SEARCH_KEY), false);
   }
+
+  const queryOnly = { ...pending, options: { version: 1 } };
+  values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(queryOnly));
+  assert.deepEqual(takePendingSavedSearch(storage, true, 'CN013'), queryOnly);
 } finally {
   await server.close();
 }

@@ -180,11 +180,15 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
     }
     const start = index;
     while (index < expression.length && !/\s/.test(expression[index])) index += 1;
-    const operator = expression.slice(start, index);
-    if (!['AND', 'OR', 'NOT'].includes(operator)) {
-      throw new Error(`无法识别搜索表达式片段：${operator}`);
+    const fragment = expression.slice(start, index);
+    if (fragment.includes('(') || fragment.includes(')')) {
+      throw new Error('括号表达式需要使用原始文本编辑器');
     }
-    tokens.push({ kind: 'operator', value: operator as SearchOperator });
+    if (['AND', 'OR', 'NOT'].includes(fragment)) {
+      tokens.push({ kind: 'operator', value: fragment as SearchOperator });
+    } else if (fragment) {
+      tokens.push({ kind: 'term', value: fragment });
+    }
   }
   const validation = validateSearchTokens(tokens);
   if (!validation.valid) throw new Error(validation.message);
