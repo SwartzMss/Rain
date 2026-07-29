@@ -1,0 +1,30 @@
+use serde::{Deserialize, Serialize};
+
+use crate::auth::AuthenticatedUser;
+
+#[derive(Debug, Deserialize)]
+pub struct CredentialsRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicUser {
+    pub id: String,
+    pub username: String,
+}
+
+impl From<AuthenticatedUser> for PublicUser {
+    fn from(user: AuthenticatedUser) -> Self {
+        Self {
+            id: user.id,
+            username: user.username,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthMeResponse {
+    pub authenticated: bool,
+    pub user: Option<PublicUser>,
+}

@@ -1,5 +1,6 @@
 use actix_web::web;
 
+mod auth;
 mod files;
 mod health;
 mod helpers;
@@ -11,6 +12,10 @@ mod uploads;
 pub fn register(cfg: &mut web::ServiceConfig) {
     cfg.service(health::health).service(
         web::scope("/api")
+            .service(auth::register_user)
+            .service(auth::login)
+            .service(auth::me)
+            .service(auth::logout)
             .service(issues::list_issues)
             .service(issues::create_issue)
             .service(issues::get_issue_bundles)
