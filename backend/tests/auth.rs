@@ -94,13 +94,14 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
         .to_owned();
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("SameSite=Lax"));
-    let cookie = Cookie::parse(set_cookie).expect("parse cookie").into_owned();
+    let cookie = Cookie::parse(set_cookie)
+        .expect("parse cookie")
+        .into_owned();
 
-    let stored_hash: String =
-        sqlx::query_scalar("SELECT token_hash FROM user_sessions LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .expect("stored token hash");
+    let stored_hash: String = sqlx::query_scalar("SELECT token_hash FROM user_sessions LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("stored token hash");
     assert_ne!(stored_hash, cookie.value());
 
     let authenticated_me = test::call_service(

@@ -31,13 +31,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(pool: SqlitePool, data_root: PathBuf, limits: AppLimits) -> Self {
         let blob_store = Arc::new(LocalCasBlobStore::new(data_root.clone()));
-        Self::with_blob_store_and_auth(
-            pool,
-            data_root,
-            limits,
-            AuthConfig::default(),
-            blob_store,
-        )
+        Self::with_blob_store_and_auth(pool, data_root, limits, AuthConfig::default(), blob_store)
     }
 
     pub fn with_blob_store(
@@ -46,13 +40,7 @@ impl AppState {
         limits: AppLimits,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
-        Self::with_blob_store_and_auth(
-            pool,
-            data_root,
-            limits,
-            AuthConfig::default(),
-            blob_store,
-        )
+        Self::with_blob_store_and_auth(pool, data_root, limits, AuthConfig::default(), blob_store)
     }
 
     pub fn with_blob_store_and_auth(

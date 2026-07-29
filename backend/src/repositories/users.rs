@@ -62,10 +62,7 @@ pub async fn find_by_normalized_username(
     .map_err(AppError::Database)
 }
 
-pub async fn find_by_id(
-    pool: &SqlitePool,
-    id: &str,
-) -> Result<Option<UserRecord>, AppError> {
+pub async fn find_by_id(pool: &SqlitePool, id: &str) -> Result<Option<UserRecord>, AppError> {
     sqlx::query_as(
         "SELECT id, username, username_normalized, password_hash, status, role FROM users WHERE id = ?",
     )
@@ -109,9 +106,6 @@ mod tests {
         let duplicate = create_user(&pool, "SWARTZ", "other")
             .await
             .expect("duplicate");
-        assert!(matches!(
-            duplicate,
-            CreateUserOutcome::DuplicateUsername
-        ));
+        assert!(matches!(duplicate, CreateUserOutcome::DuplicateUsername));
     }
 }

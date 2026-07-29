@@ -61,10 +61,7 @@ pub async fn resolve_active_user(
     Ok(user)
 }
 
-pub async fn revoke_by_token_hash(
-    pool: &SqlitePool,
-    token_hash: &str,
-) -> Result<(), AppError> {
+pub async fn revoke_by_token_hash(pool: &SqlitePool, token_hash: &str) -> Result<(), AppError> {
     sqlx::query(
         "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ? AND revoked_at IS NULL",
     )

@@ -1,6 +1,4 @@
-use actix_web::{
-    HttpRequest, HttpResponse, http::StatusCode, post, get, web,
-};
+use actix_web::{HttpRequest, HttpResponse, get, http::StatusCode, post, web};
 use chrono::{Duration, Utc};
 
 use crate::{
@@ -8,8 +6,8 @@ use crate::{
     auth::{
         extractor::OptionalUser,
         password::{
-            PasswordError, hash_password, normalize_username, validate_password,
-            validate_username, verify_password,
+            PasswordError, hash_password, normalize_username, validate_password, validate_username,
+            verify_password,
         },
         session::{
             SESSION_COOKIE_NAME, cleared_session_cookie, generate_session_token,
@@ -113,26 +111,25 @@ pub async fn login(
     let user_agent = request
         .headers()
         .get("user-agent")
-        .and_then(|value| value.to_str().ok());
-    let connection_info = request.connection_info();
-    let client_ip = connection_info.realip_remote_addr();
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let client_ip = request
+        .connection_info()
+        .realip_remote_addr()
+        .map(str::to_owned);
     sessions::create_session(
         &state.pool,
         &user.id,
         &token_hash,
         Utc::now() + Duration::seconds(ttl_i64),
-        user_agent,
-        client_ip,
+        user_agent.as_deref(),
+        client_ip.as_deref(),
     )
     .await?;
     users::mark_login(&state.pool, &user.id).await?;
 
     Ok(HttpResponse::Ok()
-        .cookie(session_cookie(
-            token,
-            ttl,
-            state.auth.session_cookie_secure,
-        ))
+        .cookie(session_cookie(token, ttl, state.auth.session_cookie_secure))
         .json(PublicUser {
             id: user.id,
             username: user.username,
@@ -156,8 +153,6 @@ pub async fn logout(
         sessions::revoke_by_token_hash(&state.pool, &hash_session_token(cookie.value())).await?;
     }
     Ok(HttpResponse::NoContent()
-        .cookie(cleared_session_cookie(
-            state.auth.session_cookie_secure,
-        ))
+        .cookie(cleared_session_cookie(state.auth.session_cookie_secure))
         .finish())
 }

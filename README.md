@@ -29,6 +29,8 @@ RAIN_LOG_DIR=./log
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8080
 RESET_DB=false
+RAIN_SESSION_TTL_SECONDS=604800
+RAIN_SESSION_COOKIE_SECURE=false
 ```
 
 ### 2. 构建前端
@@ -147,6 +149,8 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_MAX_LINE_PAGE_SIZE` | `10000` | 最大行分页大小 |
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
+| `RAIN_SESSION_TTL_SECONDS` | `604800` | 登录 Session 有效期（秒），默认 7 天 |
+| `RAIN_SESSION_COOKIE_SECURE` | `false` | 是否只通过 HTTPS 发送登录 Cookie；生产 HTTPS 环境必须设为 `true` |
 
 默认配置会使用：
 
@@ -159,11 +163,30 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 ## 使用流程
 
 1. 打开 `http://localhost:8080`。
-2. 新建或选择一个 Issue，例如 `CN013`。
-3. 在选中的 Issue 下拖拽或点击上传 `.log`、`.txt`、`.zip` 文件。
-4. 点击 Issue 的“查看”打开文件浏览页。
-5. 在左侧文件树选择文件，右侧会显示文本预览。
-6. 在搜索框输入关键词，可搜索当前 Issue 下已索引的文本日志。
+2. 通过右上角“注册”创建账户；注册成功后使用用户名和密码登录。
+3. 新建或选择一个 Issue，例如 `CN013`。
+4. 在选中的 Issue 下拖拽或点击上传 `.log`、`.txt`、`.zip` 文件。
+5. 点击 Issue 的“查看”打开文件浏览页。
+6. 在左侧文件树选择文件，右侧会显示文本预览。
+7. 在搜索框输入关键词，可搜索当前 Issue 下已索引的文本日志。
+
+## 用户认证
+
+Rain 支持用户名和密码注册、登录、查询当前身份和退出登录。用户名长度为
+3～32，只允许字母、数字、`.`、`_`、`-`，且不区分大小写；密码长度为
+8～128 个字符。密码使用 Argon2id 保存，登录 Session 使用 HttpOnly Cookie，
+数据库只保存 Session Token 的 SHA-256 哈希。
+
+注册成功后不会自动登录。当前版本没有邮箱、手机号或自助找回密码功能；忘记密码
+时只能由部署管理员直接维护数据库。通过 HTTPS 部署时必须设置：
+
+```dotenv
+RAIN_SESSION_COOKIE_SECURE=true
+```
+
+本次认证基础功能尚未限制现有创建 Issue、上传和删除接口；游客只读权限将在
+Issue #25 的后续阶段加入。在该阶段完成前，不应把“只读模式”的前端提示视为后端
+安全边界。
 
 ## 当前支持
 

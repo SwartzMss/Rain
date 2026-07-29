@@ -5,7 +5,10 @@ use futures_util::future::LocalBoxFuture;
 
 use crate::{
     AppState,
-    auth::{AuthenticatedUser, session::{SESSION_COOKIE_NAME, hash_session_token}},
+    auth::{
+        AuthenticatedUser,
+        session::{SESSION_COOKIE_NAME, hash_session_token},
+    },
     error::AppError,
     repositories::sessions,
 };
