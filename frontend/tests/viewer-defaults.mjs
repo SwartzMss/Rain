@@ -22,7 +22,7 @@ try {
     new URL('../src/features/files/TempResultView.tsx', import.meta.url),
     'utf8'
   );
-  assert.match(filesView, /useState<'log' \| 'detailed'>\('detailed'\)/);
+  assert.match(filesView, /useState<'log' \| 'detailed'>\([\s\S]*pendingSavedSearch\?\.search_type/);
   assert.match(filesView, /import \{ LINE_PAGE_SIZE_OPTIONS \} from '\.\/linePageSizes';/);
   assert.match(tempResultView, /import \{ LINE_PAGE_SIZE_OPTIONS \} from '\.\/linePageSizes';/);
   assert.doesNotMatch(filesView, /const LINE_PAGE_SIZE_OPTIONS =/);

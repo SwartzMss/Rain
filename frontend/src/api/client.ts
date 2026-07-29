@@ -267,6 +267,16 @@ export const rainApi = {
       };
       xhr.onload = () => {
         if (xhr.status < 200 || xhr.status >= 300) {
+          if (xhr.status === 401) {
+            try {
+              const payload = JSON.parse(xhr.responseText) as { code?: string };
+              if (payload.code === 'AUTHENTICATION_REQUIRED') {
+                window.dispatchEvent(new Event('rain:authentication-required'));
+              }
+            } catch {
+              // Ignore non-JSON upload errors.
+            }
+          }
           reject(new Error(parseErrorResponse(xhr.responseText, xhr.status)));
           return;
         }

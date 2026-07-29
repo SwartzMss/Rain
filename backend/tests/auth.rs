@@ -4,6 +4,7 @@ use actix_web::{
     App,
     cookie::Cookie,
     http::{StatusCode, header},
+    middleware::from_fn,
     test, web,
 };
 use backend::{AppState, config::AppLimits, db, routes};
@@ -275,29 +276,106 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
             .to_request(),
         test::TestRequest::post()
             .uri(&format!("/api/me/saved-searches/{id}/use"))
-            .cookie(bob)
+            .cookie(bob.clone())
             .to_request(),
     ] {
         let response = test::call_service(&app, request).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+    let bob_update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/api/me/saved-searches/{id}"))
+            .cookie(bob)
+            .set_json(json!({
+                "name": "Stolen",
+                "search_type": "FILENAME",
+                "query_text": "secret",
+                "scope_type": "GLOBAL",
+                "scope_key": null,
+                "options": {},
+                "is_pinned": false,
+                "sort_order": 0
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(bob_update.status(), StatusCode::NOT_FOUND);
+
+    let alice_update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/api/me/saved-searches/{id}"))
+            .cookie(alice.clone())
+            .set_json(json!({
+                "name": "Warnings",
+                "search_type": "FILENAME",
+                "query_text": "warn",
+                "scope_type": "ISSUE",
+                "scope_key": "cn013",
+                "options": {"version": 1},
+                "is_pinned": false,
+                "sort_order": 7
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(alice_update.status(), StatusCode::OK);
+    let updated: Value = test::read_body_json(alice_update).await;
+    assert_eq!(updated["name"], "Warnings");
+    assert_eq!(updated["search_type"], "FILENAME");
+    assert_eq!(updated["query_text"], "warn");
+    assert_eq!(updated["scope_key"], "CN013");
+    assert_eq!(updated["is_pinned"], false);
+    assert_eq!(updated["sort_order"], 7);
 
     let alice_list = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/api/me/saved-searches")
-            .cookie(alice)
+            .uri("/api/me/saved-searches?issue_code=CN013")
+            .cookie(alice.clone())
             .to_request(),
     )
     .await;
     let body: Value = test::read_body_json(alice_list).await;
     assert_eq!(body.as_array().expect("array").len(), 1);
-    assert_eq!(body[0]["query_text"], "\"ERROR\"");
+    assert_eq!(body[0]["query_text"], "warn");
     assert!(body[0].get("temp_result_id").is_none());
+
+    let scoped = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/me/saved-searches")
+            .cookie(alice.clone())
+            .set_json(json!({
+                "name": "Issue errors",
+                "search_type": "FILENAME",
+                "query_text": "error",
+                "scope_type": "ISSUE",
+                "scope_key": " cn013 ",
+                "options": {}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(scoped.status(), StatusCode::CREATED);
+    let scoped_body: Value = test::read_body_json(scoped).await;
+    assert_eq!(scoped_body["scope_key"], "CN013");
+
+    let normalized_list = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/me/saved-searches?issue_code=cn013")
+            .cookie(alice)
+            .to_request(),
+    )
+    .await;
+    let normalized_body: Value = test::read_body_json(normalized_list).await;
+    assert_eq!(normalized_body.as_array().expect("array").len(), 2);
 }
 
 #[actix_web::test]
-async fn changing_password_revokes_other_sessions_and_keeps_current_session() {
+async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
     let app = test::init_service(
@@ -367,27 +445,40 @@ async fn changing_password_revokes_other_sessions_and_keeps_current_session() {
     )
     .await;
     assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+    let replacement = Cookie::parse(
+        changed
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("replacement cookie")
+            .to_str()
+            .expect("cookie text"),
+    )
+    .expect("cookie")
+    .into_owned();
+    assert_ne!(replacement.value(), current.value());
 
-    let current_me = test::call_service(
+    for old_cookie in [current, other] {
+        let old_me = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/auth/me")
+                .cookie(old_cookie)
+                .to_request(),
+        )
+        .await;
+        let old_body: Value = test::read_body_json(old_me).await;
+        assert_eq!(old_body["authenticated"], false);
+    }
+    let replacement_me = test::call_service(
         &app,
         test::TestRequest::get()
             .uri("/api/auth/me")
-            .cookie(current)
+            .cookie(replacement)
             .to_request(),
     )
     .await;
-    let current_body: Value = test::read_body_json(current_me).await;
-    assert_eq!(current_body["authenticated"], true);
-    let other_me = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/api/auth/me")
-            .cookie(other)
-            .to_request(),
-    )
-    .await;
-    let other_body: Value = test::read_body_json(other_me).await;
-    assert_eq!(other_body["authenticated"], false);
+    let replacement_body: Value = test::read_body_json(replacement_me).await;
+    assert_eq!(replacement_body["authenticated"], true);
 }
 
 #[actix_web::test]
@@ -427,4 +518,39 @@ async fn registration_switch_does_not_block_existing_user_login() {
     )
     .await;
     assert_eq!(login.status(), StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn invalid_session_cookie_is_cleared_from_the_browser() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let app = test::init_service(
+        App::new()
+            .wrap(from_fn(
+                backend::auth::extractor::clear_invalid_session_cookie,
+            ))
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/auth/me")
+            .cookie(Cookie::new("rain_session", "unknown-token"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .filter_map(|value| value.to_str().ok())
+            .any(|value| value.contains("rain_session=") && value.contains("Max-Age=0"))
+    );
 }

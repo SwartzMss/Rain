@@ -11,6 +11,13 @@ pub struct ResolvedSessionUser {
     pub status: String,
 }
 
+pub struct ReplacementSession<'a> {
+    pub token_hash: &'a str,
+    pub expires_at: DateTime<Utc>,
+    pub user_agent: Option<&'a str>,
+    pub client_ip: Option<&'a str>,
+}
+
 pub async fn create_session(
     pool: &SqlitePool,
     user_id: &str,
@@ -33,6 +40,82 @@ pub async fn create_session(
     .await
     .map_err(AppError::Database)?;
     Ok(id)
+}
+
+pub async fn create_session_if_password_unchanged(
+    pool: &SqlitePool,
+    user_id: &str,
+    expected_password_hash: &str,
+    token_hash: &str,
+    expires_at: DateTime<Utc>,
+    user_agent: Option<&str>,
+    client_ip: Option<&str>,
+) -> Result<bool, AppError> {
+    let id = Uuid::new_v4().to_string();
+    let result = sqlx::query(
+        r#"
+        INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent, client_ip)
+        SELECT ?, id, ?, ?, ?, ?
+        FROM users
+        WHERE id = ? AND password_hash = ? AND status = 'ACTIVE'
+        "#,
+    )
+    .bind(id)
+    .bind(token_hash)
+    .bind(expires_at.to_rfc3339())
+    .bind(user_agent)
+    .bind(client_ip)
+    .bind(user_id)
+    .bind(expected_password_hash)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn change_password_and_replace_sessions(
+    pool: &SqlitePool,
+    user_id: &str,
+    expected_password_hash: &str,
+    new_password_hash: &str,
+    replacement: ReplacementSession<'_>,
+) -> Result<bool, AppError> {
+    let mut transaction = pool.begin().await.map_err(AppError::Database)?;
+    let updated = sqlx::query(
+        "UPDATE users SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND password_hash = ?",
+    )
+    .bind(new_password_hash)
+    .bind(user_id)
+    .bind(expected_password_hash)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::Database)?
+    .rows_affected();
+    if updated != 1 {
+        transaction.rollback().await.map_err(AppError::Database)?;
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::Database)?;
+    sqlx::query(
+        "INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent, client_ip) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(user_id)
+    .bind(replacement.token_hash)
+    .bind(replacement.expires_at.to_rfc3339())
+    .bind(replacement.user_agent)
+    .bind(replacement.client_ip)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::Database)?;
+    transaction.commit().await.map_err(AppError::Database)?;
+    Ok(true)
 }
 
 pub async fn resolve_active_user(
@@ -147,7 +230,8 @@ mod tests {
     use crate::{db, repositories::users};
 
     use super::{
-        cleanup_expired_or_revoked, create_session, resolve_active_user, revoke_by_token_hash,
+        cleanup_expired_or_revoked, create_session, create_session_if_password_unchanged,
+        resolve_active_user, revoke_by_token_hash,
     };
 
     #[tokio::test]
@@ -249,5 +333,35 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn login_cannot_create_session_after_password_hash_changes() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "Concurrent", "old-hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        sqlx::query("UPDATE users SET password_hash = 'new-hash' WHERE id = ?")
+            .bind(&user.id)
+            .execute(&pool)
+            .await
+            .expect("change password");
+        let created = create_session_if_password_unchanged(
+            &pool,
+            &user.id,
+            "old-hash",
+            "late-login",
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("conditional session");
+        assert!(!created);
     }
 }

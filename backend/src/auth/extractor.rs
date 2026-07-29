@@ -1,6 +1,13 @@
 use std::future::{Ready, ready};
 
-use actix_web::{FromRequest, HttpRequest, dev::Payload, http::StatusCode, web};
+use actix_web::{
+    Error, FromRequest, HttpMessage, HttpRequest,
+    body::MessageBody,
+    dev::{Payload, ServiceRequest, ServiceResponse},
+    http::StatusCode,
+    middleware::Next,
+    web,
+};
 use futures_util::future::LocalBoxFuture;
 
 use crate::{
@@ -14,6 +21,30 @@ use crate::{
 };
 
 pub struct OptionalUser(pub Option<AuthenticatedUser>);
+#[derive(Clone, Copy)]
+pub struct InvalidSessionCookie;
+
+pub async fn clear_invalid_session_cookie(
+    request: ServiceRequest,
+    next: Next<impl MessageBody>,
+) -> Result<ServiceResponse<impl MessageBody>, Error> {
+    let mut response = next.call(request).await?;
+    if response
+        .request()
+        .extensions()
+        .get::<InvalidSessionCookie>()
+        .is_some()
+    {
+        let secure = response
+            .request()
+            .app_data::<web::Data<AppState>>()
+            .is_some_and(|state| state.auth.session_cookie_secure);
+        response
+            .response_mut()
+            .add_cookie(&crate::auth::session::cleared_session_cookie(secure))?;
+    }
+    Ok(response)
+}
 
 impl FromRequest for OptionalUser {
     type Error = AppError;
@@ -21,6 +52,7 @@ impl FromRequest for OptionalUser {
 
     fn from_request(request: &HttpRequest, _payload: &mut Payload) -> Self::Future {
         let state = request.app_data::<web::Data<AppState>>().cloned();
+        let request = request.clone();
         let token = request
             .cookie(SESSION_COOKIE_NAME)
             .map(|cookie| cookie.value().to_owned());
@@ -33,6 +65,9 @@ impl FromRequest for OptionalUser {
             };
             let user =
                 sessions::resolve_active_user(&state.pool, &hash_session_token(&token)).await?;
+            if user.is_none() {
+                request.extensions_mut().insert(InvalidSessionCookie);
+            }
             Ok(Self(user))
         })
     }
@@ -46,6 +81,7 @@ impl FromRequest for RequireUser {
 
     fn from_request(request: &HttpRequest, payload: &mut Payload) -> Self::Future {
         let state = request.app_data::<web::Data<AppState>>().cloned();
+        let request = request.clone();
         let token = request
             .cookie(SESSION_COOKIE_NAME)
             .map(|cookie| cookie.value().to_owned());
@@ -60,6 +96,7 @@ impl FromRequest for RequireUser {
             let Some(resolved) =
                 sessions::resolve_session_user(&state.pool, &hash_session_token(&token)).await?
             else {
+                request.extensions_mut().insert(InvalidSessionCookie);
                 return Err(AppError::authentication_required());
             };
             if resolved.status != "ACTIVE" {

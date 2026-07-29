@@ -1,5 +1,6 @@
 use actix_web::{HttpResponse, delete, get, http::StatusCode, patch, post, web};
 
+use super::issues::normalize_issue_code;
 use crate::{
     AppState,
     auth::extractor::RequireUser,
@@ -8,7 +9,7 @@ use crate::{
     repositories::saved_searches,
 };
 
-fn validate(payload: &SavedSearchPayload) -> Result<(), AppError> {
+fn normalize_and_validate(payload: &SavedSearchPayload) -> Result<SavedSearchPayload, AppError> {
     if payload.name.trim().is_empty()
         || payload.name.chars().count() > 80
         || payload.query_text.trim().is_empty()
@@ -25,7 +26,14 @@ fn validate(payload: &SavedSearchPayload) -> Result<(), AppError> {
             "搜索条件无效",
         ));
     }
-    Ok(())
+    let mut normalized = payload.clone();
+    normalized.scope_key = match payload.scope_type.as_str() {
+        "ISSUE" => Some(normalize_issue_code(
+            payload.scope_key.as_deref().unwrap_or_default(),
+        )?),
+        _ => None,
+    };
+    Ok(normalized)
 }
 
 fn map_database_error(error: AppError) -> AppError {
@@ -46,7 +54,12 @@ pub async fn list(
     state: web::Data<AppState>,
     query: web::Query<SavedSearchListQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let items = saved_searches::list(&state.pool, &user.0.id, query.issue_code.as_deref()).await?;
+    let issue_code = query
+        .issue_code
+        .as_deref()
+        .map(normalize_issue_code)
+        .transpose()?;
+    let items = saved_searches::list(&state.pool, &user.0.id, issue_code.as_deref()).await?;
     Ok(HttpResponse::Ok().json(
         items
             .into_iter()
@@ -61,7 +74,7 @@ pub async fn create(
     state: web::Data<AppState>,
     payload: web::Json<SavedSearchPayload>,
 ) -> Result<HttpResponse, AppError> {
-    validate(&payload)?;
+    let payload = normalize_and_validate(&payload)?;
     let item = saved_searches::create(&state.pool, &user.0.id, &payload)
         .await
         .map_err(map_database_error)?;
@@ -75,7 +88,7 @@ pub async fn update(
     id: web::Path<String>,
     payload: web::Json<SavedSearchPayload>,
 ) -> Result<HttpResponse, AppError> {
-    validate(&payload)?;
+    let payload = normalize_and_validate(&payload)?;
     let item = saved_searches::update(&state.pool, &user.0.id, &id, &payload)
         .await
         .map_err(map_database_error)?

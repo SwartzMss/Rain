@@ -56,7 +56,7 @@ impl From<SavedSearchRecord> for SavedSearchResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SavedSearchPayload {
     pub name: String,
     pub search_type: String,

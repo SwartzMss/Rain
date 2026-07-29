@@ -18,7 +18,7 @@ use crate::{
     error::AppError,
     models::auth::{AuthMeResponse, ChangePasswordRequest, CredentialsRequest, PublicUser},
     repositories::{
-        sessions,
+        sessions::{self, ReplacementSession},
         users::{self, CreateUserOutcome},
     },
 };
@@ -68,13 +68,17 @@ const AUTH_RATE_LIMIT_MAX_BUCKETS: usize = 1024;
 
 fn auth_rate_limit_keys(request: &HttpRequest, action: &str, username: &str) -> [String; 2] {
     let client = request
-        .connection_info()
-        .realip_remote_addr()
-        .unwrap_or("unknown")
-        .to_owned();
+        .peer_addr()
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let normalized = if username.len() <= 64 {
+        normalize_username(username)
+    } else {
+        "<invalid>".into()
+    };
     [
         format!("{action}:ip:{client}"),
-        format!("{action}:username:{}", normalize_username(username)),
+        format!("{action}:username:{normalized}"),
     ]
 }
 
@@ -100,10 +104,21 @@ fn check_auth_rate_limit(
         !bucket.is_empty()
     });
 
-    if buckets.len() >= AUTH_RATE_LIMIT_MAX_BUCKETS
-        && keys.iter().any(|key| !buckets.contains_key(key))
-    {
-        return Err(rate_limited());
+    let missing_keys = keys
+        .iter()
+        .filter(|key| !buckets.contains_key(*key))
+        .count();
+    while buckets.len() + missing_keys > AUTH_RATE_LIMIT_MAX_BUCKETS {
+        let oldest = buckets
+            .iter()
+            .filter(|(key, _)| !keys.contains(key))
+            .min_by_key(|(_, bucket)| bucket.front().copied())
+            .map(|(key, _)| key.clone());
+        if let Some(key) = oldest {
+            buckets.remove(&key);
+        } else {
+            break;
+        }
     }
 
     for (key, limit) in keys.iter().zip([ip_limit, username_limit]) {
@@ -229,13 +244,11 @@ pub async fn login(
         .get("user-agent")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    let client_ip = request
-        .connection_info()
-        .realip_remote_addr()
-        .map(str::to_owned);
-    sessions::create_session(
+    let client_ip = request.peer_addr().map(|address| address.ip().to_string());
+    let created = sessions::create_session_if_password_unchanged(
         &state.pool,
         &user.id,
+        &user.password_hash,
         &token_hash,
         Utc::now()
             .checked_add_signed(Duration::seconds(ttl_i64))
@@ -244,6 +257,9 @@ pub async fn login(
         client_ip.as_deref(),
     )
     .await?;
+    if !created {
+        return Err(invalid_credentials());
+    }
     users::mark_login(&state.pool, &user.id).await?;
 
     Ok(HttpResponse::Ok()
@@ -288,6 +304,7 @@ pub async fn change_password(
         .ok_or_else(internal_auth_error)?;
     let current = payload.current_password.clone();
     let current_hash = record.password_hash;
+    let expected_password_hash = current_hash.clone();
     let verified = run_argon2(&state, move || verify_password(&current, &current_hash))
         .await
         .map_err(|_| invalid_credentials())?;
@@ -300,19 +317,40 @@ pub async fn change_password(
     }
     let new_password = payload.new_password.clone();
     let new_hash = run_argon2(&state, move || hash_password(&new_password)).await?;
-    users::change_password(&state.pool, &user.0.id, &new_hash).await?;
-
-    if let Some(cookie) = request.cookie(SESSION_COOKIE_NAME) {
-        sessions::revoke_others_for_user(
-            &state.pool,
-            &user.0.id,
-            &hash_session_token(cookie.value()),
-        )
-        .await?;
-    } else {
-        sessions::revoke_all_for_user(&state.pool, &user.0.id).await?;
+    let token = generate_session_token();
+    let token_hash = hash_session_token(&token);
+    let ttl = state.auth.session_ttl_seconds;
+    let expires_at = Utc::now()
+        .checked_add_signed(Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX)))
+        .ok_or_else(internal_auth_error)?;
+    let user_agent = request
+        .headers()
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok());
+    let client_ip = request.peer_addr().map(|address| address.ip().to_string());
+    let changed = sessions::change_password_and_replace_sessions(
+        &state.pool,
+        &user.0.id,
+        &expected_password_hash,
+        &new_hash,
+        ReplacementSession {
+            token_hash: &token_hash,
+            expires_at,
+            user_agent,
+            client_ip: client_ip.as_deref(),
+        },
+    )
+    .await?;
+    if !changed {
+        return Err(AppError::api(
+            StatusCode::CONFLICT,
+            "PASSWORD_CHANGED_CONCURRENTLY",
+            "密码已被其他请求修改，请重新登录",
+        ));
     }
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::NoContent()
+        .cookie(session_cookie(token, ttl, state.auth.session_cookie_secure))
+        .finish())
 }
 
 #[post("/auth/logout-all")]
@@ -324,4 +362,25 @@ pub async fn logout_all(
     Ok(HttpResponse::NoContent()
         .cookie(cleared_session_cookie(state.auth.session_cookie_secure))
         .finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use actix_web::test as actix_test;
+
+    use super::auth_rate_limit_keys;
+
+    #[test]
+    fn rate_limit_uses_socket_peer_and_bounds_invalid_username_keys() {
+        let request = actix_test::TestRequest::default()
+            .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234))
+            .insert_header(("x-forwarded-for", "203.0.113.10"))
+            .to_http_request();
+        let keys = auth_rate_limit_keys(&request, "login", &"x".repeat(10_000));
+        assert_eq!(keys[0], "login:ip:127.0.0.1");
+        assert_eq!(keys[1], "login:username:<invalid>");
+        assert!(!keys.iter().any(|key| key.contains("203.0.113.10")));
+    }
 }

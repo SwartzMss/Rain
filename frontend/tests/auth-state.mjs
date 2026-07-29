@@ -34,6 +34,7 @@ try {
   );
   assert.match(apiClient, /credentials:\s*'include'/);
   assert.match(apiClient, /xhr\.withCredentials\s*=\s*true/);
+  assert.match(apiClient, /xhr\.status === 401/);
   assert.match(apiClient, /payload\.message/);
   assert.match(apiClient, /rain:authentication-required/);
 
@@ -84,10 +85,14 @@ try {
     new URL('../src/features/files/FilesView.tsx', import.meta.url),
     'utf8'
   );
-  assert.match(filesView, /rain\.pendingSavedSearch/);
+  assert.match(filesView, /takePendingSavedSearch/);
   assert.match(filesView, /保存搜索条件/);
   assert.match(filesView, /我的搜索条件/);
   assert.match(filesView, /markSavedSearchUsed/);
+  assert.match(filesView, /编辑搜索条件/);
+  assert.match(filesView, /搜索表达式/);
+  assert.match(filesView, /is_pinned/);
+  assert.match(filesView, /sort_order/);
 } finally {
   await server.close();
 }

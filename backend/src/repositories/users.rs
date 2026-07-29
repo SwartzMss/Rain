@@ -11,6 +11,7 @@ pub struct UserRecord {
     pub password_hash: String,
     pub status: String,
     pub role: String,
+    pub password_changed_at: Option<String>,
 }
 
 #[derive(Debug)]
@@ -54,7 +55,7 @@ pub async fn find_by_normalized_username(
     username_normalized: &str,
 ) -> Result<Option<UserRecord>, AppError> {
     sqlx::query_as(
-        "SELECT id, username, username_normalized, password_hash, status, role FROM users WHERE username_normalized = ?",
+        "SELECT id, username, username_normalized, password_hash, status, role, password_changed_at FROM users WHERE username_normalized = ?",
     )
     .bind(username_normalized)
     .fetch_optional(pool)
@@ -64,7 +65,7 @@ pub async fn find_by_normalized_username(
 
 pub async fn find_by_id(pool: &SqlitePool, id: &str) -> Result<Option<UserRecord>, AppError> {
     sqlx::query_as(
-        "SELECT id, username, username_normalized, password_hash, status, role FROM users WHERE id = ?",
+        "SELECT id, username, username_normalized, password_hash, status, role, password_changed_at FROM users WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -76,22 +77,6 @@ pub async fn mark_login(pool: &SqlitePool, id: &str) -> Result<(), AppError> {
     sqlx::query(
         "UPDATE users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     )
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
-    Ok(())
-}
-
-pub async fn change_password(
-    pool: &SqlitePool,
-    id: &str,
-    password_hash: &str,
-) -> Result<(), AppError> {
-    sqlx::query(
-        "UPDATE users SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-    )
-    .bind(password_hash)
     .bind(id)
     .execute(pool)
     .await
