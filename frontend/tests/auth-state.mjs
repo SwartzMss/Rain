@@ -50,6 +50,33 @@ try {
     'utf8'
   );
   assert.match(main, /<AuthProvider>/);
+
+  const homeView = await readFile(
+    new URL('../src/features/files/HomeView.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(homeView, /const canWrite = auth\.state\.status === 'AUTHENTICATED'/);
+  assert.match(homeView, /canWrite={canWrite}/);
+
+  const issueSelector = await readFile(
+    new URL('../src/features/files/components/IssueSelector.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(issueSelector, /canWrite \? \(/);
+  assert.match(issueSelector, /登录后可新建/);
+
+  const uploadPanel = await readFile(
+    new URL('../src/features/files/components/UploadPanel.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(uploadPanel, /只读模式：登录后可上传/);
+
+  const uploadFileTable = await readFile(
+    new URL('../src/features/files/components/UploadFileTable.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(uploadFileTable, /canWrite && row\.stage !== 'UPLOADING'/);
+  assert.match(uploadFileTable, /登录后可删除/);
 } finally {
   await server.close();
 }

@@ -829,7 +829,6 @@ async fn upload_search_tree_and_delete_issue() {
                 "from": 0,
                 "size": 50
             }))
-            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -888,7 +887,6 @@ async fn upload_search_tree_and_delete_issue() {
                 "from": 0,
                 "size": 50
             }))
-            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -903,7 +901,6 @@ async fn upload_search_tree_and_delete_issue() {
                 "bundle_hash": bundle_hash,
                 "file_id": app_file_id
             }))
-            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -927,7 +924,6 @@ async fn upload_search_tree_and_delete_issue() {
                 "bundle_hash": bundle_hash,
                 "file_id": app_file_id
             }))
-            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -964,6 +960,18 @@ async fn upload_search_tree_and_delete_issue() {
     assert_eq!(
         temporary_download,
         "ERROR smoke works requestId=abcdef123456 中文连续文本\n"
+    );
+
+    let guest_delete_temporary_result = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/api/temp-results/{temporary_result_id}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        guest_delete_temporary_result.status(),
+        StatusCode::UNAUTHORIZED
     );
 
     let delete_temporary_result = test::call_service(

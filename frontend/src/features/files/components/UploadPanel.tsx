@@ -4,6 +4,7 @@ import type { UploadTaskResponse } from '../../../api/types';
 type UploadPanelProps = {
   activeTask: UploadTaskResponse | null;
   currentIssueCode: string;
+  canWrite: boolean;
   fileInputRef: RefObject<HTMLInputElement>;
   onFilesSelected: (files: File[]) => void;
   uploadDisabled: boolean;
@@ -15,6 +16,7 @@ type UploadPanelProps = {
 export function UploadPanel({
   activeTask,
   currentIssueCode,
+  canWrite,
   fileInputRef,
   onFilesSelected,
   uploadDisabled,
@@ -36,7 +38,7 @@ export function UploadPanel({
         className="hidden"
         disabled={uploadDisabled}
         onChange={(event) => {
-          if (uploadDisabled || uploadingRef.current) return;
+          if (!canWrite || uploadDisabled || uploadingRef.current) return;
           const files = event.target.files;
           if (files?.length) {
             onFilesSelected(Array.from(files));
@@ -50,7 +52,7 @@ export function UploadPanel({
         className="flex min-h-28 items-center justify-between gap-4 rounded-xl border border-dashed border-slate-300 bg-gradient-to-br from-slate-50 to-sky-50/50 px-5 py-4 text-sm transition hover:border-sky-400 hover:shadow-[inset_0_0_0_1px_rgba(6,182,212,0.08)] aria-disabled:opacity-60"
         aria-disabled={uploadDisabled}
         onClick={() => {
-          if (!uploadDisabled && !uploadingRef.current) {
+          if (canWrite && !uploadDisabled && !uploadingRef.current) {
             fileInputRef.current?.click();
           }
         }}
@@ -61,7 +63,7 @@ export function UploadPanel({
         onDrop={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          if (uploadDisabled || uploadingRef.current) return;
+          if (!canWrite || uploadDisabled || uploadingRef.current) return;
           if (event.dataTransfer.files.length) {
             onFilesSelected(Array.from(event.dataTransfer.files));
           }
@@ -73,7 +75,9 @@ export function UploadPanel({
           </div>
           <div>
             <p className="font-semibold text-slate-950">
-              {!currentIssueCode
+              {!canWrite
+                ? '只读模式：登录后可上传'
+                : !currentIssueCode
                 ? '先选择或新建 Issue'
                 : uploading
                   ? '处理中'
@@ -82,20 +86,22 @@ export function UploadPanel({
                     : '拖拽日志文件到这里，或点击选择文件'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              支持 .log、.txt、.zip、.tar.gz、.tgz、.gz，单个文件最大 512 MB
+              {canWrite
+                ? '支持 .log、.txt、.zip、.tar.gz、.tgz、.gz，单个文件最大 512 MB'
+                : '游客可以查看、下载和搜索，不能上传或修改 Issue。'}
             </p>
           </div>
         </div>
         <button
           type="button"
           className="shrink-0 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-sky-900/15 transition hover:-translate-y-0.5 hover:bg-sky-500 disabled:opacity-60"
-          disabled={uploadDisabled}
+          disabled={!canWrite || uploadDisabled}
           onClick={(event) => {
             event.stopPropagation();
-            if (!uploadDisabled) fileInputRef.current?.click();
+            if (canWrite && !uploadDisabled) fileInputRef.current?.click();
           }}
         >
-          {uploading || activeTask ? '处理中' : '选择文件'}
+          {!canWrite ? '需要登录' : uploading || activeTask ? '处理中' : '选择文件'}
         </button>
       </div>
       {uploadError ? <p className="text-sm text-rose-600">{uploadError}</p> : null}

@@ -115,7 +115,6 @@ struct MaterializedPreviewResponse {
 
 #[post("/temp-results/preview")]
 pub async fn preview_temp_result(
-    _user: RequireUser,
     payload: web::Json<PreviewTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
@@ -220,7 +219,6 @@ pub async fn preview_temp_result(
 
 #[post("/temp-results")]
 pub async fn create_temp_result(
-    _user: RequireUser,
     payload: web::Json<CreateTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {

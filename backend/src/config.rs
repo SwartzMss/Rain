@@ -107,6 +107,8 @@ pub struct AuthConfig {
     pub register_rate_limit_per_minute: usize,
 }
 
+const MAX_SESSION_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
@@ -154,6 +156,11 @@ impl AuthConfig {
                 "RAIN_SESSION_TTL_SECONDS must be positive".into(),
             ));
         }
+        if self.session_ttl_seconds > MAX_SESSION_TTL_SECONDS {
+            return Err(AppError::Config(format!(
+                "RAIN_SESSION_TTL_SECONDS must not exceed {MAX_SESSION_TTL_SECONDS}"
+            )));
+        }
         if self.argon2_concurrency == 0 {
             return Err(AppError::Config(
                 "RAIN_AUTH_ARGON2_CONCURRENCY must be positive".into(),
@@ -168,6 +175,64 @@ impl AuthConfig {
             return Err(AppError::Config(
                 "RAIN_AUTH_REGISTER_RATE_LIMIT_PER_MINUTE must be positive".into(),
             ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CorsConfig {
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allowed_origins: vec![
+                "http://localhost:8078".into(),
+                "http://127.0.0.1:8078".into(),
+            ],
+        }
+    }
+}
+
+impl CorsConfig {
+    fn from_env() -> Result<Self, AppError> {
+        let defaults = Self::default();
+        let raw = env::var("RAIN_ALLOWED_ORIGINS").ok();
+        let allowed_origins = raw
+            .as_deref()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or(defaults.allowed_origins);
+        let config = Self { allowed_origins };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.allowed_origins.is_empty() {
+            return Err(AppError::Config(
+                "RAIN_ALLOWED_ORIGINS must contain at least one origin".into(),
+            ));
+        }
+        for origin in &self.allowed_origins {
+            if origin == "*" {
+                return Err(AppError::Config(
+                    "RAIN_ALLOWED_ORIGINS must not use '*' when credentials are enabled".into(),
+                ));
+            }
+            if !(origin.starts_with("http://") || origin.starts_with("https://")) {
+                return Err(AppError::Config(format!(
+                    "RAIN_ALLOWED_ORIGINS entry '{origin}' must start with http:// or https://"
+                )));
+            }
         }
         Ok(())
     }
@@ -375,6 +440,7 @@ pub struct AppConfig {
     pub retention_days: Option<u64>,
     pub limits: AppLimits,
     pub auth: AuthConfig,
+    pub cors: CorsConfig,
 }
 
 impl AppConfig {
@@ -412,6 +478,7 @@ impl AppConfig {
 
         let limits = AppLimits::from_env()?;
         let auth = AuthConfig::from_env()?;
+        let cors = CorsConfig::from_env()?;
 
         Ok(Self {
             host,
@@ -423,6 +490,7 @@ impl AppConfig {
             retention_days,
             limits,
             auth,
+            cors,
         })
     }
 }
@@ -432,7 +500,8 @@ mod tests {
     use std::{path::Path, sync::Mutex};
 
     use super::{
-        AppLimits, ArchiveConfig, AuthConfig, dotenv_path_for_executable, parse_byte_size,
+        AppLimits, ArchiveConfig, AuthConfig, CorsConfig, dotenv_path_for_executable,
+        parse_byte_size,
     };
 
     #[test]
@@ -493,6 +562,36 @@ mod tests {
                 .to_string()
                 .contains("RAIN_SESSION_TTL_SECONDS")
         );
+    }
+
+    #[test]
+    fn rejects_excessive_session_ttl() {
+        let auth = AuthConfig {
+            session_ttl_seconds: u64::MAX,
+            ..AuthConfig::default()
+        };
+        assert!(
+            auth.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_SESSION_TTL_SECONDS")
+        );
+    }
+
+    #[test]
+    fn cors_defaults_are_explicit_and_reject_wildcards() {
+        let cors = CorsConfig::default();
+        assert!(cors.validate().is_ok());
+        assert!(
+            cors.allowed_origins
+                .iter()
+                .any(|origin| origin.contains("localhost"))
+        );
+
+        let wildcard = CorsConfig {
+            allowed_origins: vec!["*".into()],
+        };
+        assert!(wildcard.validate().is_err());
     }
 
     #[test]

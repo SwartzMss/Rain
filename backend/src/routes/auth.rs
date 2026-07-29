@@ -63,33 +63,60 @@ fn rate_limited() -> AppError {
     )
 }
 
-fn auth_rate_limit_key(request: &HttpRequest, action: &str, username: &str) -> String {
+const AUTH_RATE_LIMIT_WINDOW: StdDuration = StdDuration::from_secs(60);
+const AUTH_RATE_LIMIT_MAX_BUCKETS: usize = 1024;
+
+fn auth_rate_limit_keys(request: &HttpRequest, action: &str, username: &str) -> [String; 2] {
     let client = request
         .connection_info()
         .realip_remote_addr()
         .unwrap_or("unknown")
         .to_owned();
-    format!("{action}:{client}:{}", normalize_username(username))
+    [
+        format!("{action}:ip:{client}"),
+        format!("{action}:username:{}", normalize_username(username)),
+    ]
 }
 
-fn check_auth_rate_limit(state: &AppState, key: String, limit: usize) -> Result<(), AppError> {
+fn check_auth_rate_limit(
+    state: &AppState,
+    keys: [String; 2],
+    ip_limit: usize,
+    username_limit: usize,
+) -> Result<(), AppError> {
     let now = Instant::now();
-    let window = StdDuration::from_secs(60);
     let mut buckets = state
         .auth_rate_limits
         .lock()
         .map_err(|_| internal_auth_error())?;
-    let bucket = buckets.entry(key).or_default();
-    while bucket
-        .front()
-        .is_some_and(|timestamp| now.duration_since(*timestamp) >= window)
+
+    buckets.retain(|_, bucket| {
+        while bucket
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) >= AUTH_RATE_LIMIT_WINDOW)
+        {
+            bucket.pop_front();
+        }
+        !bucket.is_empty()
+    });
+
+    if buckets.len() >= AUTH_RATE_LIMIT_MAX_BUCKETS
+        && keys.iter().any(|key| !buckets.contains_key(key))
     {
-        bucket.pop_front();
-    }
-    if bucket.len() >= limit {
         return Err(rate_limited());
     }
-    bucket.push_back(now);
+
+    for (key, limit) in keys.iter().zip([ip_limit, username_limit]) {
+        let bucket = buckets.entry(key.clone()).or_default();
+        if bucket.len() >= limit {
+            return Err(rate_limited());
+        }
+    }
+    for key in keys {
+        if let Some(bucket) = buckets.get_mut(&key) {
+            bucket.push_back(now);
+        }
+    }
     Ok(())
 }
 
@@ -101,9 +128,8 @@ where
     let permit = state
         .auth_hash_permits
         .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| internal_auth_error())?;
+        .try_acquire_owned()
+        .map_err(|_| rate_limited())?;
     web::block(move || {
         let _permit = permit;
         operation()
@@ -128,7 +154,8 @@ pub async fn register_user(
 ) -> Result<HttpResponse, AppError> {
     check_auth_rate_limit(
         &state,
-        auth_rate_limit_key(&request, "register", &payload.username),
+        auth_rate_limit_keys(&request, "register", &payload.username),
+        state.auth.register_rate_limit_per_minute,
         state.auth.register_rate_limit_per_minute,
     )?;
     validate_username(&payload.username).map_err(validation_error)?;
@@ -157,7 +184,8 @@ pub async fn login(
 ) -> Result<HttpResponse, AppError> {
     check_auth_rate_limit(
         &state,
-        auth_rate_limit_key(&request, "login", &payload.username),
+        auth_rate_limit_keys(&request, "login", &payload.username),
+        state.auth.login_rate_limit_per_minute,
         state.auth.login_rate_limit_per_minute,
     )?;
     if validate_username(&payload.username).is_err()
@@ -202,7 +230,9 @@ pub async fn login(
         &state.pool,
         &user.id,
         &token_hash,
-        Utc::now() + Duration::seconds(ttl_i64),
+        Utc::now()
+            .checked_add_signed(Duration::seconds(ttl_i64))
+            .ok_or_else(internal_auth_error)?,
         user_agent.as_deref(),
         client_ip.as_deref(),
     )

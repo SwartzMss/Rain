@@ -182,11 +182,16 @@ Rain 支持用户名和密码注册、登录、查询当前身份和退出登录
 
 ```dotenv
 RAIN_SESSION_COOKIE_SECURE=true
+RAIN_ALLOWED_ORIGINS=https://rain.example.com
 ```
 
-本次认证基础功能尚未限制现有创建 Issue、上传和删除接口；游客只读权限将在
-Issue #25 的后续阶段加入。在该阶段完成前，不应把“只读模式”的前端提示视为后端
-安全边界。
+游客可以查看、下载和搜索；创建 Issue、上传、删除 Issue、删除 Bundle、删除文件节点
+以及删除临时搜索结果需要登录。详细搜索会生成可过期清理的临时结果文件，但仍属于
+游客可用的搜索流程。
+
+登录和注册接口默认启用 60 秒窗口限流，并限制 Argon2 并发，避免公开认证入口耗尽
+CPU 或 Actix blocking pool。跨域部署时需要通过 `RAIN_ALLOWED_ORIGINS` 显式配置
+允许携带认证 Cookie 的前端 Origin；不支持 `*`。
 
 ## 当前支持
 
