@@ -118,10 +118,11 @@ async fn main() -> std::io::Result<()> {
     info!(limits = ?config.limits, "effective application limits");
     spawn_blob_gc(pool.clone(), blob_store.clone());
     spawn_blob_audit(pool.clone(), blob_store.clone());
-    let shared_state = web::Data::new(AppState::with_blob_store(
+    let shared_state = web::Data::new(AppState::with_blob_store_and_auth(
         pool,
         config.data_root.clone(),
         config.limits.clone(),
+        config.auth.clone(),
         blob_store,
     ));
 

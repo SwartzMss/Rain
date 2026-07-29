@@ -16,12 +16,13 @@ use sqlx::SqlitePool;
 use tokio::sync::Semaphore;
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
-use crate::config::AppLimits;
+use crate::config::{AppLimits, AuthConfig};
 
 pub struct AppState {
     pub pool: SqlitePool,
     pub data_root: PathBuf,
     pub limits: AppLimits,
+    pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
     pub blob_store: Arc<dyn BlobStore>,
 }
@@ -29,7 +30,13 @@ pub struct AppState {
 impl AppState {
     pub fn new(pool: SqlitePool, data_root: PathBuf, limits: AppLimits) -> Self {
         let blob_store = Arc::new(LocalCasBlobStore::new(data_root.clone()));
-        Self::with_blob_store(pool, data_root, limits, blob_store)
+        Self::with_blob_store_and_auth(
+            pool,
+            data_root,
+            limits,
+            AuthConfig::default(),
+            blob_store,
+        )
     }
 
     pub fn with_blob_store(
@@ -38,12 +45,29 @@ impl AppState {
         limits: AppLimits,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
+        Self::with_blob_store_and_auth(
+            pool,
+            data_root,
+            limits,
+            AuthConfig::default(),
+            blob_store,
+        )
+    }
+
+    pub fn with_blob_store_and_auth(
+        pool: SqlitePool,
+        data_root: PathBuf,
+        limits: AppLimits,
+        auth: AuthConfig,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Self {
         let processing_permits =
             Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
         Self {
             pool,
             data_root,
             limits,
+            auth,
             processing_permits,
             blob_store,
         }

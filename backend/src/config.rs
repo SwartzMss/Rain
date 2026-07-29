@@ -98,6 +98,48 @@ pub struct AppLimits {
     pub api: ApiConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthConfig {
+    pub session_ttl_seconds: u64,
+    pub session_cookie_secure: bool,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            session_ttl_seconds: 604_800,
+            session_cookie_secure: false,
+        }
+    }
+}
+
+impl AuthConfig {
+    fn from_env() -> Result<Self, AppError> {
+        let defaults = Self::default();
+        let config = Self {
+            session_ttl_seconds: env_value(
+                "RAIN_SESSION_TTL_SECONDS",
+                defaults.session_ttl_seconds,
+            )?,
+            session_cookie_secure: env_value(
+                "RAIN_SESSION_COOKIE_SECURE",
+                defaults.session_cookie_secure,
+            )?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.session_ttl_seconds == 0 {
+            return Err(AppError::Config(
+                "RAIN_SESSION_TTL_SECONDS must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for AppLimits {
     fn default() -> Self {
         Self {
@@ -299,6 +341,7 @@ pub struct AppConfig {
     pub reset_db: bool,
     pub retention_days: Option<u64>,
     pub limits: AppLimits,
+    pub auth: AuthConfig,
 }
 
 impl AppConfig {
@@ -335,6 +378,7 @@ impl AppConfig {
         };
 
         let limits = AppLimits::from_env()?;
+        let auth = AuthConfig::from_env()?;
 
         Ok(Self {
             host,
@@ -345,6 +389,7 @@ impl AppConfig {
             reset_db,
             retention_days,
             limits,
+            auth,
         })
     }
 }
@@ -353,7 +398,9 @@ impl AppConfig {
 mod tests {
     use std::{path::Path, sync::Mutex};
 
-    use super::{AppLimits, ArchiveConfig, dotenv_path_for_executable, parse_byte_size};
+    use super::{
+        AppLimits, ArchiveConfig, AuthConfig, dotenv_path_for_executable, parse_byte_size,
+    };
 
     #[test]
     fn resolves_dotenv_next_to_executable() {
@@ -390,6 +437,26 @@ mod tests {
         assert_eq!(limits.api.max_preview_line_size, 8 * 1024_u64.pow(2));
         assert_eq!(limits.api.default_line_page_size, 5_000);
         assert_eq!(limits.api.max_line_page_size, 10_000);
+    }
+
+    #[test]
+    fn auth_defaults_and_validation_are_safe() {
+        let auth = AuthConfig::default();
+        assert_eq!(auth.session_ttl_seconds, 604_800);
+        assert!(!auth.session_cookie_secure);
+        assert!(auth.validate().is_ok());
+
+        let invalid = AuthConfig {
+            session_ttl_seconds: 0,
+            ..AuthConfig::default()
+        };
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_SESSION_TTL_SECONDS")
+        );
     }
 
     #[test]
