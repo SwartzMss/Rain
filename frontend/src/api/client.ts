@@ -11,7 +11,10 @@ import type {
   TempResultLinesResponse,
   TempResultPreviewResponse,
   UploadResponse,
-  UploadTaskResponse
+  UploadTaskResponse,
+  AuthMeResponse,
+  Credentials,
+  User
 } from './types';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || window.location.origin).replace(/\/$/, '');
@@ -40,7 +43,10 @@ const encodePathSegment = (value: string) => encodeURIComponent(value);
 function parseErrorResponse(text: string, status: number): string {
   let message = text;
   try {
-    const payload = JSON.parse(text) as { error?: unknown };
+    const payload = JSON.parse(text) as { error?: unknown; message?: unknown };
+    if (typeof payload.message === 'string' && payload.message.trim()) {
+      message = payload.message;
+    }
     if (typeof payload.error === 'string' && payload.error.trim()) {
       message = payload.error;
     }
@@ -66,8 +72,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
       headers,
-      ...init
+      credentials: 'include'
     });
   } catch (error) {
     throw new Error(normalizeApiError(error));
@@ -87,6 +94,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const rainApi = {
+  register(payload: Credentials) {
+    return request<User>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  login(payload: Credentials) {
+    return request<User>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  me() {
+    return request<AuthMeResponse>('/api/auth/me');
+  },
+  logout() {
+    return request<void>('/api/auth/logout', { method: 'POST' });
+  },
   fetchIssues() {
     return request<IssueSummary[]>(`/api/issues`);
   },
@@ -189,6 +214,7 @@ export const rainApi = {
     return new Promise<UploadResponse>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${API_BASE_URL}${path}`);
+      xhr.withCredentials = true;
       xhr.timeout = 30 * 60 * 1000;
       xhr.setRequestHeader('Accept', 'application/json');
       xhr.upload.onprogress = (event) => {

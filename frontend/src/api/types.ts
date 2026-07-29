@@ -1,6 +1,21 @@
 export type UploadStatus = 'READY' | 'PROCESSING' | 'FAILED' | 'PENDING';
 export type UploadStage = 'PENDING' | 'RECEIVING' | 'EXTRACTING' | 'INDEXING' | 'PUBLISHING' | 'READY' | 'FAILED';
 
+export interface User {
+  id: string;
+  username: string;
+}
+
+export interface Credentials {
+  username: string;
+  password: string;
+}
+
+export interface AuthMeResponse {
+  authenticated: boolean;
+  user: User | null;
+}
+
 export interface UploadSummary {
   hash: string;
   name: string;
