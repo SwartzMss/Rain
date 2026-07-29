@@ -32,6 +32,17 @@ try {
   assert.deepEqual(restored, pending);
   assert.equal(values.has(PENDING_SAVED_SEARCH_KEY), false);
   assert.equal(restored.options.tokens[0].value, 'ERROR');
+
+  for (const corrupted of [
+    { ...pending, query_text: 42 },
+    { ...pending, options: null },
+    { ...pending, options: {} },
+    { ...pending, scope_key: 42 }
+  ]) {
+    values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(corrupted));
+    assert.equal(takePendingSavedSearch(storage, true, 'CN013'), null);
+    assert.equal(values.has(PENDING_SAVED_SEARCH_KEY), false);
+  }
 } finally {
   await server.close();
 }

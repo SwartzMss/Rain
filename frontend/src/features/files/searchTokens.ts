@@ -149,6 +149,48 @@ export function serializeSearchTokens(tokens: SearchToken[]): string {
     .join(' ');
 }
 
+export function deserializeSearchTokens(expression: string): SearchToken[] {
+  const tokens: SearchToken[] = [];
+  let index = 0;
+  while (index < expression.length) {
+    while (/\s/.test(expression[index] ?? '')) index += 1;
+    if (index >= expression.length) break;
+    if (expression[index] === '"') {
+      index += 1;
+      let value = '';
+      let closed = false;
+      while (index < expression.length) {
+        const character = expression[index];
+        index += 1;
+        if (character === '"') {
+          closed = true;
+          break;
+        }
+        if (character === '\\') {
+          if (index >= expression.length) throw new Error('搜索表达式转义不完整');
+          value += expression[index];
+          index += 1;
+        } else {
+          value += character;
+        }
+      }
+      if (!closed || !value.trim()) throw new Error('搜索表达式中的关键词无效');
+      tokens.push({ kind: 'term', value });
+      continue;
+    }
+    const start = index;
+    while (index < expression.length && !/\s/.test(expression[index])) index += 1;
+    const operator = expression.slice(start, index);
+    if (!['AND', 'OR', 'NOT'].includes(operator)) {
+      throw new Error(`无法识别搜索表达式片段：${operator}`);
+    }
+    tokens.push({ kind: 'operator', value: operator as SearchOperator });
+  }
+  const validation = validateSearchTokens(tokens);
+  if (!validation.valid) throw new Error(validation.message);
+  return tokens;
+}
+
 export function formatSearchTokens(tokens: SearchToken[]): string {
   return tokens.map((token) => token.value).join(' ');
 }

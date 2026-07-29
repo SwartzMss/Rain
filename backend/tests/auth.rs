@@ -554,3 +554,33 @@ async fn invalid_session_cookie_is_cleared_from_the_browser() {
             .any(|value| value.contains("rain_session=") && value.contains("Max-Age=0"))
     );
 }
+
+#[actix_web::test]
+async fn saturated_argon2_capacity_returns_rate_limit_instead_of_bad_credentials() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    let _permit = state
+        .auth_hash_permits
+        .clone()
+        .acquire_many_owned(state.auth.argon2_concurrency as u32)
+        .await
+        .expect("argon2 permit");
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(routes::register),
+    )
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "missing-user", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "AUTH_RATE_LIMITED");
+}

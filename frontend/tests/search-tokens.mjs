@@ -19,6 +19,7 @@ try {
     appendSearchOperator,
     appendSearchTerm,
     combineSearchExpressions,
+    deserializeSearchTokens,
     finalizeSearchTokens,
     removeSearchToken,
     serializeSearchTokens,
@@ -45,6 +46,11 @@ try {
   booleanTokens = appendSearchOperator(booleanTokens, 'NOT');
   booleanTokens = appendSearchTerm(booleanTokens, 'request timeout');
   assert.equal(serializeSearchTokens(booleanTokens), '"ERROR" OR NOT "request timeout"');
+  assert.deepEqual(
+    deserializeSearchTokens('"ERROR" OR NOT "request timeout"'),
+    booleanTokens
+  );
+  assert.throws(() => deserializeSearchTokens('(ERROR OR WARN)'));
 
   assert.deepEqual(validateSearchTokens([{ kind: 'operator', value: 'AND' }]), {
     valid: false,

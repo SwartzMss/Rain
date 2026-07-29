@@ -77,16 +77,32 @@ pub async fn change_password_and_replace_sessions(
     pool: &SqlitePool,
     user_id: &str,
     expected_password_hash: &str,
+    current_token_hash: &str,
     new_password_hash: &str,
     replacement: ReplacementSession<'_>,
 ) -> Result<bool, AppError> {
     let mut transaction = pool.begin().await.map_err(AppError::Database)?;
     let updated = sqlx::query(
-        "UPDATE users SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND password_hash = ?",
+        r#"
+        UPDATE users
+        SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND password_hash = ?
+          AND status = 'ACTIVE'
+          AND EXISTS (
+              SELECT 1
+              FROM user_sessions
+              WHERE user_sessions.user_id = users.id
+                AND user_sessions.token_hash = ?
+                AND user_sessions.revoked_at IS NULL
+                AND datetime(user_sessions.expires_at) > CURRENT_TIMESTAMP
+          )
+        "#,
     )
     .bind(new_password_hash)
     .bind(user_id)
     .bind(expected_password_hash)
+    .bind(current_token_hash)
     .execute(&mut *transaction)
     .await
     .map_err(AppError::Database)?
@@ -230,8 +246,9 @@ mod tests {
     use crate::{db, repositories::users};
 
     use super::{
-        cleanup_expired_or_revoked, create_session, create_session_if_password_unchanged,
-        resolve_active_user, revoke_by_token_hash,
+        ReplacementSession, change_password_and_replace_sessions, cleanup_expired_or_revoked,
+        create_session, create_session_if_password_unchanged, resolve_active_user,
+        revoke_by_token_hash,
     };
 
     #[tokio::test]
@@ -363,5 +380,61 @@ mod tests {
         .await
         .expect("conditional session");
         assert!(!created);
+    }
+
+    #[tokio::test]
+    async fn password_change_cannot_replace_a_revoked_current_session() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "LoggedOut", "old-hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        create_session(
+            &pool,
+            &user.id,
+            "current-token",
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("session");
+        revoke_by_token_hash(&pool, "current-token")
+            .await
+            .expect("logout all");
+        let changed = change_password_and_replace_sessions(
+            &pool,
+            &user.id,
+            "old-hash",
+            "current-token",
+            "new-hash",
+            ReplacementSession {
+                token_hash: "replacement-token",
+                expires_at: Utc::now() + Duration::hours(1),
+                user_agent: None,
+                client_ip: None,
+            },
+        )
+        .await
+        .expect("conditional password change");
+        assert!(!changed);
+        let password_hash: String =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+                .bind(&user.id)
+                .fetch_one(&pool)
+                .await
+                .expect("password");
+        assert_eq!(password_hash, "old-hash");
+        let replacement_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE token_hash = ?")
+                .bind("replacement-token")
+                .fetch_one(&pool)
+                .await
+                .expect("replacement count");
+        assert_eq!(replacement_count, 0);
     }
 }

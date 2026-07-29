@@ -155,9 +155,7 @@ where
 }
 
 async fn burn_dummy_argon2(state: &AppState, password: String) -> Result<(), AppError> {
-    let _ = run_argon2(state, move || verify_dummy_password(&password))
-        .await
-        .map_err(|_| invalid_credentials())?;
+    let _ = run_argon2(state, move || verify_dummy_password(&password)).await?;
     Ok(())
 }
 
@@ -228,9 +226,7 @@ pub async fn login(
 
     let password = payload.password.clone();
     let password_hash = user.password_hash.clone();
-    let verified = run_argon2(&state, move || verify_password(&password, &password_hash))
-        .await
-        .map_err(|_| invalid_credentials())?;
+    let verified = run_argon2(&state, move || verify_password(&password, &password_hash)).await?;
     if !verified {
         return Err(invalid_credentials());
     }
@@ -328,10 +324,15 @@ pub async fn change_password(
         .get("user-agent")
         .and_then(|value| value.to_str().ok());
     let client_ip = request.peer_addr().map(|address| address.ip().to_string());
+    let current_token_hash = request
+        .cookie(SESSION_COOKIE_NAME)
+        .map(|cookie| hash_session_token(cookie.value()))
+        .ok_or_else(AppError::authentication_required)?;
     let changed = sessions::change_password_and_replace_sessions(
         &state.pool,
         &user.0.id,
         &expected_password_hash,
+        &current_token_hash,
         &new_hash,
         ReplacementSession {
             token_hash: &token_hash,

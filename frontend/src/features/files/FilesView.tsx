@@ -14,6 +14,7 @@ import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { uploadFailureMessage } from './uploadFailure';
 import {
   canFinalizeSearch,
+  deserializeSearchTokens,
   finalizeSearchTokens,
   formatSearchTokens,
   getSearchTerms,
@@ -145,6 +146,8 @@ export function BundleView() {
   );
   const [savedSearchError, setSavedSearchError] = useState('');
   const [editingSavedSearch, setEditingSavedSearch] = useState<SavedSearch | null>(null);
+  const [editingSearchTokens, setEditingSearchTokens] = useState<SearchToken[]>([]);
+  const [editingSearchDraft, setEditingSearchDraft] = useState('');
   const [resultFilterTokens, setResultFilterTokens] = useState<SearchToken[]>([]);
   const [resultFilterDraft, setResultFilterDraft] = useState('');
   const [fileSearchTokens, setFileSearchTokens] = useState<SearchToken[]>([]);
@@ -326,20 +329,42 @@ export function BundleView() {
   const updateEditingSavedSearch = async () => {
     if (!editingSavedSearch) return;
     try {
+      const finalizedTokens = editingSavedSearch.search_type === 'DETAIL'
+        ? finalizeSearchTokens(editingSearchTokens, editingSearchDraft)
+        : [];
+      const queryText = editingSavedSearch.search_type === 'DETAIL'
+        ? serializeSearchTokens(finalizedTokens)
+        : editingSavedSearch.query_text.trim();
+      if (!queryText) throw new Error('搜索表达式不能为空');
       await rainApi.updateSavedSearch(editingSavedSearch.id, {
         name: editingSavedSearch.name.trim(),
         search_type: editingSavedSearch.search_type,
-        query_text: editingSavedSearch.query_text,
+        query_text: queryText,
         scope_type: editingSavedSearch.scope_type,
         scope_key: editingSavedSearch.scope_type === 'ISSUE'
           ? (editingSavedSearch.scope_key || issueCode)
           : null,
-        options: editingSavedSearch.options,
+        options: editingSavedSearch.search_type === 'DETAIL'
+          ? { version: 1, tokens: finalizedTokens }
+          : { version: 1 },
         is_pinned: editingSavedSearch.is_pinned,
         sort_order: editingSavedSearch.sort_order
       });
       setEditingSavedSearch(null);
       await loadSavedSearches();
+    } catch (error) {
+      setSavedSearchError(normalizeApiError(error));
+    }
+  };
+
+  const beginEditingSavedSearch = (item: SavedSearch) => {
+    try {
+      setEditingSearchTokens(
+        item.search_type === 'DETAIL' ? deserializeSearchTokens(item.query_text) : []
+      );
+      setEditingSearchDraft('');
+      setSavedSearchError('');
+      setEditingSavedSearch({ ...item });
     } catch (error) {
       setSavedSearchError(normalizeApiError(error));
     }
@@ -1312,7 +1337,7 @@ export function BundleView() {
                       <div className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate font-semibold">{item.is_pinned ? '★ ' : ''}{item.name}</span>
                         <button className="text-sky-700" type="button" onClick={() => void useSavedSearch(item).catch((error) => setSavedSearchError(normalizeApiError(error)))}>使用</button>
-                        <button className="text-slate-700" type="button" onClick={() => setEditingSavedSearch({ ...item })}>编辑</button>
+                        <button className="text-slate-700" type="button" onClick={() => beginEditingSavedSearch(item)}>编辑</button>
                         <button className="text-rose-700" type="button" onClick={() => void rainApi.deleteSavedSearch(item.id).then(loadSavedSearches).catch((error) => setSavedSearchError(normalizeApiError(error)))}>删除</button>
                       </div>
                       <p className="mt-1 truncate text-slate-500">{item.query_text}</p>
@@ -1691,13 +1716,31 @@ export function BundleView() {
               <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={editingSavedSearch.name} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, name: event.target.value })} />
             </label>
             <label className="block text-sm font-medium">搜索类型
-              <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={editingSavedSearch.search_type} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, search_type: event.target.value as 'FILENAME' | 'DETAIL' })}>
+              <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={editingSavedSearch.search_type} onChange={(event) => {
+                const searchType = event.target.value as 'FILENAME' | 'DETAIL';
+                setEditingSearchTokens([]);
+                setEditingSearchDraft('');
+                setEditingSavedSearch({ ...editingSavedSearch, search_type: searchType, query_text: '' });
+              }}>
                 <option value="FILENAME">文件名</option>
                 <option value="DETAIL">详细搜索</option>
               </select>
             </label>
             <label className="block text-sm font-medium">搜索表达式
-              <textarea className="mt-1 min-h-24 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm" maxLength={4096} value={editingSavedSearch.query_text} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, query_text: event.target.value, options: { version: 1 } })} />
+              {editingSavedSearch.search_type === 'DETAIL' ? (
+                <div className="mt-1 rounded-lg border border-slate-300 px-3 py-2">
+                  <SearchTokenEditor
+                    tokens={editingSearchTokens}
+                    draft={editingSearchDraft}
+                    onTokensChange={setEditingSearchTokens}
+                    onDraftChange={setEditingSearchDraft}
+                    placeholder="输入详细搜索关键词..."
+                    ariaLabel="编辑详细搜索条件"
+                  />
+                </div>
+              ) : (
+                <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={4096} value={editingSavedSearch.query_text} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, query_text: event.target.value })} />
+              )}
             </label>
             <label className="block text-sm font-medium">使用范围
               <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={editingSavedSearch.scope_type} onChange={(event) => {
