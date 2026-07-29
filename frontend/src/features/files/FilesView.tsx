@@ -8,6 +8,7 @@ import { SearchTokenEditor } from './SearchTokenEditor';
 import { canPreviewText, isArchiveNode, isBinaryNode } from './filePresentation';
 import { shouldShowFilenameClear } from './filenameSearch';
 import { getSearchHitSource } from './searchHitSource';
+import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { uploadFailureMessage } from './uploadFailure';
 import {
   canFinalizeSearch,
@@ -35,7 +36,6 @@ import { CodeLinesPane } from './components/CodeLinesPane';
 import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
 
-const LINE_PAGE_SIZE_OPTIONS = [1000, 3000] as const;
 const DEFAULT_TREE_PANEL_WIDTH = 330;
 const MIN_TREE_PANEL_WIDTH = 260;
 const MAX_TREE_PANEL_WIDTH = 560;
@@ -117,7 +117,7 @@ export function BundleView() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchExecuted, setSearchExecuted] = useState(false);
-  const [searchMode, setSearchMode] = useState<'log' | 'detailed'>('log');
+  const [searchMode, setSearchMode] = useState<'log' | 'detailed'>('detailed');
   const [resultFilterTokens, setResultFilterTokens] = useState<SearchToken[]>([]);
   const [resultFilterDraft, setResultFilterDraft] = useState('');
   const [fileSearchTokens, setFileSearchTokens] = useState<SearchToken[]>([]);

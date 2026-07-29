@@ -143,8 +143,8 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
 | `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
-| `RAIN_API_DEFAULT_LINE_PAGE_SIZE` | `1000` | 默认行分页大小 |
-| `RAIN_API_MAX_LINE_PAGE_SIZE` | `3000` | 最大行分页大小 |
+| `RAIN_API_DEFAULT_LINE_PAGE_SIZE` | `5000` | 默认行分页大小 |
+| `RAIN_API_MAX_LINE_PAGE_SIZE` | `10000` | 最大行分页大小 |
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
 

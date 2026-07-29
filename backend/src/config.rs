@@ -82,8 +82,8 @@ impl Default for ApiConfig {
         Self {
             file_preview_size: 64 * KIB,
             max_preview_line_size: 8 * MIB,
-            default_line_page_size: 1000,
-            max_line_page_size: 3000,
+            default_line_page_size: 5_000,
+            max_line_page_size: 10_000,
             default_search_results: 50,
             max_search_results: 100,
         }
@@ -388,6 +388,8 @@ mod tests {
         assert_eq!(limits.indexing.max_indexed_line_size, 256 * 1024);
         assert_eq!(limits.api.file_preview_size, 64 * 1024);
         assert_eq!(limits.api.max_preview_line_size, 8 * 1024_u64.pow(2));
+        assert_eq!(limits.api.default_line_page_size, 5_000);
+        assert_eq!(limits.api.max_line_page_size, 10_000);
     }
 
     #[test]

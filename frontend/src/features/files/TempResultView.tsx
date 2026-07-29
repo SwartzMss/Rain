@@ -2,8 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
 import type { TempResultInfo, TempResultLinesResponse } from '../../api/types';
-
-const PAGE_SIZES = [1000, 3000] as const;
+import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 
 export function TempResultView() {
   const { resultId = '' } = useParams<{ resultId: string }>();
@@ -11,7 +10,7 @@ export function TempResultView() {
   const [result, setResult] = useState<TempResultInfo | null>(null);
   const [lines, setLines] = useState<TempResultLinesResponse | null>(null);
   const [start, setStart] = useState(0);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES[0]);
+  const [pageSize, setPageSize] = useState<number>(LINE_PAGE_SIZE_OPTIONS[0]);
   const [expression, setExpression] = useState('');
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -129,7 +128,7 @@ export function TempResultView() {
                   setStart(0);
                 }}
               >
-                {PAGE_SIZES.map((size) => <option key={size} value={size}>{size} 行/页</option>)}
+                {LINE_PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} 行/页</option>)}
               </select>
               <span>第 {Math.floor(start / pageSize) + 1} / {Math.max(1, Math.ceil(lines.line_count / pageSize))} 页</span>
               <button

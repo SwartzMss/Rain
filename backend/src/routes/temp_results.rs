@@ -734,7 +734,7 @@ fn checked_temp_path(state: &web::Data<AppState>, stored_path: &str) -> Result<P
 }
 
 fn preview_page_size(requested: Option<i64>) -> i64 {
-    requested.unwrap_or(1_000).clamp(1, 3_000)
+    requested.unwrap_or(5_000).clamp(1, 10_000)
 }
 
 fn to_response(record: TempResultRecord) -> TempResult {
@@ -758,9 +758,10 @@ mod tests {
 
     #[test]
     fn preview_supports_log_viewer_page_sizes() {
-        assert_eq!(preview_page_size(Some(1_000)), 1_000);
-        assert_eq!(preview_page_size(Some(3_000)), 3_000);
-        assert_eq!(preview_page_size(Some(9_000)), 3_000);
+        assert_eq!(preview_page_size(None), 5_000);
+        assert_eq!(preview_page_size(Some(5_000)), 5_000);
+        assert_eq!(preview_page_size(Some(10_000)), 10_000);
+        assert_eq!(preview_page_size(Some(20_000)), 10_000);
     }
 
     #[test]
