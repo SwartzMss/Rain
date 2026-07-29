@@ -102,6 +102,9 @@ pub struct AppLimits {
 pub struct AuthConfig {
     pub session_ttl_seconds: u64,
     pub session_cookie_secure: bool,
+    pub argon2_concurrency: usize,
+    pub login_rate_limit_per_minute: usize,
+    pub register_rate_limit_per_minute: usize,
 }
 
 impl Default for AuthConfig {
@@ -109,6 +112,9 @@ impl Default for AuthConfig {
         Self {
             session_ttl_seconds: 604_800,
             session_cookie_secure: false,
+            argon2_concurrency: 2,
+            login_rate_limit_per_minute: 20,
+            register_rate_limit_per_minute: 5,
         }
     }
 }
@@ -125,6 +131,18 @@ impl AuthConfig {
                 "RAIN_SESSION_COOKIE_SECURE",
                 defaults.session_cookie_secure,
             )?,
+            argon2_concurrency: env_value(
+                "RAIN_AUTH_ARGON2_CONCURRENCY",
+                defaults.argon2_concurrency,
+            )?,
+            login_rate_limit_per_minute: env_value(
+                "RAIN_AUTH_LOGIN_RATE_LIMIT_PER_MINUTE",
+                defaults.login_rate_limit_per_minute,
+            )?,
+            register_rate_limit_per_minute: env_value(
+                "RAIN_AUTH_REGISTER_RATE_LIMIT_PER_MINUTE",
+                defaults.register_rate_limit_per_minute,
+            )?,
         };
         config.validate()?;
         Ok(config)
@@ -134,6 +152,21 @@ impl AuthConfig {
         if self.session_ttl_seconds == 0 {
             return Err(AppError::Config(
                 "RAIN_SESSION_TTL_SECONDS must be positive".into(),
+            ));
+        }
+        if self.argon2_concurrency == 0 {
+            return Err(AppError::Config(
+                "RAIN_AUTH_ARGON2_CONCURRENCY must be positive".into(),
+            ));
+        }
+        if self.login_rate_limit_per_minute == 0 {
+            return Err(AppError::Config(
+                "RAIN_AUTH_LOGIN_RATE_LIMIT_PER_MINUTE must be positive".into(),
+            ));
+        }
+        if self.register_rate_limit_per_minute == 0 {
+            return Err(AppError::Config(
+                "RAIN_AUTH_REGISTER_RATE_LIMIT_PER_MINUTE must be positive".into(),
             ));
         }
         Ok(())
@@ -444,6 +477,9 @@ mod tests {
         let auth = AuthConfig::default();
         assert_eq!(auth.session_ttl_seconds, 604_800);
         assert!(!auth.session_cookie_secure);
+        assert_eq!(auth.argon2_concurrency, 2);
+        assert_eq!(auth.login_rate_limit_per_minute, 20);
+        assert_eq!(auth.register_rate_limit_per_minute, 5);
         assert!(auth.validate().is_ok());
 
         let invalid = AuthConfig {

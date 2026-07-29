@@ -47,11 +47,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    try {
-      await rainApi.logout();
-    } finally {
-      setState({ status: 'GUEST' });
-    }
+    await rainApi.logout();
+    setState({ status: 'GUEST' });
   }, []);
 
   const value = useMemo(

@@ -4,6 +4,8 @@ use uuid::Uuid;
 
 use crate::{auth::AuthenticatedUser, error::AppError};
 
+const LAST_SEEN_UPDATE_INTERVAL_SECONDS: i64 = 300;
+
 pub struct ResolvedSessionUser {
     pub user: AuthenticatedUser,
     pub status: String,
@@ -67,13 +69,25 @@ pub async fn resolve_session_user(
     });
 
     if user.is_some() {
-        sqlx::query(
-            "UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?",
+        let _ = sqlx::query(
+            r#"
+            UPDATE user_sessions
+            SET last_seen_at = CURRENT_TIMESTAMP
+            WHERE token_hash = ?
+              AND (
+                last_seen_at IS NULL
+                OR datetime(last_seen_at) <= datetime(CURRENT_TIMESTAMP, ?)
+              )
+            "#,
         )
         .bind(token_hash)
+        .bind(format!("-{LAST_SEEN_UPDATE_INTERVAL_SECONDS} seconds"))
         .execute(pool)
         .await
-        .map_err(AppError::Database)?;
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to update session last_seen_at");
+            error
+        });
     }
     Ok(user)
 }

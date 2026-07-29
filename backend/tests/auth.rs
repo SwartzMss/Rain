@@ -150,3 +150,40 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
         json!({"authenticated": false, "user": null})
     );
 }
+
+#[actix_web::test]
+async fn guest_write_routes_are_rejected() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let create_issue = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues")
+            .set_json(json!({"code": "AUTH401"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(create_issue.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = test::read_body_json(create_issue).await;
+    assert_eq!(body["code"], "AUTHENTICATION_REQUIRED");
+
+    let delete_issue = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/issues/AUTH401")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete_issue.status(), StatusCode::UNAUTHORIZED);
+}

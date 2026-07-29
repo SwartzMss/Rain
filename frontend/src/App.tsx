@@ -63,7 +63,11 @@ function App() {
                 </span>
                 <button
                   className="text-slate-300 hover:text-white"
-                  onClick={() => void auth.logout()}
+                  onClick={() => {
+                    void auth.logout().catch((error) => {
+                      window.alert(error instanceof Error ? error.message : '退出登录失败');
+                    });
+                  }}
                   type="button"
                 >
                   退出登录

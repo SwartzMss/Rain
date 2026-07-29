@@ -11,7 +11,12 @@ pub mod routes;
 pub mod services;
 pub mod upload;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use sqlx::SqlitePool;
 use tokio::sync::Semaphore;
@@ -25,6 +30,8 @@ pub struct AppState {
     pub limits: AppLimits,
     pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
+    pub auth_hash_permits: Arc<Semaphore>,
+    pub auth_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     pub blob_store: Arc<dyn BlobStore>,
 }
 
@@ -52,12 +59,15 @@ impl AppState {
     ) -> Self {
         let processing_permits =
             Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
+        let auth_hash_permits = Arc::new(Semaphore::new(auth.argon2_concurrency));
         Self {
             pool,
             data_root,
             limits,
             auth,
             processing_permits,
+            auth_hash_permits,
+            auth_rate_limits: Arc::new(Mutex::new(HashMap::new())),
             blob_store,
         }
     }

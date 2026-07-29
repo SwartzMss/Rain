@@ -8,6 +8,7 @@ use thiserror::Error;
 
 static USERNAME_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[A-Za-z0-9._-]{3,32}$").expect("valid username regex"));
+static DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$c29tZS1maXhlZC1kdW1teS1zYWx0$GzSLOtFquWhNkE8jkbti2JnRZWyLHedKNoDm46kwB9o";
 
 #[derive(Debug, Error)]
 pub enum PasswordError {
@@ -52,6 +53,10 @@ pub fn verify_password(password: &str, encoded: &str) -> Result<bool, PasswordEr
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &hash)
         .is_ok())
+}
+
+pub fn verify_dummy_password(password: &str) -> Result<bool, PasswordError> {
+    verify_password(password, DUMMY_PASSWORD_HASH)
 }
 
 #[cfg(test)]

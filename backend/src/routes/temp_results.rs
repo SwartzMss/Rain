@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    auth::extractor::RequireUser,
     error::AppError,
     log_expression,
     repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
@@ -114,6 +115,7 @@ struct MaterializedPreviewResponse {
 
 #[post("/temp-results/preview")]
 pub async fn preview_temp_result(
+    _user: RequireUser,
     payload: web::Json<PreviewTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
@@ -218,6 +220,7 @@ pub async fn preview_temp_result(
 
 #[post("/temp-results")]
 pub async fn create_temp_result(
+    _user: RequireUser,
     payload: web::Json<CreateTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
@@ -356,6 +359,7 @@ pub async fn download_temp_result(
 
 #[delete("/temp-results/{id}")]
 pub async fn delete_temp_result(
+    _user: RequireUser,
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {

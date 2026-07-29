@@ -1,5 +1,6 @@
 use actix_web::{HttpRequest, HttpResponse, get, http::StatusCode, post, web};
 use chrono::{Duration, Utc};
+use std::time::{Duration as StdDuration, Instant};
 
 use crate::{
     AppState,
@@ -7,7 +8,7 @@ use crate::{
         extractor::OptionalUser,
         password::{
             PasswordError, hash_password, normalize_username, validate_password, validate_username,
-            verify_password,
+            verify_dummy_password, verify_password,
         },
         session::{
             SESSION_COOKIE_NAME, cleared_session_cookie, generate_session_token,
@@ -54,18 +55,86 @@ fn invalid_credentials() -> AppError {
     )
 }
 
+fn rate_limited() -> AppError {
+    AppError::api(
+        StatusCode::TOO_MANY_REQUESTS,
+        "AUTH_RATE_LIMITED",
+        "认证请求过于频繁，请稍后再试",
+    )
+}
+
+fn auth_rate_limit_key(request: &HttpRequest, action: &str, username: &str) -> String {
+    let client = request
+        .connection_info()
+        .realip_remote_addr()
+        .unwrap_or("unknown")
+        .to_owned();
+    format!("{action}:{client}:{}", normalize_username(username))
+}
+
+fn check_auth_rate_limit(state: &AppState, key: String, limit: usize) -> Result<(), AppError> {
+    let now = Instant::now();
+    let window = StdDuration::from_secs(60);
+    let mut buckets = state
+        .auth_rate_limits
+        .lock()
+        .map_err(|_| internal_auth_error())?;
+    let bucket = buckets.entry(key).or_default();
+    while bucket
+        .front()
+        .is_some_and(|timestamp| now.duration_since(*timestamp) >= window)
+    {
+        bucket.pop_front();
+    }
+    if bucket.len() >= limit {
+        return Err(rate_limited());
+    }
+    bucket.push_back(now);
+    Ok(())
+}
+
+async fn run_argon2<T, F>(state: &AppState, operation: F) -> Result<T, AppError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, PasswordError> + Send + 'static,
+{
+    let permit = state
+        .auth_hash_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| internal_auth_error())?;
+    web::block(move || {
+        let _permit = permit;
+        operation()
+    })
+    .await
+    .map_err(|_| internal_auth_error())?
+    .map_err(validation_error)
+}
+
+async fn burn_dummy_argon2(state: &AppState, password: String) -> Result<(), AppError> {
+    let _ = run_argon2(state, move || verify_dummy_password(&password))
+        .await
+        .map_err(|_| invalid_credentials())?;
+    Ok(())
+}
+
 #[post("/auth/register")]
 pub async fn register_user(
+    request: HttpRequest,
     state: web::Data<AppState>,
     payload: web::Json<CredentialsRequest>,
 ) -> Result<HttpResponse, AppError> {
+    check_auth_rate_limit(
+        &state,
+        auth_rate_limit_key(&request, "register", &payload.username),
+        state.auth.register_rate_limit_per_minute,
+    )?;
     validate_username(&payload.username).map_err(validation_error)?;
     validate_password(&payload.password).map_err(validation_error)?;
     let password = payload.password.clone();
-    let password_hash = web::block(move || hash_password(&password))
-        .await
-        .map_err(|_| internal_auth_error())?
-        .map_err(validation_error)?;
+    let password_hash = run_argon2(&state, move || hash_password(&password)).await?;
 
     match users::create_user(&state.pool, &payload.username, &password_hash).await? {
         CreateUserOutcome::Created(user) => Ok(HttpResponse::Created().json(PublicUser {
@@ -86,19 +155,31 @@ pub async fn login(
     state: web::Data<AppState>,
     payload: web::Json<CredentialsRequest>,
 ) -> Result<HttpResponse, AppError> {
+    check_auth_rate_limit(
+        &state,
+        auth_rate_limit_key(&request, "login", &payload.username),
+        state.auth.login_rate_limit_per_minute,
+    )?;
+    if validate_username(&payload.username).is_err()
+        || validate_password(&payload.password).is_err()
+    {
+        burn_dummy_argon2(&state, payload.password.clone()).await?;
+        return Err(invalid_credentials());
+    }
     let normalized = normalize_username(&payload.username);
     let Some(user) = users::find_by_normalized_username(&state.pool, &normalized).await? else {
+        burn_dummy_argon2(&state, payload.password.clone()).await?;
         return Err(invalid_credentials());
     };
     if user.status != "ACTIVE" {
+        burn_dummy_argon2(&state, payload.password.clone()).await?;
         return Err(invalid_credentials());
     }
 
     let password = payload.password.clone();
     let password_hash = user.password_hash.clone();
-    let verified = web::block(move || verify_password(&password, &password_hash))
+    let verified = run_argon2(&state, move || verify_password(&password, &password_hash))
         .await
-        .map_err(|_| internal_auth_error())?
         .map_err(|_| invalid_credentials())?;
     if !verified {
         return Err(invalid_credentials());
