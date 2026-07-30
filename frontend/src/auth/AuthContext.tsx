@@ -69,9 +69,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const changePassword = useCallback(
     async (payload: { current_password: string; new_password: string }) => {
-      operationGeneration.current.invalidate();
-      await rainApi.changePassword(payload);
-      await refresh();
+      const finishMutation = operationGeneration.current.beginMutation();
+      try {
+        await rainApi.changePassword(payload);
+      } finally {
+        finishMutation();
+        await refresh();
+      }
     },
     [refresh]
   );

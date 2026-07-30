@@ -59,6 +59,19 @@ function parseErrorResponse(text: string, status: number): string {
   return message || `请求失败：${status}`;
 }
 
+export function shouldRevalidateAuthentication(status: number, text: string): boolean {
+  if (status !== 401 && status !== 403) return false;
+  try {
+    const payload = JSON.parse(text) as { code?: string };
+    return (
+      (status === 401 && payload.code === 'AUTHENTICATION_REQUIRED') ||
+      (status === 403 && payload.code === 'ACCOUNT_DISABLED')
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = typeof FormData !== 'undefined' && init?.body instanceof FormData;
   const headers = new Headers(init?.headers as HeadersInit);
@@ -85,15 +98,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const text = await response.text();
 
   if (!response.ok) {
-    if (response.status === 401) {
-      try {
-        const payload = JSON.parse(text) as { code?: string };
-        if (payload.code === 'AUTHENTICATION_REQUIRED') {
-          window.dispatchEvent(new Event('rain:authentication-required'));
-        }
-      } catch {
-        // Non-JSON errors cannot identify an expired session reliably.
-      }
+    if (shouldRevalidateAuthentication(response.status, text)) {
+      window.dispatchEvent(new Event('rain:authentication-required'));
     }
     throw new Error(parseErrorResponse(text, response.status));
   }
@@ -267,15 +273,8 @@ export const rainApi = {
       };
       xhr.onload = () => {
         if (xhr.status < 200 || xhr.status >= 300) {
-          if (xhr.status === 401) {
-            try {
-              const payload = JSON.parse(xhr.responseText) as { code?: string };
-              if (payload.code === 'AUTHENTICATION_REQUIRED') {
-                window.dispatchEvent(new Event('rain:authentication-required'));
-              }
-            } catch {
-              // Ignore non-JSON upload errors.
-            }
+          if (shouldRevalidateAuthentication(xhr.status, xhr.responseText)) {
+            window.dispatchEvent(new Event('rain:authentication-required'));
           }
           reject(new Error(parseErrorResponse(xhr.responseText, xhr.status)));
           return;

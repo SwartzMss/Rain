@@ -56,15 +56,49 @@ try {
     'a stale refresh must not overwrite a successful login'
   );
 
+  const finishMutation = generation.beginMutation();
+  const refreshDuringMutation = generation.begin();
+  assert.equal(
+    generation.isCurrent(refreshDuringMutation),
+    false,
+    'refreshes started during an authentication mutation must not commit'
+  );
+  finishMutation();
+  const refreshAfterMutation = generation.begin();
+  assert.equal(generation.isCurrent(refreshAfterMutation), true);
+
+  const { shouldRevalidateAuthentication } = await server.ssrLoadModule(
+    '/src/api/client.ts'
+  );
+  assert.equal(
+    shouldRevalidateAuthentication(
+      401,
+      JSON.stringify({ code: 'AUTHENTICATION_REQUIRED' })
+    ),
+    true
+  );
+  assert.equal(
+    shouldRevalidateAuthentication(403, JSON.stringify({ code: 'ACCOUNT_DISABLED' })),
+    true
+  );
+  assert.equal(
+    shouldRevalidateAuthentication(403, JSON.stringify({ code: 'FORBIDDEN' })),
+    false
+  );
+
   const apiClient = await readFile(
     new URL('../src/api/client.ts', import.meta.url),
     'utf8'
   );
   assert.match(apiClient, /credentials:\s*'include'/);
   assert.match(apiClient, /xhr\.withCredentials\s*=\s*true/);
-  assert.match(apiClient, /xhr\.status === 401/);
   assert.match(apiClient, /payload\.message/);
   assert.match(apiClient, /rain:authentication-required/);
+  assert.equal(
+    apiClient.match(/shouldRevalidateAuthentication\(/g)?.length,
+    3,
+    'fetch and upload XHR must share the authentication revalidation predicate'
+  );
   assert.doesNotMatch(apiClient, /VITE_API_BASE_URL/);
   assert.match(apiClient, /const API_BASE_URL = ''/);
 
@@ -93,12 +127,7 @@ try {
   assert.match(authContext, /const revalidateAuthentication = \(\) => \{\s*void refresh\(\);/);
   assert.match(
     authContext,
-    /const changePassword = useCallback\([\s\S]*operationGeneration\.current\.invalidate\(\);[\s\S]*await rainApi\.changePassword\(payload\);[\s\S]*await refresh\(\);/
-  );
-  assert.equal(
-    authContext.match(/operationGeneration\.current\.invalidate\(\)/g)?.length,
-    4,
-    'login, password change, logout, and logout-all must invalidate stale refreshes'
+    /const changePassword = useCallback\([\s\S]*beginMutation\(\)[\s\S]*await rainApi\.changePassword\(payload\);[\s\S]*finishMutation\(\);[\s\S]*await refresh\(\);/
   );
 
   const accountPage = await readFile(
