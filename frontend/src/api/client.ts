@@ -66,7 +66,8 @@ export function shouldRevalidateAuthentication(status: number, text: string): bo
     const payload = JSON.parse(text) as { code?: string };
     return (
       (status === 401 && payload.code === 'AUTHENTICATION_REQUIRED') ||
-      (status === 403 && payload.code === 'ACCOUNT_DISABLED')
+      (status === 403 &&
+        (payload.code === 'ACCOUNT_DISABLED' || payload.code === 'ADMIN_REQUIRED'))
     );
   } catch {
     return false;
