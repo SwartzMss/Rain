@@ -491,12 +491,8 @@ async fn upload_search_tree_and_delete_issue() {
         .await;
         assert_eq!(content_response.status(), StatusCode::BAD_REQUEST);
         let content_error: Value = test::read_body_json(content_response).await;
-        assert!(
-            content_error["error"]
-                .as_str()
-                .expect("binary content error")
-                .contains("text preview is not supported")
-        );
+        assert_eq!(content_error["code"], "BAD_REQUEST");
+        assert_eq!(content_error["message"], "请求无效");
         let lines_response = test::call_service(
             &app,
             test::TestRequest::get()
@@ -509,12 +505,8 @@ async fn upload_search_tree_and_delete_issue() {
         .await;
         assert_eq!(lines_response.status(), StatusCode::BAD_REQUEST);
         let lines_error: Value = test::read_body_json(lines_response).await;
-        assert!(
-            lines_error["error"]
-                .as_str()
-                .expect("binary lines error")
-                .contains("text preview is not supported")
-        );
+        assert_eq!(lines_error["code"], "BAD_REQUEST");
+        assert_eq!(lines_error["message"], "请求无效");
     }
 
     let executable_id = executable_node["id"].as_str().expect("executable id");
@@ -909,11 +901,8 @@ async fn upload_search_tree_and_delete_issue() {
         StatusCode::BAD_REQUEST
     );
     let invalid_expression_body: Value = test::read_body_json(invalid_expression_response).await;
-    let invalid_expression_message = invalid_expression_body["error"]
-        .as_str()
-        .expect("invalid expression error");
-    assert!(invalid_expression_message.contains("搜索条件无效"));
-    assert!(invalid_expression_message.contains("位置"));
+    assert_eq!(invalid_expression_body["code"], "BAD_REQUEST");
+    assert_eq!(invalid_expression_body["message"], "请求无效");
 
     let temporary_result_response = test::call_service(
         &app,

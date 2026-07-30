@@ -1,6 +1,6 @@
 use actix_web::{
     HttpRequest, HttpResponse,
-    http::header::{CACHE_CONTROL, CONTENT_TYPE},
+    http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName},
 };
 use rust_embed::Embed;
 
@@ -17,12 +17,19 @@ fn asset_response(path: &str) -> Option<HttpResponse> {
         "public, max-age=31536000, immutable"
     };
 
-    Some(
-        HttpResponse::Ok()
-            .insert_header((CONTENT_TYPE, mime.as_ref()))
-            .insert_header((CACHE_CONTROL, cache_control))
-            .body(asset.data.into_owned()),
-    )
+    let mut response = HttpResponse::Ok();
+    response
+        .insert_header((CONTENT_TYPE, mime.as_ref()))
+        .insert_header((CACHE_CONTROL, cache_control));
+    if path == "index.html" {
+        response
+            .insert_header((
+                HeaderName::from_static("content-security-policy"),
+                "frame-ancestors 'none'",
+            ))
+            .insert_header((HeaderName::from_static("x-frame-options"), "DENY"));
+    }
+    Some(response.body(asset.data.into_owned()))
 }
 
 pub async fn serve_frontend(req: HttpRequest) -> HttpResponse {
@@ -49,4 +56,34 @@ pub async fn serve_frontend(req: HttpRequest) -> HttpResponse {
             .content_type("text/plain; charset=utf-8")
             .body("embedded frontend index.html is missing")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{
+        http::header::{HeaderName, HeaderValue},
+        test,
+    };
+
+    use super::serve_frontend;
+
+    #[actix_web::test]
+    async fn html_and_spa_fallback_cannot_be_embedded() {
+        for uri in ["/", "/account", "/missing/frontend/route"] {
+            let response =
+                serve_frontend(test::TestRequest::get().uri(uri).to_http_request()).await;
+            assert_eq!(
+                response
+                    .headers()
+                    .get(HeaderName::from_static("content-security-policy")),
+                Some(&HeaderValue::from_static("frame-ancestors 'none'"))
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(HeaderName::from_static("x-frame-options")),
+                Some(&HeaderValue::from_static("DENY"))
+            );
+        }
+    }
 }
