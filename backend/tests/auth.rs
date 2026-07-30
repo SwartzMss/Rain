@@ -679,7 +679,7 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
             .auth_rate_limits
             .lock()
             .expect("rate limits")
-            .change_password_user_failure
+            .change_password_user_attempt
             .get(&failure_key)
             .map_or(0, backend::AuthRateLimitBucket::len),
         1
@@ -695,13 +695,15 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     )
     .await;
     assert_eq!(changed.status(), StatusCode::NO_CONTENT);
-    assert!(
-        !state
+    assert_eq!(
+        state
             .auth_rate_limits
             .lock()
             .expect("rate limits")
-            .change_password_user_failure
-            .contains_key(&failure_key)
+            .change_password_user_attempt
+            .get(&failure_key)
+            .map_or(0, backend::AuthRateLimitBucket::len),
+        2
     );
     let replacement = Cookie::parse(
         changed
@@ -740,7 +742,7 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
 }
 
 #[actix_web::test]
-async fn password_change_failure_limit_rejects_before_password_verification() {
+async fn password_change_in_flight_and_attempt_limit_reject_before_password_verification() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
     let state = web::Data::new(AppState::new(
@@ -782,6 +784,32 @@ async fn password_change_failure_limit_rejects_before_password_verification() {
         .next()
         .expect("session cookie")
         .into_owned();
+    state
+        .auth_rate_limits
+        .lock()
+        .expect("rate limits")
+        .change_password_in_flight
+        .insert(user_id.clone());
+    let concurrent = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/change-password")
+            .cookie(cookie.clone())
+            .set_json(json!({
+                "current_password": "password123",
+                "new_password": "new-password123"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(concurrent.status(), StatusCode::TOO_MANY_REQUESTS);
+    state
+        .auth_rate_limits
+        .lock()
+        .expect("rate limits")
+        .change_password_in_flight
+        .remove(&user_id);
+
     let mut bucket = backend::AuthRateLimitBucket::new(std::time::Duration::from_secs(15 * 60));
     for _ in 0..5 {
         bucket.push(std::time::Instant::now());
@@ -790,7 +818,7 @@ async fn password_change_failure_limit_rejects_before_password_verification() {
         .auth_rate_limits
         .lock()
         .expect("rate limits")
-        .change_password_user_failure
+        .change_password_user_attempt
         .insert(format!("change-password:user:{user_id}"), bucket);
 
     let response = test::call_service(

@@ -255,7 +255,7 @@ FROM user_sessions
 WHERE user_id = ?
   AND revoked_at IS NULL
   AND datetime(expires_at) > CURRENT_TIMESTAMP
-ORDER BY datetime(created_at) DESC, id DESC
+ORDER BY datetime(created_at) DESC, rowid DESC
 LIMIT -1 OFFSET 20
 ```
 

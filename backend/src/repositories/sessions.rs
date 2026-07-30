@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::{auth::AuthenticatedUser, error::AppError};
 
 const LAST_SEEN_UPDATE_INTERVAL_SECONDS: i64 = 300;
+const MAX_ACTIVE_SESSIONS_PER_USER: i64 = 20;
 
 fn last_seen_needs_update(last_seen_at: Option<&str>, now: DateTime<Utc>) -> bool {
     let Some(last_seen_at) = last_seen_at else {
@@ -64,6 +65,21 @@ pub async fn create_session_if_password_unchanged(
     client_ip: Option<&str>,
 ) -> Result<bool, AppError> {
     let id = Uuid::new_v4().to_string();
+    let mut transaction = pool.begin().await.map_err(AppError::Database)?;
+    sqlx::query(
+        r#"
+        DELETE FROM user_sessions
+        WHERE user_id = ?
+          AND (
+            revoked_at IS NOT NULL
+            OR datetime(expires_at) <= CURRENT_TIMESTAMP
+          )
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::Database)?;
     let result = sqlx::query(
         r#"
         INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent, client_ip)
@@ -79,10 +95,34 @@ pub async fn create_session_if_password_unchanged(
     .bind(client_ip)
     .bind(user_id)
     .bind(expected_password_hash)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(AppError::Database)?;
-    Ok(result.rows_affected() == 1)
+    if result.rows_affected() != 1 {
+        transaction.rollback().await.map_err(AppError::Database)?;
+        return Ok(false);
+    }
+    sqlx::query(
+        r#"
+        DELETE FROM user_sessions
+        WHERE id IN (
+            SELECT id
+            FROM user_sessions
+            WHERE user_id = ?
+              AND revoked_at IS NULL
+              AND datetime(expires_at) > CURRENT_TIMESTAMP
+            ORDER BY datetime(created_at) DESC, rowid DESC
+            LIMIT -1 OFFSET ?
+        )
+        "#,
+    )
+    .bind(user_id)
+    .bind(MAX_ACTIVE_SESSIONS_PER_USER)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::Database)?;
+    transaction.commit().await.map_err(AppError::Database)?;
+    Ok(true)
 }
 
 pub async fn change_password_and_replace_sessions(
@@ -474,6 +514,154 @@ mod tests {
         .await
         .expect("conditional session");
         assert!(!created);
+    }
+
+    #[tokio::test]
+    async fn session_limit_keeps_only_twenty_newest_active_sessions_per_user() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "SessionLimit", "hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        let other = match users::create_user(&pool, "OtherSessions", "hash")
+            .await
+            .expect("other user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        create_session(
+            &pool,
+            &other.id,
+            "other-token",
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("other session");
+
+        for index in 0..20 {
+            let token = format!("limited-token-{index:02}");
+            assert!(
+                create_session_if_password_unchanged(
+                    &pool,
+                    &user.id,
+                    "hash",
+                    &token,
+                    Utc::now() + Duration::hours(1),
+                    None,
+                    None,
+                )
+                .await
+                .expect("create limited session")
+            );
+            sqlx::query(
+                "UPDATE user_sessions SET created_at = ? WHERE user_id = ? AND token_hash = ?",
+            )
+            .bind(format!("2000-01-01 00:00:{index:02}"))
+            .bind(&user.id)
+            .bind(&token)
+            .execute(&pool)
+            .await
+            .expect("order session");
+        }
+        assert!(
+            create_session_if_password_unchanged(
+                &pool,
+                &user.id,
+                "hash",
+                "limited-token-20",
+                Utc::now() + Duration::hours(1),
+                None,
+                None,
+            )
+            .await
+            .expect("create newest session")
+        );
+
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_sessions WHERE user_id = ? AND revoked_at IS NULL AND datetime(expires_at) > CURRENT_TIMESTAMP",
+        )
+        .bind(&user.id)
+        .fetch_one(&pool)
+        .await
+        .expect("active count");
+        assert_eq!(active_count, 20);
+        let oldest_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE token_hash = ?")
+                .bind("limited-token-00")
+                .fetch_one(&pool)
+                .await
+                .expect("oldest count");
+        assert_eq!(oldest_count, 0);
+        let other_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE user_id = ?")
+                .bind(&other.id)
+                .fetch_one(&pool)
+                .await
+                .expect("other count");
+        assert_eq!(other_count, 1);
+    }
+
+    #[tokio::test]
+    async fn session_limit_holds_across_concurrent_logins() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "ConcurrentSessions", "hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        for index in 0..19 {
+            create_session(
+                &pool,
+                &user.id,
+                &format!("existing-{index}"),
+                Utc::now() + Duration::hours(1),
+                None,
+                None,
+            )
+            .await
+            .expect("existing session");
+        }
+
+        let left = create_session_if_password_unchanged(
+            &pool,
+            &user.id,
+            "hash",
+            "concurrent-left",
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        );
+        let right = create_session_if_password_unchanged(
+            &pool,
+            &user.id,
+            "hash",
+            "concurrent-right",
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        );
+        let (left, right) = tokio::join!(left, right);
+        assert!(left.expect("left login"));
+        assert!(right.expect("right login"));
+
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_sessions WHERE user_id = ? AND revoked_at IS NULL AND datetime(expires_at) > CURRENT_TIMESTAMP",
+        )
+        .bind(&user.id)
+        .fetch_one(&pool)
+        .await
+        .expect("active count");
+        assert_eq!(active_count, 20);
     }
 
     #[tokio::test]

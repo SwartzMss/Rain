@@ -76,7 +76,7 @@ Login Session creation becomes one transaction that:
 3. inserts the new Session;
 4. deletes the oldest active Sessions beyond the newest 20.
 
-The cap operation uses deterministic ordering by `created_at DESC, id DESC`. The insert and pruning occur in the same SQLite write transaction, so concurrent successful logins cannot leave the user above the cap after their transactions commit.
+The cap operation uses deterministic ordering by `created_at DESC, rowid DESC`, preserving the most recently inserted Session when SQLite timestamps share one-second precision. The insert and pruning occur in the same SQLite write transaction, so concurrent successful logins cannot leave the user above the cap after their transactions commit.
 
 Password replacement remains unchanged because it revokes every existing Session before inserting exactly one replacement. Repository tests cover sequential and concurrent logins, preservation of the newest Sessions, and isolation between users.
 

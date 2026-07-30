@@ -12,7 +12,7 @@ pub mod services;
 pub mod upload;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -69,7 +69,8 @@ pub struct AuthRateLimits {
     pub login_ip: HashMap<String, AuthRateLimitBucket>,
     pub login_username_failure: HashMap<String, AuthRateLimitBucket>,
     pub register_ip: HashMap<String, AuthRateLimitBucket>,
-    pub change_password_user_failure: HashMap<String, AuthRateLimitBucket>,
+    pub change_password_user_attempt: HashMap<String, AuthRateLimitBucket>,
+    pub change_password_in_flight: HashSet<String>,
 }
 
 pub struct AppState {
