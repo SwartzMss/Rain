@@ -64,6 +64,13 @@ impl AuthRateLimitBucket {
     }
 }
 
+#[derive(Default)]
+pub struct AuthRateLimits {
+    pub login_ip: HashMap<String, AuthRateLimitBucket>,
+    pub login_username_failure: HashMap<String, AuthRateLimitBucket>,
+    pub register_ip: HashMap<String, AuthRateLimitBucket>,
+}
+
 pub struct AppState {
     pub pool: SqlitePool,
     pub data_root: PathBuf,
@@ -71,7 +78,7 @@ pub struct AppState {
     pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
     pub auth_hash_permits: Arc<Semaphore>,
-    pub auth_rate_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
+    pub auth_rate_limits: Arc<Mutex<AuthRateLimits>>,
     pub blob_store: Arc<dyn BlobStore>,
 }
 
@@ -107,7 +114,7 @@ impl AppState {
             auth,
             processing_permits,
             auth_hash_permits,
-            auth_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
             blob_store,
         }
     }

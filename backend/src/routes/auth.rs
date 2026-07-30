@@ -66,7 +66,16 @@ fn rate_limited() -> AppError {
 const LOGIN_IP_WINDOW: StdDuration = StdDuration::from_secs(60);
 const LOGIN_USERNAME_FAILURE_WINDOW: StdDuration = StdDuration::from_secs(5 * 60);
 const REGISTER_IP_WINDOW: StdDuration = StdDuration::from_secs(60 * 60);
-const AUTH_RATE_LIMIT_MAX_BUCKETS: usize = 1024;
+const LOGIN_IP_MAX_BUCKETS: usize = 1024;
+const LOGIN_USERNAME_FAILURE_MAX_BUCKETS: usize = 1024;
+const REGISTER_IP_MAX_BUCKETS: usize = 1024;
+
+#[derive(Clone, Copy)]
+enum AuthRateLimitPolicy {
+    LoginIp,
+    LoginUsernameFailure,
+    RegisterIp,
+}
 
 fn client_rate_limit_key(request: &HttpRequest, action: &str) -> String {
     let client = request
@@ -87,26 +96,36 @@ fn username_failure_key(username: &str) -> String {
 
 fn check_rate_limit(
     state: &AppState,
+    policy: AuthRateLimitPolicy,
     key: &str,
     limit: usize,
     window: StdDuration,
     record: bool,
 ) -> Result<(), AppError> {
-    check_rate_limit_at(state, key, limit, window, record, Instant::now())
+    check_rate_limit_at(state, policy, key, limit, window, record, Instant::now())
 }
 
 fn check_rate_limit_at(
     state: &AppState,
+    policy: AuthRateLimitPolicy,
     key: &str,
     limit: usize,
     window: StdDuration,
     record: bool,
     now: Instant,
 ) -> Result<(), AppError> {
-    let mut buckets = state
+    let mut rate_limits = state
         .auth_rate_limits
         .lock()
         .map_err(|_| internal_auth_error())?;
+    let (buckets, max_buckets) = match policy {
+        AuthRateLimitPolicy::LoginIp => (&mut rate_limits.login_ip, LOGIN_IP_MAX_BUCKETS),
+        AuthRateLimitPolicy::LoginUsernameFailure => (
+            &mut rate_limits.login_username_failure,
+            LOGIN_USERNAME_FAILURE_MAX_BUCKETS,
+        ),
+        AuthRateLimitPolicy::RegisterIp => (&mut rate_limits.register_ip, REGISTER_IP_MAX_BUCKETS),
+    };
 
     buckets.retain(|_, bucket| {
         bucket.prune(now);
@@ -125,7 +144,7 @@ fn check_rate_limit_at(
         return Ok(());
     }
 
-    if !buckets.contains_key(key) && buckets.len() >= AUTH_RATE_LIMIT_MAX_BUCKETS {
+    if !buckets.contains_key(key) && buckets.len() >= max_buckets {
         return Err(rate_limited());
     }
 
@@ -175,6 +194,7 @@ pub async fn register_user(
     }
     check_rate_limit(
         &state,
+        AuthRateLimitPolicy::RegisterIp,
         &client_rate_limit_key(&request, "register"),
         state.auth.register_ip_limit_per_hour,
         REGISTER_IP_WINDOW,
@@ -207,6 +227,7 @@ pub async fn login(
     let username_key = username_failure_key(&payload.username);
     check_rate_limit(
         &state,
+        AuthRateLimitPolicy::LoginIp,
         &client_rate_limit_key(&request, "login"),
         state.auth.login_ip_limit_per_minute,
         LOGIN_IP_WINDOW,
@@ -214,6 +235,7 @@ pub async fn login(
     )?;
     check_rate_limit(
         &state,
+        AuthRateLimitPolicy::LoginUsernameFailure,
         &username_key,
         state.auth.login_username_failure_limit_per_5_minutes,
         LOGIN_USERNAME_FAILURE_WINDOW,
@@ -225,6 +247,7 @@ pub async fn login(
         burn_dummy_argon2(&state, payload.password.clone()).await?;
         check_rate_limit(
             &state,
+            AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
             state.auth.login_username_failure_limit_per_5_minutes,
             LOGIN_USERNAME_FAILURE_WINDOW,
@@ -237,6 +260,7 @@ pub async fn login(
         burn_dummy_argon2(&state, payload.password.clone()).await?;
         check_rate_limit(
             &state,
+            AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
             state.auth.login_username_failure_limit_per_5_minutes,
             LOGIN_USERNAME_FAILURE_WINDOW,
@@ -248,6 +272,7 @@ pub async fn login(
         burn_dummy_argon2(&state, payload.password.clone()).await?;
         check_rate_limit(
             &state,
+            AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
             state.auth.login_username_failure_limit_per_5_minutes,
             LOGIN_USERNAME_FAILURE_WINDOW,
@@ -262,6 +287,7 @@ pub async fn login(
     if !verified {
         check_rate_limit(
             &state,
+            AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
             state.auth.login_username_failure_limit_per_5_minutes,
             LOGIN_USERNAME_FAILURE_WINDOW,
@@ -416,8 +442,8 @@ mod tests {
     use crate::{AppState, config::AppLimits};
 
     use super::{
-        AUTH_RATE_LIMIT_MAX_BUCKETS, check_rate_limit_at, client_rate_limit_key,
-        username_failure_key,
+        AuthRateLimitPolicy, LOGIN_USERNAME_FAILURE_MAX_BUCKETS, check_rate_limit_at,
+        client_rate_limit_key, username_failure_key,
     };
 
     #[test]
@@ -447,6 +473,7 @@ mod tests {
         for _ in 0..2 {
             check_rate_limit_at(
                 &state,
+                AuthRateLimitPolicy::LoginIp,
                 "login:ip:127.0.0.1",
                 2,
                 StdDuration::from_secs(60),
@@ -458,6 +485,7 @@ mod tests {
         assert!(
             check_rate_limit_at(
                 &state,
+                AuthRateLimitPolicy::LoginIp,
                 "login:ip:127.0.0.1",
                 2,
                 StdDuration::from_secs(60),
@@ -468,6 +496,7 @@ mod tests {
         );
         check_rate_limit_at(
             &state,
+            AuthRateLimitPolicy::LoginIp,
             "login:ip:127.0.0.1",
             2,
             StdDuration::from_secs(60),
@@ -479,6 +508,7 @@ mod tests {
         for _ in 0..20 {
             check_rate_limit_at(
                 &state,
+                AuthRateLimitPolicy::LoginUsernameFailure,
                 "login:username:swartz",
                 2,
                 StdDuration::from_secs(300),
@@ -490,6 +520,7 @@ mod tests {
         for _ in 0..2 {
             check_rate_limit_at(
                 &state,
+                AuthRateLimitPolicy::LoginUsernameFailure,
                 "login:username:swartz",
                 2,
                 StdDuration::from_secs(300),
@@ -501,6 +532,7 @@ mod tests {
         assert!(
             check_rate_limit_at(
                 &state,
+                AuthRateLimitPolicy::LoginUsernameFailure,
                 "login:username:swartz",
                 2,
                 StdDuration::from_secs(300),
@@ -511,6 +543,7 @@ mod tests {
         );
         check_rate_limit_at(
             &state,
+            AuthRateLimitPolicy::LoginUsernameFailure,
             "login:username:swartz",
             2,
             StdDuration::from_secs(300),
@@ -521,6 +554,7 @@ mod tests {
 
         check_rate_limit_at(
             &state,
+            AuthRateLimitPolicy::RegisterIp,
             "register:ip:127.0.0.1",
             1,
             StdDuration::from_secs(3600),
@@ -531,6 +565,7 @@ mod tests {
         assert!(
             check_rate_limit_at(
                 &state,
+                AuthRateLimitPolicy::RegisterIp,
                 "register:ip:127.0.0.1",
                 1,
                 StdDuration::from_secs(3600),
@@ -541,6 +576,7 @@ mod tests {
         );
         check_rate_limit_at(
             &state,
+            AuthRateLimitPolicy::RegisterIp,
             "register:ip:127.0.0.1",
             1,
             StdDuration::from_secs(3600),
@@ -551,16 +587,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_rate_limit_buckets_are_not_evicted_at_capacity() {
+    async fn exhausted_username_buckets_do_not_block_ip_policies() {
         let pool = SqlitePoolOptions::new()
             .connect_lazy("sqlite::memory:")
             .expect("pool");
         let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
         let start = Instant::now();
 
-        for index in 0..AUTH_RATE_LIMIT_MAX_BUCKETS {
+        for index in 0..LOGIN_USERNAME_FAILURE_MAX_BUCKETS {
             check_rate_limit_at(
                 &state,
+                AuthRateLimitPolicy::LoginUsernameFailure,
                 &format!("login:username:user-{index}"),
                 10,
                 StdDuration::from_secs(300),
@@ -573,6 +610,7 @@ mod tests {
         assert!(
             check_rate_limit_at(
                 &state,
+                AuthRateLimitPolicy::LoginUsernameFailure,
                 "login:username:new-user",
                 10,
                 StdDuration::from_secs(300),
@@ -581,11 +619,32 @@ mod tests {
             )
             .is_err()
         );
+        check_rate_limit_at(
+            &state,
+            AuthRateLimitPolicy::LoginIp,
+            "login:ip:198.51.100.10",
+            20,
+            StdDuration::from_secs(60),
+            true,
+            start,
+        )
+        .expect("username bucket capacity must not block a new login IP");
+        check_rate_limit_at(
+            &state,
+            AuthRateLimitPolicy::RegisterIp,
+            "register:ip:198.51.100.10",
+            10,
+            StdDuration::from_secs(3600),
+            true,
+            start,
+        )
+        .expect("username bucket capacity must not block a new registration IP");
         assert!(
             state
                 .auth_rate_limits
                 .lock()
                 .expect("rate limits")
+                .login_username_failure
                 .contains_key("login:username:user-0")
         );
     }
@@ -600,6 +659,7 @@ mod tests {
 
         check_rate_limit_at(
             &state,
+            AuthRateLimitPolicy::LoginIp,
             "login:ip:short",
             20,
             StdDuration::from_secs(60),
@@ -609,6 +669,7 @@ mod tests {
         .expect("short bucket");
         check_rate_limit_at(
             &state,
+            AuthRateLimitPolicy::RegisterIp,
             "register:ip:long",
             10,
             StdDuration::from_secs(3600),
@@ -618,6 +679,7 @@ mod tests {
         .expect("long bucket");
         check_rate_limit_at(
             &state,
+            AuthRateLimitPolicy::LoginIp,
             "login:ip:trigger",
             20,
             StdDuration::from_secs(60),
@@ -627,7 +689,7 @@ mod tests {
         .expect("cleanup trigger");
 
         let buckets = state.auth_rate_limits.lock().expect("rate limits");
-        assert!(!buckets.contains_key("login:ip:short"));
-        assert!(buckets.contains_key("register:ip:long"));
+        assert!(!buckets.login_ip.contains_key("login:ip:short"));
+        assert!(buckets.register_ip.contains_key("register:ip:long"));
     }
 }

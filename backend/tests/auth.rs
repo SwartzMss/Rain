@@ -82,6 +82,7 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
         .auth_rate_limits
         .lock()
         .expect("rate limits")
+        .login_username_failure
         .get("login:username:swartz")
         .map_or(0, backend::AuthRateLimitBucket::len);
     let login = test::call_service(
@@ -108,6 +109,7 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
             .auth_rate_limits
             .lock()
             .expect("rate limits")
+            .login_username_failure
             .get("login:username:swartz")
             .map_or(0, backend::AuthRateLimitBucket::len),
         username_failures_before_success
