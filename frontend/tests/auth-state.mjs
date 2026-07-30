@@ -9,7 +9,8 @@ const server = await createServer({
 });
 
 try {
-  const { safeReturnPath, toAuthState } = await server.ssrLoadModule(
+  const { authStateAfterRefreshFailure, safeReturnPath, toAuthState } =
+    await server.ssrLoadModule(
     '/src/auth/authState.ts'
   );
   const { AuthOperationGeneration } = await server.ssrLoadModule(
@@ -30,6 +31,13 @@ try {
   assert.equal(safeReturnPath('/issue/CN013'), '/issue/CN013');
   assert.equal(safeReturnPath('https://evil.example'), '/');
   assert.equal(safeReturnPath('//evil.example'), '/');
+  const authenticatedState = {
+    status: 'AUTHENTICATED',
+    user: { id: '1', username: 'swartz' }
+  };
+  assert.equal(authStateAfterRefreshFailure(authenticatedState), authenticatedState);
+  assert.deepEqual(authStateAfterRefreshFailure({ status: 'GUEST' }), { status: 'GUEST' });
+  assert.deepEqual(authStateAfterRefreshFailure({ status: 'LOADING' }), { status: 'GUEST' });
 
   const generation = new AuthOperationGeneration();
   const staleRefresh = generation.begin();
@@ -124,6 +132,7 @@ try {
   );
   assert.match(authContext, /useRef\(new AuthOperationGeneration\(\)\)/);
   assert.match(authContext, /isCurrent\(refreshGeneration\)/);
+  assert.match(authContext, /setState\(authStateAfterRefreshFailure\)/);
   assert.match(authContext, /const revalidateAuthentication = \(\) => \{\s*void refresh\(\);/);
   assert.match(
     authContext,

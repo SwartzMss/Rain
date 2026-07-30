@@ -55,6 +55,14 @@ fn invalid_credentials() -> AppError {
     )
 }
 
+fn current_password_invalid() -> AppError {
+    AppError::api(
+        StatusCode::UNAUTHORIZED,
+        "CURRENT_PASSWORD_INVALID",
+        "当前密码错误",
+    )
+}
+
 fn rate_limited() -> AppError {
     AppError::api(
         StatusCode::TOO_MANY_REQUESTS,
@@ -179,6 +187,14 @@ async fn burn_dummy_argon2(state: &AppState, password: String) -> Result<(), App
     Ok(())
 }
 
+fn dummy_password_for_credentials(password: &str, credentials_valid: bool) -> String {
+    if credentials_valid {
+        password.to_owned()
+    } else {
+        "invalid-password".to_owned()
+    }
+}
+
 #[post("/auth/register")]
 pub async fn register_user(
     request: HttpRequest,
@@ -241,10 +257,14 @@ pub async fn login(
         LOGIN_USERNAME_FAILURE_WINDOW,
         false,
     )?;
-    if validate_username(&payload.username).is_err()
-        || validate_password(&payload.password).is_err()
-    {
-        burn_dummy_argon2(&state, payload.password.clone()).await?;
+    let credentials_valid = validate_username(&payload.username).is_ok()
+        && validate_password(&payload.password).is_ok();
+    if !credentials_valid {
+        burn_dummy_argon2(
+            &state,
+            dummy_password_for_credentials(&payload.password, credentials_valid),
+        )
+        .await?;
         check_rate_limit(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
@@ -257,7 +277,11 @@ pub async fn login(
     }
     let normalized = normalize_username(&payload.username);
     let Some(user) = users::find_by_normalized_username(&state.pool, &normalized).await? else {
-        burn_dummy_argon2(&state, payload.password.clone()).await?;
+        burn_dummy_argon2(
+            &state,
+            dummy_password_for_credentials(&payload.password, credentials_valid),
+        )
+        .await?;
         check_rate_limit(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
@@ -269,7 +293,11 @@ pub async fn login(
         return Err(invalid_credentials());
     };
     if user.status != "ACTIVE" {
-        burn_dummy_argon2(&state, payload.password.clone()).await?;
+        burn_dummy_argon2(
+            &state,
+            dummy_password_for_credentials(&payload.password, credentials_valid),
+        )
+        .await?;
         check_rate_limit(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
@@ -360,6 +388,9 @@ pub async fn change_password(
     payload: web::Json<ChangePasswordRequest>,
 ) -> Result<HttpResponse, AppError> {
     validate_password(&payload.new_password).map_err(validation_error)?;
+    if validate_password(&payload.current_password).is_err() {
+        return Err(current_password_invalid());
+    }
     let record = users::find_by_id(&state.pool, &user.0.id)
         .await?
         .ok_or_else(internal_auth_error)?;
@@ -368,11 +399,7 @@ pub async fn change_password(
     let expected_password_hash = current_hash.clone();
     let verified = run_argon2(&state, move || verify_password(&current, &current_hash)).await?;
     if !verified {
-        return Err(AppError::api(
-            StatusCode::UNAUTHORIZED,
-            "CURRENT_PASSWORD_INVALID",
-            "当前密码错误",
-        ));
+        return Err(current_password_invalid());
     }
     let new_password = payload.new_password.clone();
     let new_hash = run_argon2(&state, move || hash_password(&new_password)).await?;
@@ -443,7 +470,7 @@ mod tests {
 
     use super::{
         AuthRateLimitPolicy, LOGIN_USERNAME_FAILURE_MAX_BUCKETS, check_rate_limit_at,
-        client_rate_limit_key, username_failure_key,
+        client_rate_limit_key, dummy_password_for_credentials, username_failure_key,
     };
 
     #[test]
@@ -459,6 +486,18 @@ mod tests {
         assert_eq!(
             username_failure_key(&"x".repeat(10_000)),
             "login:username:<invalid>"
+        );
+    }
+
+    #[test]
+    fn invalid_credentials_use_a_bounded_dummy_password() {
+        let untrusted = "x".repeat(100_000);
+        let dummy = dummy_password_for_credentials(&untrusted, false);
+        assert_ne!(dummy, untrusted);
+        assert!(dummy.len() <= 128);
+        assert_eq!(
+            dummy_password_for_credentials("valid-password", true),
+            "valid-password"
         );
     }
 

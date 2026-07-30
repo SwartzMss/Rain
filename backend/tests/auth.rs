@@ -667,6 +667,22 @@ async fn password_change_preserves_argon2_capacity_errors() {
         .acquire_many_owned(state.auth.argon2_concurrency as u32)
         .await
         .expect("argon2 permits");
+    let invalid_current = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/change-password")
+            .cookie(cookie.clone())
+            .set_json(json!({
+                "current_password": "x".repeat(10_000),
+                "new_password": "new-password123"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(invalid_current.status(), StatusCode::UNAUTHORIZED);
+    let invalid_body: Value = test::read_body_json(invalid_current).await;
+    assert_eq!(invalid_body["code"], "CURRENT_PASSWORD_INVALID");
+
     let response = test::call_service(
         &app,
         test::TestRequest::post()

@@ -11,7 +11,11 @@ import {
 import { rainApi } from '../api/client';
 import type { Credentials, User } from '../api/types';
 import { AuthOperationGeneration } from './AuthOperationGeneration';
-import { toAuthState, type AuthState } from './authState';
+import {
+  authStateAfterRefreshFailure,
+  toAuthState,
+  type AuthState
+} from './authState';
 
 interface AuthContextValue {
   state: AuthState;
@@ -38,7 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch {
       if (operationGeneration.current.isCurrent(refreshGeneration)) {
-        setState({ status: 'GUEST' });
+        setState(authStateAfterRefreshFailure);
       }
     }
   }, []);

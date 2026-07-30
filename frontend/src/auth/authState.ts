@@ -12,6 +12,10 @@ export function toAuthState(response: AuthMeResponse): AuthState {
   return { status: 'GUEST' };
 }
 
+export function authStateAfterRefreshFailure(state: AuthState): AuthState {
+  return state.status === 'LOADING' ? { status: 'GUEST' } : state;
+}
+
 export function safeReturnPath(value: unknown): string {
   return typeof value === 'string' &&
     value.startsWith('/') &&
