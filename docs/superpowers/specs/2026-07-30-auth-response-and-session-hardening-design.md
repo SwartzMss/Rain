@@ -51,19 +51,34 @@ The policy is applied at scoped middleware level so it covers successful respons
 
 Integration tests cover `/api/auth/me`, `/api/auth/change-password` error responses, and `/api/me/saved-searches`.
 
-## Password-Change Failure Limiting
+## Password-Change Attempt Limiting
 
 Add a fourth independent in-memory rate-limit map keyed by authenticated user ID:
 
 - window: 15 minutes;
-- limit: 5 failed current-password verifications;
+- limit: 5 password-change attempts that enter the expensive phase;
 - independent capacity, so exhaustion cannot block login-IP, registration-IP, or failed-username policies.
 
-Before acquiring an Argon2 permit, password change checks this bucket without incrementing it. A completed current-password mismatch records a failure. Invalid password length continues to return `CURRENT_PASSWORD_INVALID` without Argon2 work and also records a failure, preventing a cheap bypass of the endpoint policy.
+Each user also has a process-local in-flight guard. A password-change request must acquire it before reading the password hash or acquiring an Argon2 permit. A second concurrent request for the same user returns `429 TOO_MANY_REQUESTS` without entering password verification or replacement-password hashing.
 
-Successful password verification clears the user’s failure bucket before hashing the new password. When limited, the endpoint returns the existing stable `429 TOO_MANY_REQUESTS` contract.
+After acquiring the guard, a request checks and records the attempt bucket before current-password validation or Argon2 work. Successful verification does not clear the bucket, so correct-password requests cannot bypass the frequency policy. Invalid current-password format remains cheap and returns `CURRENT_PASSWORD_INVALID`, but still counts as a password-change attempt.
 
-Tests verify the sixth failed attempt is rejected before Argon2 execution, successful verification clears prior failures, and the new bucket cannot consume the other policy maps’ capacity.
+Tests verify the sixth attempt is rejected before Argon2 execution, concurrent correct-password requests allow only one request into the expensive phase, the in-flight guard releases on every return path, and the new bucket cannot consume the other policy maps’ capacity.
+
+## Active Session Cap
+
+Each user may have at most 20 active, unexpired Sessions.
+
+Login Session creation becomes one transaction that:
+
+1. verifies the user is still active and the password hash is unchanged;
+2. deletes expired and revoked Sessions for that user;
+3. inserts the new Session;
+4. deletes the oldest active Sessions beyond the newest 20.
+
+The cap operation uses deterministic ordering by `created_at DESC, id DESC`. The insert and pruning occur in the same SQLite write transaction, so concurrent successful logins cannot leave the user above the cap after their transactions commit.
+
+Password replacement remains unchanged because it revokes every existing Session before inserting exactly one replacement. Repository tests cover sequential and concurrent logins, preservation of the newest Sessions, and isolation between users.
 
 ## Compatibility and Validation
 

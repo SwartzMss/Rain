@@ -163,7 +163,7 @@ when the request path starts with `/api/auth/` or `/api/me/`. Preserve unrelated
 
 Run the command from Step 2. Expected: all cache-policy assertions pass.
 
-### Task 4: Limit failed password changes per user
+### Task 4: Limit expensive password-change attempts per user
 
 **Files:**
 - Modify: `backend/src/lib.rs`
@@ -174,12 +174,14 @@ Run the command from Step 2. Expected: all cache-policy assertions pass.
 
 Add policy tests proving:
 
-- the sixth failure within 15 minutes returns `TOO_MANY_REQUESTS`;
-- failures expire after 15 minutes;
-- a successful current-password verification clears the user bucket;
+- the sixth expensive attempt within 15 minutes returns `TOO_MANY_REQUESTS`;
+- attempts expire after 15 minutes;
+- a successful current-password verification does not clear the user bucket;
+- a second concurrent request for the same user cannot enter Argon2 work;
+- the in-flight guard releases after success and error returns;
 - filling the password-change map does not consume login-IP, failed-username, or registration-IP maps.
 
-Add an integration test that seeds five failures for an authenticated user and confirms the next password-change request returns 429 before changing the password.
+Add an integration test that seeds five attempts for an authenticated user and confirms the next password-change request returns 429 before changing the password.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -195,10 +197,11 @@ Expected: the policy, map, and clearing behavior do not exist.
 
 - [ ] **Step 3: Add an independent policy and map**
 
-Extend `AuthRateLimits` with:
+Keep the independent attempt map and add process-local in-flight user tracking:
 
 ```rust
-pub change_password_user_failure: HashMap<String, AuthRateLimitBucket>
+pub change_password_user_attempt: HashMap<String, AuthRateLimitBucket>
+pub change_password_in_flight: HashSet<String>
 ```
 
 Add:
@@ -209,11 +212,11 @@ const CHANGE_PASSWORD_FAILURE_LIMIT: usize = 5;
 const CHANGE_PASSWORD_FAILURE_MAX_BUCKETS: usize = 1024;
 ```
 
-Add `AuthRateLimitPolicy::ChangePasswordUserFailure`, use a key derived from the authenticated user ID, and add a helper that removes the user bucket after successful verification.
+Add `AuthRateLimitPolicy::ChangePasswordUserAttempt` and use a key derived from the authenticated user ID. Add an RAII guard that removes the user ID from `change_password_in_flight` on drop.
 
-- [ ] **Step 4: Enforce before Argon2 and record failures**
+- [ ] **Step 4: Enforce in-flight and attempt limits before Argon2**
 
-At password-change entry, check the user bucket without recording before any current-password Argon2 operation. Record a failure for invalid current-password length and completed verification mismatch. On successful verification, clear the failure bucket before hashing the replacement password.
+After validating the new-password shape, acquire the per-user in-flight guard. Check and record the attempt bucket once before validating the current password, loading its hash, or acquiring an Argon2 permit. Do not clear it after successful verification. Invalid current-password length remains cheap but consumes one attempt.
 
 Return the existing `429 TOO_MANY_REQUESTS` response when the bucket is full.
 
@@ -221,7 +224,48 @@ Return the existing `429 TOO_MANY_REQUESTS` response when the bucket is full.
 
 Run the commands from Step 2. Expected: all policy and integration tests pass.
 
-### Task 5: Full verification and PR update
+### Task 5: Cap active Sessions per user
+
+**Files:**
+- Modify: `backend/src/repositories/sessions.rs`
+- Modify: `backend/tests/auth.rs`
+
+- [ ] **Step 1: Write failing repository tests**
+
+Create 21 sequential login Sessions for one user and assert only the newest 20 remain active. Add a concurrent creation test and a second-user test proving pruning is isolated by `user_id`.
+
+- [ ] **Step 2: Run focused tests and verify RED**
+
+Run:
+
+```bash
+cd backend
+cargo test session_limit --lib
+```
+
+Expected: all 21 Sessions remain because login Session creation has no cap.
+
+- [ ] **Step 3: Make login Session creation transactional**
+
+In `create_session_if_password_unchanged`, begin a transaction, verify the active user and unchanged password hash, remove expired/revoked rows for that user, insert the new Session, and delete active rows outside:
+
+```sql
+SELECT id
+FROM user_sessions
+WHERE user_id = ?
+  AND revoked_at IS NULL
+  AND datetime(expires_at) > CURRENT_TIMESTAMP
+ORDER BY datetime(created_at) DESC, id DESC
+LIMIT -1 OFFSET 20
+```
+
+Commit only after pruning completes. Return `false` without insertion when the credential predicate no longer holds.
+
+- [ ] **Step 4: Run focused tests and verify GREEN**
+
+Run `cargo test session_limit --lib`. Expected: sequential, concurrent, newest-preservation, and user-isolation tests pass.
+
+### Task 6: Full verification and PR update
 
 **Files:**
 - Modify: `docs/superpowers/plans/2026-07-30-auth-response-and-session-hardening.md` only if implementation details require correcting the plan
@@ -272,4 +316,4 @@ git push origin HEAD:agent/user-auth-session
 
 - [ ] **Step 5: Update and verify PR #26**
 
-Append a concise follow-up section documenting controlled business errors, conditional Session activity updates, no-store identity responses, and the 5-per-15-minute password-change failure policy. Verify the PR head SHA equals local `HEAD`.
+Append a concise follow-up section documenting the per-user password-change in-flight guard, the 5-per-15-minute expensive-attempt policy, and the 20-active-Session cap. Verify the PR head SHA equals local `HEAD`.
