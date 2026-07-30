@@ -130,9 +130,6 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(from_fn(http_access_log::log_useful_requests))
             .wrap(from_fn(backend::auth::same_origin::enforce_same_origin))
-            .wrap(from_fn(
-                backend::auth::extractor::clear_invalid_session_cookie,
-            ))
             .app_data(shared_state.clone())
             .configure(register)
             .default_service(web::get().to(embedded_frontend::serve_frontend))

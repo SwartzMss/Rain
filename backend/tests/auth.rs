@@ -725,14 +725,11 @@ async fn registration_switch_does_not_block_existing_user_login() {
 }
 
 #[actix_web::test]
-async fn invalid_session_cookie_is_cleared_from_the_browser() {
+async fn invalid_session_response_does_not_clear_a_newer_browser_session() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
     let app = test::init_service(
         App::new()
-            .wrap(from_fn(
-                backend::auth::extractor::clear_invalid_session_cookie,
-            ))
             .app_data(web::Data::new(AppState::new(
                 pool,
                 PathBuf::from("data"),
@@ -754,8 +751,9 @@ async fn invalid_session_cookie_is_cleared_from_the_browser() {
         response
             .headers()
             .get_all(header::SET_COOKIE)
-            .filter_map(|value| value.to_str().ok())
-            .any(|value| value.contains("rain_session=") && value.contains("Max-Age=0"))
+            .next()
+            .is_none(),
+        "an old invalid-session response must not mutate the browser's current cookie"
     );
 }
 

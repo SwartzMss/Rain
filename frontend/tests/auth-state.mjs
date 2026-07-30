@@ -90,10 +90,11 @@ try {
   );
   assert.match(authContext, /useRef\(new AuthOperationGeneration\(\)\)/);
   assert.match(authContext, /isCurrent\(refreshGeneration\)/);
+  assert.match(authContext, /const revalidateAuthentication = \(\) => \{\s*void refresh\(\);/);
   assert.equal(
     authContext.match(/operationGeneration\.current\.invalidate\(\)/g)?.length,
-    4,
-    'login, logout, logout-all, and authentication-required must invalidate stale refreshes'
+    3,
+    'only successful login, logout, and logout-all operations invalidate stale refreshes directly'
   );
 
   const homeView = await readFile(

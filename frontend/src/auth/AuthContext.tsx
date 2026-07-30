@@ -47,13 +47,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   useEffect(() => {
-    const becomeGuest = () => {
-      operationGeneration.current.invalidate();
-      setState({ status: 'GUEST' });
+    const revalidateAuthentication = () => {
+      void refresh();
     };
-    window.addEventListener('rain:authentication-required', becomeGuest);
-    return () => window.removeEventListener('rain:authentication-required', becomeGuest);
-  }, []);
+    window.addEventListener('rain:authentication-required', revalidateAuthentication);
+    return () =>
+      window.removeEventListener('rain:authentication-required', revalidateAuthentication);
+  }, [refresh]);
 
   const login = useCallback(async (credentials: Credentials) => {
     const user = await rainApi.login(credentials);
