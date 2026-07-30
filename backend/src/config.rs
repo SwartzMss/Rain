@@ -388,16 +388,29 @@ fn dotenv_path_for_executable(executable: &std::path::Path) -> Option<PathBuf> {
     executable.parent().map(|directory| directory.join(".env"))
 }
 
-fn load_dotenv() {
+fn load_dotenv() -> Result<Option<PathBuf>, AppError> {
     if let Ok(executable) = env::current_exe()
         && let Some(path) = dotenv_path_for_executable(&executable)
         && path.is_file()
     {
-        dotenvy::from_path(path).ok();
-        return;
+        dotenvy::from_path(&path).map_err(|error| {
+            AppError::Config(format!(
+                "failed to load .env file '{}': {}; please save the file as UTF-8",
+                path.display(),
+                error
+            ))
+        })?;
+        return Ok(Some(path));
     }
 
-    dotenvy::dotenv().ok();
+    match dotenvy::dotenv() {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.not_found() => Ok(None),
+        Err(error) => Err(AppError::Config(format!(
+            "failed to load .env: {}; please save the file as UTF-8",
+            error
+        ))),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -416,8 +429,13 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, AppError> {
-        load_dotenv();
+        let dotenv_path = load_dotenv()?;
 
+        if let Some(path) = &dotenv_path {
+            eprintln!("loaded environment file: {}", path.display());
+        } else {
+            eprintln!("environment file not found, using process environment and defaults");
+        }
         let host = env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".into());
         let port: u16 = env::var("SERVER_PORT")
             .unwrap_or_else(|_| "8078".into())
@@ -454,6 +472,11 @@ impl AppConfig {
             password: env::var("RAIN_BOOTSTRAP_ADMIN_PASSWORD").unwrap_or_default(),
         };
 
+        eprintln!(
+            "bootstrap administrator configuration: username={}, password_configured={}",
+            bootstrap_admin.username,
+            !bootstrap_admin.password.is_empty()
+        );
         Ok(Self {
             host,
             port,
