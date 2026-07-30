@@ -2,9 +2,11 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
 import type { TempResultInfo, TempResultLinesResponse } from '../../api/types';
+import { useAuth } from '../../auth/AuthContext';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 
 export function TempResultView() {
+  const auth = useAuth();
   const { resultId = '' } = useParams<{ resultId: string }>();
   const navigate = useNavigate();
   const [result, setResult] = useState<TempResultInfo | null>(null);
@@ -55,6 +57,17 @@ export function TempResultView() {
     }
   };
 
+  const deleteResult = async () => {
+    if (!window.confirm('确定删除这个临时结果吗？')) return;
+    setError(null);
+    try {
+      await rainApi.deleteTempResult(resultId);
+      navigate('/');
+    } catch (deleteError) {
+      setError(normalizeApiError(deleteError));
+    }
+  };
+
   if (loading && !result) {
     return <p className="py-12 text-center text-sm text-slate-500">临时结果加载中...</p>;
   }
@@ -73,17 +86,15 @@ export function TempResultView() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
-              <button
-                type="button"
-                className="rounded border border-rose-300 px-3 py-1.5 text-rose-600 hover:border-rose-700"
-                onClick={async () => {
-                  if (!window.confirm('确定删除这个临时结果吗？')) return;
-                  await rainApi.deleteTempResult(resultId);
-                  navigate('/');
-                }}
-              >
-                删除
-              </button>
+              {auth.state.status === 'AUTHENTICATED' ? (
+                <button
+                  type="button"
+                  className="rounded border border-rose-300 px-3 py-1.5 text-rose-600 hover:border-rose-700"
+                  onClick={() => void deleteResult()}
+                >
+                  删除
+                </button>
+              ) : null}
             </div>
           </div>
 

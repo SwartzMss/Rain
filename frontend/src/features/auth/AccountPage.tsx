@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Navigate } from 'react-router-dom';
-import { normalizeApiError, rainApi } from '../../api/client';
+import { normalizeApiError } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 
 export function AccountPage() {
@@ -20,7 +20,7 @@ export function AccountPage() {
     setError('');
     setMessage('');
     try {
-      await rainApi.changePassword({
+      await auth.changePassword({
         current_password: currentPassword,
         new_password: newPassword
       });

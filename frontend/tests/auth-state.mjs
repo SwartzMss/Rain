@@ -91,11 +91,22 @@ try {
   assert.match(authContext, /useRef\(new AuthOperationGeneration\(\)\)/);
   assert.match(authContext, /isCurrent\(refreshGeneration\)/);
   assert.match(authContext, /const revalidateAuthentication = \(\) => \{\s*void refresh\(\);/);
+  assert.match(
+    authContext,
+    /const changePassword = useCallback\([\s\S]*operationGeneration\.current\.invalidate\(\);[\s\S]*await rainApi\.changePassword\(payload\);[\s\S]*await refresh\(\);/
+  );
   assert.equal(
     authContext.match(/operationGeneration\.current\.invalidate\(\)/g)?.length,
-    3,
-    'only successful login, logout, and logout-all operations invalidate stale refreshes directly'
+    4,
+    'login, password change, logout, and logout-all must invalidate stale refreshes'
   );
+
+  const accountPage = await readFile(
+    new URL('../src/features/auth/AccountPage.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(accountPage, /await auth\.changePassword\(/);
+  assert.doesNotMatch(accountPage, /rainApi\.changePassword\(/);
 
   const homeView = await readFile(
     new URL('../src/features/files/HomeView.tsx', import.meta.url),

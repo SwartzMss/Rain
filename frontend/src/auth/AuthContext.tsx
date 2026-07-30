@@ -17,6 +17,7 @@ interface AuthContextValue {
   state: AuthState;
   login(credentials: Credentials): Promise<User>;
   register(credentials: Credentials): Promise<User>;
+  changePassword(payload: { current_password: string; new_password: string }): Promise<void>;
   logout(): Promise<void>;
   logoutAll(): Promise<void>;
   refresh(): Promise<void>;
@@ -66,6 +67,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return rainApi.register(credentials);
   }, []);
 
+  const changePassword = useCallback(
+    async (payload: { current_password: string; new_password: string }) => {
+      operationGeneration.current.invalidate();
+      await rainApi.changePassword(payload);
+      await refresh();
+    },
+    [refresh]
+  );
+
   const logout = useCallback(async () => {
     await rainApi.logout();
     operationGeneration.current.invalidate();
@@ -79,8 +89,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ state, login, register, logout, logoutAll, refresh }),
-    [state, login, register, logout, logoutAll, refresh]
+    () => ({ state, login, register, changePassword, logout, logoutAll, refresh }),
+    [state, login, register, changePassword, logout, logoutAll, refresh]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
