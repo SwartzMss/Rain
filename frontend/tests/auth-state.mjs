@@ -12,6 +12,9 @@ try {
   const { safeReturnPath, toAuthState } = await server.ssrLoadModule(
     '/src/auth/authState.ts'
   );
+  const { AuthOperationGeneration } = await server.ssrLoadModule(
+    '/src/auth/AuthOperationGeneration.ts'
+  );
 
   assert.equal(
     toAuthState({ authenticated: false, user: null }).status,
@@ -27,6 +30,31 @@ try {
   assert.equal(safeReturnPath('/issue/CN013'), '/issue/CN013');
   assert.equal(safeReturnPath('https://evil.example'), '/');
   assert.equal(safeReturnPath('//evil.example'), '/');
+
+  const generation = new AuthOperationGeneration();
+  const staleRefresh = generation.begin();
+  let authState = { status: 'LOADING' };
+  let resolveRefresh;
+  const refreshResponse = new Promise((resolve) => {
+    resolveRefresh = resolve;
+  });
+  const refresh = refreshResponse.then((nextState) => {
+    if (generation.isCurrent(staleRefresh)) authState = nextState;
+  });
+
+  generation.invalidate();
+  authState = {
+    status: 'AUTHENTICATED',
+    user: { id: '1', username: 'swartz' }
+  };
+  resolveRefresh({ status: 'GUEST' });
+  await refresh;
+
+  assert.equal(
+    authState.status,
+    'AUTHENTICATED',
+    'a stale refresh must not overwrite a successful login'
+  );
 
   const apiClient = await readFile(
     new URL('../src/api/client.ts', import.meta.url),
@@ -55,6 +83,18 @@ try {
     'utf8'
   );
   assert.match(main, /<AuthProvider>/);
+
+  const authContext = await readFile(
+    new URL('../src/auth/AuthContext.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(authContext, /useRef\(new AuthOperationGeneration\(\)\)/);
+  assert.match(authContext, /isCurrent\(refreshGeneration\)/);
+  assert.equal(
+    authContext.match(/operationGeneration\.current\.invalidate\(\)/g)?.length,
+    4,
+    'login, logout, logout-all, and authentication-required must invalidate stale refreshes'
+  );
 
   const homeView = await readFile(
     new URL('../src/features/files/HomeView.tsx', import.meta.url),
