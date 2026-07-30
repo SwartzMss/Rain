@@ -3,8 +3,7 @@ mod http_access_log;
 
 use std::{fmt::Display, fs, future::Future, path::PathBuf, time::Duration};
 
-use actix_cors::Cors;
-use actix_web::{App, HttpServer, http::header, middleware::from_fn, web};
+use actix_web::{App, HttpServer, middleware::from_fn, web};
 use backend::{
     AppState,
     blob_store::{
@@ -119,7 +118,6 @@ async fn main() -> std::io::Result<()> {
     spawn_blob_gc(pool.clone(), blob_store.clone());
     spawn_blob_audit(pool.clone(), blob_store.clone());
     spawn_session_cleanup(pool.clone());
-    let allowed_origins = config.cors.allowed_origins.clone();
     let shared_state = web::Data::new(AppState::with_blob_store_and_auth(
         pool,
         config.data_root.clone(),
@@ -129,20 +127,12 @@ async fn main() -> std::io::Result<()> {
     ));
 
     HttpServer::new(move || {
-        let cors = allowed_origins.iter().fold(
-            Cors::default()
-                .allowed_methods(vec!["GET", "POST", "PATCH", "DELETE", "OPTIONS"])
-                .allowed_headers(vec![header::CONTENT_TYPE, header::ACCEPT])
-                .supports_credentials()
-                .max_age(3600),
-            |cors, origin| cors.allowed_origin(origin),
-        );
         App::new()
             .wrap(from_fn(http_access_log::log_useful_requests))
+            .wrap(from_fn(backend::auth::same_origin::enforce_same_origin))
             .wrap(from_fn(
                 backend::auth::extractor::clear_invalid_session_cookie,
             ))
-            .wrap(cors)
             .app_data(shared_state.clone())
             .configure(register)
             .default_service(web::get().to(embedded_frontend::serve_frontend))

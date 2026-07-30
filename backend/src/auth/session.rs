@@ -18,22 +18,20 @@ pub fn hash_session_token(token: &str) -> String {
         .collect()
 }
 
-pub fn session_cookie(token: String, ttl_seconds: u64, secure: bool) -> Cookie<'static> {
+pub fn session_cookie(token: String, ttl_seconds: u64) -> Cookie<'static> {
     Cookie::build(SESSION_COOKIE_NAME, token)
         .http_only(true)
         .same_site(SameSite::Lax)
         .path("/")
-        .secure(secure)
         .max_age(Duration::seconds(ttl_seconds.min(i64::MAX as u64) as i64))
         .finish()
 }
 
-pub fn cleared_session_cookie(secure: bool) -> Cookie<'static> {
+pub fn cleared_session_cookie() -> Cookie<'static> {
     Cookie::build(SESSION_COOKIE_NAME, "")
         .http_only(true)
         .same_site(SameSite::Lax)
         .path("/")
-        .secure(secure)
         .max_age(Duration::ZERO)
         .finish()
 }

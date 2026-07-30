@@ -19,7 +19,7 @@ import type {
   SavedSearchPayload
 } from './types';
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || window.location.origin).replace(/\/$/, '');
+const API_BASE_URL = '';
 const ISSUE_CODE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
 export function normalizeApiError(error: unknown): string {

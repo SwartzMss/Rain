@@ -37,6 +37,8 @@ try {
   assert.match(apiClient, /xhr\.status === 401/);
   assert.match(apiClient, /payload\.message/);
   assert.match(apiClient, /rain:authentication-required/);
+  assert.doesNotMatch(apiClient, /VITE_API_BASE_URL/);
+  assert.match(apiClient, /const API_BASE_URL = ''/);
 
   const app = await readFile(
     new URL('../src/App.tsx', import.meta.url),

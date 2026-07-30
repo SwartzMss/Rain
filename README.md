@@ -30,7 +30,6 @@ SERVER_HOST=0.0.0.0
 SERVER_PORT=8080
 RESET_DB=false
 RAIN_SESSION_TTL_SECONDS=604800
-RAIN_SESSION_COOKIE_SECURE=false
 ```
 
 ### 2. 构建前端
@@ -68,10 +67,11 @@ npm run dev
 
 开发时也可以继续使用 Vite dev server：`http://localhost:5173`。
 
-如果使用 Vite dev server，在 `frontend/.env` 中设置：
+Vite 会把浏览器的同源 `/api` 请求代理到默认的 `http://localhost:8080`。如果后端
+开发端口不同，可在 `frontend/.env` 中设置仅供开发服务器使用的代理目标：
 
 ```dotenv
-VITE_API_BASE_URL=http://localhost:8080
+RAIN_DEV_API_PROXY_TARGET=http://localhost:8080
 ```
 
 ## 构建发布包
@@ -150,9 +150,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
 | `RAIN_SESSION_TTL_SECONDS` | `604800` | 登录 Session 有效期（秒），默认 7 天 |
-| `RAIN_SESSION_COOKIE_SECURE` | `false` | 是否只通过 HTTPS 发送登录 Cookie；生产 HTTPS 环境必须设为 `true` |
 | `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
-| `RAIN_ALLOWED_ORIGINS` | 本机同源地址 | 允许携带认证 Cookie 的前端 Origin，逗号分隔 |
 
 默认配置会使用：
 
@@ -180,12 +178,8 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 数据库只保存 Session Token 的 SHA-256 哈希。
 
 注册成功后不会自动登录。当前版本没有邮箱、手机号或自助找回密码功能；忘记密码
-时只能由部署管理员直接维护数据库。通过 HTTPS 部署时必须设置：
-
-```dotenv
-RAIN_SESSION_COOKIE_SECURE=true
-RAIN_ALLOWED_ORIGINS=https://rain.example.com
-```
+时只能由部署管理员直接维护数据库。当前版本面向可信内网 HTTP 部署，必须通过 Rain
+后端提供的页面同源访问 API，不支持独立部署在其他来源的浏览器前端。
 
 游客可以查看、下载和搜索；创建 Issue、上传、删除 Issue、删除 Bundle、删除文件节点
 以及删除临时搜索结果需要登录。详细搜索会生成可过期清理的临时结果文件，但仍属于
@@ -201,8 +195,7 @@ RAIN_ALLOWED_ORIGINS=https://rain.example.com
 仍可正常登录。
 
 登录和注册接口默认启用 60 秒窗口限流，并限制 Argon2 并发，避免公开认证入口耗尽
-CPU 或 Actix blocking pool。跨域部署时需要通过 `RAIN_ALLOWED_ORIGINS` 显式配置
-允许携带认证 Cookie 的前端 Origin；不支持 `*`。
+CPU 或 Actix blocking pool。浏览器访问遵循同源策略，服务端不发送跨域许可响应头。
 
 ## 当前支持
 

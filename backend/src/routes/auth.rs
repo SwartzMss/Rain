@@ -259,7 +259,7 @@ pub async fn login(
     users::mark_login(&state.pool, &user.id).await?;
 
     Ok(HttpResponse::Ok()
-        .cookie(session_cookie(token, ttl, state.auth.session_cookie_secure))
+        .cookie(session_cookie(token, ttl))
         .json(PublicUser {
             id: user.id,
             username: user.username,
@@ -283,7 +283,7 @@ pub async fn logout(
         sessions::revoke_by_token_hash(&state.pool, &hash_session_token(cookie.value())).await?;
     }
     Ok(HttpResponse::NoContent()
-        .cookie(cleared_session_cookie(state.auth.session_cookie_secure))
+        .cookie(cleared_session_cookie())
         .finish())
 }
 
@@ -350,7 +350,7 @@ pub async fn change_password(
         ));
     }
     Ok(HttpResponse::NoContent()
-        .cookie(session_cookie(token, ttl, state.auth.session_cookie_secure))
+        .cookie(session_cookie(token, ttl))
         .finish())
 }
 
@@ -361,7 +361,7 @@ pub async fn logout_all(
 ) -> Result<HttpResponse, AppError> {
     sessions::revoke_all_for_user(&state.pool, &user.0.id).await?;
     Ok(HttpResponse::NoContent()
-        .cookie(cleared_session_cookie(state.auth.session_cookie_secure))
+        .cookie(cleared_session_cookie())
         .finish())
 }
 

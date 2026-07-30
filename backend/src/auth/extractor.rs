@@ -35,13 +35,9 @@ pub async fn clear_invalid_session_cookie(
         .get::<InvalidSessionCookie>()
         .is_some()
     {
-        let secure = response
-            .request()
-            .app_data::<web::Data<AppState>>()
-            .is_some_and(|state| state.auth.session_cookie_secure);
         response
             .response_mut()
-            .add_cookie(&crate::auth::session::cleared_session_cookie(secure))?;
+            .add_cookie(&crate::auth::session::cleared_session_cookie())?;
     }
     Ok(response)
 }

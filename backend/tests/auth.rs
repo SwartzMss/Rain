@@ -95,6 +95,7 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
         .to_owned();
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("SameSite=Lax"));
+    assert!(!set_cookie.contains("Secure"));
     let cookie = Cookie::parse(set_cookie)
         .expect("parse cookie")
         .into_owned();
@@ -150,6 +151,69 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
         after_logout_body,
         json!({"authenticated": false, "user": null})
     );
+}
+
+#[actix_web::test]
+async fn unsafe_cross_origin_requests_are_rejected() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let app = test::init_service(
+        App::new()
+            .wrap(from_fn(backend::auth::same_origin::enforce_same_origin))
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .insert_header((header::HOST, "rain.internal:8080"))
+            .insert_header((header::ORIGIN, "http://other.internal:8080"))
+            .set_json(json!({"username": "swartz", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "CROSS_ORIGIN_REQUEST_REJECTED");
+}
+
+#[actix_web::test]
+async fn same_origin_browser_requests_forwarded_by_the_dev_proxy_are_allowed() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let app = test::init_service(
+        App::new()
+            .wrap(from_fn(backend::auth::same_origin::enforce_same_origin))
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .insert_header((header::HOST, "localhost:8080"))
+            .insert_header((header::ORIGIN, "http://localhost:5173"))
+            .insert_header(("Sec-Fetch-Site", "same-origin"))
+            .set_json(json!({"username": "swartz", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 #[actix_web::test]

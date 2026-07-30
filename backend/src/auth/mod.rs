@@ -1,5 +1,6 @@
 pub mod extractor;
 pub mod password;
+pub mod same_origin;
 pub mod session;
 
 #[derive(Debug, Clone, serde::Serialize)]
