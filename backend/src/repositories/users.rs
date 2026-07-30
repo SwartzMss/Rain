@@ -73,17 +73,6 @@ pub async fn find_by_id(pool: &SqlitePool, id: &str) -> Result<Option<UserRecord
     .map_err(AppError::Database)
 }
 
-pub async fn mark_login(pool: &SqlitePool, id: &str) -> Result<(), AppError> {
-    sqlx::query(
-        "UPDATE users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-    )
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{auth::password::normalize_username, db};

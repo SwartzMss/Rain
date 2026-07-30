@@ -121,6 +121,23 @@ pub async fn create_session_if_password_unchanged(
     .execute(&mut *transaction)
     .await
     .map_err(AppError::Database)?;
+    let metadata_updated = sqlx::query(
+        r#"
+        UPDATE users
+        SET last_login_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::Database)?
+    .rows_affected();
+    if metadata_updated != 1 {
+        transaction.rollback().await.map_err(AppError::Database)?;
+        return Err(AppError::Database(sqlx::Error::RowNotFound));
+    }
     transaction.commit().await.map_err(AppError::Database)?;
     Ok(true)
 }
@@ -662,6 +679,70 @@ mod tests {
         .await
         .expect("active count");
         assert_eq!(active_count, 20);
+    }
+
+    #[tokio::test]
+    async fn login_metadata_failure_rolls_back_session_changes() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "AtomicLogin", "hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        for index in 0..20 {
+            create_session(
+                &pool,
+                &user.id,
+                &format!("atomic-existing-{index:02}"),
+                Utc::now() + Duration::hours(1),
+                None,
+                None,
+            )
+            .await
+            .expect("existing session");
+        }
+        sqlx::query(
+            r#"
+            CREATE TRIGGER fail_last_login
+            BEFORE UPDATE OF last_login_at ON users
+            BEGIN
+                SELECT RAISE(ABORT, 'forced last login failure');
+            END
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("failure trigger");
+
+        create_session_if_password_unchanged(
+            &pool,
+            &user.id,
+            "hash",
+            "atomic-candidate",
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect_err("login metadata failure must abort Session creation");
+
+        let session_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE user_id = ?")
+                .bind(&user.id)
+                .fetch_one(&pool)
+                .await
+                .expect("session count");
+        assert_eq!(session_count, 20);
+        let candidate_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_sessions WHERE token_hash = ?")
+                .bind("atomic-candidate")
+                .fetch_one(&pool)
+                .await
+                .expect("candidate count");
+        assert_eq!(candidate_count, 0);
     }
 
     #[tokio::test]

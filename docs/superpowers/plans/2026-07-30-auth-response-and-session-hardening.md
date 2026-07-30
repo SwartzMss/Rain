@@ -317,3 +317,42 @@ git push origin HEAD:agent/user-auth-session
 - [ ] **Step 5: Update and verify PR #26**
 
 Append a concise follow-up section documenting the per-user password-change in-flight guard, the 5-per-15-minute expensive-attempt policy, and the 20-active-Session cap. Verify the PR head SHA equals local `HEAD`.
+
+### Task 7: Make login Session and metadata atomic
+
+**Files:**
+- Modify: `backend/src/repositories/sessions.rs`
+- Modify: `backend/src/repositories/users.rs`
+- Modify: `backend/src/routes/auth.rs`
+
+- [ ] **Step 1: Write a failing rollback test**
+
+Install a test-only SQLite trigger that aborts updates to `users.last_login_at`. Fill the user to the active Session cap, call `create_session_if_password_unchanged`, and assert the operation fails while the candidate Session is absent and all existing Sessions remain.
+
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run:
+
+```bash
+cd backend
+cargo test login_metadata_failure_rolls_back_session_changes --lib
+```
+
+Expected: the repository call succeeds because it does not yet update login metadata in its transaction.
+
+- [ ] **Step 3: Update metadata before transaction commit**
+
+After Session pruning, execute:
+
+```sql
+UPDATE users
+SET last_login_at = CURRENT_TIMESTAMP,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+```
+
+Require exactly one affected row, then commit. Delete `users::mark_login` and its independent route call.
+
+- [ ] **Step 4: Run focused and full verification**
+
+Run the focused rollback test, then the full backend and frontend verification commands from Task 6.

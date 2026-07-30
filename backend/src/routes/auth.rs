@@ -395,7 +395,6 @@ pub async fn login(
     if !created {
         return Err(invalid_credentials());
     }
-    users::mark_login(&state.pool, &user.id).await?;
 
     Ok(HttpResponse::Ok()
         .cookie(session_cookie(token, ttl))
