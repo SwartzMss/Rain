@@ -40,11 +40,6 @@ import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
 import { PENDING_SAVED_SEARCH_KEY, takePendingSavedSearch } from './pendingSavedSearch';
 
-const DEFAULT_TREE_PANEL_WIDTH = 330;
-const MIN_TREE_PANEL_WIDTH = 260;
-const MAX_TREE_PANEL_WIDTH = 560;
-const TREE_PANEL_WIDTH_STORAGE_KEY = 'rain.fileTreePanelWidth';
-
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
     return '正在建立索引';
@@ -177,15 +172,6 @@ export function BundleView() {
   const [fileSearchExecuted, setFileSearchExecuted] = useState(false);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const [sourceActionMessage, setSourceActionMessage] = useState<string | null>(null);
-  const [treePanelWidth, setTreePanelWidth] = useState(() => {
-    const stored = Number.parseInt(localStorage.getItem(TREE_PANEL_WIDTH_STORAGE_KEY) ?? '', 10);
-    return Number.isFinite(stored)
-      ? Math.min(MAX_TREE_PANEL_WIDTH, Math.max(MIN_TREE_PANEL_WIDTH, stored))
-      : DEFAULT_TREE_PANEL_WIDTH;
-  });
-  const [resizingTreePanel, setResizingTreePanel] = useState(false);
-  const treeResizeStartRef = useRef<{ pointerX: number; panelWidth: number } | null>(null);
-  const layoutRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const filenameInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestGenerationRef = useRef(0);
@@ -226,18 +212,7 @@ export function BundleView() {
   });
 
   const currentSavedSearchPayload = useCallback((): SavedSearchPayload | null => {
-    if (searchMode === 'log') {
-      const query = filenameQuery.trim();
-      if (!query) return null;
-      return {
-        name: savedSearchName,
-        search_type: 'FILENAME',
-        query_text: query,
-        scope_type: savedSearchScope,
-        scope_key: savedSearchScope === 'ISSUE' ? issueCode : null,
-        options: { version: 1 }
-      };
-    }
+    if (searchMode !== 'detailed') return null;
     try {
       if (detailRawExpression !== null) {
         const query = detailRawExpression.trim();
@@ -263,11 +238,12 @@ export function BundleView() {
     } catch {
       return null;
     }
-  }, [detailRawExpression, filenameQuery, issueCode, savedSearchName, savedSearchScope, searchDraft, searchMode, searchTokens]);
+  }, [detailRawExpression, issueCode, savedSearchName, savedSearchScope, searchDraft, searchMode, searchTokens]);
 
   const loadSavedSearches = useCallback(async () => {
     if (auth.state.status !== 'AUTHENTICATED') return;
-    setSavedSearches(await rainApi.fetchSavedSearches(issueCode || undefined));
+    const items = await rainApi.fetchSavedSearches(issueCode || undefined);
+    setSavedSearches(items.filter((item) => item.search_type === 'DETAIL'));
   }, [auth.state.status, issueCode]);
 
   useEffect(() => {
@@ -325,32 +301,20 @@ export function BundleView() {
   };
 
   const useSavedSearch = async (item: SavedSearch) => {
-    setSearchMode(item.search_type === 'FILENAME' ? 'log' : 'detailed');
-    if (item.search_type === 'FILENAME') {
-      setFilenameQuery(item.query_text);
-      setSearchLoading(true);
-      try {
-        const response = await rainApi.searchIssueLogs(issueCode, item.query_text, { mode: 'filename', size: 50 });
-        setSearchResults(response.hits);
-        setSearchExecuted(true);
-      } finally {
-        setSearchLoading(false);
-      }
-    } else {
-      const editor = detailEditorState(item.query_text);
-      setSearchTokens(editor.tokens);
-      setDetailRawExpression(editor.rawExpression);
-      setSearchDraft('');
-      setSearchLoading(true);
-      try {
-        const response = await rainApi.previewTempResult({ expression: item.query_text, issue_code: issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] });
-        const hits = response.lines.map((line) => ({ bundle_hash: line.bundle_hash, file_id: line.file_id ?? '', path: line.path, snippet: line.content, line_number: line.line_number }));
-        setSearchResults(hits);
-        setSearchExecuted(true);
-        openViewerTab({ id: `search:${Date.now()}`, kind: 'search', resultId: response.result_id, title: item.name, pinned: false, scrollTop: 0, expression: item.query_text, hits, total: response.total, from: 0, pageSize: LINE_PAGE_SIZE_OPTIONS[0], source: { kind: 'issue', issueCode } });
-      } finally {
-        setSearchLoading(false);
-      }
+    setSearchMode('detailed');
+    const editor = detailEditorState(item.query_text);
+    setSearchTokens(editor.tokens);
+    setDetailRawExpression(editor.rawExpression);
+    setSearchDraft('');
+    setSearchLoading(true);
+    try {
+      const response = await rainApi.previewTempResult({ expression: item.query_text, issue_code: issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] });
+      const hits = response.lines.map((line) => ({ bundle_hash: line.bundle_hash, file_id: line.file_id ?? '', path: line.path, snippet: line.content, line_number: line.line_number }));
+      setSearchResults(hits);
+      setSearchExecuted(true);
+      openViewerTab({ id: `search:${Date.now()}`, kind: 'search', resultId: response.result_id, title: item.name, pinned: false, scrollTop: 0, expression: item.query_text, hits, total: response.total, from: 0, pageSize: LINE_PAGE_SIZE_OPTIONS[0], source: { kind: 'issue', issueCode } });
+    } finally {
+      setSearchLoading(false);
     }
     await rainApi.markSavedSearchUsed(item.id);
     setSavedSearchesOpen(false);
@@ -359,26 +323,21 @@ export function BundleView() {
   const updateEditingSavedSearch = async () => {
     if (!editingSavedSearch) return;
     try {
-      const finalizedTokens = editingSavedSearch.search_type === 'DETAIL'
-        && editingRawExpression === null
+      const finalizedTokens = editingRawExpression === null
         ? finalizeSearchTokens(editingSearchTokens, editingSearchDraft)
         : [];
-      const queryText = editingSavedSearch.search_type === 'DETAIL'
-        ? editingRawExpression?.trim() || serializeSearchTokens(finalizedTokens)
-        : editingSavedSearch.query_text.trim();
+      const queryText = editingRawExpression?.trim() || serializeSearchTokens(finalizedTokens);
       if (!queryText) throw new Error('搜索表达式不能为空');
       await rainApi.updateSavedSearch(editingSavedSearch.id, {
         name: editingSavedSearch.name.trim(),
-        search_type: editingSavedSearch.search_type,
+        search_type: 'DETAIL',
         query_text: queryText,
         scope_type: editingSavedSearch.scope_type,
         scope_key: editingSavedSearch.scope_type === 'ISSUE'
           ? (editingSavedSearch.scope_key || issueCode)
           : null,
-        options: editingSavedSearch.search_type === 'DETAIL'
-          ? editingRawExpression === null
-            ? { version: 1, tokens: finalizedTokens }
-            : { version: 1 }
+        options: editingRawExpression === null
+          ? { version: 1, tokens: finalizedTokens }
           : { version: 1 },
         is_pinned: editingSavedSearch.is_pinned,
         sort_order: editingSavedSearch.sort_order
@@ -391,9 +350,7 @@ export function BundleView() {
   };
 
   const beginEditingSavedSearch = (item: SavedSearch) => {
-    const editor = detailEditorState(
-      item.search_type === 'DETAIL' ? item.query_text : undefined
-    );
+    const editor = detailEditorState(item.query_text);
     setEditingSearchTokens(editor.tokens);
     setEditingRawExpression(editor.rawExpression);
     setEditingSearchDraft('');
@@ -416,43 +373,6 @@ export function BundleView() {
   useEffect(() => {
     treeNodesRef.current = treeNodes;
   }, [treeNodes]);
-
-  useEffect(() => {
-    localStorage.setItem(TREE_PANEL_WIDTH_STORAGE_KEY, String(treePanelWidth));
-  }, [treePanelWidth]);
-
-  useEffect(() => {
-    if (!resizingTreePanel) return;
-    const previousCursor = document.body.style.cursor;
-    const previousUserSelect = document.body.style.userSelect;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    const resize = (event: PointerEvent) => {
-      const layout = layoutRef.current;
-      const start = treeResizeStartRef.current;
-      if (!layout || !start) return;
-      const bounds = layout.getBoundingClientRect();
-      const availableMaximum = Math.max(MIN_TREE_PANEL_WIDTH, bounds.width - 420);
-      const nextWidth = start.panelWidth + event.clientX - start.pointerX;
-      setTreePanelWidth(
-        Math.min(MAX_TREE_PANEL_WIDTH, availableMaximum, Math.max(MIN_TREE_PANEL_WIDTH, nextWidth))
-      );
-    };
-    const stop = () => {
-      treeResizeStartRef.current = null;
-      setResizingTreePanel(false);
-    };
-    window.addEventListener('pointermove', resize);
-    window.addEventListener('pointerup', stop, { once: true });
-    window.addEventListener('pointercancel', stop, { once: true });
-    return () => {
-      window.removeEventListener('pointermove', resize);
-      window.removeEventListener('pointerup', stop);
-      window.removeEventListener('pointercancel', stop);
-      document.body.style.cursor = previousCursor;
-      document.body.style.userSelect = previousUserSelect;
-    };
-  }, [resizingTreePanel]);
 
   const loadNode = useCallback(
     async (
@@ -624,6 +544,19 @@ export function BundleView() {
     setResultFilterTokens([]);
     setResultFilterDraft('');
     window.requestAnimationFrame(() => filenameInputRef.current?.focus());
+  }, []);
+
+  const clearDetailedSearch = useCallback(() => {
+    searchRequestGenerationRef.current += 1;
+    setSearchTokens([]);
+    setDetailRawExpression(null);
+    setSearchDraft('');
+    setSearchResults([]);
+    setSearchLoading(false);
+    setSearchError(null);
+    setSearchExecuted(false);
+    setResultFilterTokens([]);
+    setResultFilterDraft('');
   }, []);
 
   const handleSearchSubmit = (event: React.FormEvent<HTMLFormElement>) => {
@@ -1260,6 +1193,15 @@ export function BundleView() {
     loading: searchLoading,
     error: searchError
   });
+  const showDetailedClear = searchMode === 'detailed' && (
+    detailRawExpression !== null
+    || searchTokens.length > 0
+    || Boolean(searchDraft.trim())
+    || searchExecuted
+    || searchResults.length > 0
+    || searchLoading
+    || Boolean(searchError)
+  );
   const canRunFileSearch = canFinalizeSearch(fileSearchTokens, fileSearchDraft);
   const canRunResultFilter = canFinalizeSearch(resultFilterTokens, resultFilterDraft);
 
@@ -1272,11 +1214,7 @@ export function BundleView() {
           </p>
         ) : null}
 
-        <div
-          ref={layoutRef}
-          className="bundle-layout min-h-[calc(100vh-104px)] gap-0 lg:h-full lg:min-h-0 lg:overflow-hidden"
-          style={{ '--tree-panel-width': `${treePanelWidth}px` } as React.CSSProperties}
-        >
+        <div className="bundle-layout min-h-[calc(100vh-104px)] gap-0 lg:h-full lg:min-h-0 lg:overflow-hidden">
           <div className="relative flex min-h-0 flex-col border-r border-slate-200 bg-white">
             <div className="border-b border-slate-200 px-4 py-4">
               <div className="mb-4 flex items-start justify-between gap-3">
@@ -1340,6 +1278,16 @@ export function BundleView() {
                     清除
                   </button>
                 ) : null}
+                {showDetailedClear ? (
+                  <button
+                    type="button"
+                    className="mt-0.5 shrink-0 rounded border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-400 hover:text-slate-950"
+                    aria-label="清除日志内容搜索"
+                    onClick={clearDetailedSearch}
+                  >
+                    清除
+                  </button>
+                ) : null}
                 <button
                   type="submit"
                   className="mt-0.5 shrink-0 rounded bg-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-900 transition hover:bg-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1349,39 +1297,42 @@ export function BundleView() {
                   搜索
                 </button>
               </form>
-              <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
-                <span className="shrink-0">搜索方式</span>
+              <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
                 <div className="flex rounded-md border border-slate-200 bg-slate-50 p-0.5 shadow-inner">
                   <button
                     type="button"
-                    className={`rounded px-4 py-1.5 font-semibold transition ${searchMode === 'log' ? 'border border-sky-300 bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
+                    className={`rounded px-2.5 py-1.5 font-semibold transition ${searchMode === 'log' ? 'border border-sky-300 bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
                     onClick={() => changeSearchMode('log')}
                   >
                     按文件名
                   </button>
                   <button
                     type="button"
-                    className={`rounded px-4 py-1.5 font-semibold transition ${searchMode === 'detailed' ? 'border border-sky-300 bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
+                    className={`rounded px-2.5 py-1.5 font-semibold transition ${searchMode === 'detailed' ? 'border border-sky-300 bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
                     onClick={() => changeSearchMode('detailed')}
                   >
                     搜日志内容
                   </button>
                 </div>
-                <button
-                  type="button"
-                  className="ml-auto rounded-md border border-slate-300 bg-white px-3 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
-                  onClick={beginSaveSearch}
-                >
-                  保存条件
-                </button>
                 {auth.state.status === 'AUTHENTICATED' ? (
-                  <button
-                    type="button"
-                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
-                    onClick={() => setSavedSearchesOpen((open) => !open)}
-                  >
-                    我的搜索条件
-                  </button>
+                  <>
+                    {auth.state.status === 'AUTHENTICATED' && searchMode === 'detailed' ? (
+                      <button
+                        type="button"
+                        className="ml-auto rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
+                        onClick={beginSaveSearch}
+                      >
+                        保存条件
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={`${searchMode === 'detailed' ? '' : 'ml-auto '}rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400`}
+                      onClick={() => setSavedSearchesOpen((open) => !open)}
+                    >
+                      我的搜索条件
+                    </button>
+                  </>
                 ) : null}
               </div>
               {savedSearchesOpen ? (
@@ -1402,7 +1353,7 @@ export function BundleView() {
               {searchError ? <p className="mt-2 text-xs text-rose-600">{searchError}</p> : null}
               {savedSearchError ? <p className="mt-2 text-xs text-rose-600">{savedSearchError}</p> : null}
             </div>
-            <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+            <div className="min-h-0 flex-1 overflow-x-auto overflow-y-auto px-4 py-3">
             {nonReadyBundles.length > 0 ? (
               <div className="space-y-1 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
                 {nonReadyBundles.map((bundle) => (
@@ -1455,7 +1406,7 @@ export function BundleView() {
                 </div>
               )
             ) : rootIds.length > 0 ? (
-              <div className="space-y-2 text-sm text-slate-700">
+              <div className="min-w-max space-y-2 text-sm text-slate-700">
                 {rootIds.some((rootId) => (treeNodes[rootId]?.childrenIds.length ?? 0) > 0) ? (
                   rootIds.map((rootId) => (
                     <div key={rootId} className="space-y-1">
@@ -1486,46 +1437,6 @@ export function BundleView() {
             ) : (
               <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
             )}
-            </div>
-            <div
-              role="separator"
-              aria-label="调整文件树宽度"
-              aria-orientation="vertical"
-              aria-valuemin={MIN_TREE_PANEL_WIDTH}
-              aria-valuemax={MAX_TREE_PANEL_WIDTH}
-              aria-valuenow={treePanelWidth}
-              tabIndex={0}
-              className={`group absolute inset-y-0 right-[-4px] z-20 hidden w-2 cursor-col-resize touch-none outline-none lg:block ${
-                resizingTreePanel ? 'bg-sky-400/30' : 'hover:bg-sky-400/20 focus:bg-sky-400/30'
-              }`}
-              title="拖动调整文件树宽度；双击恢复默认宽度"
-              onPointerDown={(event) => {
-                if (event.button !== 0) return;
-                event.preventDefault();
-                treeResizeStartRef.current = {
-                  pointerX: event.clientX,
-                  panelWidth: treePanelWidth
-                };
-                setResizingTreePanel(true);
-              }}
-              onDoubleClick={() => setTreePanelWidth(DEFAULT_TREE_PANEL_WIDTH)}
-              onKeyDown={(event) => {
-                if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-                  event.preventDefault();
-                  const direction = event.key === 'ArrowLeft' ? -1 : 1;
-                  setTreePanelWidth((width) =>
-                    Math.min(MAX_TREE_PANEL_WIDTH, Math.max(MIN_TREE_PANEL_WIDTH, width + direction * 20))
-                  );
-                } else if (event.key === 'Home') {
-                  event.preventDefault();
-                  setTreePanelWidth(MIN_TREE_PANEL_WIDTH);
-                } else if (event.key === 'End') {
-                  event.preventDefault();
-                  setTreePanelWidth(MAX_TREE_PANEL_WIDTH);
-                }
-              }}
-            >
-              <span className="absolute left-1/2 top-1/2 h-12 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-300 transition group-hover:bg-sky-400 group-focus:bg-sky-400" />
             </div>
           </div>
 
@@ -1769,41 +1680,25 @@ export function BundleView() {
             <label className="block text-sm font-medium">名称
               <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={editingSavedSearch.name} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, name: event.target.value })} />
             </label>
-            <label className="block text-sm font-medium">搜索类型
-              <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={editingSavedSearch.search_type} onChange={(event) => {
-                const searchType = event.target.value as 'FILENAME' | 'DETAIL';
-                setEditingSearchTokens([]);
-                setEditingSearchDraft('');
-                setEditingRawExpression(null);
-                setEditingSavedSearch({ ...editingSavedSearch, search_type: searchType, query_text: '' });
-              }}>
-                <option value="FILENAME">文件名</option>
-                <option value="DETAIL">详细搜索</option>
-              </select>
-            </label>
             <label className="block text-sm font-medium">搜索表达式
-              {editingSavedSearch.search_type === 'DETAIL' ? (
-                editingRawExpression !== null ? (
-                  <textarea
-                    className="mt-1 min-h-24 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm"
-                    maxLength={4096}
-                    value={editingRawExpression}
-                    onChange={(event) => setEditingRawExpression(event.target.value)}
-                  />
-                ) : (
-                  <div className="mt-1 rounded-lg border border-slate-300 px-3 py-2">
-                    <SearchTokenEditor
-                      tokens={editingSearchTokens}
-                      draft={editingSearchDraft}
-                      onTokensChange={setEditingSearchTokens}
-                      onDraftChange={setEditingSearchDraft}
-                      placeholder="输入详细搜索关键词..."
-                      ariaLabel="编辑详细搜索条件"
-                    />
-                  </div>
-                )
+              {editingRawExpression !== null ? (
+                <textarea
+                  className="mt-1 min-h-24 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm"
+                  maxLength={4096}
+                  value={editingRawExpression}
+                  onChange={(event) => setEditingRawExpression(event.target.value)}
+                />
               ) : (
-                <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={4096} value={editingSavedSearch.query_text} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, query_text: event.target.value })} />
+                <div className="mt-1 rounded-lg border border-slate-300 px-3 py-2">
+                  <SearchTokenEditor
+                    tokens={editingSearchTokens}
+                    draft={editingSearchDraft}
+                    onTokensChange={setEditingSearchTokens}
+                    onDraftChange={setEditingSearchDraft}
+                    placeholder="输入详细搜索关键词..."
+                    ariaLabel="编辑详细搜索条件"
+                  />
+                </div>
               )}
             </label>
             <label className="block text-sm font-medium">使用范围

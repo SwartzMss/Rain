@@ -41,7 +41,6 @@ pub fn register(cfg: &mut web::ServiceConfig) {
             .service(auth::me)
             .service(auth::logout)
             .service(auth::change_password)
-            .service(auth::logout_all)
             .service(saved_searches::list)
             .service(saved_searches::create)
             .service(saved_searches::update)

@@ -51,7 +51,7 @@ export function FileTreeNode({
         aria-label={node.name}
         onClick={() => onNodeClick(node.id)}
         className={[
-          'group flex h-9 w-full items-center gap-2 rounded-md border border-transparent px-2 text-left text-sm transition',
+          'group flex h-9 w-full min-w-max items-center gap-2 rounded-md border border-transparent px-2 text-left text-sm transition',
           isSelected ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-[inset_3px_0_0_rgba(37,99,235,0.82)]' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'
         ].join(' ')}
         style={{ paddingLeft: `${8 + depth * 16}px` }}
@@ -69,7 +69,7 @@ export function FileTreeNode({
           <FileIcon name={node.name} binary={isBinaryNode(node)} />
         )}
         <span
-          className="min-w-0 flex-1 truncate text-[13px] font-medium leading-4"
+          className="flex-1 whitespace-nowrap text-[13px] font-medium leading-4"
           title={node.name}
         >
           {node.name}

@@ -274,17 +274,6 @@ pub async fn revoke_by_token_hash(pool: &SqlitePool, token_hash: &str) -> Result
     Ok(())
 }
 
-pub async fn revoke_all_for_user(pool: &SqlitePool, user_id: &str) -> Result<u64, AppError> {
-    Ok(sqlx::query(
-        "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
-    )
-    .bind(user_id)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?
-    .rows_affected())
-}
-
 pub async fn revoke_others_for_user(
     pool: &SqlitePool,
     user_id: &str,
