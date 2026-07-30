@@ -12,11 +12,12 @@ import { useIssueBundles } from './hooks/useIssueBundles';
 import { useIssues } from './hooks/useIssues';
 import { useUploadTask } from './hooks/useUploadTask';
 import { shouldResetUploadAfterBundleDeletion } from './uploadDeletion';
+import { isAdmin } from '../../auth/permissions';
 
 export function HomeView() {
   const navigate = useNavigate();
   const auth = useAuth();
-  const canWrite = auth.state.status === 'AUTHENTICATED';
+  const canWrite = auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newIssueCode, setNewIssueCode] = useState('');

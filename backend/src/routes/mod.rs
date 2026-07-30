@@ -37,6 +37,11 @@ pub fn register(cfg: &mut web::ServiceConfig) {
         web::scope("/api")
             .wrap(from_fn(prevent_session_response_caching))
             .service(auth::register_user)
+            .service(admin::list_users)
+            .service(admin::change_role)
+            .service(admin::change_status)
+            .service(admin::revoke_sessions)
+            .service(admin::list_audit)
             .service(auth::login)
             .service(auth::me)
             .service(auth::logout)
@@ -68,3 +73,4 @@ pub fn register(cfg: &mut web::ServiceConfig) {
             .service(uploads::get_upload_task),
     );
 }
+mod admin;

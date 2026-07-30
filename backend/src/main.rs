@@ -59,6 +59,13 @@ async fn main() -> std::io::Result<()> {
     prepare_schema(&pool, config.reset_db)
         .await
         .expect("failed to prepare database schema");
+    backend::repositories::bootstrap_admin::bootstrap_admin(
+        &pool,
+        &config.bootstrap_admin.username,
+        config.bootstrap_admin.password(),
+    )
+    .await
+    .expect("failed to bootstrap administrator");
     log_sqlite_file_sizes(&config.database_url).await;
 
     if config.reset_db {

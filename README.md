@@ -342,3 +342,13 @@ Multipart 字段：
 5. 带日志引用的 AI 分析。
 
 数据库细节见 [doc/DB.md](doc/DB.md)。
+# 管理员初始化与权限
+
+首次使用空数据库启动前必须设置管理员密码：
+
+```env
+RAIN_BOOTSTRAP_ADMIN_USERNAME=admin
+RAIN_BOOTSTRAP_ADMIN_PASSWORD=<至少 8 个字符的强密码>
+```
+
+启动会在 Schema 准备完成后原子创建首个 `ACTIVE + ADMIN` 用户和审计记录。数据库已有有效管理员时会跳过初始化，`.env` 不会覆盖管理员在网页中修改后的密码。普通用户和游客可读取共享数据，只有管理员能新建 Issue、上传或删除共享数据；管理员可在 `/admin` 管理用户角色、状态、Session 和审计日志。本版本按全新安装部署，不兼容旧数据库 Schema。

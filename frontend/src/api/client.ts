@@ -17,6 +17,7 @@ import type {
   User,
   SavedSearch,
   SavedSearchPayload
+  , AdminUserPage, AuditLogPage, UserRole, UserStatus
 } from './types';
 
 const API_BASE_URL = '';
@@ -112,6 +113,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const rainApi = {
+  fetchAdminUsers(params: { query?: string; role?: UserRole; status?: UserStatus; cursor?: string } = {}) {
+    const query = new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => Boolean(entry[1])));
+    return request<AdminUserPage>(`/api/admin/users?${query}`);
+  },
+  fetchAuditLogs(cursor?: string) { return request<AuditLogPage>(`/api/admin/audit-logs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`); },
+  changeUserRole(id: string, role: UserRole) { return request(`/api/admin/users/${encodePathSegment(id)}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }); },
+  changeUserStatus(id: string, status: UserStatus) { return request(`/api/admin/users/${encodePathSegment(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }); },
+  revokeUserSessions(id: string) { return request<{ revoked_sessions: number }>(`/api/admin/users/${encodePathSegment(id)}/revoke-sessions`, { method: 'POST' }); },
   register(payload: Credentials) {
     return request<User>('/api/auth/register', {
       method: 'POST',

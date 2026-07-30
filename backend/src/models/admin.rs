@@ -1,0 +1,72 @@
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+
+use crate::auth::{UserRole, UserStatus};
+
+#[derive(Debug, Deserialize)]
+pub struct AdminListQuery {
+    pub query: Option<String>,
+    pub role: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct AdminUser {
+    pub id: String,
+    pub username: String,
+    pub role: UserRole,
+    pub status: UserStatus,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_login_at: Option<String>,
+    pub active_session_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminUserPage {
+    pub items: Vec<AdminUser>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangeRole {
+    pub role: String,
+}
+#[derive(Debug, Deserialize)]
+pub struct ChangeStatus {
+    pub status: String,
+}
+#[derive(Debug, Serialize)]
+pub struct RevokedSessions {
+    pub revoked_sessions: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditListQuery {
+    pub action: Option<String>,
+    pub target_user_id: Option<String>,
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct AuditLog {
+    pub id: String,
+    pub actor_type: String,
+    pub actor_user_id: Option<String>,
+    pub target_user_id: Option<String>,
+    pub action: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditLogPage {
+    pub items: Vec<AuditLog>,
+    pub next_cursor: Option<String>,
+}

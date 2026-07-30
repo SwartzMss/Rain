@@ -1,10 +1,19 @@
 export type UploadStatus = 'READY' | 'PROCESSING' | 'FAILED' | 'PENDING';
 export type UploadStage = 'PENDING' | 'RECEIVING' | 'EXTRACTING' | 'INDEXING' | 'PUBLISHING' | 'READY' | 'FAILED';
 
+export type UserRole = 'USER' | 'ADMIN';
+export type UserStatus = 'ACTIVE' | 'DISABLED';
+
 export interface User {
   id: string;
   username: string;
+  role: UserRole;
 }
+
+export interface AdminUser extends User { status: UserStatus; created_at: string; updated_at: string; last_login_at: string | null; active_session_count: number; }
+export interface AdminUserPage { items: AdminUser[]; next_cursor: string | null; }
+export interface AuditLog { id: string; actor_type: 'USER' | 'SYSTEM'; actor_user_id: string | null; target_user_id: string | null; action: string; old_value: string | null; new_value: string | null; created_at: string; }
+export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }
 
 export interface Credentials {
   username: string;

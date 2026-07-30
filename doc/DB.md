@@ -151,3 +151,8 @@ flowchart TD
 ```
 
 递归解压、文本扫描和索引全部在 `.tmp/{task_id}/staging/{bundle_hash}` 中完成。嵌套深度、条目总数和 Issue 内容容量由同一 bundle 共享预算；任一层损坏或超过安全限制时，任务标记为 `FAILED`，并删除 staging 文件及该 bundle 的 `files`、行偏移和 FTS 半成品记录。
+# 管理员数据模型
+
+`users.role` 仅允许 `USER`/`ADMIN`，`users.status` 仅允许 `ACTIVE`/`DISABLED`。Session 不缓存角色或状态，每个认证请求都联表读取用户当前值。
+
+`admin_audit_logs` 记录 `ADMIN_BOOTSTRAPPED`、`USER_ROLE_CHANGED`、`USER_STATUS_CHANGED` 和 `USER_SESSIONS_REVOKED`。日志只保存 actor、target、动作、旧值/新值以及请求元数据，不保存密码、密码哈希、Cookie 或 Session token。角色/状态/Session 管理与审计写入位于同一事务；降级或停用管理员使用 SQLite `BEGIN IMMEDIATE` 保证至少保留一个 `ACTIVE ADMIN`。

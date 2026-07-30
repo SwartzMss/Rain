@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::{
     AppState,
-    auth::extractor::RequireUser,
+    auth::extractor::RequireAdmin,
     error::AppError,
     file_classification::PreviewKind,
     models::files::{FileNode, FileNodeResponse},
@@ -159,7 +159,7 @@ pub async fn download_file(
 
 #[delete("/files/v1/{bundle_id}/files/{file_id}")]
 pub async fn delete_file_node(
-    _user: RequireUser,
+    _user: RequireAdmin,
     params: web::Path<FilePath>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
