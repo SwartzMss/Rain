@@ -7,6 +7,7 @@ type IssueSelectorProps = {
   issueSearchText: string;
   issuesError: string | null;
   issuesLoading: boolean;
+  canWrite: boolean;
   onCreateClick: () => void;
   onIssueSearchTextChange: (value: string) => void;
   onRefreshIssues: () => void;
@@ -21,6 +22,7 @@ export function IssueSelector({
   issueSearchText,
   issuesError,
   issuesLoading,
+  canWrite,
   onCreateClick,
   onIssueSearchTextChange,
   onRefreshIssues,
@@ -31,13 +33,19 @@ export function IssueSelector({
     <aside className="flex min-h-[680px] flex-col rounded-2xl border border-slate-200/90 bg-white/95 p-4 shadow-[0_18px_48px_rgba(7,21,34,0.08)] backdrop-blur">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-slate-950">Issues</h2>
-        <button
-          type="button"
-          className="rounded-lg bg-slate-950 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
-          onClick={onCreateClick}
-        >
-          + 新建 Issue
-        </button>
+        {canWrite ? (
+          <button
+            type="button"
+            className="rounded-lg bg-slate-950 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+            onClick={onCreateClick}
+          >
+            + 新建 Issue
+          </button>
+        ) : (
+          <span className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">
+            登录后可新建
+          </span>
+        )}
       </div>
 
       <div className="relative">

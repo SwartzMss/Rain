@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../../auth/AuthContext';
 import { normalizeApiError, rainApi } from '../../api/client';
 import { ConfirmDialog, type ConfirmDialogState } from './components/ConfirmDialog';
 import { IssueCreateDialog } from './components/IssueCreateDialog';
@@ -14,6 +15,8 @@ import { shouldResetUploadAfterBundleDeletion } from './uploadDeletion';
 
 export function HomeView() {
   const navigate = useNavigate();
+  const auth = useAuth();
+  const canWrite = auth.state.status === 'AUTHENTICATED';
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newIssueCode, setNewIssueCode] = useState('');
@@ -161,6 +164,7 @@ export function HomeView() {
         issueSearchText={issues.issueSearchText}
         issuesError={issues.issuesError}
         issuesLoading={issues.issuesLoading}
+        canWrite={canWrite}
         onCreateClick={() => setCreateDialogOpen(true)}
         onIssueSearchTextChange={issues.setIssueSearchText}
         onRefreshIssues={() => issues.loadIssues().catch(() => undefined)}
@@ -176,7 +180,7 @@ export function HomeView() {
                 {issues.currentIssueCode || '请选择 Issue'}
               </h2>
             </div>
-            {issues.currentIssueCode ? (
+            {canWrite && issues.currentIssueCode ? (
               <button
                 type="button"
                 className="rounded-lg border border-rose-500/60 px-4 py-2 text-sm font-semibold text-rose-600 transition hover:bg-rose-500/10 disabled:opacity-60"
@@ -191,6 +195,7 @@ export function HomeView() {
           <UploadPanel
             activeTask={upload.activeTask}
             currentIssueCode={issues.currentIssueCode}
+            canWrite={canWrite}
             fileInputRef={fileInputRef}
             onFilesSelected={(files) => upload.performUpload(files).catch(() => undefined)}
             uploadDisabled={upload.uploadDisabled}
@@ -205,6 +210,7 @@ export function HomeView() {
           currentIssueCode={issues.currentIssueCode}
           deletingKey={deletingKey}
           fileRows={fileRows}
+          canWrite={canWrite}
           onDeleteRow={deleteRow}
         />
       </section>

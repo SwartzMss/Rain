@@ -1,16 +1,52 @@
-use actix_web::web;
+use actix_web::{
+    Error,
+    body::MessageBody,
+    dev::{ServiceRequest, ServiceResponse},
+    http::header::{CACHE_CONTROL, HeaderValue},
+    middleware::{Next, from_fn},
+    web,
+};
 
+mod auth;
 mod files;
 mod health;
 mod helpers;
 mod issues;
 mod logs;
+mod saved_searches;
 mod temp_results;
 mod uploads;
+
+async fn prevent_session_response_caching(
+    request: ServiceRequest,
+    next: Next<impl MessageBody>,
+) -> Result<ServiceResponse<impl MessageBody>, Error> {
+    let no_store =
+        request.path().starts_with("/api/auth/") || request.path().starts_with("/api/me/");
+    let mut response = next.call(request).await?;
+    if no_store {
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store, private"));
+    }
+    Ok(response)
+}
 
 pub fn register(cfg: &mut web::ServiceConfig) {
     cfg.service(health::health).service(
         web::scope("/api")
+            .wrap(from_fn(prevent_session_response_caching))
+            .service(auth::register_user)
+            .service(auth::login)
+            .service(auth::me)
+            .service(auth::logout)
+            .service(auth::change_password)
+            .service(auth::logout_all)
+            .service(saved_searches::list)
+            .service(saved_searches::create)
+            .service(saved_searches::update)
+            .service(saved_searches::delete)
+            .service(saved_searches::mark_used)
             .service(issues::list_issues)
             .service(issues::create_issue)
             .service(issues::get_issue_bundles)

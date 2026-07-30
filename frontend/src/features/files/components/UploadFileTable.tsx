@@ -8,6 +8,7 @@ type UploadFileTableProps = {
   currentIssueCode: string;
   deletingKey: string | null;
   fileRows: FileRow[];
+  canWrite: boolean;
   onDeleteRow: (row: FileRow) => void;
 };
 
@@ -16,6 +17,7 @@ export function UploadFileTable({
   currentIssueCode,
   deletingKey,
   fileRows,
+  canWrite,
   onDeleteRow
 }: UploadFileTableProps) {
   return (
@@ -64,7 +66,7 @@ export function UploadFileTable({
                     {row.status === 'PROCESSING' || row.status === 'PENDING' ? (
                       <span className="mr-4 text-slate-500">等待完成</span>
                     ) : null}
-                    {row.stage !== 'UPLOADING' && row.bundleHash ? (
+                    {canWrite && row.stage !== 'UPLOADING' && row.bundleHash ? (
                       <button
                         type="button"
                         className="text-rose-600 hover:text-rose-700 disabled:text-slate-600"
@@ -73,6 +75,9 @@ export function UploadFileTable({
                       >
                         {deleting ? '删除中...' : '删除'}
                       </button>
+                    ) : null}
+                    {!canWrite && row.stage !== 'UPLOADING' && row.bundleHash ? (
+                      <span className="text-xs text-slate-500">登录后可删除</span>
                     ) : null}
                   </td>
                 </tr>

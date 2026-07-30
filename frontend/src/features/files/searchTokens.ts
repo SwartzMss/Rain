@@ -149,6 +149,53 @@ export function serializeSearchTokens(tokens: SearchToken[]): string {
     .join(' ');
 }
 
+export function deserializeSearchTokens(expression: string): SearchToken[] {
+  const tokens: SearchToken[] = [];
+  let index = 0;
+  while (index < expression.length) {
+    while (/\s/.test(expression[index] ?? '')) index += 1;
+    if (index >= expression.length) break;
+    if (expression[index] === '"') {
+      index += 1;
+      let value = '';
+      let closed = false;
+      while (index < expression.length) {
+        const character = expression[index];
+        index += 1;
+        if (character === '"') {
+          closed = true;
+          break;
+        }
+        if (character === '\\') {
+          if (index >= expression.length) throw new Error('搜索表达式转义不完整');
+          const escaped = expression[index];
+          value += escaped === '"' || escaped === '\\' ? escaped : `\\${escaped}`;
+          index += 1;
+        } else {
+          value += character;
+        }
+      }
+      if (!closed || !value.trim()) throw new Error('搜索表达式中的关键词无效');
+      tokens.push({ kind: 'term', value });
+      continue;
+    }
+    const start = index;
+    while (index < expression.length && !/\s/.test(expression[index])) index += 1;
+    const fragment = expression.slice(start, index);
+    if (fragment.includes('(') || fragment.includes(')')) {
+      throw new Error('括号表达式需要使用原始文本编辑器');
+    }
+    if (['AND', 'OR', 'NOT'].includes(fragment)) {
+      tokens.push({ kind: 'operator', value: fragment as SearchOperator });
+    } else if (fragment) {
+      tokens.push({ kind: 'term', value: fragment });
+    }
+  }
+  const validation = validateSearchTokens(tokens);
+  if (!validation.valid) throw new Error(validation.message);
+  return tokens;
+}
+
 export function formatSearchTokens(tokens: SearchToken[]): string {
   return tokens.map((token) => token.value).join(' ');
 }

@@ -98,6 +98,96 @@ pub struct AppLimits {
     pub api: ApiConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthConfig {
+    pub allow_registration: bool,
+    pub session_ttl_seconds: u64,
+    pub argon2_concurrency: usize,
+    pub login_ip_limit_per_minute: usize,
+    pub login_username_failure_limit_per_5_minutes: usize,
+    pub register_ip_limit_per_hour: usize,
+}
+
+const MAX_SESSION_TTL_SECONDS: u64 = 90 * 24 * 60 * 60;
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            allow_registration: true,
+            session_ttl_seconds: 604_800,
+            argon2_concurrency: 5,
+            login_ip_limit_per_minute: 20,
+            login_username_failure_limit_per_5_minutes: 10,
+            register_ip_limit_per_hour: 10,
+        }
+    }
+}
+
+impl AuthConfig {
+    fn from_env() -> Result<Self, AppError> {
+        let defaults = Self::default();
+        let config = Self {
+            allow_registration: env_value("RAIN_ALLOW_REGISTRATION", defaults.allow_registration)?,
+            session_ttl_seconds: env_value(
+                "RAIN_SESSION_TTL_SECONDS",
+                defaults.session_ttl_seconds,
+            )?,
+            argon2_concurrency: env_value(
+                "RAIN_AUTH_ARGON2_CONCURRENCY",
+                defaults.argon2_concurrency,
+            )?,
+            login_ip_limit_per_minute: env_value(
+                "RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE",
+                defaults.login_ip_limit_per_minute,
+            )?,
+            login_username_failure_limit_per_5_minutes: env_value(
+                "RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES",
+                defaults.login_username_failure_limit_per_5_minutes,
+            )?,
+            register_ip_limit_per_hour: env_value(
+                "RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR",
+                defaults.register_ip_limit_per_hour,
+            )?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.session_ttl_seconds == 0 {
+            return Err(AppError::Config(
+                "RAIN_SESSION_TTL_SECONDS must be positive".into(),
+            ));
+        }
+        if self.session_ttl_seconds > MAX_SESSION_TTL_SECONDS {
+            return Err(AppError::Config(format!(
+                "RAIN_SESSION_TTL_SECONDS must not exceed {MAX_SESSION_TTL_SECONDS}"
+            )));
+        }
+        if self.argon2_concurrency == 0 {
+            return Err(AppError::Config(
+                "RAIN_AUTH_ARGON2_CONCURRENCY must be positive".into(),
+            ));
+        }
+        if self.login_ip_limit_per_minute == 0 {
+            return Err(AppError::Config(
+                "RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE must be positive".into(),
+            ));
+        }
+        if self.login_username_failure_limit_per_5_minutes == 0 {
+            return Err(AppError::Config(
+                "RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES must be positive".into(),
+            ));
+        }
+        if self.register_ip_limit_per_hour == 0 {
+            return Err(AppError::Config(
+                "RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for AppLimits {
     fn default() -> Self {
         Self {
@@ -299,6 +389,7 @@ pub struct AppConfig {
     pub reset_db: bool,
     pub retention_days: Option<u64>,
     pub limits: AppLimits,
+    pub auth: AuthConfig,
 }
 
 impl AppConfig {
@@ -335,6 +426,7 @@ impl AppConfig {
         };
 
         let limits = AppLimits::from_env()?;
+        let auth = AuthConfig::from_env()?;
 
         Ok(Self {
             host,
@@ -345,6 +437,7 @@ impl AppConfig {
             reset_db,
             retention_days,
             limits,
+            auth,
         })
     }
 }
@@ -353,7 +446,9 @@ impl AppConfig {
 mod tests {
     use std::{path::Path, sync::Mutex};
 
-    use super::{AppLimits, ArchiveConfig, dotenv_path_for_executable, parse_byte_size};
+    use super::{
+        AppLimits, ArchiveConfig, AuthConfig, dotenv_path_for_executable, parse_byte_size,
+    };
 
     #[test]
     fn resolves_dotenv_next_to_executable() {
@@ -390,6 +485,75 @@ mod tests {
         assert_eq!(limits.api.max_preview_line_size, 8 * 1024_u64.pow(2));
         assert_eq!(limits.api.default_line_page_size, 5_000);
         assert_eq!(limits.api.max_line_page_size, 10_000);
+    }
+
+    #[test]
+    fn auth_defaults_and_validation_are_safe() {
+        let auth = AuthConfig::default();
+        assert_eq!(auth.session_ttl_seconds, 604_800);
+        assert_eq!(auth.argon2_concurrency, 5);
+        assert_eq!(auth.login_ip_limit_per_minute, 20);
+        assert_eq!(auth.login_username_failure_limit_per_5_minutes, 10);
+        assert_eq!(auth.register_ip_limit_per_hour, 10);
+        assert!(auth.validate().is_ok());
+
+        let invalid = AuthConfig {
+            session_ttl_seconds: 0,
+            ..AuthConfig::default()
+        };
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_SESSION_TTL_SECONDS")
+        );
+
+        for (invalid, expected_name) in [
+            (
+                AuthConfig {
+                    login_ip_limit_per_minute: 0,
+                    ..AuthConfig::default()
+                },
+                "RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE",
+            ),
+            (
+                AuthConfig {
+                    login_username_failure_limit_per_5_minutes: 0,
+                    ..AuthConfig::default()
+                },
+                "RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES",
+            ),
+            (
+                AuthConfig {
+                    register_ip_limit_per_hour: 0,
+                    ..AuthConfig::default()
+                },
+                "RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR",
+            ),
+        ] {
+            assert!(
+                invalid
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected_name)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_excessive_session_ttl() {
+        let auth = AuthConfig {
+            session_ttl_seconds: u64::MAX,
+            ..AuthConfig::default()
+        };
+        assert!(
+            auth.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_SESSION_TTL_SECONDS")
+        );
     }
 
     #[test]

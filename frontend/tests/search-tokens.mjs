@@ -19,6 +19,7 @@ try {
     appendSearchOperator,
     appendSearchTerm,
     combineSearchExpressions,
+    deserializeSearchTokens,
     finalizeSearchTokens,
     removeSearchToken,
     serializeSearchTokens,
@@ -45,6 +46,24 @@ try {
   booleanTokens = appendSearchOperator(booleanTokens, 'NOT');
   booleanTokens = appendSearchTerm(booleanTokens, 'request timeout');
   assert.equal(serializeSearchTokens(booleanTokens), '"ERROR" OR NOT "request timeout"');
+  assert.deepEqual(
+    deserializeSearchTokens('"ERROR" OR NOT "request timeout"'),
+    booleanTokens
+  );
+  assert.deepEqual(deserializeSearchTokens('ERROR AND WARN'), [
+    { kind: 'term', value: 'ERROR' },
+    { kind: 'operator', value: 'AND' },
+    { kind: 'term', value: 'WARN' }
+  ]);
+
+  const assertSearchRoundTrip = (expression, expectedValue) => {
+    const tokens = deserializeSearchTokens(expression);
+    assert.deepEqual(tokens, [{ kind: 'term', value: expectedValue }]);
+    assert.deepEqual(deserializeSearchTokens(serializeSearchTokens(tokens)), tokens);
+  };
+  assertSearchRoundTrip(String.raw`"C:\temp"`, String.raw`C:\temp`);
+  assertSearchRoundTrip(String.raw`"say \"hello\""`, 'say "hello"');
+  assertSearchRoundTrip(String.raw`"C:\\temp"`, String.raw`C:\temp`);
 
   assert.deepEqual(validateSearchTokens([{ kind: 'operator', value: 'AND' }]), {
     valid: false,

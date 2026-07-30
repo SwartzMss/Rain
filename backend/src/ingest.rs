@@ -781,7 +781,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use crate::config::ArchiveConfig;
+    use crate::{config::ArchiveConfig, error::AppError};
     use flate2::{Compression, write::GzEncoder};
 
     use super::limits::{
@@ -1082,7 +1082,13 @@ mod tests {
         first.reserve(100).await.expect("reserve exact limit");
         let error = second.reserve(1).await.expect_err("reject overflow");
 
-        assert!(error.to_string().contains("100 B"));
+        let AppError::PublicApi { code, message, .. } = error else {
+            panic!("quota errors must use a controlled public response");
+        };
+        assert_eq!(code, "ISSUE_QUOTA_EXCEEDED");
+        assert!(message.contains("100 B"));
+        assert!(message.contains("当前已使用 100 B"));
+        assert!(message.contains("本次新增内容至少 1 B"));
         assert_eq!(first.reserved_bytes().await.unwrap(), 100);
         assert_eq!(second.reserved_bytes().await.unwrap(), 0);
     }

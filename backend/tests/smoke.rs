@@ -4,8 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use actix_web::{App, http::StatusCode, test, web};
-use backend::{AppState, config::AppLimits, db, routes};
+use actix_web::{App, cookie::Cookie, http::StatusCode, test, web};
+use backend::{
+    AppState,
+    auth::session::{SESSION_COOKIE_NAME, generate_session_token, hash_session_token},
+    config::AppLimits,
+    db,
+    repositories::{sessions, users},
+    routes,
+};
+use chrono::{Duration, Utc};
 use flate2::{Compression, write::GzEncoder};
 use serde_json::Value;
 use uuid::Uuid;
@@ -62,6 +70,7 @@ async fn upload_search_tree_and_delete_issue() {
             .configure(routes::register),
     )
     .await;
+    let auth_cookie = test_auth_cookie(&pool).await;
 
     let boundary = format!("rain-{}", Uuid::new_v4().simple());
     let upload_body = multipart_body(
@@ -79,6 +88,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={boundary}"),
             ))
             .set_payload(upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -96,6 +106,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/uploads/{bundle_hash}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -115,6 +126,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/uploads/{bundle_hash}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -125,6 +137,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/SMOKE/search?q=app.log&mode=filename&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -136,6 +149,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/SMOKE/search?q=smoke&mode=content&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -154,6 +168,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/SMOKE/search?q=def123&mode=content&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -169,6 +184,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/SMOKE/search?q=ER&mode=content&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -193,6 +209,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={gz_boundary}"),
             ))
             .set_payload(gz_upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -210,6 +227,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/GZIP/search?q=compressed&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -239,6 +257,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={tar_boundary}"),
             ))
             .set_payload(tar_upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -249,6 +268,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/TARGZ/search?q=targz&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -282,6 +302,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={nested_zip_boundary}"),
             ))
             .set_payload(nested_zip_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -291,6 +312,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/NESTEDZIP/search?q=nested%20zip%20search&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -322,6 +344,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={nested_chain_boundary}"),
             ))
             .set_payload(nested_chain_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -331,6 +354,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/NESTEDCHAIN/search?q=nested%20chain%20search&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -364,6 +388,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={depth_fail_boundary}"),
             ))
             .set_payload(depth_fail_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -375,6 +400,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{depth_fail_bundle}/files/root"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -411,6 +437,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={binary_boundary}"),
             ))
             .set_payload(binary_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -422,6 +449,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{binary_bundle}/files/root"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -457,34 +485,28 @@ async fn upload_search_tree_and_delete_issue() {
                 .uri(&format!(
                     "/api/files/v1/{binary_bundle}/files/{file_id}/content"
                 ))
+                .cookie(auth_cookie.clone())
                 .to_request(),
         )
         .await;
         assert_eq!(content_response.status(), StatusCode::BAD_REQUEST);
         let content_error: Value = test::read_body_json(content_response).await;
-        assert!(
-            content_error["error"]
-                .as_str()
-                .expect("binary content error")
-                .contains("text preview is not supported")
-        );
+        assert_eq!(content_error["code"], "BAD_REQUEST");
+        assert_eq!(content_error["message"], "请求无效");
         let lines_response = test::call_service(
             &app,
             test::TestRequest::get()
                 .uri(&format!(
                     "/api/files/v1/{binary_bundle}/files/{file_id}/lines"
                 ))
+                .cookie(auth_cookie.clone())
                 .to_request(),
         )
         .await;
         assert_eq!(lines_response.status(), StatusCode::BAD_REQUEST);
         let lines_error: Value = test::read_body_json(lines_response).await;
-        assert!(
-            lines_error["error"]
-                .as_str()
-                .expect("binary lines error")
-                .contains("text preview is not supported")
-        );
+        assert_eq!(lines_error["code"], "BAD_REQUEST");
+        assert_eq!(lines_error["message"], "请求无效");
     }
 
     let executable_id = executable_node["id"].as_str().expect("executable id");
@@ -494,6 +516,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{binary_bundle}/files/{executable_id}/download"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -511,6 +534,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{binary_bundle}/files/{docx_id}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -525,6 +549,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/BINARY/search?q=unknown%20extension%20text&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -578,6 +603,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={delete_dir_boundary}"),
             ))
             .set_payload(delete_dir_upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -589,6 +615,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{delete_dir_bundle}/files/root"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -601,6 +628,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{delete_dir_bundle}/files/{archive_id}"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -613,6 +641,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{delete_dir_bundle}/files/{extracted_id}"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -640,6 +669,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{delete_dir_bundle}/files/{target_dir_id}"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -650,6 +680,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{delete_dir_bundle}/files/{extracted_id}"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -699,6 +730,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={failed_boundary}"),
             ))
             .set_payload(failed_upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -710,6 +742,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/uploads/{failed_bundle}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -722,6 +755,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/FAILEDCASE")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -733,6 +767,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{failed_bundle}/files/root"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -742,6 +777,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{bundle_hash}/files/root"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -756,6 +792,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/log/v2/{bundle_hash}/search?q=smoke&file_id={app_file_id}&size=10"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -767,6 +804,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/log/v2/{bundle_hash}/search?q=smoke&file_id=999999999&size=10"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -801,6 +839,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/temp-results/{preview_result_id}/lines?start=0&limit=1000"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -820,6 +859,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::delete()
             .uri(&format!("/api/temp-results/{preview_result_id}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -861,9 +901,10 @@ async fn upload_search_tree_and_delete_issue() {
         StatusCode::BAD_REQUEST
     );
     let invalid_expression_body: Value = test::read_body_json(invalid_expression_response).await;
-    let invalid_expression_message = invalid_expression_body["error"]
+    assert_eq!(invalid_expression_body["code"], "SEARCH_EXPRESSION_INVALID");
+    let invalid_expression_message = invalid_expression_body["message"]
         .as_str()
-        .expect("invalid expression error");
+        .expect("invalid expression message");
     assert!(invalid_expression_message.contains("搜索条件无效"));
     assert!(invalid_expression_message.contains("位置"));
 
@@ -892,6 +933,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/temp-results/{temporary_result_id}/lines?start=0&limit=1000"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -904,6 +946,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/temp-results/{temporary_result_id}/download"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -912,10 +955,23 @@ async fn upload_search_tree_and_delete_issue() {
         "ERROR smoke works requestId=abcdef123456 中文连续文本\n"
     );
 
+    let guest_delete_temporary_result = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/api/temp-results/{temporary_result_id}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        guest_delete_temporary_result.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
     let delete_temporary_result = test::call_service(
         &app,
         test::TestRequest::delete()
             .uri(&format!("/api/temp-results/{temporary_result_id}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -925,6 +981,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/temp-results/{temporary_result_id}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -936,6 +993,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{bundle_hash}/files/{app_file_id}/lines?start=1&limit=1"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -952,6 +1010,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{bundle_hash}/files/{app_file_id}/download"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -976,6 +1035,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={large_boundary}"),
             ))
             .set_payload(large_upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -986,6 +1046,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/LARGE/search?q=tail%20failure&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1006,6 +1067,7 @@ async fn upload_search_tree_and_delete_issue() {
                     .as_str()
                     .expect("large bundle hash")
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1021,6 +1083,7 @@ async fn upload_search_tree_and_delete_issue() {
                     .as_str()
                     .expect("large bundle hash")
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1047,6 +1110,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={bad_utf8_boundary}"),
             ))
             .set_payload(bad_utf8_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1056,6 +1120,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/BADUTF8/search?q=invalid%20byte&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1083,6 +1148,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={long_line_boundary}"),
             ))
             .set_payload(long_line_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1094,6 +1160,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{long_line_bundle}/files/root"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1106,6 +1173,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{long_line_bundle}/files/{long_line_file}/lines?start=0&limit=1"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1113,6 +1181,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/LONGLINE/search?q=INDEX_PREFIX&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1120,6 +1189,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/LONGLINE/search?q=INDEX_SUFFIX&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1141,6 +1211,7 @@ async fn upload_search_tree_and_delete_issue() {
             .uri(&format!(
                 "/api/files/v1/{long_line_bundle}/files/{long_line_file}/lines?start=1&limit=1"
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1169,6 +1240,7 @@ async fn upload_search_tree_and_delete_issue() {
                 format!("multipart/form-data; boundary={collision_boundary}"),
             ))
             .set_payload(collision_upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1180,6 +1252,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/files/v1/{collision_bundle}/files/root"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1199,6 +1272,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::delete()
             .uri("/api/issues/SMOKE")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1207,6 +1281,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/SMOKE")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1215,6 +1290,7 @@ async fn upload_search_tree_and_delete_issue() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/uploads/{bundle_hash}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1246,6 +1322,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
             .configure(routes::register),
     )
     .await;
+    let auth_cookie = test_auth_cookie(&pool).await;
 
     let boundary = format!("rain-{}", Uuid::new_v4().simple());
     let response = test::call_service(
@@ -1262,6 +1339,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
                 "too-large.log",
                 "12345678901234567",
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1303,6 +1381,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
                 "exact.log",
                 "1234567890123456",
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1321,6 +1400,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
         &app,
         test::TestRequest::delete()
             .uri(&format!("/api/issues/QUOTAFAIL/bundles/{exact_hash}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1344,7 +1424,10 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     assert_eq!(deleted_bundle_files, 0);
     let issues_after_bundle_delete: Value = test::call_and_read_body_json(
         &app,
-        test::TestRequest::get().uri("/api/issues").to_request(),
+        test::TestRequest::get()
+            .uri("/api/issues")
+            .cookie(auth_cookie.clone())
+            .to_request(),
     )
     .await;
     let quota_issue = issues_after_bundle_delete
@@ -1358,6 +1441,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
         &app,
         test::TestRequest::get()
             .uri(&format!("/api/uploads/{exact_hash}"))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1378,6 +1462,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
                 "replacement.log",
                 "abcdefghijklmnop",
             ))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1413,6 +1498,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
             .configure(routes::register),
     )
     .await;
+    let auth_cookie = test_auth_cookie(&pool).await;
 
     let create = test::call_service(
         &app,
@@ -1422,6 +1508,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
                 "code": "new001",
                 "name": "First issue"
             }))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1436,6 +1523,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
         test::TestRequest::post()
             .uri("/api/issues")
             .set_json(serde_json::json!({ "code": "NEW001" }))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1446,6 +1534,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
         test::TestRequest::post()
             .uri("/api/issues")
             .set_json(serde_json::json!({ "code": "BAD/ID" }))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1460,6 +1549,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
                 "code": "unicode",
                 "name": unicode_name
             }))
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1467,7 +1557,10 @@ async fn issue_creation_and_upload_require_existing_issue() {
 
     let issues: Value = test::call_and_read_body_json(
         &app,
-        test::TestRequest::get().uri("/api/issues").to_request(),
+        test::TestRequest::get()
+            .uri("/api/issues")
+            .cookie(auth_cookie.clone())
+            .to_request(),
     )
     .await;
     let created_issue = issues
@@ -1494,6 +1587,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
                 format!("multipart/form-data; boundary={missing_boundary}"),
             ))
             .set_payload(missing_upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1523,6 +1617,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
                 format!("multipart/form-data; boundary={upload_boundary}"),
             ))
             .set_payload(upload_body)
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1550,6 +1645,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
         &app,
         test::TestRequest::delete()
             .uri("/api/issues/NEW001")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1719,18 +1815,20 @@ async fn processing_bundles_cannot_be_deleted() {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
-                pool,
+                pool.clone(),
                 data_root,
                 AppLimits::default(),
             )))
             .configure(routes::register),
     )
     .await;
+    let auth_cookie = test_auth_cookie(&pool).await;
 
     let delete_bundle = test::call_service(
         &app,
         test::TestRequest::delete()
             .uri("/api/issues/BUSY/bundles/busy-hash")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1740,6 +1838,7 @@ async fn processing_bundles_cannot_be_deleted() {
         &app,
         test::TestRequest::get()
             .uri("/api/log/v2/busy-hash/search?q=processing")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1749,6 +1848,7 @@ async fn processing_bundles_cannot_be_deleted() {
         &app,
         test::TestRequest::get()
             .uri("/api/files/v1/busy-hash/files/root")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1758,6 +1858,7 @@ async fn processing_bundles_cannot_be_deleted() {
         &app,
         test::TestRequest::get()
             .uri("/api/issues/BUSY/search?q=processing&size=10")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1767,6 +1868,7 @@ async fn processing_bundles_cannot_be_deleted() {
         &app,
         test::TestRequest::delete()
             .uri("/api/issues/BUSY")
+            .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
@@ -1842,6 +1944,29 @@ async fn insert_issues(pool: &sqlx::SqlitePool, issue_codes: &[&str]) {
             .await
             .expect("insert issue");
     }
+}
+
+async fn test_auth_cookie(pool: &sqlx::SqlitePool) -> Cookie<'static> {
+    let username = format!("smoke-{}", Uuid::new_v4().simple());
+    let user = match users::create_user(pool, &username, "test-password-hash")
+        .await
+        .expect("create smoke test user")
+    {
+        users::CreateUserOutcome::Created(user) => user,
+        users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate test user"),
+    };
+    let token = generate_session_token();
+    sessions::create_session(
+        pool,
+        &user.id,
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .expect("create smoke test session");
+    Cookie::new(SESSION_COOKIE_NAME, token)
 }
 
 fn multipart_body_bytes(

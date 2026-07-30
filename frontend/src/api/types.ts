@@ -1,6 +1,41 @@
 export type UploadStatus = 'READY' | 'PROCESSING' | 'FAILED' | 'PENDING';
 export type UploadStage = 'PENDING' | 'RECEIVING' | 'EXTRACTING' | 'INDEXING' | 'PUBLISHING' | 'READY' | 'FAILED';
 
+export interface User {
+  id: string;
+  username: string;
+}
+
+export interface Credentials {
+  username: string;
+  password: string;
+}
+
+export interface AuthMeResponse {
+  authenticated: boolean;
+  user: User | null;
+}
+
+export interface SavedSearchPayload {
+  name: string;
+  search_type: 'FILENAME' | 'DETAIL';
+  query_text: string;
+  scope_type: 'GLOBAL' | 'ISSUE';
+  scope_key: string | null;
+  options: Record<string, unknown>;
+  is_pinned?: boolean;
+  sort_order?: number;
+}
+
+export interface SavedSearch extends SavedSearchPayload {
+  id: string;
+  is_pinned: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+}
+
 export interface UploadSummary {
   hash: string;
   name: string;

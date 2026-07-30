@@ -257,6 +257,9 @@ struct ExpiredBundle {
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
         "DROP TABLE IF EXISTS log_segments_fts",
+        "DROP TABLE IF EXISTS saved_searches",
+        "DROP TABLE IF EXISTS user_sessions",
+        "DROP TABLE IF EXISTS users",
         "DROP TABLE IF EXISTS temp_results",
         "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
@@ -278,6 +281,55 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
 
 async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            username_normalized TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            role TEXT NOT NULL DEFAULT 'USER',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_login_at TEXT,
+            password_changed_at TEXT
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            user_agent TEXT,
+            client_ip TEXT
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS saved_searches (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT COLLATE NOCASE NOT NULL,
+            search_type TEXT NOT NULL CHECK (search_type IN ('FILENAME', 'DETAIL')),
+            query_text TEXT NOT NULL,
+            scope_type TEXT NOT NULL DEFAULT 'GLOBAL' CHECK (scope_type IN ('GLOBAL', 'ISSUE')),
+            scope_key TEXT,
+            options_json TEXT NOT NULL DEFAULT '{}',
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TEXT,
+            UNIQUE(user_id, name),
+            CHECK (
+                (scope_type = 'GLOBAL' AND scope_key IS NULL)
+                OR (scope_type = 'ISSUE' AND scope_key IS NOT NULL)
+            )
+        )
+        "#,
         r#"
         CREATE TABLE IF NOT EXISTS issues (
             code TEXT PRIMARY KEY,
@@ -403,6 +455,9 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_logs_file_chunk ON log_segments (file_id, chunk_index)",
         "CREATE INDEX IF NOT EXISTS idx_line_offsets_file_line ON log_line_offsets (file_id, line_number)",
         "CREATE INDEX IF NOT EXISTS idx_temp_results_expiry ON temp_results (expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions (expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_saved_searches_user ON saved_searches (user_id, is_pinned DESC, sort_order, updated_at DESC)",
     ];
 
     for statement in statements {
@@ -474,6 +529,31 @@ mod tests {
                     .await
                     .expect("inspect schema");
             assert!(!exists, "{object} should not exist");
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_creates_authentication_storage() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+
+        for object in [
+            "users",
+            "user_sessions",
+            "saved_searches",
+            "idx_user_sessions_user",
+            "idx_user_sessions_expiry",
+            "idx_saved_searches_user",
+        ] {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?)")
+                    .bind(object)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("inspect schema");
+            assert!(exists, "{object} should exist");
         }
     }
 

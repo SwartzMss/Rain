@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -10,26 +11,83 @@ pub mod routes;
 pub mod services;
 pub mod upload;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use sqlx::SqlitePool;
 use tokio::sync::Semaphore;
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
-use crate::config::AppLimits;
+use crate::config::{AppLimits, AuthConfig};
+
+pub struct AuthRateLimitBucket {
+    window: Duration,
+    events: VecDeque<Instant>,
+}
+
+impl AuthRateLimitBucket {
+    pub fn new(window: Duration) -> Self {
+        Self {
+            window,
+            events: VecDeque::new(),
+        }
+    }
+
+    pub fn prune(&mut self, now: Instant) {
+        while self
+            .events
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) >= self.window)
+        {
+            self.events.pop_front();
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn push(&mut self, timestamp: Instant) {
+        self.events.push_back(timestamp);
+    }
+
+    pub fn set_window(&mut self, window: Duration) {
+        self.window = window;
+    }
+}
+
+#[derive(Default)]
+pub struct AuthRateLimits {
+    pub login_ip: HashMap<String, AuthRateLimitBucket>,
+    pub login_username_failure: HashMap<String, AuthRateLimitBucket>,
+    pub register_ip: HashMap<String, AuthRateLimitBucket>,
+    pub change_password_user_attempt: HashMap<String, AuthRateLimitBucket>,
+    pub change_password_in_flight: HashSet<String>,
+}
 
 pub struct AppState {
     pub pool: SqlitePool,
     pub data_root: PathBuf,
     pub limits: AppLimits,
+    pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
+    pub auth_hash_permits: Arc<Semaphore>,
+    pub auth_rate_limits: Arc<Mutex<AuthRateLimits>>,
     pub blob_store: Arc<dyn BlobStore>,
 }
 
 impl AppState {
     pub fn new(pool: SqlitePool, data_root: PathBuf, limits: AppLimits) -> Self {
         let blob_store = Arc::new(LocalCasBlobStore::new(data_root.clone()));
-        Self::with_blob_store(pool, data_root, limits, blob_store)
+        Self::with_blob_store_and_auth(pool, data_root, limits, AuthConfig::default(), blob_store)
     }
 
     pub fn with_blob_store(
@@ -38,13 +96,27 @@ impl AppState {
         limits: AppLimits,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
+        Self::with_blob_store_and_auth(pool, data_root, limits, AuthConfig::default(), blob_store)
+    }
+
+    pub fn with_blob_store_and_auth(
+        pool: SqlitePool,
+        data_root: PathBuf,
+        limits: AppLimits,
+        auth: AuthConfig,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Self {
         let processing_permits =
             Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
+        let auth_hash_permits = Arc::new(Semaphore::new(auth.argon2_concurrency));
         Self {
             pool,
             data_root,
             limits,
+            auth,
             processing_permits,
+            auth_hash_permits,
+            auth_rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
             blob_store,
         }
     }

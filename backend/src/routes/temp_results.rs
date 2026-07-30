@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use actix_files::NamedFile;
-use actix_web::{HttpResponse, delete, get, http::header, post, web};
+use actix_web::{HttpResponse, delete, get, http::StatusCode, http::header, post, web};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    auth::extractor::RequireUser,
     error::AppError,
     log_expression,
     repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
@@ -30,10 +31,14 @@ use super::{
 const RETENTION_DAYS: i64 = 7;
 
 fn invalid_expression(error: log_expression::ParseError) -> AppError {
-    AppError::BadRequest(format!(
-        "搜索条件无效，请检查 AND/OR/NOT 前后是否都有关键词（位置 {}：{}）",
-        error.offset, error.message
-    ))
+    AppError::public(
+        StatusCode::BAD_REQUEST,
+        "SEARCH_EXPRESSION_INVALID",
+        format!(
+            "搜索条件无效，请检查 AND/OR/NOT 前后是否都有关键词（位置 {}：{}）",
+            error.offset, error.message
+        ),
+    )
 }
 
 #[derive(Deserialize)]
@@ -356,6 +361,7 @@ pub async fn download_temp_result(
 
 #[delete("/temp-results/{id}")]
 pub async fn delete_temp_result(
+    _user: RequireUser,
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {

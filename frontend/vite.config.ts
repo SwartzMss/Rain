@@ -1,23 +1,21 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
-const runtimeProcess = (globalThis as {
-  process?: { env?: Record<string, string | undefined> };
-}).process;
+export default defineConfig(({ mode }) => {
+  const apiProxyTarget =
+    loadEnv(mode, '.', 'RAIN_').RAIN_DEV_API_PROXY_TARGET || 'http://localhost:8080';
 
-const apiProxyTarget =
-  runtimeProcess?.env?.VITE_API_BASE_URL ?? 'http://localhost:8080';
-
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    port: 5173,
-    host: '0.0.0.0',
-    proxy: {
-      '/api': {
-        target: apiProxyTarget,
-        changeOrigin: true
+  return {
+    plugins: [react()],
+    server: {
+      port: 5173,
+      host: '0.0.0.0',
+      proxy: {
+        '/api': {
+          target: apiProxyTarget,
+          changeOrigin: true
+        }
       }
     }
-  }
+  };
 });
