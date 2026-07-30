@@ -114,7 +114,7 @@ impl Default for AuthConfig {
         Self {
             allow_registration: true,
             session_ttl_seconds: 604_800,
-            argon2_concurrency: 2,
+            argon2_concurrency: 5,
             login_rate_limit_per_minute: 20,
             register_rate_limit_per_minute: 5,
         }
@@ -480,7 +480,7 @@ mod tests {
     fn auth_defaults_and_validation_are_safe() {
         let auth = AuthConfig::default();
         assert_eq!(auth.session_ttl_seconds, 604_800);
-        assert_eq!(auth.argon2_concurrency, 2);
+        assert_eq!(auth.argon2_concurrency, 5);
         assert_eq!(auth.login_rate_limit_per_minute, 20);
         assert_eq!(auth.register_rate_limit_per_minute, 5);
         assert!(auth.validate().is_ok());
