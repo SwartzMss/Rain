@@ -1,3 +1,4 @@
+use actix_web::http::StatusCode;
 use sqlx::SqlitePool;
 
 use crate::error::AppError;
@@ -70,12 +71,16 @@ impl IssueQuota {
         .fetch_one(&self.pool)
         .await
         .map_err(AppError::Database)?;
-        Err(AppError::BadRequest(format!(
-            "Issue 内容超过 {} 上限；当前已使用 {}，本次新增内容至少 {}",
-            format_binary_size(self.limit),
-            format_binary_size(usage.max(0) as u64),
-            format_binary_size(bytes as u64)
-        )))
+        Err(AppError::public(
+            StatusCode::BAD_REQUEST,
+            "ISSUE_QUOTA_EXCEEDED",
+            format!(
+                "Issue 内容超过 {} 上限；当前已使用 {}，本次新增内容至少 {}",
+                format_binary_size(self.limit),
+                format_binary_size(usage.max(0) as u64),
+                format_binary_size(bytes as u64)
+            ),
+        ))
     }
 
     #[cfg(test)]

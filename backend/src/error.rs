@@ -21,6 +21,12 @@ pub enum AppError {
         code: &'static str,
         message: &'static str,
     },
+    #[error("{message}")]
+    PublicApi {
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+    },
 }
 
 impl AppError {
@@ -39,6 +45,14 @@ impl AppError {
             "此操作需要登录",
         )
     }
+
+    pub fn public(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self::PublicApi {
+            status,
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 impl ResponseError for AppError {
@@ -50,7 +64,7 @@ impl ResponseError for AppError {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
-            AppError::Api { status, .. } => *status,
+            AppError::Api { status, .. } | AppError::PublicApi { status, .. } => *status,
         }
     }
 
@@ -62,6 +76,11 @@ impl ResponseError for AppError {
                     "message": message
                 }))
             }
+            AppError::PublicApi { code, message, .. } => HttpResponse::build(self.status_code())
+                .json(serde_json::json!({
+                    "code": code,
+                    "message": message
+                })),
             AppError::Database(_) => {
                 tracing::error!(error = %self, "database request failed");
                 HttpResponse::build(self.status_code()).json(serde_json::json!({
@@ -168,5 +187,20 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
         assert_eq!(payload["code"], "PUBLIC_CODE");
         assert_eq!(payload["message"], "公开文案");
+    }
+
+    #[actix_web::test]
+    async fn public_business_errors_keep_controlled_owned_messages() {
+        let response = AppError::public(
+            StatusCode::BAD_REQUEST,
+            "SEARCH_EXPRESSION_INVALID",
+            format!("搜索条件无效（位置 {}）", 12),
+        )
+        .error_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body()).await.expect("response body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
+        assert_eq!(payload["code"], "SEARCH_EXPRESSION_INVALID");
+        assert_eq!(payload["message"], "搜索条件无效（位置 12）");
     }
 }

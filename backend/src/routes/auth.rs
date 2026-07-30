@@ -74,15 +74,19 @@ fn rate_limited() -> AppError {
 const LOGIN_IP_WINDOW: StdDuration = StdDuration::from_secs(60);
 const LOGIN_USERNAME_FAILURE_WINDOW: StdDuration = StdDuration::from_secs(5 * 60);
 const REGISTER_IP_WINDOW: StdDuration = StdDuration::from_secs(60 * 60);
+const CHANGE_PASSWORD_FAILURE_WINDOW: StdDuration = StdDuration::from_secs(15 * 60);
+const CHANGE_PASSWORD_FAILURE_LIMIT: usize = 5;
 const LOGIN_IP_MAX_BUCKETS: usize = 1024;
 const LOGIN_USERNAME_FAILURE_MAX_BUCKETS: usize = 1024;
 const REGISTER_IP_MAX_BUCKETS: usize = 1024;
+const CHANGE_PASSWORD_FAILURE_MAX_BUCKETS: usize = 1024;
 
 #[derive(Clone, Copy)]
 enum AuthRateLimitPolicy {
     LoginIp,
     LoginUsernameFailure,
     RegisterIp,
+    ChangePasswordUserFailure,
 }
 
 fn client_rate_limit_key(request: &HttpRequest, action: &str) -> String {
@@ -100,6 +104,10 @@ fn username_failure_key(username: &str) -> String {
         "<invalid>".into()
     };
     format!("login:username:{normalized}")
+}
+
+fn password_change_failure_key(user_id: &str) -> String {
+    format!("change-password:user:{user_id}")
 }
 
 fn check_rate_limit(
@@ -133,6 +141,10 @@ fn check_rate_limit_at(
             LOGIN_USERNAME_FAILURE_MAX_BUCKETS,
         ),
         AuthRateLimitPolicy::RegisterIp => (&mut rate_limits.register_ip, REGISTER_IP_MAX_BUCKETS),
+        AuthRateLimitPolicy::ChangePasswordUserFailure => (
+            &mut rate_limits.change_password_user_failure,
+            CHANGE_PASSWORD_FAILURE_MAX_BUCKETS,
+        ),
     };
 
     buckets.retain(|_, bucket| {
@@ -160,6 +172,27 @@ fn check_rate_limit_at(
         .entry(key.to_owned())
         .or_insert_with(|| AuthRateLimitBucket::new(window))
         .push(now);
+    Ok(())
+}
+
+fn clear_rate_limit(
+    state: &AppState,
+    policy: AuthRateLimitPolicy,
+    key: &str,
+) -> Result<(), AppError> {
+    let mut rate_limits = state
+        .auth_rate_limits
+        .lock()
+        .map_err(|_| internal_auth_error())?;
+    match policy {
+        AuthRateLimitPolicy::LoginIp => &mut rate_limits.login_ip,
+        AuthRateLimitPolicy::LoginUsernameFailure => &mut rate_limits.login_username_failure,
+        AuthRateLimitPolicy::RegisterIp => &mut rate_limits.register_ip,
+        AuthRateLimitPolicy::ChangePasswordUserFailure => {
+            &mut rate_limits.change_password_user_failure
+        }
+    }
+    .remove(key);
     Ok(())
 }
 
@@ -388,7 +421,24 @@ pub async fn change_password(
     payload: web::Json<ChangePasswordRequest>,
 ) -> Result<HttpResponse, AppError> {
     validate_password(&payload.new_password).map_err(validation_error)?;
+    let failure_key = password_change_failure_key(&user.0.id);
+    check_rate_limit(
+        &state,
+        AuthRateLimitPolicy::ChangePasswordUserFailure,
+        &failure_key,
+        CHANGE_PASSWORD_FAILURE_LIMIT,
+        CHANGE_PASSWORD_FAILURE_WINDOW,
+        false,
+    )?;
     if validate_password(&payload.current_password).is_err() {
+        check_rate_limit(
+            &state,
+            AuthRateLimitPolicy::ChangePasswordUserFailure,
+            &failure_key,
+            CHANGE_PASSWORD_FAILURE_LIMIT,
+            CHANGE_PASSWORD_FAILURE_WINDOW,
+            true,
+        )?;
         return Err(current_password_invalid());
     }
     let record = users::find_by_id(&state.pool, &user.0.id)
@@ -399,8 +449,21 @@ pub async fn change_password(
     let expected_password_hash = current_hash.clone();
     let verified = run_argon2(&state, move || verify_password(&current, &current_hash)).await?;
     if !verified {
+        check_rate_limit(
+            &state,
+            AuthRateLimitPolicy::ChangePasswordUserFailure,
+            &failure_key,
+            CHANGE_PASSWORD_FAILURE_LIMIT,
+            CHANGE_PASSWORD_FAILURE_WINDOW,
+            true,
+        )?;
         return Err(current_password_invalid());
     }
+    clear_rate_limit(
+        &state,
+        AuthRateLimitPolicy::ChangePasswordUserFailure,
+        &failure_key,
+    )?;
     let new_password = payload.new_password.clone();
     let new_hash = run_argon2(&state, move || hash_password(&new_password)).await?;
     let token = generate_session_token();
@@ -469,8 +532,10 @@ mod tests {
     use crate::{AppState, config::AppLimits};
 
     use super::{
-        AuthRateLimitPolicy, LOGIN_USERNAME_FAILURE_MAX_BUCKETS, check_rate_limit_at,
-        client_rate_limit_key, dummy_password_for_credentials, username_failure_key,
+        AuthRateLimitPolicy, CHANGE_PASSWORD_FAILURE_LIMIT, CHANGE_PASSWORD_FAILURE_MAX_BUCKETS,
+        CHANGE_PASSWORD_FAILURE_WINDOW, LOGIN_USERNAME_FAILURE_MAX_BUCKETS, check_rate_limit_at,
+        clear_rate_limit, client_rate_limit_key, dummy_password_for_credentials,
+        password_change_failure_key, username_failure_key,
     };
 
     #[test]
@@ -686,6 +751,105 @@ mod tests {
                 .login_username_failure
                 .contains_key("login:username:user-0")
         );
+    }
+
+    #[tokio::test]
+    async fn password_change_failure_policy_is_bounded_expiring_and_isolated() {
+        let pool = SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .expect("pool");
+        let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+        let start = Instant::now();
+        let key = password_change_failure_key("user-1");
+
+        for _ in 0..CHANGE_PASSWORD_FAILURE_LIMIT {
+            check_rate_limit_at(
+                &state,
+                AuthRateLimitPolicy::ChangePasswordUserFailure,
+                &key,
+                CHANGE_PASSWORD_FAILURE_LIMIT,
+                CHANGE_PASSWORD_FAILURE_WINDOW,
+                true,
+                start,
+            )
+            .expect("password-change failure");
+        }
+        assert!(
+            check_rate_limit_at(
+                &state,
+                AuthRateLimitPolicy::ChangePasswordUserFailure,
+                &key,
+                CHANGE_PASSWORD_FAILURE_LIMIT,
+                CHANGE_PASSWORD_FAILURE_WINDOW,
+                false,
+                start,
+            )
+            .is_err()
+        );
+        check_rate_limit_at(
+            &state,
+            AuthRateLimitPolicy::ChangePasswordUserFailure,
+            &key,
+            CHANGE_PASSWORD_FAILURE_LIMIT,
+            CHANGE_PASSWORD_FAILURE_WINDOW,
+            false,
+            start + CHANGE_PASSWORD_FAILURE_WINDOW,
+        )
+        .expect("password-change failure window expired");
+
+        check_rate_limit_at(
+            &state,
+            AuthRateLimitPolicy::ChangePasswordUserFailure,
+            &key,
+            CHANGE_PASSWORD_FAILURE_LIMIT,
+            CHANGE_PASSWORD_FAILURE_WINDOW,
+            true,
+            start,
+        )
+        .expect("failure before successful verification");
+        clear_rate_limit(&state, AuthRateLimitPolicy::ChangePasswordUserFailure, &key)
+            .expect("clear failures");
+        assert!(
+            !state
+                .auth_rate_limits
+                .lock()
+                .expect("rate limits")
+                .change_password_user_failure
+                .contains_key(&key)
+        );
+
+        for index in 0..CHANGE_PASSWORD_FAILURE_MAX_BUCKETS {
+            check_rate_limit_at(
+                &state,
+                AuthRateLimitPolicy::ChangePasswordUserFailure,
+                &password_change_failure_key(&format!("user-{index}")),
+                CHANGE_PASSWORD_FAILURE_LIMIT,
+                CHANGE_PASSWORD_FAILURE_WINDOW,
+                true,
+                start,
+            )
+            .expect("independent password-change bucket");
+        }
+        check_rate_limit_at(
+            &state,
+            AuthRateLimitPolicy::LoginIp,
+            "login:ip:203.0.113.1",
+            20,
+            StdDuration::from_secs(60),
+            true,
+            start,
+        )
+        .expect("password-change capacity must not block login IP");
+        check_rate_limit_at(
+            &state,
+            AuthRateLimitPolicy::RegisterIp,
+            "register:ip:203.0.113.1",
+            10,
+            StdDuration::from_secs(3600),
+            true,
+            start,
+        )
+        .expect("password-change capacity must not block registration IP");
     }
 
     #[tokio::test]

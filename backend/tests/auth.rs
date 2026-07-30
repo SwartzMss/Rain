@@ -11,6 +11,103 @@ use backend::{AppState, config::AppLimits, db, routes};
 use serde_json::{Value, json};
 
 #[actix_web::test]
+async fn session_dependent_responses_are_not_cacheable() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let guest_me = test::call_service(
+        &app,
+        test::TestRequest::get().uri("/api/auth/me").to_request(),
+    )
+    .await;
+    assert_eq!(
+        guest_me.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store, private"))
+    );
+
+    let register = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username": "CacheUser", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(register.status(), StatusCode::CREATED);
+    let login = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "CacheUser", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    let cookie = login
+        .response()
+        .cookies()
+        .next()
+        .expect("session cookie")
+        .into_owned();
+
+    let authenticated_me = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/auth/me")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        authenticated_me.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store, private"))
+    );
+
+    let change_error = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/change-password")
+            .cookie(cookie.clone())
+            .set_json(json!({"current_password": "short", "new_password": "new-password123"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(change_error.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        change_error.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store, private"))
+    );
+
+    let saved_searches = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/me/saved-searches")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(saved_searches.status(), StatusCode::OK);
+    assert_eq!(
+        saved_searches.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store, private"))
+    );
+
+    let health =
+        test::call_service(&app, test::TestRequest::get().uri("/healthz").to_request()).await;
+    assert_eq!(health.status(), StatusCode::OK);
+    assert!(health.headers().get(header::CACHE_CONTROL).is_none());
+}
+
+#[actix_web::test]
 async fn registration_login_me_and_logout_follow_the_public_contract() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
@@ -498,13 +595,14 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
 async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    let state = web::Data::new(AppState::new(
+        pool.clone(),
+        PathBuf::from("data"),
+        AppLimits::default(),
+    ));
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(AppState::new(
-                pool,
-                PathBuf::from("data"),
-                AppLimits::default(),
-            )))
+            .app_data(state.clone())
             .configure(routes::register),
     )
     .await;
@@ -517,6 +615,12 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     )
     .await;
     assert_eq!(register.status(), StatusCode::CREATED);
+    let user_id: String =
+        sqlx::query_scalar("SELECT id FROM users WHERE username_normalized = 'password-user'")
+            .fetch_one(&pool)
+            .await
+            .expect("user id");
+    let failure_key = format!("change-password:user:{user_id}");
     let first_login = test::call_service(
         &app,
         test::TestRequest::post()
@@ -570,6 +674,16 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     assert_eq!(wrong_current.status(), StatusCode::UNAUTHORIZED);
     let wrong_body: Value = test::read_body_json(wrong_current).await;
     assert_eq!(wrong_body["code"], "CURRENT_PASSWORD_INVALID");
+    assert_eq!(
+        state
+            .auth_rate_limits
+            .lock()
+            .expect("rate limits")
+            .change_password_user_failure
+            .get(&failure_key)
+            .map_or(0, backend::AuthRateLimitBucket::len),
+        1
+    );
 
     let changed = test::call_service(
         &app,
@@ -581,6 +695,14 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     )
     .await;
     assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !state
+            .auth_rate_limits
+            .lock()
+            .expect("rate limits")
+            .change_password_user_failure
+            .contains_key(&failure_key)
+    );
     let replacement = Cookie::parse(
         changed
             .headers()
@@ -615,6 +737,77 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     .await;
     let replacement_body: Value = test::read_body_json(replacement_me).await;
     assert_eq!(replacement_body["authenticated"], true);
+}
+
+#[actix_web::test]
+async fn password_change_failure_limit_rejects_before_password_verification() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let state = web::Data::new(AppState::new(
+        pool.clone(),
+        PathBuf::from("data"),
+        AppLimits::default(),
+    ));
+    let app = test::init_service(
+        App::new()
+            .app_data(state.clone())
+            .configure(routes::register),
+    )
+    .await;
+    let register = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username": "limited-change", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(register.status(), StatusCode::CREATED);
+    let user_id: String =
+        sqlx::query_scalar("SELECT id FROM users WHERE username_normalized = 'limited-change'")
+            .fetch_one(&pool)
+            .await
+            .expect("user id");
+    let login = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "limited-change", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    let cookie = login
+        .response()
+        .cookies()
+        .next()
+        .expect("session cookie")
+        .into_owned();
+    let mut bucket = backend::AuthRateLimitBucket::new(std::time::Duration::from_secs(15 * 60));
+    for _ in 0..5 {
+        bucket.push(std::time::Instant::now());
+    }
+    state
+        .auth_rate_limits
+        .lock()
+        .expect("rate limits")
+        .change_password_user_failure
+        .insert(format!("change-password:user:{user_id}"), bucket);
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/change-password")
+            .cookie(cookie)
+            .set_json(json!({
+                "current_password": "password123",
+                "new_password": "new-password123"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "TOO_MANY_REQUESTS");
 }
 
 #[actix_web::test]

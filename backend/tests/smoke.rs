@@ -901,8 +901,12 @@ async fn upload_search_tree_and_delete_issue() {
         StatusCode::BAD_REQUEST
     );
     let invalid_expression_body: Value = test::read_body_json(invalid_expression_response).await;
-    assert_eq!(invalid_expression_body["code"], "BAD_REQUEST");
-    assert_eq!(invalid_expression_body["message"], "请求无效");
+    assert_eq!(invalid_expression_body["code"], "SEARCH_EXPRESSION_INVALID");
+    let invalid_expression_message = invalid_expression_body["message"]
+        .as_str()
+        .expect("invalid expression message");
+    assert!(invalid_expression_message.contains("搜索条件无效"));
+    assert!(invalid_expression_message.contains("位置"));
 
     let temporary_result_response = test::call_service(
         &app,

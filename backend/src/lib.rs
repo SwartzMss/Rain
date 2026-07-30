@@ -69,6 +69,7 @@ pub struct AuthRateLimits {
     pub login_ip: HashMap<String, AuthRateLimitBucket>,
     pub login_username_failure: HashMap<String, AuthRateLimitBucket>,
     pub register_ip: HashMap<String, AuthRateLimitBucket>,
+    pub change_password_user_failure: HashMap<String, AuthRateLimitBucket>,
 }
 
 pub struct AppState {

@@ -1,10 +1,22 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::{auth::AuthenticatedUser, error::AppError};
 
 const LAST_SEEN_UPDATE_INTERVAL_SECONDS: i64 = 300;
+
+fn last_seen_needs_update(last_seen_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    let Some(last_seen_at) = last_seen_at else {
+        return true;
+    };
+    let Ok(last_seen_at) = NaiveDateTime::parse_from_str(last_seen_at, "%Y-%m-%d %H:%M:%S") else {
+        return true;
+    };
+    now.signed_duration_since(last_seen_at.and_utc())
+        .num_seconds()
+        >= LAST_SEEN_UPDATE_INTERVAL_SECONDS
+}
 
 pub struct ResolvedSessionUser {
     pub user: AuthenticatedUser,
@@ -148,9 +160,9 @@ pub async fn resolve_session_user(
     pool: &SqlitePool,
     token_hash: &str,
 ) -> Result<Option<ResolvedSessionUser>, AppError> {
-    let user = sqlx::query_as::<_, (String, String, String)>(
+    let resolved = sqlx::query_as::<_, (String, String, String, Option<String>)>(
         r#"
-        SELECT users.id, users.username, users.status
+        SELECT users.id, users.username, users.status, user_sessions.last_seen_at
         FROM user_sessions
         JOIN users ON users.id = user_sessions.user_id
         WHERE user_sessions.token_hash = ?
@@ -161,13 +173,11 @@ pub async fn resolve_session_user(
     .bind(token_hash)
     .fetch_optional(pool)
     .await
-    .map_err(AppError::Database)?
-    .map(|(id, username, status)| ResolvedSessionUser {
-        user: AuthenticatedUser { id, username },
-        status,
-    });
+    .map_err(AppError::Database)?;
 
-    if user.is_some() {
+    if resolved.as_ref().is_some_and(|(_, _, _, last_seen_at)| {
+        last_seen_needs_update(last_seen_at.as_deref(), Utc::now())
+    }) {
         let _ = sqlx::query(
             r#"
             UPDATE user_sessions
@@ -188,7 +198,12 @@ pub async fn resolve_session_user(
             error
         });
     }
-    Ok(user)
+    Ok(
+        resolved.map(|(id, username, status, _)| ResolvedSessionUser {
+            user: AuthenticatedUser { id, username },
+            status,
+        }),
+    )
 }
 
 pub async fn revoke_by_token_hash(pool: &SqlitePool, token_hash: &str) -> Result<(), AppError> {
@@ -241,15 +256,94 @@ pub async fn cleanup_expired_or_revoked(pool: &SqlitePool) -> Result<u64, AppErr
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, TimeZone, Utc};
 
     use crate::{db, repositories::users};
 
     use super::{
         ReplacementSession, change_password_and_replace_sessions, cleanup_expired_or_revoked,
-        create_session, create_session_if_password_unchanged, resolve_active_user,
-        revoke_by_token_hash,
+        create_session, create_session_if_password_unchanged, last_seen_needs_update,
+        resolve_active_user, revoke_by_token_hash,
     };
+
+    #[test]
+    fn last_seen_updates_only_after_the_activity_interval() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 7, 30, 10, 0, 0)
+            .single()
+            .expect("fixed time");
+
+        assert!(!last_seen_needs_update(Some("2026-07-30 10:00:00"), now));
+        assert!(!last_seen_needs_update(Some("2026-07-30 09:55:01"), now));
+        assert!(last_seen_needs_update(Some("2026-07-30 09:55:00"), now));
+        assert!(last_seen_needs_update(None, now));
+        assert!(last_seen_needs_update(Some("invalid"), now));
+    }
+
+    #[tokio::test]
+    async fn session_resolution_advances_only_stale_last_seen_values() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "Activity", "hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate"),
+        };
+        create_session(
+            &pool,
+            &user.id,
+            "activity-hash",
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("session");
+
+        sqlx::query(
+            "UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?",
+        )
+        .bind("activity-hash")
+        .execute(&pool)
+        .await
+        .expect("set fresh timestamp");
+        let fresh_before: String =
+            sqlx::query_scalar("SELECT last_seen_at FROM user_sessions WHERE token_hash = ?")
+                .bind("activity-hash")
+                .fetch_one(&pool)
+                .await
+                .expect("fresh timestamp");
+        resolve_active_user(&pool, "activity-hash")
+            .await
+            .expect("resolve fresh session");
+        let fresh_after: String =
+            sqlx::query_scalar("SELECT last_seen_at FROM user_sessions WHERE token_hash = ?")
+                .bind("activity-hash")
+                .fetch_one(&pool)
+                .await
+                .expect("fresh timestamp after resolution");
+        assert_eq!(fresh_after, fresh_before);
+
+        sqlx::query(
+            "UPDATE user_sessions SET last_seen_at = '2000-01-01 00:00:00' WHERE token_hash = ?",
+        )
+        .bind("activity-hash")
+        .execute(&pool)
+        .await
+        .expect("set stale timestamp");
+        resolve_active_user(&pool, "activity-hash")
+            .await
+            .expect("resolve stale session");
+        let stale_after: String =
+            sqlx::query_scalar("SELECT last_seen_at FROM user_sessions WHERE token_hash = ?")
+                .bind("activity-hash")
+                .fetch_one(&pool)
+                .await
+                .expect("stale timestamp after resolution");
+        assert_ne!(stale_after, "2000-01-01 00:00:00");
+    }
 
     #[tokio::test]
     async fn resolves_only_active_unexpired_unrevoked_sessions() {

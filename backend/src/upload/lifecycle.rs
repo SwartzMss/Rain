@@ -66,7 +66,7 @@ pub(crate) fn failure_details(error: &AppError) -> FailureDetails {
         AppError::NotFound(_) => ("RESOURCE_NOT_FOUND", false),
         AppError::BadRequest(_) => ("INVALID_CONTENT", false),
         AppError::Conflict(_) => ("CONFLICT", true),
-        AppError::Api { code, .. } => (*code, false),
+        AppError::Api { code, .. } | AppError::PublicApi { code, .. } => (*code, false),
     };
     FailureDetails {
         code,
@@ -79,6 +79,7 @@ pub(crate) fn user_facing_failure_reason(error: &AppError) -> String {
     match error {
         AppError::BadRequest(message) | AppError::Conflict(message) => message.clone(),
         AppError::Api { message, .. } => (*message).to_string(),
+        AppError::PublicApi { message, .. } => message.clone(),
         _ => "上传处理失败，请删除后重试".to_string(),
     }
 }
