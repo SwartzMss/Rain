@@ -16,13 +16,8 @@ export async function runAdminAction(options: {
   action: () => Promise<unknown>;
   reload: () => Promise<unknown>;
   refreshAuth: () => Promise<unknown>;
-  selfRevocation: boolean;
 }): Promise<void> {
   await options.action();
-  if (options.selfRevocation) {
-    await options.refreshAuth();
-    return;
-  }
   await options.reload();
   await options.refreshAuth();
 }

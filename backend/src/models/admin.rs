@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::auth::{UserRole, UserStatus};
+use crate::auth::UserStatus;
 
 #[derive(Debug, Deserialize)]
 pub struct AdminListQuery {
     pub query: Option<String>,
-    pub role: Option<String>,
     pub status: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
@@ -16,7 +15,6 @@ pub struct AdminListQuery {
 pub struct AdminUser {
     pub id: String,
     pub username: String,
-    pub role: UserRole,
     pub status: UserStatus,
     pub created_at: String,
     pub updated_at: String,
@@ -30,10 +28,6 @@ pub struct AdminUserPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ChangeRole {
-    pub role: String,
-}
 #[derive(Debug, Deserialize)]
 pub struct ChangeStatus {
     pub status: String,

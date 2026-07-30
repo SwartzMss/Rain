@@ -15,10 +15,9 @@ try {
   await runAdminAction({
     action: async () => calls.push('action'),
     reload: async () => calls.push('reload'),
-    refreshAuth: async () => calls.push('refresh'),
-    selfRevocation: true
+    refreshAuth: async () => calls.push('refresh')
   });
-  assert.deepEqual(calls, ['action', 'refresh']);
+  assert.deepEqual(calls, ['action', 'reload', 'refresh']);
 
   let history = [undefined];
   history = advanceCursor(history, 'page-2');
@@ -31,4 +30,9 @@ try {
 } finally {
   await server.close();
 }
+const { readFile } = await import('node:fs/promises');
+const adminPage = await readFile(new URL('../src/features/admin/AdminPage.tsx', import.meta.url), 'utf8');
+assert.doesNotMatch(adminPage, /全部角色|提升|降级|changeUserRole/);
+const apiClient = await readFile(new URL('../src/api/client.ts', import.meta.url), 'utf8');
+assert.doesNotMatch(apiClient, /changeUserRole|\/role/);
 console.log('admin permission tests passed');

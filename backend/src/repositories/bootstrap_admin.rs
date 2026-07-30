@@ -12,14 +12,21 @@ pub async fn bootstrap_admin(
     password: &str,
 ) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    let active_admins: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-    if active_admins > 0 {
+    let (administrators, active_administrators, users): (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE role = 'ADMIN'), COUNT(*) FILTER (WHERE role = 'ADMIN' AND status = 'ACTIVE'), COUNT(*) FROM users",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+    if administrators == 1 && active_administrators == 1 {
         tx.commit().await.map_err(AppError::Database)?;
         return Ok(());
+    }
+    if administrators != 0 {
+        return Err(AppError::Config(
+            "ADMIN_INVARIANT_VIOLATION: database must contain exactly one ACTIVE administrator"
+                .into(),
+        ));
     }
     if password.is_empty() {
         return Err(AppError::Config(
@@ -46,6 +53,12 @@ pub async fn bootstrap_admin(
     if occupied > 0 {
         return Err(AppError::Config(
             "BOOTSTRAP_ADMIN_CONFLICT: bootstrap administrator username is occupied".into(),
+        ));
+    }
+    if users > 0 {
+        return Err(AppError::Config(
+            "ADMIN_INVARIANT_VIOLATION: an initialized database cannot be missing its administrator"
+                .into(),
         ));
     }
     let id = Uuid::new_v4().to_string();

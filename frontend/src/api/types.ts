@@ -10,7 +10,7 @@ export interface User {
   role: UserRole;
 }
 
-export interface AdminUser extends User { status: UserStatus; created_at: string; updated_at: string; last_login_at: string | null; active_session_count: number; }
+export interface AdminUser { id: string; username: string; status: UserStatus; created_at: string; updated_at: string; last_login_at: string | null; active_session_count: number; }
 export interface AdminUserPage { items: AdminUser[]; next_cursor: string | null; }
 export interface AuditLog { id: string; actor_type: 'USER' | 'SYSTEM'; actor_user_id: string | null; target_user_id: string | null; action: string; old_value: string | null; new_value: string | null; created_at: string; }
 export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }

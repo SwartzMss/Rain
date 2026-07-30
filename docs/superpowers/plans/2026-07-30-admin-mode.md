@@ -4,7 +4,7 @@
 
 **Goal:** Implement issue #40's two-level USER/ADMIN authorization, bootstrap administrator, global write protection, user administration, audit trail, and administrator UI.
 
-**Architecture:** Keep role and status as shared Rust domain enums loaded on every authenticated request. Bootstrap and all administrator mutations are transactional repository operations; Actix extractors enforce server-side access, while React derives presentation from the authenticated user's role. SQLite keyset pagination and `BEGIN IMMEDIATE` protect bounded queries and the last-active-admin invariant.
+**Architecture:** Keep role and status as shared Rust domain enums loaded on every authenticated request. Bootstrap creates the single immutable ACTIVE administrator and every later startup validates that invariant; management mutations are transactional and target ordinary users only. Actix extractors enforce server-side access, while React derives presentation from the authenticated user's role and SQLite keyset pagination bounds management queries.
 
 **Tech Stack:** Rust, Actix Web, SQLx/SQLite, Argon2, React, TypeScript, Vite, Node test runner.
 
@@ -63,10 +63,10 @@
 - Modify: `backend/src/error.rs`
 - Test: `backend/tests/admin.rs`
 
-- [ ] Add failing integration tests for bounded/filterable cursor pagination, promote/demote, disable/enable, atomic session revocation, self-protection, last ACTIVE ADMIN protection, concurrent mutual demotion/disable, audit filtering/pagination, non-admin rejection, and rollback when audit insertion fails.
+- [ ] Add failing integration tests for bounded/filterable cursor pagination, ordinary-user disable/enable, atomic session revocation, immutable-administrator rejection, the exactly-one-ACTIVE-administrator startup invariant, audit filtering/pagination, non-admin rejection, and rollback when audit insertion fails.
 - [ ] Run `cargo test --test admin api -- --nocapture`; verify failures identify the missing `/api/admin/*` services.
-- [ ] Implement typed request/response models and keyset cursors; implement list, role, status, revoke-sessions, and audit endpoints behind `RequireAdmin`.
-- [ ] Use explicit `BEGIN IMMEDIATE` repository transactions to reload targets, count ACTIVE ADMIN users, mutate state/revoke sessions, and append audit records atomically; map the issue's stable error codes and statuses.
+- [ ] Implement typed request/response models and keyset cursors; implement ordinary-user list, status, revoke-sessions, and audit endpoints behind `RequireAdmin`.
+- [ ] Use explicit transactions to reject ADMIN targets with `IMMUTABLE_ADMIN_ACCOUNT`, mutate USER state/revoke sessions, and append audit records atomically; map the stable error codes and statuses.
 - [ ] Run focused tests, `cargo test`, `cargo fmt --check`, and Clippy with warnings denied; commit as `feat: add audited administrator user management`.
 
 ### Task 4: Frontend permissions and administrator page
@@ -94,4 +94,3 @@
 - [ ] Add `UserRole`, centralized `isAdmin`, admin API client/types, guarded `/admin` route, searchable/filterable cursor tables, confirmations, and explicit mutation feedback; gate every existing global write control through `isAdmin`.
 - [ ] Document bootstrap environment variables, fresh-install deployment, final schema, permissions, and audit behavior.
 - [ ] Run `npm test`, `npm run check`, backend tests/Clippy, `git diff --check`, and verify the issue #40 Definition of Done item-by-item; commit as `feat: add administrator management interface`.
-
