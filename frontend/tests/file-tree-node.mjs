@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -65,11 +66,24 @@ try {
   assert.match(markup, /text-violet-500/);
   assert.match(markup, /text-slate-500/);
   assert.match(markup, /rotate-90/);
+  assert.match(markup, /min-w-max/);
+  assert.match(markup, /whitespace-nowrap/);
+  assert.doesNotMatch(markup, /truncate/);
   assert.doesNotMatch(markup, />ZIP<|>TXT<|□|▣/);
   assert.doesNotMatch(markup, /1 子节点/);
   assert.doesNotMatch(markup, /text\/plain/);
   assert.doesNotMatch(markup, /4\.0 KB/);
   assert.doesNotMatch(markup, /展开|收起|暂无子节点/);
+
+  const filesView = await readFile(
+    new URL('../src/features/files/FilesView.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(filesView, /overflow-x-auto/);
+  assert.doesNotMatch(filesView, /调整文件树宽度|treePanelWidth|treeResizeStartRef/);
+
+  const appCss = await readFile(new URL('../src/App.css', import.meta.url), 'utf8');
+  assert.match(appCss, /grid-template-columns: 330px minmax\(0, 1fr\)/);
 } finally {
   await server.close();
 }

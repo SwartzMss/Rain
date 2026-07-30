@@ -130,9 +130,6 @@ export const rainApi = {
   logout() {
     return request<void>('/api/auth/logout', { method: 'POST' });
   },
-  logoutAll() {
-    return request<void>('/api/auth/logout-all', { method: 'POST' });
-  },
   changePassword(payload: { current_password: string; new_password: string }) {
     return request<void>('/api/auth/change-password', {
       method: 'POST',

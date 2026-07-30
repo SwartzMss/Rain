@@ -75,9 +75,7 @@ export function UploadPanel({
           </div>
           <div>
             <p className="font-semibold text-slate-950">
-              {!canWrite
-                ? '只读模式：登录后可上传'
-                : !currentIssueCode
+              {!currentIssueCode
                 ? '先选择或新建 Issue'
                 : uploading
                   ? '处理中'
@@ -86,9 +84,7 @@ export function UploadPanel({
                     : '拖拽日志文件到这里，或点击选择文件'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              {canWrite
-                ? '支持 .log、.txt、.zip、.tar.gz、.tgz、.gz，单个文件最大 512 MB'
-                : '游客可以查看、下载和搜索，不能上传或修改 Issue。'}
+              支持 .log、.txt、.zip、.tar.gz、.tgz、.gz，单个文件最大 512 MB
             </p>
           </div>
         </div>
@@ -101,7 +97,7 @@ export function UploadPanel({
             if (canWrite && !uploadDisabled) fileInputRef.current?.click();
           }}
         >
-          {!canWrite ? '需要登录' : uploading || activeTask ? '处理中' : '选择文件'}
+          {uploading || activeTask ? '处理中' : '选择文件'}
         </button>
       </div>
       {uploadError ? <p className="text-sm text-rose-600">{uploadError}</p> : null}

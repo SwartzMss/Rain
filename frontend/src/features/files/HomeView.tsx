@@ -192,17 +192,19 @@ export function HomeView() {
             ) : null}
           </div>
 
-          <UploadPanel
-            activeTask={upload.activeTask}
-            currentIssueCode={issues.currentIssueCode}
-            canWrite={canWrite}
-            fileInputRef={fileInputRef}
-            onFilesSelected={(files) => upload.performUpload(files).catch(() => undefined)}
-            uploadDisabled={upload.uploadDisabled}
-            uploadError={upload.uploadError}
-            uploading={upload.uploading}
-            uploadingRef={upload.uploadingRef}
-          />
+          {canWrite ? (
+            <UploadPanel
+              activeTask={upload.activeTask}
+              currentIssueCode={issues.currentIssueCode}
+              canWrite={canWrite}
+              fileInputRef={fileInputRef}
+              onFilesSelected={(files) => upload.performUpload(files).catch(() => undefined)}
+              uploadDisabled={upload.uploadDisabled}
+              uploadError={upload.uploadError}
+              uploading={upload.uploading}
+              uploadingRef={upload.uploadingRef}
+            />
+          ) : null}
         </div>
 
         <UploadFileTable

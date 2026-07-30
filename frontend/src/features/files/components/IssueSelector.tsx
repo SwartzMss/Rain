@@ -41,11 +41,7 @@ export function IssueSelector({
           >
             + 新建 Issue
           </button>
-        ) : (
-          <span className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">
-            登录后可新建
-          </span>
-        )}
+        ) : null}
       </div>
 
       <div className="relative">

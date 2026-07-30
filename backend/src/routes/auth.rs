@@ -499,17 +499,6 @@ pub async fn change_password(
         .finish())
 }
 
-#[post("/auth/logout-all")]
-pub async fn logout_all(
-    user: RequireUser,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, AppError> {
-    sessions::revoke_all_for_user(&state.pool, &user.0.id).await?;
-    Ok(HttpResponse::NoContent()
-        .cookie(cleared_session_cookie())
-        .finish())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{

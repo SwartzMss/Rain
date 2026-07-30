@@ -76,9 +76,6 @@ export function UploadFileTable({
                         {deleting ? '删除中...' : '删除'}
                       </button>
                     ) : null}
-                    {!canWrite && row.stage !== 'UPLOADING' && row.bundleHash ? (
-                      <span className="text-xs text-slate-500">登录后可删除</span>
-                    ) : null}
                   </td>
                 </tr>
               );

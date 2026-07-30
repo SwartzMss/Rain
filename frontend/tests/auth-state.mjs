@@ -109,6 +109,7 @@ try {
   );
   assert.doesNotMatch(apiClient, /VITE_API_BASE_URL/);
   assert.match(apiClient, /const API_BASE_URL = ''/);
+  assert.doesNotMatch(apiClient, /logoutAll|logout-all/);
 
   const app = await readFile(
     new URL('../src/App.tsx', import.meta.url),
@@ -138,6 +139,7 @@ try {
     authContext,
     /const changePassword = useCallback\([\s\S]*beginMutation\(\)[\s\S]*await rainApi\.changePassword\(payload\);[\s\S]*finishMutation\(\);[\s\S]*await refresh\(\);/
   );
+  assert.doesNotMatch(authContext, /logoutAll/);
 
   const accountPage = await readFile(
     new URL('../src/features/auth/AccountPage.tsx', import.meta.url),
@@ -145,6 +147,7 @@ try {
   );
   assert.match(accountPage, /await auth\.changePassword\(/);
   assert.doesNotMatch(accountPage, /rainApi\.changePassword\(/);
+  assert.doesNotMatch(accountPage, /退出所有设备|logoutAll/);
 
   const homeView = await readFile(
     new URL('../src/features/files/HomeView.tsx', import.meta.url),
@@ -158,20 +161,20 @@ try {
     'utf8'
   );
   assert.match(issueSelector, /canWrite \? \(/);
-  assert.match(issueSelector, /登录后可新建/);
+  assert.doesNotMatch(issueSelector, /登录后可新建/);
 
   const uploadPanel = await readFile(
     new URL('../src/features/files/components/UploadPanel.tsx', import.meta.url),
     'utf8'
   );
-  assert.match(uploadPanel, /只读模式：登录后可上传/);
+  assert.doesNotMatch(uploadPanel, /登录后可上传|需要登录|游客可以/);
 
   const uploadFileTable = await readFile(
     new URL('../src/features/files/components/UploadFileTable.tsx', import.meta.url),
     'utf8'
   );
   assert.match(uploadFileTable, /canWrite && row\.stage !== 'UPLOADING'/);
-  assert.match(uploadFileTable, /登录后可删除/);
+  assert.doesNotMatch(uploadFileTable, /登录后可删除/);
 
   const filesView = await readFile(
     new URL('../src/features/files/FilesView.tsx', import.meta.url),
@@ -180,6 +183,12 @@ try {
   assert.match(filesView, /takePendingSavedSearch/);
   assert.match(filesView, /保存搜索条件/);
   assert.match(filesView, /我的搜索条件/);
+  assert.match(
+    filesView,
+    /auth\.state\.status === 'AUTHENTICATED' && searchMode === 'detailed'[\s\S]*?保存条件/
+  );
+  assert.doesNotMatch(filesView, />搜索类型</);
+  assert.doesNotMatch(filesView, /<option value="FILENAME">/);
   assert.match(filesView, /markSavedSearchUsed/);
   assert.match(filesView, /编辑搜索条件/);
   assert.match(filesView, /搜索表达式/);

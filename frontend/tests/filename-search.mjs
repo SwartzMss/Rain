@@ -43,9 +43,11 @@ try {
   );
   assert.match(filesView, /aria-label="文件名搜索"/);
   assert.match(filesView, /aria-label="清除文件名搜索"/);
+  assert.match(filesView, /aria-label="清除日志内容搜索"/);
   assert.match(filesView, /onSubmit=\{handleSearchSubmit\}/);
   assert.match(filesView, /searchMode === 'log'[\s\S]*?<input[\s\S]*?: \([\s\S]*?<SearchTokenEditor/);
   assert.doesNotMatch(filesView, /allowOperators=\{searchMode === 'detailed'\}/);
+  assert.doesNotMatch(filesView, />搜索方式</);
 } finally {
   await server.close();
 }
