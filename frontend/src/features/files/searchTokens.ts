@@ -168,7 +168,8 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
         }
         if (character === '\\') {
           if (index >= expression.length) throw new Error('搜索表达式转义不完整');
-          value += expression[index];
+          const escaped = expression[index];
+          value += escaped === '"' || escaped === '\\' ? escaped : `\\${escaped}`;
           index += 1;
         } else {
           value += character;

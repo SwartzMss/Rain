@@ -56,6 +56,15 @@ try {
     { kind: 'term', value: 'WARN' }
   ]);
 
+  const assertSearchRoundTrip = (expression, expectedValue) => {
+    const tokens = deserializeSearchTokens(expression);
+    assert.deepEqual(tokens, [{ kind: 'term', value: expectedValue }]);
+    assert.deepEqual(deserializeSearchTokens(serializeSearchTokens(tokens)), tokens);
+  };
+  assertSearchRoundTrip(String.raw`"C:\temp"`, String.raw`C:\temp`);
+  assertSearchRoundTrip(String.raw`"say \"hello\""`, 'say "hello"');
+  assertSearchRoundTrip(String.raw`"C:\\temp"`, String.raw`C:\temp`);
+
   assert.deepEqual(validateSearchTokens([{ kind: 'operator', value: 'AND' }]), {
     valid: false,
     message: 'AND 前缺少关键词'
