@@ -2,7 +2,10 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::{auth::AuthenticatedUser, error::AppError};
+use crate::{
+    auth::{AuthenticatedUser, UserRole, UserStatus},
+    error::AppError,
+};
 
 const LAST_SEEN_UPDATE_INTERVAL_SECONDS: i64 = 300;
 const MAX_ACTIVE_SESSIONS_PER_USER: i64 = 20;
@@ -21,7 +24,7 @@ fn last_seen_needs_update(last_seen_at: Option<&str>, now: DateTime<Utc>) -> boo
 
 pub struct ResolvedSessionUser {
     pub user: AuthenticatedUser,
-    pub status: String,
+    pub status: UserStatus,
 }
 
 pub struct ReplacementSession<'a> {
@@ -209,7 +212,7 @@ pub async fn resolve_active_user(
 ) -> Result<Option<AuthenticatedUser>, AppError> {
     Ok(resolve_session_user(pool, token_hash)
         .await?
-        .filter(|resolved| resolved.status == "ACTIVE")
+        .filter(|resolved| resolved.status == UserStatus::Active)
         .map(|resolved| resolved.user))
 }
 
@@ -217,9 +220,9 @@ pub async fn resolve_session_user(
     pool: &SqlitePool,
     token_hash: &str,
 ) -> Result<Option<ResolvedSessionUser>, AppError> {
-    let resolved = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+    let resolved = sqlx::query_as::<_, (String, String, UserRole, UserStatus, Option<String>)>(
         r#"
-        SELECT users.id, users.username, users.status, user_sessions.last_seen_at
+        SELECT users.id, users.username, users.role, users.status, user_sessions.last_seen_at
         FROM user_sessions
         JOIN users ON users.id = user_sessions.user_id
         WHERE user_sessions.token_hash = ?
@@ -232,7 +235,7 @@ pub async fn resolve_session_user(
     .await
     .map_err(AppError::Database)?;
 
-    if resolved.as_ref().is_some_and(|(_, _, _, last_seen_at)| {
+    if resolved.as_ref().is_some_and(|(_, _, _, _, last_seen_at)| {
         last_seen_needs_update(last_seen_at.as_deref(), Utc::now())
     }) {
         let _ = sqlx::query(
@@ -256,8 +259,8 @@ pub async fn resolve_session_user(
         });
     }
     Ok(
-        resolved.map(|(id, username, status, _)| ResolvedSessionUser {
-            user: AuthenticatedUser { id, username },
+        resolved.map(|(id, username, role, status, _)| ResolvedSessionUser {
+            user: AuthenticatedUser { id, username, role },
             status,
         }),
     )

@@ -257,6 +257,7 @@ struct ExpiredBundle {
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
         "DROP TABLE IF EXISTS log_segments_fts",
+        "DROP TABLE IF EXISTS admin_audit_logs",
         "DROP TABLE IF EXISTS saved_searches",
         "DROP TABLE IF EXISTS user_sessions",
         "DROP TABLE IF EXISTS users",
@@ -287,12 +288,27 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             username TEXT NOT NULL,
             username_normalized TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'ACTIVE',
-            role TEXT NOT NULL DEFAULT 'USER',
+            status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DISABLED')),
+            role TEXT NOT NULL DEFAULT 'USER' CHECK (role IN ('USER', 'ADMIN')),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_login_at TEXT,
-            password_changed_at TEXT
+            password_changed_at TEXT,
+            CHECK (role != 'ADMIN' OR status = 'ACTIVE')
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS admin_audit_logs (
+            id TEXT PRIMARY KEY,
+            actor_type TEXT NOT NULL CHECK (actor_type IN ('USER', 'SYSTEM')),
+            actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+            target_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+            action TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            client_ip TEXT,
+            user_agent TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
         r#"
@@ -457,6 +473,10 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_temp_results_expiry ON temp_results (expires_at)",
         "CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions (user_id)",
         "CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions (expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_users_role_status ON users (role, status, created_at, id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_single_admin ON users (role) WHERE role = 'ADMIN'",
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_logs (created_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_target ON admin_audit_logs (target_user_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_saved_searches_user ON saved_searches (user_id, is_pinned DESC, sort_order, updated_at DESC)",
     ];
 

@@ -26,7 +26,7 @@ try {
   assert.match(filesView, /import \{ LINE_PAGE_SIZE_OPTIONS \} from '\.\/linePageSizes';/);
   assert.match(tempResultView, /import \{ LINE_PAGE_SIZE_OPTIONS \} from '\.\/linePageSizes';/);
   assert.match(tempResultView, /const auth = useAuth\(\);/);
-  assert.match(tempResultView, /auth\.state\.status === 'AUTHENTICATED' \? \(/);
+  assert.match(tempResultView, /auth\.state\.status === 'AUTHENTICATED' && isAdmin\(auth\.state\.user\) \? \(/);
   assert.match(
     tempResultView,
     /rainApi\.deleteTempResult\(resultId\)[\s\S]*catch \(deleteError\)[\s\S]*setError\(normalizeApiError\(deleteError\)\)/

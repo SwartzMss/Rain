@@ -90,6 +90,10 @@ try {
     true
   );
   assert.equal(
+    shouldRevalidateAuthentication(403, JSON.stringify({ code: 'ADMIN_REQUIRED' })),
+    true
+  );
+  assert.equal(
     shouldRevalidateAuthentication(403, JSON.stringify({ code: 'FORBIDDEN' })),
     false
   );

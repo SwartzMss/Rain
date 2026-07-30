@@ -271,6 +271,7 @@ pub async fn register_user(
         CreateUserOutcome::Created(user) => Ok(HttpResponse::Created().json(PublicUser {
             id: user.id,
             username: user.username,
+            role: crate::auth::UserRole::User,
         })),
         CreateUserOutcome::DuplicateUsername => Err(AppError::api(
             StatusCode::CONFLICT,
@@ -401,6 +402,7 @@ pub async fn login(
         .json(PublicUser {
             id: user.id,
             username: user.username,
+            role: user.role.parse().map_err(|_| internal_auth_error())?,
         }))
 }
 

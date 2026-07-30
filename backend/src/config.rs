@@ -10,6 +10,27 @@ const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
 
+#[derive(Clone)]
+pub struct BootstrapAdminConfig {
+    pub username: String,
+    password: String,
+}
+
+impl std::fmt::Debug for BootstrapAdminConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BootstrapAdminConfig")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl BootstrapAdminConfig {
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UploadConfig {
     pub concurrent_processing_tasks: usize,
@@ -390,6 +411,7 @@ pub struct AppConfig {
     pub retention_days: Option<u64>,
     pub limits: AppLimits,
     pub auth: AuthConfig,
+    pub bootstrap_admin: BootstrapAdminConfig,
 }
 
 impl AppConfig {
@@ -427,6 +449,10 @@ impl AppConfig {
 
         let limits = AppLimits::from_env()?;
         let auth = AuthConfig::from_env()?;
+        let bootstrap_admin = BootstrapAdminConfig {
+            username: env::var("RAIN_BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".into()),
+            password: env::var("RAIN_BOOTSTRAP_ADMIN_PASSWORD").unwrap_or_default(),
+        };
 
         Ok(Self {
             host,
@@ -438,6 +464,7 @@ impl AppConfig {
             retention_days,
             limits,
             auth,
+            bootstrap_admin,
         })
     }
 }

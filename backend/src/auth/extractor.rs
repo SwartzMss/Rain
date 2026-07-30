@@ -62,7 +62,7 @@ impl FromRequest for RequireUser {
             else {
                 return Err(AppError::authentication_required());
             };
-            if resolved.status != "ACTIVE" {
+            if resolved.status != crate::auth::UserStatus::Active {
                 return Err(AppError::api(
                     StatusCode::FORBIDDEN,
                     "ACCOUNT_DISABLED",
@@ -75,6 +75,45 @@ impl FromRequest for RequireUser {
 }
 
 pub struct GuestOnly;
+
+pub struct RequireAdmin(pub AuthenticatedUser);
+
+impl FromRequest for RequireAdmin {
+    type Error = AppError;
+    type Future = LocalBoxFuture<'static, Result<Self, Self::Error>>;
+
+    fn from_request(request: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        let state = request.app_data::<web::Data<AppState>>().cloned();
+        let token = request
+            .cookie(SESSION_COOKIE_NAME)
+            .map(|cookie| cookie.value().to_owned());
+        Box::pin(async move {
+            let state =
+                state.ok_or_else(|| AppError::Config("missing application state".into()))?;
+            let token = token
+                .filter(|value| !value.is_empty())
+                .ok_or_else(AppError::authentication_required)?;
+            let resolved = sessions::resolve_session_user(&state.pool, &hash_session_token(&token))
+                .await?
+                .ok_or_else(AppError::authentication_required)?;
+            if resolved.status != crate::auth::UserStatus::Active {
+                return Err(AppError::api(
+                    StatusCode::FORBIDDEN,
+                    "ACCOUNT_DISABLED",
+                    "账户已停用",
+                ));
+            }
+            if resolved.user.role != crate::auth::UserRole::Admin {
+                return Err(AppError::api(
+                    StatusCode::FORBIDDEN,
+                    "ADMIN_REQUIRED",
+                    "此操作需要管理员权限",
+                ));
+            }
+            Ok(Self(resolved.user))
+        })
+    }
+}
 
 impl FromRequest for GuestOnly {
     type Error = AppError;
@@ -100,7 +139,7 @@ mod tests {
         repositories::{sessions, users},
     };
 
-    use super::{OptionalUser, RequireUser};
+    use super::{OptionalUser, RequireAdmin, RequireUser};
 
     async fn optional(user: OptionalUser) -> HttpResponse {
         HttpResponse::Ok().json(serde_json::json!({"authenticated": user.0.is_some()}))
@@ -108,6 +147,55 @@ mod tests {
 
     async fn required(_user: RequireUser) -> HttpResponse {
         HttpResponse::NoContent().finish()
+    }
+
+    async fn admin(_user: RequireAdmin) -> HttpResponse {
+        HttpResponse::NoContent().finish()
+    }
+
+    #[actix_web::test]
+    async fn active_user_is_rejected_when_admin_is_required() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "Ordinary", "hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("duplicate"),
+        };
+        let token = "ordinary-session";
+        sessions::create_session(
+            &pool,
+            &user.id,
+            &hash_session_token(token),
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("session");
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState::new(
+                    pool,
+                    PathBuf::from("data"),
+                    AppLimits::default(),
+                )))
+                .route("/admin", web::get().to(admin)),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/admin")
+                .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["code"], "ADMIN_REQUIRED");
     }
 
     #[actix_web::test]

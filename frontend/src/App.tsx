@@ -7,6 +7,8 @@ import { HomeView } from './features/files/HomeView';
 import { TempResultView } from './features/files/TempResultView';
 import { APP_VERSION } from './version';
 import './App.css';
+import { isAdmin } from './auth/permissions';
+import { AdminPage } from './features/admin/AdminPage';
 
 function App() {
   const auth = useAuth();
@@ -60,8 +62,9 @@ function App() {
             {auth.state.status === 'AUTHENTICATED' && (
               <>
                 <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1.5 text-cyan-100">
-                  {auth.state.user.username}
+                  {auth.state.user.username} · {isAdmin(auth.state.user) ? '管理员' : '只读用户'}
                 </span>
+                {isAdmin(auth.state.user) ? <Link className="text-slate-300 no-underline hover:text-white" to="/admin">管理</Link> : null}
                 <Link className="text-slate-300 no-underline hover:text-white" to="/account">账户</Link>
                 <button
                   className="text-slate-300 hover:text-white"
@@ -86,6 +89,7 @@ function App() {
           <Route path="/login" element={<AuthPage mode="login" />} />
           <Route path="/register" element={<AuthPage mode="register" />} />
           <Route path="/account" element={<AccountPage />} />
+          <Route path="/admin" element={<AdminPage />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />
           <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
           <Route path="/temp-results/:resultId" element={<TempResultView />} />
