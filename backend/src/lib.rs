@@ -15,7 +15,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use sqlx::SqlitePool;
@@ -24,6 +24,46 @@ use tokio::sync::Semaphore;
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AppLimits, AuthConfig};
 
+pub struct AuthRateLimitBucket {
+    window: Duration,
+    events: VecDeque<Instant>,
+}
+
+impl AuthRateLimitBucket {
+    pub fn new(window: Duration) -> Self {
+        Self {
+            window,
+            events: VecDeque::new(),
+        }
+    }
+
+    pub fn prune(&mut self, now: Instant) {
+        while self
+            .events
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) >= self.window)
+        {
+            self.events.pop_front();
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn push(&mut self, timestamp: Instant) {
+        self.events.push_back(timestamp);
+    }
+
+    pub fn set_window(&mut self, window: Duration) {
+        self.window = window;
+    }
+}
+
 pub struct AppState {
     pub pool: SqlitePool,
     pub data_root: PathBuf,
@@ -31,7 +71,7 @@ pub struct AppState {
     pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
     pub auth_hash_permits: Arc<Semaphore>,
-    pub auth_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    pub auth_rate_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
     pub blob_store: Arc<dyn BlobStore>,
 }
 

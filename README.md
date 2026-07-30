@@ -151,6 +151,10 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
 | `RAIN_SESSION_TTL_SECONDS` | `604800` | 登录 Session 有效期（秒），默认 7 天 |
 | `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
+| `RAIN_AUTH_ARGON2_CONCURRENCY` | `5` | Argon2 哈希与校验并发上限 |
+| `RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE` | `20` | 同一 IP 每分钟登录尝试上限 |
+| `RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES` | `10` | 同一用户名每 5 分钟失败登录上限 |
+| `RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR` | `10` | 同一 IP 每小时注册尝试上限 |
 
 默认配置会使用：
 
@@ -194,8 +198,10 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 关闭注册入口对应的后端能力；此时注册 API 返回 `REGISTRATION_DISABLED`，已有账户
 仍可正常登录。
 
-登录和注册接口默认启用 60 秒窗口限流，并限制 Argon2 并发，避免公开认证入口耗尽
-CPU 或 Actix blocking pool。浏览器访问遵循同源策略，服务端不发送跨域许可响应头。
+登录接口按 IP 限制为每分钟 20 次尝试，并按用户名限制为每 5 分钟 10 次失败；成功
+登录不累计用户名失败次数。注册接口按 IP 限制为每小时 10 次。认证同时限制 Argon2
+并发，避免公开入口耗尽 CPU 或 Actix blocking pool。浏览器访问遵循同源策略，服务端
+不发送跨域许可响应头。
 
 ## 当前支持
 

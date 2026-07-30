@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::{
-    AppState,
+    AppState, AuthRateLimitBucket,
     auth::{
         extractor::{OptionalUser, RequireUser},
         password::{
@@ -58,80 +58,81 @@ fn invalid_credentials() -> AppError {
 fn rate_limited() -> AppError {
     AppError::api(
         StatusCode::TOO_MANY_REQUESTS,
-        "AUTH_RATE_LIMITED",
+        "TOO_MANY_REQUESTS",
         "认证请求过于频繁，请稍后再试",
     )
 }
 
-const AUTH_RATE_LIMIT_WINDOW: StdDuration = StdDuration::from_secs(60);
+const LOGIN_IP_WINDOW: StdDuration = StdDuration::from_secs(60);
+const LOGIN_USERNAME_FAILURE_WINDOW: StdDuration = StdDuration::from_secs(5 * 60);
+const REGISTER_IP_WINDOW: StdDuration = StdDuration::from_secs(60 * 60);
 const AUTH_RATE_LIMIT_MAX_BUCKETS: usize = 1024;
 
-fn auth_rate_limit_keys(request: &HttpRequest, action: &str, username: &str) -> [String; 2] {
+fn client_rate_limit_key(request: &HttpRequest, action: &str) -> String {
     let client = request
         .peer_addr()
         .map(|address| address.ip().to_string())
         .unwrap_or_else(|| "unknown".into());
+    format!("{action}:ip:{client}")
+}
+
+fn username_failure_key(username: &str) -> String {
     let normalized = if username.len() <= 64 {
         normalize_username(username)
     } else {
         "<invalid>".into()
     };
-    [
-        format!("{action}:ip:{client}"),
-        format!("{action}:username:{normalized}"),
-    ]
+    format!("login:username:{normalized}")
 }
 
-fn check_auth_rate_limit(
+fn check_rate_limit(
     state: &AppState,
-    keys: [String; 2],
-    ip_limit: usize,
-    username_limit: usize,
+    key: &str,
+    limit: usize,
+    window: StdDuration,
+    record: bool,
 ) -> Result<(), AppError> {
-    let now = Instant::now();
+    check_rate_limit_at(state, key, limit, window, record, Instant::now())
+}
+
+fn check_rate_limit_at(
+    state: &AppState,
+    key: &str,
+    limit: usize,
+    window: StdDuration,
+    record: bool,
+    now: Instant,
+) -> Result<(), AppError> {
     let mut buckets = state
         .auth_rate_limits
         .lock()
         .map_err(|_| internal_auth_error())?;
 
     buckets.retain(|_, bucket| {
-        while bucket
-            .front()
-            .is_some_and(|timestamp| now.duration_since(*timestamp) >= AUTH_RATE_LIMIT_WINDOW)
-        {
-            bucket.pop_front();
-        }
+        bucket.prune(now);
         !bucket.is_empty()
     });
 
-    let missing_keys = keys
-        .iter()
-        .filter(|key| !buckets.contains_key(*key))
-        .count();
-    while buckets.len() + missing_keys > AUTH_RATE_LIMIT_MAX_BUCKETS {
-        let oldest = buckets
-            .iter()
-            .filter(|(key, _)| !keys.contains(key))
-            .min_by_key(|(_, bucket)| bucket.front().copied())
-            .map(|(key, _)| key.clone());
-        if let Some(key) = oldest {
-            buckets.remove(&key);
-        } else {
-            break;
-        }
-    }
-
-    for (key, limit) in keys.iter().zip([ip_limit, username_limit]) {
-        let bucket = buckets.entry(key.clone()).or_default();
+    if let Some(bucket) = buckets.get_mut(key) {
+        bucket.set_window(window);
+        bucket.prune(now);
         if bucket.len() >= limit {
             return Err(rate_limited());
         }
     }
-    for key in keys {
-        if let Some(bucket) = buckets.get_mut(&key) {
-            bucket.push_back(now);
-        }
+
+    if !record {
+        return Ok(());
     }
+
+    if !buckets.contains_key(key) && buckets.len() >= AUTH_RATE_LIMIT_MAX_BUCKETS {
+        return Err(rate_limited());
+    }
+
+    buckets
+        .entry(key.to_owned())
+        .or_insert_with(|| AuthRateLimitBucket::new(window))
+        .push(now);
     Ok(())
 }
 
@@ -172,11 +173,12 @@ pub async fn register_user(
             "当前未开放注册",
         ));
     }
-    check_auth_rate_limit(
+    check_rate_limit(
         &state,
-        auth_rate_limit_keys(&request, "register", &payload.username),
-        state.auth.register_rate_limit_per_minute,
-        state.auth.register_rate_limit_per_minute,
+        &client_rate_limit_key(&request, "register"),
+        state.auth.register_ip_limit_per_hour,
+        REGISTER_IP_WINDOW,
+        true,
     )?;
     validate_username(&payload.username).map_err(validation_error)?;
     validate_password(&payload.password).map_err(validation_error)?;
@@ -202,25 +204,55 @@ pub async fn login(
     state: web::Data<AppState>,
     payload: web::Json<CredentialsRequest>,
 ) -> Result<HttpResponse, AppError> {
-    check_auth_rate_limit(
+    let username_key = username_failure_key(&payload.username);
+    check_rate_limit(
         &state,
-        auth_rate_limit_keys(&request, "login", &payload.username),
-        state.auth.login_rate_limit_per_minute,
-        state.auth.login_rate_limit_per_minute,
+        &client_rate_limit_key(&request, "login"),
+        state.auth.login_ip_limit_per_minute,
+        LOGIN_IP_WINDOW,
+        true,
+    )?;
+    check_rate_limit(
+        &state,
+        &username_key,
+        state.auth.login_username_failure_limit_per_5_minutes,
+        LOGIN_USERNAME_FAILURE_WINDOW,
+        false,
     )?;
     if validate_username(&payload.username).is_err()
         || validate_password(&payload.password).is_err()
     {
         burn_dummy_argon2(&state, payload.password.clone()).await?;
+        check_rate_limit(
+            &state,
+            &username_key,
+            state.auth.login_username_failure_limit_per_5_minutes,
+            LOGIN_USERNAME_FAILURE_WINDOW,
+            true,
+        )?;
         return Err(invalid_credentials());
     }
     let normalized = normalize_username(&payload.username);
     let Some(user) = users::find_by_normalized_username(&state.pool, &normalized).await? else {
         burn_dummy_argon2(&state, payload.password.clone()).await?;
+        check_rate_limit(
+            &state,
+            &username_key,
+            state.auth.login_username_failure_limit_per_5_minutes,
+            LOGIN_USERNAME_FAILURE_WINDOW,
+            true,
+        )?;
         return Err(invalid_credentials());
     };
     if user.status != "ACTIVE" {
         burn_dummy_argon2(&state, payload.password.clone()).await?;
+        check_rate_limit(
+            &state,
+            &username_key,
+            state.auth.login_username_failure_limit_per_5_minutes,
+            LOGIN_USERNAME_FAILURE_WINDOW,
+            true,
+        )?;
         return Err(invalid_credentials());
     }
 
@@ -228,6 +260,13 @@ pub async fn login(
     let password_hash = user.password_hash.clone();
     let verified = run_argon2(&state, move || verify_password(&password, &password_hash)).await?;
     if !verified {
+        check_rate_limit(
+            &state,
+            &username_key,
+            state.auth.login_username_failure_limit_per_5_minutes,
+            LOGIN_USERNAME_FAILURE_WINDOW,
+            true,
+        )?;
         return Err(invalid_credentials());
     }
 
@@ -301,9 +340,7 @@ pub async fn change_password(
     let current = payload.current_password.clone();
     let current_hash = record.password_hash;
     let expected_password_hash = current_hash.clone();
-    let verified = run_argon2(&state, move || verify_password(&current, &current_hash))
-        .await
-        .map_err(|_| invalid_credentials())?;
+    let verified = run_argon2(&state, move || verify_password(&current, &current_hash)).await?;
     if !verified {
         return Err(AppError::api(
             StatusCode::UNAUTHORIZED,
@@ -367,21 +404,230 @@ pub async fn logout_all(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::PathBuf,
+        time::{Duration as StdDuration, Instant},
+    };
 
     use actix_web::test as actix_test;
+    use sqlx::sqlite::SqlitePoolOptions;
 
-    use super::auth_rate_limit_keys;
+    use crate::{AppState, config::AppLimits};
+
+    use super::{
+        AUTH_RATE_LIMIT_MAX_BUCKETS, check_rate_limit_at, client_rate_limit_key,
+        username_failure_key,
+    };
 
     #[test]
-    fn rate_limit_uses_socket_peer_and_bounds_invalid_username_keys() {
+    fn rate_limit_keys_use_socket_peer_and_bound_invalid_usernames() {
         let request = actix_test::TestRequest::default()
             .peer_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234))
             .insert_header(("x-forwarded-for", "203.0.113.10"))
             .to_http_request();
-        let keys = auth_rate_limit_keys(&request, "login", &"x".repeat(10_000));
-        assert_eq!(keys[0], "login:ip:127.0.0.1");
-        assert_eq!(keys[1], "login:username:<invalid>");
-        assert!(!keys.iter().any(|key| key.contains("203.0.113.10")));
+        assert_eq!(
+            client_rate_limit_key(&request, "login"),
+            "login:ip:127.0.0.1"
+        );
+        assert_eq!(
+            username_failure_key(&"x".repeat(10_000)),
+            "login:username:<invalid>"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_buckets_have_independent_windows_and_check_modes() {
+        let pool = SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .expect("pool");
+        let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+        let start = Instant::now();
+
+        for _ in 0..2 {
+            check_rate_limit_at(
+                &state,
+                "login:ip:127.0.0.1",
+                2,
+                StdDuration::from_secs(60),
+                true,
+                start,
+            )
+            .expect("login IP attempt");
+        }
+        assert!(
+            check_rate_limit_at(
+                &state,
+                "login:ip:127.0.0.1",
+                2,
+                StdDuration::from_secs(60),
+                true,
+                start,
+            )
+            .is_err()
+        );
+        check_rate_limit_at(
+            &state,
+            "login:ip:127.0.0.1",
+            2,
+            StdDuration::from_secs(60),
+            true,
+            start + StdDuration::from_secs(60),
+        )
+        .expect("login IP window expired");
+
+        for _ in 0..20 {
+            check_rate_limit_at(
+                &state,
+                "login:username:swartz",
+                2,
+                StdDuration::from_secs(300),
+                false,
+                start,
+            )
+            .expect("successful login does not record username failure");
+        }
+        for _ in 0..2 {
+            check_rate_limit_at(
+                &state,
+                "login:username:swartz",
+                2,
+                StdDuration::from_secs(300),
+                true,
+                start,
+            )
+            .expect("username failure");
+        }
+        assert!(
+            check_rate_limit_at(
+                &state,
+                "login:username:swartz",
+                2,
+                StdDuration::from_secs(300),
+                false,
+                start,
+            )
+            .is_err()
+        );
+        check_rate_limit_at(
+            &state,
+            "login:username:swartz",
+            2,
+            StdDuration::from_secs(300),
+            false,
+            start + StdDuration::from_secs(300),
+        )
+        .expect("username failure window expired");
+
+        check_rate_limit_at(
+            &state,
+            "register:ip:127.0.0.1",
+            1,
+            StdDuration::from_secs(3600),
+            true,
+            start,
+        )
+        .expect("registration attempt");
+        assert!(
+            check_rate_limit_at(
+                &state,
+                "register:ip:127.0.0.1",
+                1,
+                StdDuration::from_secs(3600),
+                true,
+                start,
+            )
+            .is_err()
+        );
+        check_rate_limit_at(
+            &state,
+            "register:ip:127.0.0.1",
+            1,
+            StdDuration::from_secs(3600),
+            true,
+            start + StdDuration::from_secs(3600),
+        )
+        .expect("registration window expired");
+    }
+
+    #[tokio::test]
+    async fn active_rate_limit_buckets_are_not_evicted_at_capacity() {
+        let pool = SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .expect("pool");
+        let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+        let start = Instant::now();
+
+        for index in 0..AUTH_RATE_LIMIT_MAX_BUCKETS {
+            check_rate_limit_at(
+                &state,
+                &format!("login:username:user-{index}"),
+                10,
+                StdDuration::from_secs(300),
+                true,
+                start,
+            )
+            .expect("active bucket");
+        }
+
+        assert!(
+            check_rate_limit_at(
+                &state,
+                "login:username:new-user",
+                10,
+                StdDuration::from_secs(300),
+                true,
+                start,
+            )
+            .is_err()
+        );
+        assert!(
+            state
+                .auth_rate_limits
+                .lock()
+                .expect("rate limits")
+                .contains_key("login:username:user-0")
+        );
+    }
+
+    #[tokio::test]
+    async fn bucket_cleanup_uses_each_policy_window() {
+        let pool = SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .expect("pool");
+        let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+        let start = Instant::now();
+
+        check_rate_limit_at(
+            &state,
+            "login:ip:short",
+            20,
+            StdDuration::from_secs(60),
+            true,
+            start,
+        )
+        .expect("short bucket");
+        check_rate_limit_at(
+            &state,
+            "register:ip:long",
+            10,
+            StdDuration::from_secs(3600),
+            true,
+            start,
+        )
+        .expect("long bucket");
+        check_rate_limit_at(
+            &state,
+            "login:ip:trigger",
+            20,
+            StdDuration::from_secs(60),
+            false,
+            start + StdDuration::from_secs(60),
+        )
+        .expect("cleanup trigger");
+
+        let buckets = state.auth_rate_limits.lock().expect("rate limits");
+        assert!(!buckets.contains_key("login:ip:short"));
+        assert!(buckets.contains_key("register:ip:long"));
     }
 }

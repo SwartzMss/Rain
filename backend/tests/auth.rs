@@ -14,13 +14,14 @@ use serde_json::{Value, json};
 async fn registration_login_me_and_logout_follow_the_public_contract() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    let state = web::Data::new(AppState::new(
+        pool.clone(),
+        PathBuf::from("data"),
+        AppLimits::default(),
+    ));
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(AppState::new(
-                pool.clone(),
-                PathBuf::from("data"),
-                AppLimits::default(),
-            )))
+            .app_data(state.clone())
             .configure(routes::register),
     )
     .await;
@@ -77,6 +78,12 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
         );
     }
 
+    let username_failures_before_success = state
+        .auth_rate_limits
+        .lock()
+        .expect("rate limits")
+        .get("login:username:swartz")
+        .map_or(0, backend::AuthRateLimitBucket::len);
     let login = test::call_service(
         &app,
         test::TestRequest::post()
@@ -96,6 +103,15 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("SameSite=Lax"));
     assert!(!set_cookie.contains("Secure"));
+    assert_eq!(
+        state
+            .auth_rate_limits
+            .lock()
+            .expect("rate limits")
+            .get("login:username:swartz")
+            .map_or(0, backend::AuthRateLimitBucket::len),
+        username_failures_before_success
+    );
     let cookie = Cookie::parse(set_cookie)
         .expect("parse cookie")
         .into_owned();
@@ -537,6 +553,22 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
         .unwrap()
         .into_owned()
     };
+    let wrong_current = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/change-password")
+            .cookie(current.clone())
+            .set_json(json!({
+                "current_password": "wrong-password",
+                "new_password": "new-password123"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(wrong_current.status(), StatusCode::UNAUTHORIZED);
+    let wrong_body: Value = test::read_body_json(wrong_current).await;
+    assert_eq!(wrong_body["code"], "CURRENT_PASSWORD_INVALID");
+
     let changed = test::call_service(
         &app,
         test::TestRequest::post()
@@ -581,6 +613,74 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     .await;
     let replacement_body: Value = test::read_body_json(replacement_me).await;
     assert_eq!(replacement_body["authenticated"], true);
+}
+
+#[actix_web::test]
+async fn password_change_preserves_argon2_capacity_errors() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let state = web::Data::new(AppState::new(
+        pool,
+        PathBuf::from("data"),
+        AppLimits::default(),
+    ));
+    let app = test::init_service(
+        App::new()
+            .app_data(state.clone())
+            .configure(routes::register),
+    )
+    .await;
+
+    let register = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username": "capacity-user", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(register.status(), StatusCode::CREATED);
+    let login = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "capacity-user", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    let cookie = Cookie::parse(
+        login
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("session cookie")
+            .to_str()
+            .expect("cookie text"),
+    )
+    .expect("cookie")
+    .into_owned();
+
+    let _permit = state
+        .auth_hash_permits
+        .clone()
+        .acquire_many_owned(state.auth.argon2_concurrency as u32)
+        .await
+        .expect("argon2 permits");
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/change-password")
+            .cookie(cookie)
+            .set_json(json!({
+                "current_password": "password123",
+                "new_password": "new-password123"
+            }))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "TOO_MANY_REQUESTS");
 }
 
 #[actix_web::test]
@@ -684,5 +784,5 @@ async fn saturated_argon2_capacity_returns_rate_limit_instead_of_bad_credentials
     .await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let body: Value = test::read_body_json(response).await;
-    assert_eq!(body["code"], "AUTH_RATE_LIMITED");
+    assert_eq!(body["code"], "TOO_MANY_REQUESTS");
 }

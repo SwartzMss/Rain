@@ -1,6 +1,6 @@
 use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
-    password_hash::{SaltString, rand_core::OsRng},
+    password_hash::{Error as PasswordHashError, SaltString, rand_core::OsRng},
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -50,9 +50,11 @@ pub fn hash_password(password: &str) -> Result<String, PasswordError> {
 
 pub fn verify_password(password: &str, encoded: &str) -> Result<bool, PasswordError> {
     let hash = PasswordHash::new(encoded).map_err(|_| PasswordError::Hashing)?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &hash)
-        .is_ok())
+    match Argon2::default().verify_password(password.as_bytes(), &hash) {
+        Ok(()) => Ok(true),
+        Err(PasswordHashError::Password) => Ok(false),
+        Err(_) => Err(PasswordError::Hashing),
+    }
 }
 
 pub fn verify_dummy_password(password: &str) -> Result<bool, PasswordError> {
@@ -81,5 +83,11 @@ mod tests {
         assert!(hash.starts_with("$argon2id$"));
         assert!(verify_password("password123", &hash).expect("verify"));
         assert!(!verify_password("wrong-password", &hash).expect("verify"));
+
+        let unsupported = hash.replacen("argon2id", "unsupported", 1);
+        assert!(matches!(
+            verify_password("password123", &unsupported),
+            Err(super::PasswordError::Hashing)
+        ));
     }
 }
