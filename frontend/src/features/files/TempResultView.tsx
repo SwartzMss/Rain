@@ -4,7 +4,7 @@ import { normalizeApiError, rainApi } from '../../api/client';
 import type { TempResultInfo, TempResultLinesResponse } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
-import { isAdmin } from '../../auth/permissions';
+import { isUser } from '../../auth/permissions';
 
 export function TempResultView() {
   const auth = useAuth();
@@ -87,7 +87,7 @@ export function TempResultView() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
-              {auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user) ? (
+              {auth.state.status === 'AUTHENTICATED' && isUser(auth.state.user) ? (
                 <button
                   type="button"
                   className="rounded border border-rose-300 px-3 py-1.5 text-rose-600 hover:border-rose-700"

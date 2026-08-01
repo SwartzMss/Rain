@@ -1,4 +1,4 @@
-import { Link, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext';
 import { AuthPage } from './features/auth/AuthPage';
 import { AccountPage } from './features/auth/AccountPage';
@@ -8,7 +8,7 @@ import { TempResultView } from './features/files/TempResultView';
 import { APP_VERSION } from './version';
 import './App.css';
 import { isAdmin } from './auth/permissions';
-import { AdminPage } from './features/admin/AdminPage';
+import { AdminPage, AdminUsersPage, AuditLogsPage } from './features/admin/AdminPage';
 
 function App() {
   const auth = useAuth();
@@ -19,7 +19,7 @@ function App() {
     <div className="min-h-screen text-slate-900">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-slate-950/95 shadow-lg shadow-slate-950/15 backdrop-blur-xl">
         <div className="mx-auto flex h-16 w-full max-w-none items-center justify-between gap-3 px-6">
-          <Link to="/" className="text-white no-underline">
+          <Link to={auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user) ? '/admin/users' : '/'} className="text-white no-underline">
             <div className="flex flex-wrap items-center gap-2.5">
               <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-cyan-300/30 bg-gradient-to-br from-cyan-300 to-teal-400 text-lg text-slate-950 shadow-lg shadow-cyan-950/30">☁</span>
               <h1 className="text-2xl font-semibold tracking-tight text-white">Rain</h1>
@@ -62,9 +62,9 @@ function App() {
             {auth.state.status === 'AUTHENTICATED' && (
               <>
                 <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1.5 text-cyan-100">
-                  {auth.state.user.username} · {isAdmin(auth.state.user) ? '管理员' : '只读用户'}
+                  {auth.state.user.username} · {isAdmin(auth.state.user) ? '管理员' : '普通用户'}
                 </span>
-                {isAdmin(auth.state.user) ? <Link className="text-slate-300 no-underline hover:text-white" to="/admin">管理</Link> : null}
+                {isAdmin(auth.state.user) ? <Link className="text-slate-300 no-underline hover:text-white" to="/admin/users">管理</Link> : null}
                 <Link className="text-slate-300 no-underline hover:text-white" to="/account">账户</Link>
                 <button
                   className="text-slate-300 hover:text-white"
@@ -85,11 +85,13 @@ function App() {
 
       <main className="mx-auto w-full max-w-none px-5 py-5">
         <Routes>
-          <Route path="/" element={<HomeView />} />
+          <Route path="/" element={auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user) ? <Navigate to="/admin/users" replace /> : <HomeView />} />
           <Route path="/login" element={<AuthPage mode="login" />} />
           <Route path="/register" element={<AuthPage mode="register" />} />
           <Route path="/account" element={<AccountPage />} />
           <Route path="/admin" element={<AdminPage />} />
+          <Route path="/admin/users" element={<AdminUsersPage />} />
+          <Route path="/admin/audit-logs" element={<AuditLogsPage />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />
           <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
           <Route path="/temp-results/:resultId" element={<TempResultView />} />
