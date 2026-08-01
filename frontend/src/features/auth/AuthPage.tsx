@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { normalizeApiError } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
-import { safeReturnPath } from '../../auth/authState';
+import { postLoginPath, safeReturnPath } from '../../auth/authState';
 
 interface AuthPageProps {
   mode: 'login' | 'register';
@@ -25,7 +25,7 @@ export function AuthPage({ mode }: AuthPageProps) {
   const isLogin = mode === 'login';
 
   if (auth.state.status === 'AUTHENTICATED') {
-    return <Navigate to={safeReturnPath(state.from)} replace />;
+    return <Navigate to={postLoginPath(auth.state.user, state.from)} replace />;
   }
 
   const submit = async (event: FormEvent) => {
@@ -34,8 +34,8 @@ export function AuthPage({ mode }: AuthPageProps) {
     setSubmitting(true);
     try {
       if (isLogin) {
-        await auth.login({ username, password });
-        navigate(safeReturnPath(state.from), { replace: true });
+        const user = await auth.login({ username, password });
+        navigate(postLoginPath(user, state.from), { replace: true });
       } else {
         await auth.register({ username, password });
         navigate('/login', {

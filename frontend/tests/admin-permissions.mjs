@@ -40,4 +40,8 @@ assert.match(homeView, /isUser\(auth\.state\.user\)/);
 const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 assert.match(app, /to="\/admin\/users"/);
 assert.match(app, /<Navigate to="\/admin\/users" replace \/>/);
+assert.doesNotMatch(app, /isAdmin\(auth\.state\.user\) \? <Link[\s\S]*>管理<\/Link>/);
+assert.match(app, /!isAdmin\(auth\.state\.user\)[\s\S]*to="\/account"/);
+const accountPage = await readFile(new URL('../src/features/auth/AccountPage.tsx', import.meta.url), 'utf8');
+assert.match(accountPage, /isAdmin\(auth\.state\.user\)[\s\S]*Navigate to="\/admin\/users"/);
 console.log('admin permission tests passed');

@@ -9,7 +9,7 @@ const server = await createServer({
 });
 
 try {
-  const { authStateAfterRefreshFailure, safeReturnPath, toAuthState } =
+  const { authStateAfterRefreshFailure, postLoginPath, safeReturnPath, toAuthState } =
     await server.ssrLoadModule(
     '/src/auth/authState.ts'
   );
@@ -31,6 +31,9 @@ try {
   assert.equal(safeReturnPath('/issue/CN013'), '/issue/CN013');
   assert.equal(safeReturnPath('https://evil.example'), '/');
   assert.equal(safeReturnPath('//evil.example'), '/');
+  assert.equal(postLoginPath({ role: 'USER' }, '/admin/users'), '/');
+  assert.equal(postLoginPath({ role: 'USER' }, '/issue/ABC'), '/issue/ABC');
+  assert.equal(postLoginPath({ role: 'ADMIN' }, '/'), '/admin/users');
   const authenticatedState = {
     status: 'AUTHENTICATED',
     user: { id: '1', username: 'swartz' }

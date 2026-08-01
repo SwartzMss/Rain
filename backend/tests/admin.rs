@@ -215,3 +215,52 @@ async fn admin_api_lists_users_and_protects_self_from_disable() {
     let body: serde_json::Value = test::read_body_json(business_write).await;
     assert_eq!(body["code"], "BUSINESS_USER_REQUIRED");
 }
+
+#[actix_web::test]
+async fn administrator_cannot_change_password() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    bootstrap_admin::bootstrap_admin(&pool, "admin", "strong-password")
+        .await
+        .expect("bootstrap");
+    let admin_id: String = sqlx::query_scalar("SELECT id FROM users WHERE role='ADMIN'")
+        .fetch_one(&pool)
+        .await
+        .expect("admin");
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &admin_id,
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .expect("session");
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/change-password")
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+            .set_json(serde_json::json!({
+                "current_password": "strong-password",
+                "new_password": "new-strong-password"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "BUSINESS_USER_REQUIRED");
+}

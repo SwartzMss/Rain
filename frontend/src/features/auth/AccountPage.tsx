@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { Navigate } from 'react-router-dom';
 import { normalizeApiError } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
+import { isAdmin } from '../../auth/permissions';
 
 export function AccountPage() {
   const auth = useAuth();
@@ -13,6 +14,7 @@ export function AccountPage() {
 
   if (auth.state.status === 'GUEST') return <Navigate to="/login" replace />;
   if (auth.state.status === 'LOADING') return <p>正在确认身份…</p>;
+  if (isAdmin(auth.state.user)) return <Navigate to="/admin/users" replace />;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
