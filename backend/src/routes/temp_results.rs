@@ -196,17 +196,19 @@ pub async fn preview_temp_result(
             return Err(error);
         }
     };
-    let metadata = match tokio::fs::metadata(&staging_output_path).await {
-        Ok(metadata) => metadata,
+    let size_bytes = match result_storage_size(
+        &staging_output_path,
+        &staging_meta_path,
+        &staging_index_path,
+    )
+    .await
+    {
+        Ok(size_bytes) => size_bytes,
         Err(error) => {
             remove_preview_artifacts(&output_path).await?;
             return Err(AppError::Io(error));
         }
     };
-    if let Err(error) = ensure_temp_result_capacity(&state, metadata.len()).await {
-        remove_preview_artifacts(&output_path).await?;
-        return Err(error);
-    }
     let publish_result = async {
         tokio::fs::rename(&staging_output_path, &output_path)
             .await
@@ -231,7 +233,7 @@ pub async fn preview_temp_result(
         &source_label,
         &output_path,
         preview.total,
-        metadata.len() as i64,
+        i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
     )
     .await
     {
@@ -281,7 +283,7 @@ pub async fn create_temp_result(
     let mut output = File::create(&output_path).await.map_err(AppError::Io)?;
     let mut metadata_output = File::create(&meta_path).await.map_err(AppError::Io)?;
     let mut index_output = File::create(&index_path).await.map_err(AppError::Io)?;
-    let matching_lines = TempResultExecutor::write_matches(
+    let matching_lines = match TempResultExecutor::write_matches(
         &sources,
         &expression,
         &mut output,
@@ -289,40 +291,41 @@ pub async fn create_temp_result(
         &mut index_output,
         state.limits.temp_results.max_result_size,
     )
-    .await?;
+    .await
+    {
+        Ok(matching_lines) => matching_lines,
+        Err(error) => {
+            drop(output);
+            drop(metadata_output);
+            drop(index_output);
+            remove_result_files(&output_path).await?;
+            return Err(error);
+        }
+    };
+    drop(output);
+    drop(metadata_output);
+    drop(index_output);
 
-    let metadata = tokio::fs::metadata(&output_path)
-        .await
-        .map_err(AppError::Io)?;
-    if let Err(error) = ensure_temp_result_capacity(&state, metadata.len()).await {
-        remove_result_files(&output_path).await?;
-        return Err(error);
-    }
-    let created_at = Utc::now();
-    let expires_at = created_at + Duration::days(RETENTION_DAYS);
-    let name = format!("filtered-{}.log", &id[..8]);
-    let storage_path = output_path.to_string_lossy().to_string();
-    let insert_result = sqlx::query(
-        r#"
-        INSERT INTO temp_results
-            (id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
+    let size_bytes = match result_storage_size(&output_path, &meta_path, &index_path).await {
+        Ok(size_bytes) => size_bytes,
+        Err(error) => {
+            remove_result_files(&output_path).await?;
+            return Err(AppError::Io(error));
+        }
+    };
+    let insert_result = insert_temp_result(
+        &state,
+        &id,
+        expression_text,
+        &source_label,
+        &output_path,
+        matching_lines,
+        i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
     )
-    .bind(&id)
-    .bind(&name)
-    .bind(expression_text)
-    .bind(&source_label)
-    .bind(storage_path)
-    .bind(matching_lines)
-    .bind(metadata.len() as i64)
-    .bind(created_at.to_rfc3339())
-    .bind(expires_at.to_rfc3339())
-    .execute(&state.pool)
     .await;
     if let Err(error) = insert_result {
         remove_result_files(&output_path).await?;
-        return Err(AppError::Database(error));
+        return Err(error);
     }
 
     let result = load_and_renew(&state, &id).await?;
@@ -556,6 +559,29 @@ fn source_label(sources: &[TempSource]) -> String {
     }
 }
 
+async fn result_storage_size(
+    log_path: &Path,
+    meta_path: &Path,
+    index_path: &Path,
+) -> Result<u64, std::io::Error> {
+    let mut total = 0_u64;
+    for path in [log_path, meta_path, index_path] {
+        let size = tokio::fs::metadata(path).await?.len();
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| std::io::Error::other("temporary result size overflow"))?;
+    }
+    Ok(total)
+}
+
+fn temp_result_too_large() -> AppError {
+    AppError::public(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "TEMP_RESULT_TOO_LARGE",
+        "临时结果超过大小限制",
+    )
+}
+
 async fn insert_temp_result(
     state: &web::Data<AppState>,
     id: &str,
@@ -565,6 +591,8 @@ async fn insert_temp_result(
     line_count: i64,
     size_bytes: i64,
 ) -> Result<(), AppError> {
+    let _capacity_guard = state.temp_result_capacity_lock.lock().await;
+    ensure_temp_result_capacity(state, size_bytes).await?;
     let created_at = Utc::now();
     let expires_at = created_at + Duration::days(RETENTION_DAYS);
     let name = format!("filtered-{}.log", &id[..8]);
@@ -610,28 +638,20 @@ async fn ensure_temp_result_budget(state: &web::Data<AppState>) -> Result<(), Ap
 
 async fn ensure_temp_result_capacity(
     state: &web::Data<AppState>,
-    size_bytes: u64,
+    size_bytes: i64,
 ) -> Result<(), AppError> {
     let (count, total): (i64, i64) =
         sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results")
             .fetch_one(&state.pool)
             .await
             .map_err(AppError::Database)?;
-    let next_total = total
-        .checked_add(i64::try_from(size_bytes).map_err(|_| {
-            AppError::public(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "TEMP_RESULT_TOO_LARGE",
-                "临时结果超过大小限制",
-            )
-        })?)
-        .ok_or_else(|| {
-            AppError::api(
-                StatusCode::TOO_MANY_REQUESTS,
-                "TEMP_RESULT_BUDGET_EXCEEDED",
-                "临时结果存储配额已用尽，请稍后重试",
-            )
-        })?;
+    let next_total = total.checked_add(size_bytes).ok_or_else(|| {
+        AppError::api(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TEMP_RESULT_BUDGET_EXCEEDED",
+            "临时结果存储配额已用尽，请稍后重试",
+        )
+    })?;
     if count >= state.limits.temp_results.max_records
         || next_total > i64::try_from(state.limits.temp_results.max_total_size).unwrap_or(i64::MAX)
     {

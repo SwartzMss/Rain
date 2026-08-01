@@ -63,6 +63,7 @@ impl TempResultExecutor {
         let mut lines = Vec::new();
         let mut log_offset = 0_u64;
         let mut meta_offset = 0_u64;
+        let mut total_output_bytes = 0_u64;
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
@@ -118,29 +119,33 @@ impl TempResultExecutor {
                             log_offset,
                             meta_offset,
                         };
-                        write_json_line(index_output, &checkpoint).await?;
+                        write_json_line(
+                            index_output,
+                            &checkpoint,
+                            max_output_bytes,
+                            &mut total_output_bytes,
+                        )
+                        .await?;
                     }
                     let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
-                    let next_output_size = log_offset.checked_add(line_bytes).ok_or_else(|| {
-                        AppError::public(
-                            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
-                            "TEMP_RESULT_TOO_LARGE",
-                            "临时结果超过大小限制",
-                        )
-                    })?;
-                    if next_output_size > max_output_bytes {
-                        return Err(AppError::public(
-                            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
-                            "TEMP_RESULT_TOO_LARGE",
-                            "临时结果超过大小限制",
-                        ));
-                    }
+                    let next_output_size =
+                        log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
+                    ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
                     output.write_all(&bytes).await.map_err(AppError::Io)?;
                     log_offset = next_output_size;
+                    total_output_bytes = total_output_bytes
+                        .checked_add(line_bytes)
+                        .ok_or_else(too_large)?;
                     if !bytes.ends_with(b"\n") {
                         output.write_all(b"\n").await.map_err(AppError::Io)?;
                     }
-                    meta_offset += write_json_line(metadata_output, &metadata).await?;
+                    meta_offset += write_json_line(
+                        metadata_output,
+                        &metadata,
+                        max_output_bytes,
+                        &mut total_output_bytes,
+                    )
+                    .await?;
                     let page_end = from
                         .checked_add(size)
                         .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
@@ -191,6 +196,7 @@ impl TempResultExecutor {
         let mut matching_lines = 0_i64;
         let mut log_offset = 0_u64;
         let mut meta_offset = 0_u64;
+        let mut total_output_bytes = 0_u64;
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
@@ -247,30 +253,30 @@ impl TempResultExecutor {
                                 log_offset,
                                 meta_offset,
                             },
+                            max_output_bytes,
+                            &mut total_output_bytes,
                         )
                         .await?;
                     }
                     let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
-                    let next_output_size = log_offset.checked_add(line_bytes).ok_or_else(|| {
-                        AppError::public(
-                            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
-                            "TEMP_RESULT_TOO_LARGE",
-                            "临时结果超过大小限制",
-                        )
-                    })?;
-                    if next_output_size > max_output_bytes {
-                        return Err(AppError::public(
-                            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
-                            "TEMP_RESULT_TOO_LARGE",
-                            "临时结果超过大小限制",
-                        ));
-                    }
+                    let next_output_size =
+                        log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
+                    ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
                     output.write_all(&bytes).await.map_err(AppError::Io)?;
                     log_offset = next_output_size;
+                    total_output_bytes = total_output_bytes
+                        .checked_add(line_bytes)
+                        .ok_or_else(too_large)?;
                     if !bytes.ends_with(b"\n") {
                         output.write_all(b"\n").await.map_err(AppError::Io)?;
                     }
-                    meta_offset += write_json_line(metadata_output, &metadata).await?;
+                    meta_offset += write_json_line(
+                        metadata_output,
+                        &metadata,
+                        max_output_bytes,
+                        &mut total_output_bytes,
+                    )
+                    .await?;
                     matching_lines += 1;
                 }
                 source_line += 1;
@@ -283,12 +289,39 @@ impl TempResultExecutor {
     }
 }
 
-async fn write_json_line<T: Serialize>(output: &mut File, value: &T) -> Result<u64, AppError> {
+fn too_large() -> AppError {
+    AppError::public(
+        actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+        "TEMP_RESULT_TOO_LARGE",
+        "临时结果超过大小限制",
+    )
+}
+
+fn ensure_output_capacity(current: u64, additional: u64, limit: u64) -> Result<(), AppError> {
+    if current
+        .checked_add(additional)
+        .is_none_or(|size| size > limit)
+    {
+        return Err(too_large());
+    }
+    Ok(())
+}
+
+async fn write_json_line<T: Serialize>(
+    output: &mut File,
+    value: &T,
+    max_output_bytes: u64,
+    total_output_bytes: &mut u64,
+) -> Result<u64, AppError> {
     let mut bytes = serde_json::to_vec(value).map_err(|error| {
         AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
     bytes.push(b'\n');
+    ensure_output_capacity(*total_output_bytes, bytes.len() as u64, max_output_bytes)?;
     output.write_all(&bytes).await.map_err(AppError::Io)?;
+    *total_output_bytes = total_output_bytes
+        .checked_add(bytes.len() as u64)
+        .ok_or_else(too_large)?;
     Ok(bytes.len() as u64)
 }
 

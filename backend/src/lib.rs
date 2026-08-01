@@ -19,7 +19,7 @@ use std::{
 };
 
 use sqlx::SqlitePool;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AppLimits, AuthConfig};
@@ -81,6 +81,7 @@ pub struct AppState {
     pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
     pub temp_result_permits: Arc<Semaphore>,
+    pub temp_result_capacity_lock: Arc<AsyncMutex<()>>,
     pub auth_hash_permits: Arc<Semaphore>,
     pub auth_rate_limits: Arc<Mutex<AuthRateLimits>>,
     pub blob_store: Arc<dyn BlobStore>,
@@ -121,6 +122,7 @@ impl AppState {
             auth,
             processing_permits,
             temp_result_permits,
+            temp_result_capacity_lock: Arc::new(AsyncMutex::new(())),
             auth_hash_permits,
             auth_rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
             blob_store,
