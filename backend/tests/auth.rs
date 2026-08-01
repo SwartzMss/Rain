@@ -504,14 +504,15 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
     assert_eq!(updated["name"], "Warnings");
     assert_eq!(updated["search_type"], "FILENAME");
     assert_eq!(updated["query_text"], "warn");
-    assert_eq!(updated["scope_key"], "CN013");
+    assert_eq!(updated["scope_type"], "GLOBAL");
+    assert_eq!(updated["scope_key"], Value::Null);
     assert_eq!(updated["is_pinned"], false);
-    assert_eq!(updated["sort_order"], 7);
+    assert_eq!(updated["sort_order"], 0);
 
     let alice_list = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/api/me/saved-searches?issue_code=CN013")
+            .uri("/api/me/saved-searches")
             .cookie(alice.clone())
             .to_request(),
     )
@@ -539,7 +540,8 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
     .await;
     assert_eq!(scoped.status(), StatusCode::CREATED);
     let scoped_body: Value = test::read_body_json(scoped).await;
-    assert_eq!(scoped_body["scope_key"], "CN013");
+    assert_eq!(scoped_body["scope_type"], "GLOBAL");
+    assert_eq!(scoped_body["scope_key"], Value::Null);
 
     let normalized_list = test::call_service(
         &app,

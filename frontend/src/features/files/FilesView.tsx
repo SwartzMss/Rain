@@ -110,8 +110,7 @@ export function BundleView() {
   const issueCode = issueCodeFromRoute || locationState?.issue || '';
   const [pendingSavedSearch] = useState(() => takePendingSavedSearch(
     sessionStorage,
-    auth.state.status === 'AUTHENTICATED',
-    issueCode
+    auth.state.status === 'AUTHENTICATED'
   ));
   const [pendingDetailEditor] = useState(() => detailEditorState(
     pendingSavedSearch?.search_type === 'DETAIL' ? pendingSavedSearch.query_text : undefined
@@ -153,9 +152,6 @@ export function BundleView() {
   const [savedSearchesOpen, setSavedSearchesOpen] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(Boolean(pendingSavedSearch));
   const [savedSearchName, setSavedSearchName] = useState('');
-  const [savedSearchScope, setSavedSearchScope] = useState<'GLOBAL' | 'ISSUE'>(
-    pendingSavedSearch?.scope_type ?? 'ISSUE'
-  );
   const [savedSearchError, setSavedSearchError] = useState('');
   const [editingSavedSearch, setEditingSavedSearch] = useState<SavedSearch | null>(null);
   const [editingSearchTokens, setEditingSearchTokens] = useState<SearchToken[]>([]);
@@ -222,8 +218,6 @@ export function BundleView() {
           name: savedSearchName,
           search_type: 'DETAIL',
           query_text: query,
-          scope_type: savedSearchScope,
-          scope_key: savedSearchScope === 'ISSUE' ? issueCode : null,
           options: { version: 1 }
         };
       }
@@ -232,20 +226,18 @@ export function BundleView() {
         name: savedSearchName,
         search_type: 'DETAIL',
         query_text: serializeSearchTokens(tokens),
-        scope_type: savedSearchScope,
-        scope_key: savedSearchScope === 'ISSUE' ? issueCode : null,
         options: { version: 1, tokens }
       };
     } catch {
       return null;
     }
-  }, [detailRawExpression, issueCode, savedSearchName, savedSearchScope, searchDraft, searchMode, searchTokens]);
+  }, [detailRawExpression, savedSearchName, searchDraft, searchMode, searchTokens]);
 
   const loadSavedSearches = useCallback(async () => {
     if (auth.state.status !== 'AUTHENTICATED') return;
-    const items = await rainApi.fetchSavedSearches(issueCode || undefined);
+    const items = await rainApi.fetchSavedSearches();
     setSavedSearches(items.filter((item) => item.search_type === 'DETAIL'));
-  }, [auth.state.status, issueCode]);
+  }, [auth.state.status]);
 
   useEffect(() => {
     if (auth.state.status !== 'AUTHENTICATED') {
@@ -254,7 +246,7 @@ export function BundleView() {
     }
     void loadSavedSearches().catch((error) => setSavedSearchError(normalizeApiError(error)));
     if (!pendingSavedSearch) {
-      const pending = takePendingSavedSearch(sessionStorage, true, issueCode);
+      const pending = takePendingSavedSearch(sessionStorage, true);
       if (pending) {
         const editor = detailEditorState(
           pending.search_type === 'DETAIL' ? pending.query_text : undefined
@@ -264,7 +256,6 @@ export function BundleView() {
         setSearchTokens(editor.tokens);
         setDetailRawExpression(editor.rawExpression);
         setSearchDraft('');
-        setSavedSearchScope(pending.scope_type);
         setSaveDialogOpen(true);
       }
     }
@@ -333,15 +324,10 @@ export function BundleView() {
         name: editingSavedSearch.name.trim(),
         search_type: 'DETAIL',
         query_text: queryText,
-        scope_type: editingSavedSearch.scope_type,
-        scope_key: editingSavedSearch.scope_type === 'ISSUE'
-          ? (editingSavedSearch.scope_key || issueCode)
-          : null,
         options: editingRawExpression === null
           ? { version: 1, tokens: finalizedTokens }
           : { version: 1 },
-        is_pinned: editingSavedSearch.is_pinned,
-        sort_order: editingSavedSearch.sort_order
+        is_pinned: editingSavedSearch.is_pinned
       });
       setEditingSavedSearch(null);
       await loadSavedSearches();
@@ -1660,12 +1646,6 @@ export function BundleView() {
             <label className="mt-4 block text-sm font-medium">名称
               <input className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={savedSearchName} onChange={(event) => setSavedSearchName(event.target.value)} autoFocus />
             </label>
-            <label className="mt-4 block text-sm font-medium">使用范围
-              <select className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" value={savedSearchScope} onChange={(event) => setSavedSearchScope(event.target.value as 'GLOBAL' | 'ISSUE')}>
-                <option value="ISSUE">当前 Issue</option>
-                <option value="GLOBAL">所有 Issue</option>
-              </select>
-            </label>
             {savedSearchError ? <p className="mt-3 text-sm text-rose-600">{savedSearchError}</p> : null}
             <div className="mt-6 flex justify-end gap-3">
               <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => setSaveDialogOpen(false)}>取消</button>
@@ -1702,22 +1682,10 @@ export function BundleView() {
                 </div>
               )}
             </label>
-            <label className="block text-sm font-medium">使用范围
-              <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={editingSavedSearch.scope_type} onChange={(event) => {
-                const scope = event.target.value as 'GLOBAL' | 'ISSUE';
-                setEditingSavedSearch({ ...editingSavedSearch, scope_type: scope, scope_key: scope === 'ISSUE' ? issueCode : null });
-              }}>
-                <option value="ISSUE">当前 Issue</option>
-                <option value="GLOBAL">所有 Issue</option>
-              </select>
-            </label>
             <div className="flex gap-6">
               <label className="flex items-center gap-2 text-sm font-medium">
                 <input type="checkbox" checked={editingSavedSearch.is_pinned} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, is_pinned: event.target.checked })} />
                 置顶
-              </label>
-              <label className="flex items-center gap-2 text-sm font-medium">排序
-                <input className="w-24 rounded-lg border border-slate-300 px-3 py-2" type="number" value={editingSavedSearch.sort_order} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, sort_order: Number(event.target.value) || 0 })} />
               </label>
             </div>
             <div className="flex justify-end gap-3">

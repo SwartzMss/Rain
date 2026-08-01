@@ -8,17 +8,12 @@ use crate::{
 
 const COLUMNS: &str = "id, user_id, name, search_type, query_text, scope_type, scope_key, options_json, is_pinned, sort_order, created_at, updated_at, last_used_at";
 
-pub async fn list(
-    pool: &SqlitePool,
-    user_id: &str,
-    issue_code: Option<&str>,
-) -> Result<Vec<SavedSearchRecord>, AppError> {
+pub async fn list(pool: &SqlitePool, user_id: &str) -> Result<Vec<SavedSearchRecord>, AppError> {
     let sql = format!(
-        "SELECT {COLUMNS} FROM saved_searches WHERE user_id = ? AND (scope_type = 'GLOBAL' OR (scope_type = 'ISSUE' AND scope_key = ?)) ORDER BY is_pinned DESC, sort_order, updated_at DESC"
+        "SELECT {COLUMNS} FROM saved_searches WHERE user_id = ? ORDER BY is_pinned DESC, updated_at DESC"
     );
     sqlx::query_as(&sql)
         .bind(user_id)
-        .bind(issue_code)
         .fetch_all(pool)
         .await
         .map_err(AppError::Database)
@@ -30,10 +25,9 @@ pub async fn create(
     payload: &SavedSearchPayload,
 ) -> Result<SavedSearchRecord, AppError> {
     let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO saved_searches (id, user_id, name, search_type, query_text, scope_type, scope_key, options_json, is_pinned, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO saved_searches (id, user_id, name, search_type, query_text, scope_type, scope_key, options_json, is_pinned, sort_order) VALUES (?, ?, ?, ?, ?, 'GLOBAL', NULL, ?, ?, 0)")
         .bind(&id).bind(user_id).bind(payload.name.trim()).bind(&payload.search_type)
-        .bind(&payload.query_text).bind(&payload.scope_type).bind(payload.scope_key.as_deref())
-        .bind(payload.options.to_string()).bind(payload.is_pinned).bind(payload.sort_order)
+        .bind(&payload.query_text).bind(payload.options.to_string()).bind(payload.is_pinned)
         .execute(pool).await.map_err(AppError::Database)?;
     find_owned(pool, user_id, &id)
         .await?
@@ -46,10 +40,9 @@ pub async fn update(
     id: &str,
     payload: &SavedSearchPayload,
 ) -> Result<Option<SavedSearchRecord>, AppError> {
-    let result = sqlx::query("UPDATE saved_searches SET name = ?, search_type = ?, query_text = ?, scope_type = ?, scope_key = ?, options_json = ?, is_pinned = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")
+    let result = sqlx::query("UPDATE saved_searches SET name = ?, search_type = ?, query_text = ?, scope_type = 'GLOBAL', scope_key = NULL, options_json = ?, is_pinned = ?, sort_order = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?")
         .bind(payload.name.trim()).bind(&payload.search_type).bind(&payload.query_text)
-        .bind(&payload.scope_type).bind(payload.scope_key.as_deref()).bind(payload.options.to_string())
-        .bind(payload.is_pinned).bind(payload.sort_order).bind(id).bind(user_id)
+        .bind(payload.options.to_string()).bind(payload.is_pinned).bind(id).bind(user_id)
         .execute(pool).await.map_err(AppError::Database)?;
     if result.rows_affected() == 0 {
         return Ok(None);

@@ -200,7 +200,8 @@ try {
   assert.match(filesView, /编辑搜索条件/);
   assert.match(filesView, /搜索表达式/);
   assert.match(filesView, /is_pinned/);
-  assert.match(filesView, /sort_order/);
+  assert.doesNotMatch(filesView, /savedSearchScope|scope_type|scope_key|sort_order/);
+  assert.doesNotMatch(filesView, /fetchSavedSearches\(issueCode/);
   assert.match(filesView, /detailRawExpression/);
   assert.match(filesView, /日志内容原始搜索表达式/);
   assert.match(filesView, /const hasFileContext = Boolean\(issueCode \|\| bundleId\)/);

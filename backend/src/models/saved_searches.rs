@@ -61,8 +61,6 @@ pub struct SavedSearchPayload {
     pub name: String,
     pub search_type: String,
     pub query_text: String,
-    pub scope_type: String,
-    pub scope_key: Option<String>,
     #[serde(default)]
     pub options: Value,
     #[serde(default)]
