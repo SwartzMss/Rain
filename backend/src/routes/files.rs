@@ -1,7 +1,7 @@
 use actix_files::NamedFile;
 use actix_web::{
     HttpResponse, delete, get,
-    http::header::{ContentDisposition, DispositionParam, DispositionType},
+    http::header::{Charset, ContentDisposition, DispositionParam, DispositionType, ExtendedValue},
     web,
 };
 use serde::Deserialize;
@@ -148,14 +148,40 @@ pub async fn download_file(
     }
 
     let disk_path = resolve_file_path(&record, state.blob_store.as_ref()).await?;
+    let fallback_name = ascii_filename_fallback(&record.name);
     let named = NamedFile::open_async(disk_path)
         .await
         .map_err(AppError::Io)?
         .set_content_disposition(ContentDisposition {
             disposition: DispositionType::Attachment,
-            parameters: vec![DispositionParam::Filename(record.name)],
+            parameters: vec![
+                DispositionParam::FilenameExt(ExtendedValue {
+                    charset: Charset::Ext("UTF-8".into()),
+                    language_tag: None,
+                    value: record.name.as_bytes().to_vec(),
+                }),
+                DispositionParam::Filename(fallback_name),
+            ],
         });
     Ok(named)
+}
+
+fn ascii_filename_fallback(name: &str) -> String {
+    let fallback: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if fallback.trim_matches('_').is_empty() {
+        "download".into()
+    } else {
+        fallback
+    }
 }
 
 #[delete("/files/v1/{bundle_id}/files/{file_id}")]

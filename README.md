@@ -55,6 +55,8 @@ cargo run
 
 ```bash
 curl http://localhost:8080/healthz
+# 检查 SQLite 与数据目录是否已就绪
+curl -i http://localhost:8080/readyz
 ```
 
 ### 开发前端
@@ -224,7 +226,7 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 - 文件树浏览。
 - 文本文件分页读取，后端按行偏移索引快速跳转。
 - 单行默认超过 8 MiB 时索引和分页展示会截断该行，并标记 `[line truncated]`；该限制可配置。
-- Issue 范围和 bundle 范围采用 SQLite FTS5 trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符时只在最多 10001 个候选日志分块内进行有界回退搜索，深分页不能超过该扫描窗口。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
+- Issue 范围和 bundle 范围采用 SQLite FTS5 trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符的关键词直接拒绝。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
 - 原始文件下载。
 - 删除 Issue、Bundle、单个文件节点。
 - 可选过期清理：设置 `RAIN_RETENTION_DAYS` 后启动时清理过期上传。
@@ -237,10 +239,10 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 - 后台处理在 `.tmp/{task_id}/staging` 中完成解压和索引；真实文件同步写入内容寻址 BlobStore，完成或失败后 staging 工作区会被清理。
 - 临时搜索结果受单结果大小、全局总容量、记录数、并发物化数和按 IP 的请求频率共同限制；达到上限时不会继续创建结果文件。
 - 搜索关键词少于 3 个字符会被拒绝，以避免公开接口执行无界的全文扫描。
-- SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务最多 2 个并发。
+- SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务默认最多 4 个并发，可通过 `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` 调整。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。
 - 搜索使用 SQLite FTS5 trigram external-content 索引；日志 chunk 正文仅存于 `log_segments.content`，FTS 不保存正文副本。
-- 短关键词回退搜索使用按 `log_segments.id` 稳定排序的物化候选集限制实际扫描量；返回的总数只针对该有界候选窗口，不代表整个 Issue 或 Bundle 的精确全量统计，并通过 `truncated` 标记窗口外仍有候选记录。
+- 服务状态分为进程存活检查 `/healthz` 和依赖就绪检查 `/readyz`；页面顶部显示的是后者，检查 SQLite 和数据目录是否可用。
 - 真实文件使用 SHA-256 内容寻址 Blob 存储，保存到数据根目录下的 `blobs/<hash前两位>/<完整hash>`；多个 Bundle 中的相同内容只保存一份。
 - 文件字节访问统一经过 `BlobStore` 接口；当前使用 `LocalCasBlobStore`，上层业务不依赖本地物理路径。
 - Bundle 使用逻辑删除；无引用 Blob 由后台 GC 基于数据库实际引用扫描，并在 24 小时宽限期后回收。

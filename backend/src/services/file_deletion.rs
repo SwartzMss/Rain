@@ -31,7 +31,7 @@ pub async fn delete_file_tree(
     }
 
     sqlx::query(
-        "UPDATE bundles SET content_size_bytes = (SELECT COALESCE(SUM(size_bytes), 0) FROM files WHERE bundle_id = ? AND is_dir = 0) WHERE id = ?",
+        "UPDATE bundles SET content_size_bytes = (SELECT COALESCE(SUM(CASE WHEN json_extract(meta, '$.preview_kind') = 'archive' THEN 0 ELSE size_bytes END), 0) FROM files WHERE bundle_id = ? AND is_dir = 0) WHERE id = ?",
     )
     .bind(bundle_id)
     .bind(bundle_id)
