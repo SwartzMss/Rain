@@ -210,7 +210,7 @@ pub async fn cleanup_expired_bundles(
 
 pub async fn finish_bundle_deletion(pool: &SqlitePool, bundle_id: &str) -> Result<(), AppError> {
     cleanup_bundle_content_batched(pool, bundle_id, CLEANUP_BATCH_SIZE).await?;
-    sqlx::query("UPDATE bundles SET status = 'DELETED' WHERE id = ? AND status = 'DELETING'")
+    sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
         .bind(bundle_id)
         .execute(pool)
         .await
@@ -225,7 +225,9 @@ pub async fn resume_deleting_bundles(pool: &SqlitePool) -> Result<u64, AppError>
             .await
             .map_err(AppError::Database)?;
     for bundle_id in &bundle_ids {
-        finish_bundle_deletion(pool, bundle_id).await?;
+        if let Err(error) = finish_bundle_deletion(pool, bundle_id).await {
+            tracing::warn!(bundle_id, %error, "deleting bundle recovery failed; will retry later");
+        }
     }
     Ok(bundle_ids.len() as u64)
 }

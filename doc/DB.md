@@ -21,6 +21,7 @@
 - `code` TEXT PK：Issue 编号（上传归属键）。
 - `name` TEXT：显示名称（默认与 `code` 相同）。
 - `description` TEXT：描述。
+- `owner_user_id` TEXT：创建该 Issue 的用户，引用 `users.id`；管理员创建的 Issue 可为空。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 
 ## 表：bundles
@@ -33,6 +34,7 @@
 - `process_stage` TEXT：处理中的当前操作，只使用 `RECEIVING / EXTRACTING / INDEXING / PUBLISHING`；完成或失败后保留最后一次操作。
 - `failure_stage`、`failure_code`、`failure_reason`、`retryable`：结构化失败诊断。
 - `deleted_at` TEXT：Bundle 逻辑删除时间；未删除时为 NULL。
+- `uploader_user_id` TEXT：实际上传者，引用 `users.id`；用于管理员统计用户实际占用容量。
 - `size_bytes` INTEGER：本次上传总字节数。
 - `content_size_bytes` INTEGER：计入 Issue 配额的最终可浏览文件总字节数；压缩包和目录本身不重复计入。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
@@ -104,6 +106,7 @@
 - 读取 Blob 前必须确认记录的 `storage_backend` 与当前 `BlobStore::backend_name()` 一致；多后端并存时应由后续 `BlobStoreRegistry` 按 backend 路由。
 - Bundle 删除先原子写入 `status='DELETING'` 和 `deleted_at`，使所有查询立即隐藏，再由后台幂等清理索引和文件引用；全部完成后写入 `DELETED`，服务重启会恢复未完成的删除。
 - Issue 删除同步复用每个 Bundle 的 `finish_bundle_deletion`；所有 Bundle 清理成功后才删除 Issue，失败后可再次请求从 `DELETING` 继续。
+- Bundle 删除完成时会将 `content_size_bytes` 清零；删除和 STAGING Blob 恢复任务在启动恢复后仍由后台定时重试。
 - 后台 Blob GC 每小时扫描一次，始终使用 `NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)` 确认无引用，不维护易失真的引用计数。
 - 无引用的 `MISSING` Blob 直接删除数据库记录；无引用的 `CORRUPTED` Blob 删除物理对象后再删除记录，两者不永久滞留。
 - `verified_at` 记录最近一次完整 SHA-256 审计时间。全量审计不阻塞 HTTP 启动；后台每小时按最久未校验优先处理，单批最多 100 个 Blob 或 5 GiB。

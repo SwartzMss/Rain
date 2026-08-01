@@ -45,7 +45,6 @@ pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, App
         FROM issues
         WHERE status = 'ACTIVE'
         ORDER BY code DESC
-        LIMIT 200
         "#,
     )
     .fetch_all(&state.pool)

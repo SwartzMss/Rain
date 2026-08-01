@@ -383,6 +383,22 @@ pub async fn recover_pending_blobs(
     garbage_collect_unreferenced_blobs(pool, store).await
 }
 
+pub fn spawn_blob_recovery(pool: SqlitePool, store: Arc<dyn BlobStore>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(300),
+        );
+        loop {
+            interval.tick().await;
+            match recover_pending_blobs(&pool, store.as_ref()).await {
+                Ok(recovered) => tracing::info!(recovered, "staging blob recovery completed"),
+                Err(error) => tracing::warn!(%error, "staging blob recovery failed; will retry"),
+            }
+        }
+    });
+}
+
 pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Result<u64, AppError> {
     const AUDIT_BATCH_SIZE: i64 = 100;
     const AUDIT_BYTE_BUDGET: u64 = 5 * 1024 * 1024 * 1024;

@@ -30,6 +30,15 @@ pub async fn delete_file_tree(
         delete_file_row(&mut tx, bundle_id, *file_id).await?;
     }
 
+    sqlx::query(
+        "UPDATE bundles SET content_size_bytes = (SELECT COALESCE(SUM(size_bytes), 0) FROM files WHERE bundle_id = ? AND is_dir = 0) WHERE id = ?",
+    )
+    .bind(bundle_id)
+    .bind(bundle_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+
     tx.commit().await.map_err(AppError::Database)?;
 
     Ok(())

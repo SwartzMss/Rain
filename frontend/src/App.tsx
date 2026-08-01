@@ -9,11 +9,31 @@ import { APP_VERSION } from './version';
 import './App.css';
 import { isAdmin } from './auth/permissions';
 import { AdminPage, AdminUsersPage, AuditLogsPage } from './features/admin/AdminPage';
+import { useEffect, useState } from 'react';
 
 function App() {
   const auth = useAuth();
   const location = useLocation();
   const returnPath = `${location.pathname}${location.search}`;
+  const [serviceHealthy, setServiceHealthy] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    const checkHealth = async () => {
+      try {
+        const response = await fetch('/healthz', { cache: 'no-store' });
+        if (active) setServiceHealthy(response.ok);
+      } catch {
+        if (active) setServiceHealthy(false);
+      }
+    };
+    void checkHealth();
+    const timer = window.setInterval(() => void checkHealth(), 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen text-slate-900">
@@ -30,8 +50,8 @@ function App() {
           </Link>
           <div className="flex items-center gap-3 text-sm font-medium text-slate-200">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
-              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]" />
-              <span>服务正常</span>
+              <span className={`h-2.5 w-2.5 rounded-full ${serviceHealthy ? 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]' : 'bg-rose-400 shadow-[0_0_10px_rgba(251,113,133,0.8)]'}`} />
+              <span>{serviceHealthy ? '服务正常' : '服务异常'}</span>
             </div>
             {auth.state.status === 'LOADING' && (
               <span className="rounded-full border border-white/10 px-3 py-1.5 text-slate-400">

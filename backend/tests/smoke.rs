@@ -180,7 +180,7 @@ async fn upload_search_tree_and_delete_issue() {
             .contains("abcdef123456")
     );
 
-    let short_search: Value = test::call_and_read_body_json(
+    let short_search = test::call_service(
         &app,
         test::TestRequest::get()
             .uri("/api/issues/SMOKE/search?q=ER&mode=content&size=10")
@@ -188,7 +188,7 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(short_search["total"], 1);
+    assert_eq!(short_search.status(), StatusCode::BAD_REQUEST);
 
     let gz_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let gz_content = "INFO gzip\nERROR compressed smoke works\n";
@@ -1258,7 +1258,7 @@ async fn upload_search_tree_and_delete_issue() {
     .await;
     let collision_files = collision_tree["children"].as_array().expect("children");
     assert_eq!(collision_files.len(), 2);
-    assert_eq!(collision_files[0]["name"], "a_b.log");
+    assert_eq!(collision_files[0]["name"], "a b.log");
     assert_eq!(collision_files[1]["name"], "a_b.log");
     let first_storage = collision_files[0]["meta"]["storage_name"]
         .as_str()
