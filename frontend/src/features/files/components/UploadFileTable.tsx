@@ -1,4 +1,5 @@
 import { rainApi } from '../../../api/client';
+import { useAuth } from '../../../auth/AuthContext';
 import type { FileRow } from '../homeRows';
 import { formatBytes, stageClass, stageLabel } from '../homeRows';
 import { FileIcon } from './FileIcons';
@@ -20,6 +21,9 @@ export function UploadFileTable({
   canWrite,
   onDeleteRow
 }: UploadFileTableProps) {
+  const auth = useAuth();
+  const canDownload = auth.state.status === 'AUTHENTICATED';
+
   return (
     <div className="rounded-2xl border border-slate-200/90 bg-white/95 p-4 shadow-[0_18px_48px_rgba(7,21,34,0.08)] backdrop-blur">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -55,7 +59,7 @@ export function UploadFileTable({
                   </td>
                   <td className="px-4 py-3">{formatBytes(row.sizeBytes)}</td>
                   <td className="whitespace-nowrap px-4 py-3">
-                    {row.status === 'READY' && row.file ? (
+                    {canDownload && row.status === 'READY' && row.file ? (
                       <a
                         className="mr-4 text-sky-700 hover:text-sky-800"
                         href={rainApi.fileDownloadUrl(row.bundleHash, String(row.file.id))}

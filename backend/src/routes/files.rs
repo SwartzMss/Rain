@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::{
     AppState,
-    auth::extractor::RequireBusinessUser,
+    auth::extractor::{RequireBusinessUser, RequireUser},
     error::AppError,
     file_classification::PreviewKind,
     models::files::{FileNode, FileNodeResponse},
@@ -133,6 +133,7 @@ pub async fn get_file_lines(
 
 #[get("/files/v1/{bundle_id}/files/{file_id}/download")]
 pub async fn download_file(
+    _user: RequireUser,
     params: web::Path<FilePath>,
     state: web::Data<AppState>,
 ) -> Result<NamedFile, AppError> {
