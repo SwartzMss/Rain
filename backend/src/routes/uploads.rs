@@ -1,5 +1,8 @@
-use actix_multipart::Multipart;
-use actix_web::{HttpResponse, get, http::StatusCode, post, web};
+use actix_web::{
+    HttpRequest, HttpResponse, get,
+    http::{StatusCode, header::CONTENT_LENGTH},
+    post, web,
+};
 use serde::Serialize;
 use tokio::fs;
 use uuid::Uuid;
@@ -12,7 +15,7 @@ use crate::{
     upload::{
         job::{UploadJob, spawn_upload_job},
         lifecycle::create_processing_bundle,
-        multipart::collect_multipart_upload,
+        multipart::{collect_multipart_upload, limited_multipart, raw_payload_limit},
     },
 };
 
@@ -24,10 +27,25 @@ pub async fn upload_logs(
     user: RequireBusinessUser,
     state: web::Data<AppState>,
     path: web::Path<String>,
-    payload: Multipart,
+    req: HttpRequest,
+    payload: web::Payload,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     require_issue_exists(&state.pool, &issue_code).await?;
+    let request_limit = raw_payload_limit(state.limits.issue_max_content_size.saturating_mul(2));
+    if let Some(length) = req.headers().get(CONTENT_LENGTH) {
+        let length = length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| AppError::BadRequest("invalid Content-Length header".into()))?;
+        if length > request_limit {
+            return Err(AppError::BadRequest(format!(
+                "upload request exceeds the maximum size of {}",
+                crate::upload::filename::format_bytes(request_limit)
+            )));
+        }
+    }
     let receive_permit = state
         .receive_permits
         .clone()
@@ -45,7 +63,7 @@ pub async fn upload_logs(
     fs::create_dir_all(&temp_dir).await.map_err(AppError::Io)?;
 
     let upload = match collect_multipart_upload(
-        payload,
+        limited_multipart(&req, payload, request_limit),
         &temp_dir,
         state.limits.issue_max_content_size.saturating_mul(2),
         state.tmp_bytes.clone(),
@@ -90,7 +108,9 @@ pub async fn upload_logs(
                 error = %cleanup_error,
                 "failed to remove temporary upload directory; retaining budget reservation"
             );
-            std::mem::forget(upload.receive_reservation);
+            state
+                .temp_cleanup_queue
+                .enqueue(temp_dir.clone(), upload.receive_reservation);
         }
         return Err(error);
     }
@@ -114,6 +134,7 @@ pub async fn upload_logs(
         bundle_hash: bundle_hash.clone(),
         files: upload.files,
         receive_reservation: upload.receive_reservation,
+        temp_cleanup_queue: state.temp_cleanup_queue.clone(),
     });
 
     drop(receive_permit);

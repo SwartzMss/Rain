@@ -132,6 +132,7 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         blob_store,
     ));
+    backend::upload::job::spawn_temp_cleanup_worker(shared_state.temp_cleanup_queue.clone());
 
     HttpServer::new(move || {
         App::new()

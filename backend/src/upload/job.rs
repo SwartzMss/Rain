@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use tokio::{fs, sync::Semaphore};
 use tracing::error;
@@ -15,6 +19,52 @@ use super::{
     multipart::{ReceiveReservation, UploadedFile},
 };
 
+struct PendingTempCleanup {
+    path: PathBuf,
+    reservation: ReceiveReservation,
+}
+
+#[derive(Clone, Default)]
+pub struct TempCleanupQueue(Arc<Mutex<VecDeque<PendingTempCleanup>>>);
+
+impl TempCleanupQueue {
+    pub fn enqueue(&self, path: PathBuf, reservation: ReceiveReservation) {
+        if let Ok(mut pending) = self.0.lock() {
+            pending.push_back(PendingTempCleanup { path, reservation });
+        } else {
+            std::mem::forget(reservation);
+        }
+    }
+}
+
+pub fn spawn_temp_cleanup_worker(queue: TempCleanupQueue) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let pending = queue
+                .0
+                .lock()
+                .map(|mut items| items.drain(..).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for item in pending {
+                match fs::remove_dir_all(&item.path).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        error!(
+                            path = %item.path.display(),
+                            error = %error,
+                            "temporary upload cleanup retry failed"
+                        );
+                        queue.enqueue(item.path, item.reservation);
+                    }
+                }
+            }
+        }
+    });
+}
+
 pub struct UploadJob {
     pub pool: sqlx::SqlitePool,
     pub data_root: PathBuf,
@@ -30,6 +80,7 @@ pub struct UploadJob {
     pub bundle_hash: String,
     pub files: Vec<UploadedFile>,
     pub receive_reservation: ReceiveReservation,
+    pub temp_cleanup_queue: TempCleanupQueue,
 }
 
 pub fn spawn_upload_job(job: UploadJob) {
@@ -59,7 +110,8 @@ pub fn spawn_upload_job(job: UploadJob) {
                         error = %cleanup_error,
                         "failed to remove temporary upload directory; retaining budget reservation"
                     );
-                    std::mem::forget(job.receive_reservation);
+                    job.temp_cleanup_queue
+                        .enqueue(job.temp_dir.clone(), job.receive_reservation);
                 }
                 return;
             }
@@ -92,7 +144,8 @@ pub fn spawn_upload_job(job: UploadJob) {
                 error = %cleanup_error,
                 "failed to remove temporary upload directory; retaining budget reservation"
             );
-            std::mem::forget(job.receive_reservation);
+            job.temp_cleanup_queue
+                .enqueue(job.temp_dir.clone(), job.receive_reservation);
         }
     });
 }
