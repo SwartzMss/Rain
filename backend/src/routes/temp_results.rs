@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState, AuthRateLimitBucket,
-    auth::extractor::RequireBusinessUser,
+    auth::extractor::{RequireBusinessUser, RequireUser},
     error::AppError,
     log_expression,
     repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
@@ -397,6 +397,7 @@ pub async fn get_temp_result_lines(
 
 #[get("/temp-results/{id}/download")]
 pub async fn download_temp_result(
+    _user: RequireUser,
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<NamedFile, AppError> {
