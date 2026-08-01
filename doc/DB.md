@@ -94,6 +94,7 @@
 - `storage_backend`：当前为 `local`，为远程对象存储预留扩展点。
 - `storage_key`：本地为 `blobs/<hash前两位>/<完整hash>`，不包含 Bundle UUID。
 - `state` 状态机：`STAGING → READY → PENDING_DELETE`；完整性检查会把丢失对象标记为 `MISSING`，大小不一致对象标记为 `CORRUPTED`。
+- `last_attempt_at` TEXT：STAGING Blob 最近一次恢复尝试时间；恢复任务按该时间轮转，避免异常记录阻塞后续记录。
 - 重复上传不会把已被引用的 `READY` Blob 降级；`PENDING_DELETE/MISSING/CORRUPTED` 必须经过物理对象重新发布及存在性、大小校验后，才能从 `STAGING` 回到 `READY`。
 - `files.blob_id` 引用 Blob；仅目录可为空。
 - `files.path` 是逻辑路径（保留现有 API 字段名），不再用于定位新上传文件的物理位置。

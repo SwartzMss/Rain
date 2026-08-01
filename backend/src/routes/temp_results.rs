@@ -802,14 +802,24 @@ pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), A
     .await
     .map_err(AppError::Database)?;
     for record in records {
-        if let Ok(path) = checked_temp_path(state, &record.storage_path) {
-            remove_result_files(&path).await?;
+        let path = match checked_temp_path(state, &record.storage_path) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(result_id = %record.id, %error, "expired temporary result path is invalid; keeping record");
+                continue;
+            }
+        };
+        if let Err(error) = remove_result_files(&path).await {
+            tracing::warn!(result_id = %record.id, %error, "expired temporary result files could not be removed; keeping record");
+            continue;
         }
-        sqlx::query("DELETE FROM temp_results WHERE id = ?")
+        if let Err(error) = sqlx::query("DELETE FROM temp_results WHERE id = ?")
             .bind(&record.id)
             .execute(&state.pool)
             .await
-            .map_err(AppError::Database)?;
+        {
+            tracing::warn!(result_id = %record.id, %error, "expired temporary result database record could not be removed");
+        }
     }
     Ok(())
 }

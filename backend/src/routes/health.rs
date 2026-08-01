@@ -54,16 +54,16 @@ async fn check_database(pool: &sqlx::SqlitePool) -> bool {
         return false;
     };
     let result = async {
-        sqlx::query("CREATE TEMP TABLE rain_ready_probe (value INTEGER)")
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS rain_ready_probe (id TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+        )
             .execute(&mut *transaction)
             .await?;
-        sqlx::query("INSERT INTO rain_ready_probe (value) VALUES (1)")
+        sqlx::query("INSERT INTO rain_ready_probe (id, value) VALUES (?, 1)")
+            .bind(Uuid::new_v4().simple().to_string())
             .execute(&mut *transaction)
             .await?;
-        sqlx::query("DROP TABLE rain_ready_probe")
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await
+        transaction.rollback().await
     }
     .await;
     result.is_ok()

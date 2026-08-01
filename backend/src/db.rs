@@ -385,6 +385,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             storage_backend TEXT NOT NULL,
             storage_key TEXT NOT NULL UNIQUE,
             state TEXT NOT NULL,
+            last_attempt_at TEXT,
             unreferenced_at TEXT,
             verified_at TEXT
         )

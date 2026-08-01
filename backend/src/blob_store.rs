@@ -353,7 +353,7 @@ pub async fn recover_pending_blobs(
     store: &dyn BlobStore,
 ) -> Result<BlobRecoveryStats, AppError> {
     let staging: Vec<(i64, String, i64, String)> = sqlx::query_as(
-        "SELECT id, content_hash, size_bytes, storage_key FROM blobs WHERE state = 'STAGING' AND storage_backend = ? ORDER BY id LIMIT 100",
+        "SELECT id, content_hash, size_bytes, storage_key FROM blobs WHERE state = 'STAGING' AND storage_backend = ? ORDER BY last_attempt_at IS NOT NULL, datetime(last_attempt_at), id LIMIT 100",
     )
     .bind(store.backend_name())
     .fetch_all(pool)
@@ -361,6 +361,17 @@ pub async fn recover_pending_blobs(
     .map_err(AppError::Database)?;
     let mut stats = BlobRecoveryStats::default();
     for (id, expected_hash, expected_size, storage_key) in staging {
+        if let Err(error) = sqlx::query(
+            "UPDATE blobs SET last_attempt_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'STAGING'",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        {
+            stats.failed += 1;
+            tracing::warn!(blob_id = id, %error, "staging blob recovery attempt could not be recorded; continuing");
+            continue;
+        }
         let result = async {
             let state = if store
                 .verify(&storage_key, &expected_hash, expected_size.max(0) as u64)
