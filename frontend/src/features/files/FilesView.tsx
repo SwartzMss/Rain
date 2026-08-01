@@ -812,6 +812,43 @@ export function BundleView() {
     }
   };
 
+  const revealSourceNode = async (source: ReturnType<typeof getSearchHitSource>) => {
+    if (!source) return;
+
+    const knownNodes = new Map(Object.entries(treeNodesRef.current));
+    let current = knownNodes.get(source.nodeId) ?? null;
+    if (!current) {
+      const result = await loadNode(source.bundleHash, source.fileId, null);
+      current = result?.node ?? null;
+      result?.children.forEach((child) => knownNodes.set(child.id, child));
+      if (current) knownNodes.set(current.id, current);
+    }
+    if (!current) return;
+
+    const ancestors: string[] = [];
+    const visited = new Set<string>();
+    while (true) {
+      const parentId: string | null = current ? current.parentId : null;
+      if (!parentId || visited.has(parentId)) break;
+      visited.add(parentId);
+      ancestors.push(parentId);
+      let parent: TreeNode | null = knownNodes.get(parentId) ?? null;
+      if (!parent) {
+        const rawParentId = parentId.split(/:(.+)/)[1] ?? '';
+        const result = await loadNode(source.bundleHash, rawParentId, null);
+        parent = result?.node ?? null;
+        result?.children.forEach((child) => knownNodes.set(child.id, child));
+        if (parent) knownNodes.set(parent.id, parent);
+      }
+      if (!parent) break;
+      current = parent;
+    }
+
+    if (ancestors.length > 0) {
+      setExpandedNodes((prev) => new Set([...prev, ...ancestors]));
+    }
+  };
+
   const openSearchHitSource = async (hit: IssueLogSearchHit) => {
     const source = getSearchHitSource(hit);
     if (!source) {
@@ -819,6 +856,7 @@ export function BundleView() {
       return;
     }
     try {
+      await revealSourceNode(source);
       await handleNodeClick(source.nodeId, source.line, { preserveSearch: true });
       setSourceActionMessage(
         source.line === null ? '已打开文件，原始行号不可用' : null

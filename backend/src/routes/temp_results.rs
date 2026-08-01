@@ -445,6 +445,7 @@ async fn resolve_sources(
         for row in rows {
             let file = FileRow {
                 id: row.id,
+                parent_id: None,
                 name: row.name,
                 path: row.path,
                 is_dir: false,

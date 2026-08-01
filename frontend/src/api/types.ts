@@ -74,6 +74,7 @@ export interface CreateIssueRequest {
 
 export interface FileNode {
   id: number | string;
+  parent_id?: number | string | null;
   name: string;
   path: string;
   is_dir: boolean;

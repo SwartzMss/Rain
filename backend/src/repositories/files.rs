@@ -13,6 +13,7 @@ use crate::{
 #[derive(FromRow)]
 pub struct FileRow {
     pub id: i64,
+    pub parent_id: Option<i64>,
     pub name: String,
     pub path: String,
     pub is_dir: bool,
@@ -34,7 +35,7 @@ pub async fn fetch_file(
 ) -> Result<FileRow, AppError> {
     sqlx::query_as::<_, FileRow>(
         r#"
-        SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+        SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
                f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
         FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
         WHERE f.bundle_id = ? AND f.id = ?
@@ -57,7 +58,7 @@ pub async fn fetch_children(
     if let Some(parent) = parent_id {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+            SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
                    f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
             FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
             WHERE f.bundle_id = ? AND f.parent_id = ?
@@ -71,7 +72,7 @@ pub async fn fetch_children(
     } else {
         sqlx::query_as::<_, FileRow>(
             r#"
-            SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+            SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
                    f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
             FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
             WHERE f.bundle_id = ? AND f.parent_id IS NULL
@@ -153,7 +154,7 @@ pub async fn fetch_extracted_child_ids(
 ) -> Result<Vec<i64>, AppError> {
     let rows = sqlx::query_as::<_, FileRow>(
         r#"
-        SELECT f.id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
+        SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
                f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
         FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
         WHERE f.bundle_id = ? AND f.parent_id = ?
@@ -223,6 +224,7 @@ pub fn to_file_node(record: FileRow) -> FileNode {
         .and_then(|value| serde_json::from_str(value).ok());
     FileNode {
         id: record.id.to_string(),
+        parent_id: record.parent_id.map(|id| id.to_string()),
         name: record.name,
         path: record.path,
         is_dir: record.is_dir,
@@ -307,6 +309,7 @@ mod tests {
     fn row(path: &str, meta: Option<&str>) -> FileRow {
         FileRow {
             id: 1,
+            parent_id: None,
             name: "app.log".into(),
             path: path.into(),
             is_dir: false,
