@@ -369,6 +369,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             failure_reason TEXT,
             retryable INTEGER,
             deleted_at TEXT,
+            uploader_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
             size_bytes INTEGER,
             content_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (content_size_bytes >= 0),
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

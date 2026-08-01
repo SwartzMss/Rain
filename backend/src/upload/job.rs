@@ -52,7 +52,15 @@ pub fn spawn_upload_job(job: UploadJob) {
                     &AppError::Conflict("上传处理任务已停止".into()),
                 )
                 .await;
-                let _ = fs::remove_dir_all(&job.temp_dir).await;
+                if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
+                    error!(
+                        bundle_id = %job.bundle_id,
+                        path = %job.temp_dir.display(),
+                        error = %cleanup_error,
+                        "failed to remove temporary upload directory; retaining budget reservation"
+                    );
+                    std::mem::forget(job.receive_reservation);
+                }
                 return;
             }
         };
@@ -77,7 +85,15 @@ pub fn spawn_upload_job(job: UploadJob) {
             .await;
         }
 
-        let _ = fs::remove_dir_all(&job.temp_dir).await;
+        if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
+            error!(
+                bundle_id = %job.bundle_id,
+                path = %job.temp_dir.display(),
+                error = %cleanup_error,
+                "failed to remove temporary upload directory; retaining budget reservation"
+            );
+            std::mem::forget(job.receive_reservation);
+        }
     });
 }
 

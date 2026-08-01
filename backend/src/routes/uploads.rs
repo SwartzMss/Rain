@@ -21,7 +21,7 @@ use super::issues::{normalize_issue_code, require_issue_exists};
 // scoped under /api in routes::register, so use relative path
 #[post("/issues/{issue_code}/uploads")]
 pub async fn upload_logs(
-    _user: RequireBusinessUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     path: web::Path<String>,
     payload: Multipart,
@@ -80,10 +80,18 @@ pub async fn upload_logs(
         &bundle_hash,
         &bundle_name,
         upload.total_bytes,
+        Some(&user.0.id),
     )
     .await
     {
-        let _ = fs::remove_dir_all(&temp_dir).await;
+        if let Err(cleanup_error) = fs::remove_dir_all(&temp_dir).await {
+            tracing::error!(
+                path = %temp_dir.display(),
+                error = %cleanup_error,
+                "failed to remove temporary upload directory; retaining budget reservation"
+            );
+            std::mem::forget(upload.receive_reservation);
+        }
         return Err(error);
     }
 

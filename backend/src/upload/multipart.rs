@@ -107,7 +107,8 @@ pub async fn collect_multipart_upload(
     max_tmp_bytes: u64,
 ) -> Result<MultipartUpload, AppError> {
     let mut files: Vec<UploadedFile> = Vec::new();
-    let mut total_bytes: u64 = 0;
+    let mut total_file_bytes: u64 = 0;
+    let mut total_request_bytes: u64 = 0;
     let mut file_fields = 0;
     let receive_reservation = ReceiveReservation::new(tmp_bytes, max_tmp_bytes);
 
@@ -121,7 +122,13 @@ pub async fn collect_multipart_upload(
 
         match field_name.as_str() {
             "issue_code" => {
-                collect_text_field(&mut field, MAX_MULTIPART_TEXT_FIELD_SIZE).await?;
+                collect_text_field(
+                    &mut field,
+                    MAX_MULTIPART_TEXT_FIELD_SIZE,
+                    &mut total_request_bytes,
+                    max_total_bytes,
+                )
+                .await?;
             }
             "files" => {
                 if file_fields >= MAX_UPLOAD_FILES {
@@ -141,8 +148,9 @@ pub async fn collect_multipart_upload(
                 let storage_name = unique_storage_name(&filename);
                 let temp_name = format!("{}-{storage_name}", file_fields - 1);
                 let temp_path = temp_dir.join(temp_name);
-                let remaining_bytes =
-                    max_total_bytes.checked_sub(total_bytes).ok_or_else(|| {
+                let remaining_bytes = max_total_bytes
+                    .checked_sub(total_request_bytes)
+                    .ok_or_else(|| {
                         AppError::BadRequest(format!(
                             "upload exceeds the maximum size of {}",
                             format_bytes(max_total_bytes)
@@ -154,13 +162,16 @@ pub async fn collect_multipart_upload(
                     remaining_bytes,
                     &filename,
                     &receive_reservation,
+                    &mut total_request_bytes,
+                    max_total_bytes,
                 )
                 .await?;
 
                 if size_bytes > 0 {
-                    total_bytes = total_bytes.checked_add(size_bytes).ok_or_else(|| {
-                        AppError::BadRequest("upload size exceeds the supported limit".into())
-                    })?;
+                    total_file_bytes =
+                        total_file_bytes.checked_add(size_bytes).ok_or_else(|| {
+                            AppError::BadRequest("upload size exceeds the supported limit".into())
+                        })?;
                     files.push(UploadedFile {
                         original_name: filename,
                         display_name,
@@ -175,8 +186,14 @@ pub async fn collect_multipart_upload(
             }
             _ => {
                 // Ignore unknown fields.
-                collect_binary_field(&mut field, MAX_MULTIPART_TEXT_FIELD_SIZE, &field_name)
-                    .await?;
+                collect_binary_field(
+                    &mut field,
+                    MAX_MULTIPART_TEXT_FIELD_SIZE,
+                    &field_name,
+                    &mut total_request_bytes,
+                    max_total_bytes,
+                )
+                .await?;
             }
         }
     }
@@ -187,13 +204,25 @@ pub async fn collect_multipart_upload(
 
     Ok(MultipartUpload {
         files,
-        total_bytes,
+        total_bytes: total_file_bytes,
         receive_reservation,
     })
 }
 
-async fn collect_text_field(field: &mut Field, limit: u64) -> Result<String, AppError> {
-    let bytes = collect_binary_field(field, limit, "text field").await?;
+async fn collect_text_field(
+    field: &mut Field,
+    limit: u64,
+    total_request_bytes: &mut u64,
+    max_total_bytes: u64,
+) -> Result<String, AppError> {
+    let bytes = collect_binary_field(
+        field,
+        limit,
+        "text field",
+        total_request_bytes,
+        max_total_bytes,
+    )
+    .await?;
     let value = String::from_utf8(bytes)
         .map_err(|_| AppError::BadRequest("field is not valid UTF-8".into()))?;
     Ok(value.trim().to_string())
@@ -203,6 +232,8 @@ async fn collect_binary_field(
     field: &mut Field,
     limit: u64,
     label: &str,
+    total_request_bytes: &mut u64,
+    max_total_bytes: u64,
 ) -> Result<Vec<u8>, AppError> {
     let mut data = Vec::new();
     while let Some(chunk) = field
@@ -224,6 +255,7 @@ async fn collect_binary_field(
                 format_bytes(limit)
             )));
         }
+        reserve_request_bytes(total_request_bytes, chunk.len() as u64, max_total_bytes)?;
         data.extend_from_slice(&chunk);
     }
     Ok(data)
@@ -235,6 +267,8 @@ async fn collect_file_field(
     limit: u64,
     label: &str,
     reservation: &ReceiveReservation,
+    total_request_bytes: &mut u64,
+    max_total_bytes: u64,
 ) -> Result<u64, AppError> {
     let mut file = fs::File::create(path).await.map_err(AppError::Io)?;
     let mut written = 0u64;
@@ -255,10 +289,28 @@ async fn collect_file_field(
                 format_bytes(limit)
             )));
         }
+        reserve_request_bytes(total_request_bytes, chunk.len() as u64, max_total_bytes)?;
         reservation.reserve(chunk.len() as u64)?;
         file.write_all(&chunk).await.map_err(AppError::Io)?;
         written = next_written;
     }
     file.flush().await.map_err(AppError::Io)?;
     Ok(written)
+}
+
+fn reserve_request_bytes(
+    total_request_bytes: &mut u64,
+    bytes: u64,
+    max_total_bytes: u64,
+) -> Result<(), AppError> {
+    *total_request_bytes = total_request_bytes.checked_add(bytes).ok_or_else(|| {
+        AppError::BadRequest("upload request size exceeds the supported limit".into())
+    })?;
+    if *total_request_bytes > max_total_bytes {
+        return Err(AppError::BadRequest(format!(
+            "upload request exceeds the maximum size of {}",
+            format_bytes(max_total_bytes)
+        )));
+    }
+    Ok(())
 }
