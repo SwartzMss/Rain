@@ -34,12 +34,16 @@ impl BootstrapAdminConfig {
 #[derive(Debug, Clone)]
 pub struct UploadConfig {
     pub concurrent_processing_tasks: usize,
+    pub concurrent_receive_tasks: usize,
+    pub max_tmp_bytes: u64,
 }
 
 impl Default for UploadConfig {
     fn default() -> Self {
         Self {
             concurrent_processing_tasks: 4,
+            concurrent_receive_tasks: 4,
+            max_tmp_bytes: 16 * GIB,
         }
     }
 }
@@ -306,6 +310,14 @@ impl AppLimits {
                     "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS",
                     defaults.upload.concurrent_processing_tasks,
                 )?,
+                concurrent_receive_tasks: env_value(
+                    "RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS",
+                    defaults.upload.concurrent_receive_tasks,
+                )?,
+                max_tmp_bytes: env_size(
+                    "RAIN_UPLOAD_MAX_TMP_BYTES",
+                    defaults.upload.max_tmp_bytes,
+                )?,
             },
             indexing: IndexingConfig {
                 max_indexed_line_size: env_size(
@@ -378,6 +390,11 @@ impl AppLimits {
             self.upload.concurrent_processing_tasks,
             "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS"
         );
+        positive!(
+            self.upload.concurrent_receive_tasks,
+            "RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS"
+        );
+        positive!(self.upload.max_tmp_bytes, "RAIN_UPLOAD_MAX_TMP_BYTES");
         positive!(
             self.indexing.max_indexed_line_size,
             "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE"

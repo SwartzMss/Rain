@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     finalizer::{finalize_bundle_failed, finalize_bundle_ready_with_retry},
-    multipart::UploadedFile,
+    multipart::{ReceiveReservation, UploadedFile},
 };
 
 pub struct UploadJob {
@@ -29,6 +29,7 @@ pub struct UploadJob {
     pub bundle_id: String,
     pub bundle_hash: String,
     pub files: Vec<UploadedFile>,
+    pub receive_reservation: ReceiveReservation,
 }
 
 pub fn spawn_upload_job(job: UploadJob) {

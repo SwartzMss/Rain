@@ -83,7 +83,6 @@ pub async fn search_logs(
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
           AND (? IS NULL OR ls.file_id = ?)
-        ORDER BY ls.id
         LIMIT ?
         )
         SELECT COUNT(*) FROM candidates
@@ -140,7 +139,6 @@ pub async fn search_logs(
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
           AND (? IS NULL OR ls.file_id = ?)
-        ORDER BY ls.id
         LIMIT ?
         )
         SELECT file_id, path, timeline, offset, line_end, chunk_index, content
@@ -298,7 +296,6 @@ pub async fn search_issue_logs(
         WHERE b.issue_code = ?
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
-        ORDER BY ls.id
         LIMIT ?
         )
         SELECT COUNT(*) FROM candidates
@@ -347,7 +344,6 @@ pub async fn search_issue_logs(
         WHERE b.issue_code = ?
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
-        ORDER BY ls.id
         LIMIT ?
         )
         SELECT file_id, path, offset, line_end, chunk_index, content, bundle_hash

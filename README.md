@@ -142,6 +142,8 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | --- | ---: | --- |
 | `RAIN_ISSUE_MAX_CONTENT_SIZE` | `4 GiB` | 每个 Issue 最终可浏览文件总量；压缩包按解压后内容计算 |
 | `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` | `4` | 并发后台处理任务 |
+| `RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS` | `4` | 并发 Multipart 接收任务 |
+| `RAIN_UPLOAD_MAX_TMP_BYTES` | `16 GiB` | 所有上传接收临时目录占用的全局字节上限 |
 | `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
 | `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
@@ -230,7 +232,7 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 
 - 暂不支持 `.rar`、`.7z` 解压。
 - 上传传输有前端进度；后台任务通过 `RECEIVING/EXTRACTING/INDEXING/PUBLISHING` 阶段提供处理状态，暂未提供阶段内百分比。
-- 上传接收阶段按单次请求限制文件总数和字节数；接收字节上限为 Issue 最终内容上限的 2 倍，最终可浏览内容仍受 `RAIN_ISSUE_MAX_CONTENT_SIZE` 限制。
+- 上传接收阶段按单次请求限制文件总数和字节数，并受并发接收数与 `.tmp` 全局字节预算限制；接收字节上限为 Issue 最终内容上限的 2 倍，最终可浏览内容仍受 `RAIN_ISSUE_MAX_CONTENT_SIZE` 限制。Multipart 中的每个文件字段都会计入文件数量，即使字段内容为空。
 - 后台处理在 `.tmp/{task_id}/staging` 中完成解压和索引；真实文件同步写入内容寻址 BlobStore，完成或失败后 staging 工作区会被清理。
 - SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务最多 2 个并发。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。

@@ -28,6 +28,17 @@ pub async fn upload_logs(
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     require_issue_exists(&state.pool, &issue_code).await?;
+    let receive_permit = state
+        .receive_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::api(
+                StatusCode::TOO_MANY_REQUESTS,
+                "UPLOAD_RECEIVE_BUSY",
+                "上传接收任务过多，请稍后重试",
+            )
+        })?;
 
     let upload_id = Uuid::new_v4().simple().to_string();
     let temp_dir = state.data_root.join(".tmp").join(&upload_id);
@@ -37,6 +48,8 @@ pub async fn upload_logs(
         payload,
         &temp_dir,
         state.limits.issue_max_content_size.saturating_mul(2),
+        state.tmp_bytes.clone(),
+        state.limits.upload.max_tmp_bytes,
     )
     .await
     {
@@ -92,7 +105,10 @@ pub async fn upload_logs(
         bundle_id: bundle_id.clone(),
         bundle_hash: bundle_hash.clone(),
         files: upload.files,
+        receive_reservation: upload.receive_reservation,
     });
+
+    drop(receive_permit);
 
     Ok(
         HttpResponse::build(StatusCode::ACCEPTED).json(UploadResponse {

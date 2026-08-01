@@ -1,6 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use actix_multipart::{Field, Multipart};
+use actix_web::http::StatusCode;
 use futures_util::TryStreamExt;
 use tokio::{fs, io::AsyncWriteExt};
 
@@ -23,15 +30,67 @@ pub struct UploadedFile {
 pub struct MultipartUpload {
     pub files: Vec<UploadedFile>,
     pub total_bytes: u64,
+    pub receive_reservation: ReceiveReservation,
+}
+
+pub struct ReceiveReservation {
+    used: Arc<AtomicU64>,
+    reserved: u64,
+}
+
+impl ReceiveReservation {
+    fn new(used: Arc<AtomicU64>) -> Self {
+        Self { used, reserved: 0 }
+    }
+
+    fn reserve(&mut self, bytes: u64, max: u64) -> Result<(), AppError> {
+        let next_reserved = self
+            .reserved
+            .checked_add(bytes)
+            .ok_or_else(tmp_budget_error)?;
+        loop {
+            let current = self.used.load(Ordering::Acquire);
+            let next = current.checked_add(bytes).ok_or_else(tmp_budget_error)?;
+            if next > max {
+                return Err(tmp_budget_error());
+            }
+            if self
+                .used
+                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.reserved = next_reserved;
+                return Ok(());
+            }
+        }
+    }
+}
+
+impl Drop for ReceiveReservation {
+    fn drop(&mut self) {
+        self.used.fetch_sub(self.reserved, Ordering::AcqRel);
+    }
+}
+
+fn tmp_budget_error() -> AppError {
+    AppError::api(
+        StatusCode::TOO_MANY_REQUESTS,
+        "UPLOAD_TMP_BUDGET_EXCEEDED",
+        "上传临时存储配额已用尽，请稍后重试",
+    )
 }
 
 pub async fn collect_multipart_upload(
     mut payload: Multipart,
     temp_dir: &Path,
     max_total_bytes: u64,
+    tmp_bytes: Arc<AtomicU64>,
+    max_tmp_bytes: u64,
 ) -> Result<MultipartUpload, AppError> {
     let mut files: Vec<UploadedFile> = Vec::new();
     let mut total_bytes: u64 = 0;
+    let mut file_fields = 0;
+    let mut receive_reservation = ReceiveReservation::new(tmp_bytes);
 
     while let Some(mut field) = payload
         .try_next()
@@ -46,12 +105,13 @@ pub async fn collect_multipart_upload(
                 collect_text_field(&mut field, MAX_MULTIPART_TEXT_FIELD_SIZE).await?;
             }
             "files" => {
-                if files.len() >= MAX_UPLOAD_FILES {
+                if file_fields >= MAX_UPLOAD_FILES {
                     return Err(AppError::BadRequest(format!(
                         "too many files; max {} files per upload",
                         MAX_UPLOAD_FILES
                     )));
                 }
+                file_fields += 1;
                 let filename = content_disposition
                     .get_filename()
                     .map(|name| name.to_string())
@@ -60,7 +120,7 @@ pub async fn collect_multipart_upload(
                 let content_type = field.content_type().map(|mime| mime.to_string());
                 let display_name = sanitize_filename(&filename);
                 let storage_name = unique_storage_name(&filename);
-                let temp_name = format!("{}-{storage_name}", files.len());
+                let temp_name = format!("{}-{storage_name}", file_fields - 1);
                 let temp_path = temp_dir.join(temp_name);
                 let remaining_bytes =
                     max_total_bytes.checked_sub(total_bytes).ok_or_else(|| {
@@ -69,8 +129,15 @@ pub async fn collect_multipart_upload(
                             format_bytes(max_total_bytes)
                         ))
                     })?;
-                let size_bytes =
-                    collect_file_field(&mut field, &temp_path, remaining_bytes, &filename).await?;
+                let size_bytes = collect_file_field(
+                    &mut field,
+                    &temp_path,
+                    remaining_bytes,
+                    &filename,
+                    &mut receive_reservation,
+                    max_tmp_bytes,
+                )
+                .await?;
 
                 if size_bytes > 0 {
                     total_bytes = total_bytes.checked_add(size_bytes).ok_or_else(|| {
@@ -100,7 +167,11 @@ pub async fn collect_multipart_upload(
         return Err(AppError::BadRequest("no files provided".into()));
     }
 
-    Ok(MultipartUpload { files, total_bytes })
+    Ok(MultipartUpload {
+        files,
+        total_bytes,
+        receive_reservation,
+    })
 }
 
 async fn collect_text_field(field: &mut Field, limit: u64) -> Result<String, AppError> {
@@ -145,6 +216,8 @@ async fn collect_file_field(
     path: &Path,
     limit: u64,
     label: &str,
+    reservation: &mut ReceiveReservation,
+    max_tmp_bytes: u64,
 ) -> Result<u64, AppError> {
     let mut file = fs::File::create(path).await.map_err(AppError::Io)?;
     let mut written = 0u64;
@@ -165,6 +238,7 @@ async fn collect_file_field(
                 format_bytes(limit)
             )));
         }
+        reservation.reserve(chunk.len() as u64, max_tmp_bytes)?;
         file.write_all(&chunk).await.map_err(AppError::Io)?;
         written = next_written;
     }

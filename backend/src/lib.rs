@@ -14,7 +14,7 @@ pub mod upload;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicU64},
     time::{Duration, Instant},
 };
 
@@ -80,6 +80,8 @@ pub struct AppState {
     pub limits: AppLimits,
     pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
+    pub receive_permits: Arc<Semaphore>,
+    pub tmp_bytes: Arc<AtomicU64>,
     pub temp_result_permits: Arc<Semaphore>,
     pub temp_result_capacity_lock: Arc<AsyncMutex<()>>,
     pub auth_hash_permits: Arc<Semaphore>,
@@ -111,6 +113,7 @@ impl AppState {
     ) -> Self {
         let processing_permits =
             Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
+        let receive_permits = Arc::new(Semaphore::new(limits.upload.concurrent_receive_tasks));
         let temp_result_permits = Arc::new(Semaphore::new(
             limits.temp_results.concurrent_materializations,
         ));
@@ -121,6 +124,8 @@ impl AppState {
             limits,
             auth,
             processing_permits,
+            receive_permits,
+            tmp_bytes: Arc::new(AtomicU64::new(0)),
             temp_result_permits,
             temp_result_capacity_lock: Arc::new(AsyncMutex::new(())),
             auth_hash_permits,
