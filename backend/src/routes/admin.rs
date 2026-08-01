@@ -187,7 +187,7 @@ pub async fn list_audit(
     let limit = limit(query.limit)?;
     let cursor = decode_cursor(query.cursor.as_deref())?;
     let mut sql = QueryBuilder::<Sqlite>::new(
-        "SELECT id,actor_type,actor_user_id,target_user_id,action,old_value,new_value,client_ip,user_agent,created_at FROM admin_audit_logs WHERE 1=1",
+        "SELECT l.id,l.actor_type,l.actor_user_id,l.target_user_id,u.username AS target_username,l.action,l.old_value,l.new_value,l.client_ip,l.user_agent,l.created_at FROM admin_audit_logs l LEFT JOIN users u ON u.id=l.target_user_id WHERE 1=1",
     );
     if let Some(v) = query.action.as_deref() {
         sql.push(" AND action=").push_bind(v);

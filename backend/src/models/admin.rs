@@ -51,6 +51,7 @@ pub struct AuditLog {
     pub actor_type: String,
     pub actor_user_id: Option<String>,
     pub target_user_id: Option<String>,
+    pub target_username: Option<String>,
     pub action: String,
     pub old_value: Option<String>,
     pub new_value: Option<String>,

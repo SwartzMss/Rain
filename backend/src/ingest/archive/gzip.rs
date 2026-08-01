@@ -51,7 +51,8 @@ pub(crate) async fn extract_gzip_file(
         }
         let mut outfile = StdFile::create(&out_path)
             .map_err(|error| io_error_at("create gzip output", &out_path, error))?;
-        let copied = copy_with_limit(&mut decoder, &mut outfile, copy_limit).map_err(|error| {
+        let temp_budget = archive_budget.clone();
+        let copied = copy_with_limit(&mut decoder, &mut outfile, copy_limit, &temp_budget).map_err(|error| {
             if matches!(error, AppError::BadRequest(_)) {
                 if remaining <= entry_limit {
                     AppError::BadRequest(format!(
@@ -87,6 +88,7 @@ fn copy_with_limit<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     limit: u64,
+    archive_budget: &ArchiveBudget,
 ) -> Result<u64, AppError> {
     let mut buffer = [0u8; 16 * 1024];
     let mut total = 0u64;
@@ -103,6 +105,7 @@ fn copy_with_limit<R: Read, W: Write>(
                 "gzip exceeds limit of {limit} bytes"
             )));
         }
+        archive_budget.reserve_temp_bytes(read as u64)?;
         writer.write_all(&buffer[..read]).map_err(io_error)?;
     }
     Ok(total)

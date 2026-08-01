@@ -71,6 +71,38 @@ pub async fn search_logs(
         ));
     }
 
+    let truncated = if search_term.chars().count() < 3 {
+        let candidate_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM (
+                SELECT ls.id
+                FROM log_segments ls
+                JOIN files f ON f.id = ls.file_id
+                WHERE ls.bundle_id = ?
+                  AND (? IS NULL OR ls.timeline = ?)
+                  AND (? IS NULL OR f.path LIKE ?)
+                  AND (? IS NULL OR ls.file_id = ?)
+                ORDER BY ls.id
+                LIMIT ?
+            )
+            "#,
+        )
+        .bind(&bundle.id)
+        .bind(&timeline)
+        .bind(&timeline)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(SHORT_SEARCH_SCAN_LIMIT + 1)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+        candidate_count > SHORT_SEARCH_SCAN_LIMIT
+    } else {
+        false
+    };
+
     let total: i64 = if search_term.chars().count() < 3 {
         sqlx::query_scalar(
             r#"
@@ -83,6 +115,7 @@ pub async fn search_logs(
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
           AND (? IS NULL OR ls.file_id = ?)
+        ORDER BY ls.id
         LIMIT ?
         )
         SELECT COUNT(*) FROM candidates
@@ -139,6 +172,7 @@ pub async fn search_logs(
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
           AND (? IS NULL OR ls.file_id = ?)
+        ORDER BY ls.id
         LIMIT ?
         )
         SELECT file_id, path, timeline, offset, line_end, chunk_index, content
@@ -217,6 +251,7 @@ pub async fn search_logs(
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,
         hits,
+        truncated,
     }))
 }
 
@@ -285,6 +320,34 @@ pub async fn search_issue_logs(
         ));
     }
 
+    let truncated = if search_term.chars().count() < 3 {
+        let candidate_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM (
+                SELECT ls.id
+                FROM log_segments ls
+                JOIN bundles b ON b.id = ls.bundle_id
+                JOIN files f ON f.id = ls.file_id
+                WHERE b.issue_code = ?
+                  AND b.status = 'READY'
+                  AND (? IS NULL OR f.path LIKE ?)
+                ORDER BY ls.id
+                LIMIT ?
+            )
+            "#,
+        )
+        .bind(&issue_code)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(SHORT_SEARCH_SCAN_LIMIT + 1)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+        candidate_count > SHORT_SEARCH_SCAN_LIMIT
+    } else {
+        false
+    };
+
     let total: i64 = if search_term.chars().count() < 3 {
         sqlx::query_scalar(
             r#"
@@ -296,6 +359,7 @@ pub async fn search_issue_logs(
         WHERE b.issue_code = ?
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
+        ORDER BY ls.id
         LIMIT ?
         )
         SELECT COUNT(*) FROM candidates
@@ -344,6 +408,7 @@ pub async fn search_issue_logs(
         WHERE b.issue_code = ?
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
+        ORDER BY ls.id
         LIMIT ?
         )
         SELECT file_id, path, offset, line_end, chunk_index, content, bundle_hash
@@ -414,6 +479,7 @@ pub async fn search_issue_logs(
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,
         hits,
+        truncated,
     }))
 }
 
@@ -501,6 +567,7 @@ async fn search_issue_files(
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,
         hits,
+        truncated: false,
     }))
 }
 

@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{config::ArchiveConfig, error::AppError};
+use crate::upload::multipart::TempBudget;
 
 use super::path_policy::format_binary_size;
 
@@ -8,6 +9,7 @@ use super::path_policy::format_binary_size;
 pub struct ArchiveBudget {
     counters: Arc<Mutex<ArchiveCounters>>,
     pub(crate) config: ArchiveConfig,
+    temp_budget: Option<TempBudget>,
 }
 
 impl Default for ArchiveBudget {
@@ -27,7 +29,20 @@ impl ArchiveBudget {
         Self {
             counters: Arc::new(Mutex::new(ArchiveCounters::default())),
             config,
+            temp_budget: None,
         }
+    }
+
+    pub fn with_temp_budget(mut self, temp_budget: TempBudget) -> Self {
+        self.temp_budget = Some(temp_budget);
+        self
+    }
+
+    pub(crate) fn reserve_temp_bytes(&self, bytes: u64) -> Result<(), AppError> {
+        if let Some(budget) = &self.temp_budget {
+            budget.reserve(bytes)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn reserve_entry(&self) -> Result<(), AppError> {

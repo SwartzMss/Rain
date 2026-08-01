@@ -34,24 +34,42 @@ pub struct MultipartUpload {
 }
 
 pub struct ReceiveReservation {
+    budget: TempBudget,
+}
+
+#[derive(Clone)]
+pub struct TempBudget {
     used: Arc<AtomicU64>,
-    reserved: u64,
+    reserved: Arc<AtomicU64>,
+    max: u64,
 }
 
 impl ReceiveReservation {
-    fn new(used: Arc<AtomicU64>) -> Self {
-        Self { used, reserved: 0 }
+    fn new(used: Arc<AtomicU64>, max: u64) -> Self {
+        Self {
+            budget: TempBudget {
+                used,
+                reserved: Arc::new(AtomicU64::new(0)),
+                max,
+            },
+        }
     }
 
-    fn reserve(&mut self, bytes: u64, max: u64) -> Result<(), AppError> {
-        let next_reserved = self
-            .reserved
-            .checked_add(bytes)
-            .ok_or_else(tmp_budget_error)?;
+    fn reserve(&self, bytes: u64) -> Result<(), AppError> {
+        self.budget.reserve(bytes)
+    }
+
+    pub fn temp_budget(&self) -> TempBudget {
+        self.budget.clone()
+    }
+}
+
+impl TempBudget {
+    pub fn reserve(&self, bytes: u64) -> Result<(), AppError> {
         loop {
             let current = self.used.load(Ordering::Acquire);
             let next = current.checked_add(bytes).ok_or_else(tmp_budget_error)?;
-            if next > max {
+            if next > self.max {
                 return Err(tmp_budget_error());
             }
             if self
@@ -59,7 +77,7 @@ impl ReceiveReservation {
                 .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                self.reserved = next_reserved;
+                self.reserved.fetch_add(bytes, Ordering::AcqRel);
                 return Ok(());
             }
         }
@@ -68,7 +86,8 @@ impl ReceiveReservation {
 
 impl Drop for ReceiveReservation {
     fn drop(&mut self) {
-        self.used.fetch_sub(self.reserved, Ordering::AcqRel);
+        let reserved = self.budget.reserved.swap(0, Ordering::AcqRel);
+        self.budget.used.fetch_sub(reserved, Ordering::AcqRel);
     }
 }
 
@@ -90,7 +109,7 @@ pub async fn collect_multipart_upload(
     let mut files: Vec<UploadedFile> = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut file_fields = 0;
-    let mut receive_reservation = ReceiveReservation::new(tmp_bytes);
+    let receive_reservation = ReceiveReservation::new(tmp_bytes, max_tmp_bytes);
 
     while let Some(mut field) = payload
         .try_next()
@@ -134,8 +153,7 @@ pub async fn collect_multipart_upload(
                     &temp_path,
                     remaining_bytes,
                     &filename,
-                    &mut receive_reservation,
-                    max_tmp_bytes,
+                    &receive_reservation,
                 )
                 .await?;
 
@@ -216,8 +234,7 @@ async fn collect_file_field(
     path: &Path,
     limit: u64,
     label: &str,
-    reservation: &mut ReceiveReservation,
-    max_tmp_bytes: u64,
+    reservation: &ReceiveReservation,
 ) -> Result<u64, AppError> {
     let mut file = fs::File::create(path).await.map_err(AppError::Io)?;
     let mut written = 0u64;
@@ -238,7 +255,7 @@ async fn collect_file_field(
                 format_bytes(limit)
             )));
         }
-        reservation.reserve(chunk.len() as u64, max_tmp_bytes)?;
+        reservation.reserve(chunk.len() as u64)?;
         file.write_all(&chunk).await.map_err(AppError::Io)?;
         written = next_written;
     }

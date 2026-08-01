@@ -143,7 +143,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_ISSUE_MAX_CONTENT_SIZE` | `4 GiB` | 每个 Issue 最终可浏览文件总量；压缩包按解压后内容计算 |
 | `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` | `4` | 并发后台处理任务 |
 | `RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS` | `4` | 并发 Multipart 接收任务 |
-| `RAIN_UPLOAD_MAX_TMP_BYTES` | `16 GiB` | 所有上传接收临时目录占用的全局字节上限 |
+| `RAIN_UPLOAD_MAX_TMP_BYTES` | `16 GiB` | 所有上传任务 `.tmp` 工作区的全局字节预算，包含原始接收文件和解压后的 staging 文件 |
 | `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
 | `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
@@ -232,12 +232,12 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 
 - 暂不支持 `.rar`、`.7z` 解压。
 - 上传传输有前端进度；后台任务通过 `RECEIVING/EXTRACTING/INDEXING/PUBLISHING` 阶段提供处理状态，暂未提供阶段内百分比。
-- 上传接收阶段按单次请求限制文件总数和字节数，并受并发接收数与 `.tmp` 全局字节预算限制；接收字节上限为 Issue 最终内容上限的 2 倍，最终可浏览内容仍受 `RAIN_ISSUE_MAX_CONTENT_SIZE` 限制。Multipart 中的每个文件字段都会计入文件数量，即使字段内容为空。
+- 上传接收阶段按单次请求限制文件总数和字节数，并受并发接收数与 `.tmp` 工作区全局字节预算限制；预算覆盖原始接收文件、递归解压后的 staging 文件和解压过程中的中间输出。接收字节上限为 Issue 最终内容上限的 2 倍，最终可浏览内容仍受 `RAIN_ISSUE_MAX_CONTENT_SIZE` 限制。Multipart 中的每个文件字段都会计入文件数量，即使字段内容为空。
 - 后台处理在 `.tmp/{task_id}/staging` 中完成解压和索引；真实文件同步写入内容寻址 BlobStore，完成或失败后 staging 工作区会被清理。
 - SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务最多 2 个并发。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。
 - 搜索使用 SQLite FTS5 trigram external-content 索引；日志 chunk 正文仅存于 `log_segments.content`，FTS 不保存正文副本。
-- 短关键词回退搜索使用物化候选集限制实际扫描量；返回的总数只针对该有界候选窗口，不代表整个 Issue 或 Bundle 的精确全量统计。
+- 短关键词回退搜索使用按 `log_segments.id` 稳定排序的物化候选集限制实际扫描量；返回的总数只针对该有界候选窗口，不代表整个 Issue 或 Bundle 的精确全量统计，并通过 `truncated` 标记窗口外仍有候选记录。
 - 真实文件使用 SHA-256 内容寻址 Blob 存储，保存到数据根目录下的 `blobs/<hash前两位>/<完整hash>`；多个 Bundle 中的相同内容只保存一份。
 - 文件字节访问统一经过 `BlobStore` 接口；当前使用 `LocalCasBlobStore`，上层业务不依赖本地物理路径。
 - Bundle 使用逻辑删除；无引用 Blob 由后台 GC 基于数据库实际引用扫描，并在 24 小时宽限期后回收。

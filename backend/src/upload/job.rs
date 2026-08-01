@@ -82,7 +82,8 @@ pub fn spawn_upload_job(job: UploadJob) {
 }
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
-    let archive_budget = ArchiveBudget::new(job.archive_config.clone());
+    let archive_budget = ArchiveBudget::new(job.archive_config.clone())
+        .with_temp_budget(job.receive_reservation.temp_budget());
     let issue_quota = IssueQuota::new(
         job.pool.clone(),
         &job.issue_code,
