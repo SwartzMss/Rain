@@ -9,11 +9,31 @@ import { APP_VERSION } from './version';
 import './App.css';
 import { isAdmin } from './auth/permissions';
 import { AdminPage, AdminUsersPage, AuditLogsPage } from './features/admin/AdminPage';
+import { useEffect, useState } from 'react';
 
 function App() {
   const auth = useAuth();
   const location = useLocation();
   const returnPath = `${location.pathname}${location.search}`;
+  const [serviceStatus, setServiceStatus] = useState<'checking' | 'healthy' | 'unhealthy'>('checking');
+
+  useEffect(() => {
+    let active = true;
+    const checkHealth = async () => {
+      try {
+        const response = await fetch('/readyz', { cache: 'no-store' });
+        if (active) setServiceStatus(response.ok ? 'healthy' : 'unhealthy');
+      } catch {
+        if (active) setServiceStatus('unhealthy');
+      }
+    };
+    void checkHealth();
+    const timer = window.setInterval(() => void checkHealth(), 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen text-slate-900">
@@ -30,8 +50,8 @@ function App() {
           </Link>
           <div className="flex items-center gap-3 text-sm font-medium text-slate-200">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
-              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]" />
-              <span>服务正常</span>
+              <span className={`h-2.5 w-2.5 rounded-full ${serviceStatus === 'healthy' ? 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]' : serviceStatus === 'checking' ? 'bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.8)]' : 'bg-rose-400 shadow-[0_0_10px_rgba(251,113,133,0.8)]'}`} />
+              <span>{serviceStatus === 'healthy' ? '服务正常' : serviceStatus === 'checking' ? '检测中' : '服务异常'}</span>
             </div>
             {auth.state.status === 'LOADING' && (
               <span className="rounded-full border border-white/10 px-3 py-1.5 text-slate-400">

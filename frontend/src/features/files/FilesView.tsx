@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { normalizeApiError, rainApi } from '../../api/client';
+import { ApiError, normalizeApiError, rainApi } from '../../api/client';
 import type { IssueLogSearchHit, LogSearchHit, SavedSearch, SavedSearchPayload, UploadSummary } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import type { BundleInfo } from '../../lib/bundles';
@@ -609,6 +609,12 @@ export function BundleView() {
           bundles = list;
         } catch (error) {
           loadFailed = true;
+          if (error instanceof ApiError && (error.code === 'RESOURCE_NOT_FOUND' || error.status === 404)) {
+            if (!ignore) {
+              navigate('/', { replace: true });
+            }
+            return;
+          }
           if (!ignore) {
             setTreeError(normalizeApiError(error));
           }
@@ -713,6 +719,7 @@ export function BundleView() {
     bundleId,
     activeBundle.name,
     loadNode,
+    navigate,
     refreshKey,
     resetViewerTabs,
     setViewerTabsState

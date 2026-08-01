@@ -22,10 +22,11 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
     let sanitized: String = file_name
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
-            } else {
+            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
                 '_'
+            } else {
+                ch
             }
         })
         .collect();

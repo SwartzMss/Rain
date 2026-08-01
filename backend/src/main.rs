@@ -8,6 +8,7 @@ use backend::{
     AppState,
     blob_store::{
         BlobStore, LocalCasBlobStore, recover_pending_blobs, spawn_blob_audit, spawn_blob_gc,
+        spawn_blob_recovery,
     },
     config::AppConfig,
     db::{
@@ -98,11 +99,11 @@ async fn main() -> std::io::Result<()> {
     )
     .await;
 
-    run_optional_recovery_stage(
-        "pending-blob-recovery",
-        STARTUP_RECOVERY_TIMEOUT,
-        recover_pending_blobs(&pool, blob_store.as_ref()),
-    )
+    run_optional_recovery_stage("pending-blob-recovery", STARTUP_RECOVERY_TIMEOUT, async {
+        recover_pending_blobs(&pool, blob_store.as_ref())
+            .await
+            .map(|stats| stats.recovered)
+    })
     .await;
 
     if let Some(retention_days) = config.retention_days {
@@ -124,6 +125,8 @@ async fn main() -> std::io::Result<()> {
     info!(limits = ?config.limits, "effective application limits");
     spawn_blob_gc(pool.clone(), blob_store.clone());
     spawn_blob_audit(pool.clone(), blob_store.clone());
+    spawn_blob_recovery(pool.clone(), blob_store.clone());
+    spawn_deleting_bundle_cleanup(pool.clone());
     spawn_session_cleanup(pool.clone());
     let shared_state = web::Data::new(AppState::with_blob_store_and_auth(
         pool,
@@ -133,6 +136,7 @@ async fn main() -> std::io::Result<()> {
         blob_store,
     ));
     backend::upload::job::spawn_temp_cleanup_worker(shared_state.temp_cleanup_queue.clone());
+    backend::routes::spawn_temp_result_cleanup(shared_state.clone());
 
     HttpServer::new(move || {
         App::new()
@@ -145,6 +149,25 @@ async fn main() -> std::io::Result<()> {
     .bind(bind_addr)?
     .run()
     .await
+}
+
+fn spawn_deleting_bundle_cleanup(pool: sqlx::SqlitePool) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(300),
+        );
+        loop {
+            interval.tick().await;
+            match resume_deleting_bundles(&pool).await {
+                Ok(retried) if retried > 0 => {
+                    tracing::info!(retried, "deleting bundle cleanup completed")
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "deleting bundle cleanup failed; will retry"),
+            }
+        }
+    });
 }
 
 fn spawn_session_cleanup(pool: sqlx::SqlitePool) {

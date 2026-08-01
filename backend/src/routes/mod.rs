@@ -17,6 +17,22 @@ mod saved_searches;
 mod temp_results;
 mod uploads;
 
+pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(300),
+        );
+        loop {
+            interval.tick().await;
+            match temp_results::cleanup_expired(&state).await {
+                Ok(()) => tracing::debug!("expired temporary results cleanup completed"),
+                Err(error) => tracing::warn!(%error, "expired temporary results cleanup failed"),
+            }
+        }
+    });
+}
+
 async fn prevent_session_response_caching(
     request: ServiceRequest,
     next: Next<impl MessageBody>,
@@ -33,43 +49,45 @@ async fn prevent_session_response_caching(
 }
 
 pub fn register(cfg: &mut web::ServiceConfig) {
-    cfg.service(health::health).service(
-        web::scope("/api")
-            .wrap(from_fn(prevent_session_response_caching))
-            .service(auth::register_user)
-            .service(admin::list_users)
-            .service(admin::change_status)
-            .service(admin::revoke_sessions)
-            .service(admin::list_audit)
-            .service(auth::login)
-            .service(auth::me)
-            .service(auth::logout)
-            .service(auth::change_password)
-            .service(saved_searches::list)
-            .service(saved_searches::create)
-            .service(saved_searches::update)
-            .service(saved_searches::delete)
-            .service(saved_searches::mark_used)
-            .service(issues::list_issues)
-            .service(issues::create_issue)
-            .service(issues::get_issue_bundles)
-            .service(issues::delete_issue_bundle)
-            .service(issues::delete_issue)
-            .service(files::get_file_node)
-            .service(files::get_file_content)
-            .service(files::get_file_lines)
-            .service(files::download_file)
-            .service(files::delete_file_node)
-            .service(logs::search_issue_logs)
-            .service(logs::search_logs)
-            .service(temp_results::create_temp_result)
-            .service(temp_results::preview_temp_result)
-            .service(temp_results::get_temp_result)
-            .service(temp_results::get_temp_result_lines)
-            .service(temp_results::download_temp_result)
-            .service(temp_results::delete_temp_result)
-            .service(uploads::upload_logs)
-            .service(uploads::get_upload_task),
-    );
+    cfg.service(health::health)
+        .service(health::readiness)
+        .service(
+            web::scope("/api")
+                .wrap(from_fn(prevent_session_response_caching))
+                .service(auth::register_user)
+                .service(admin::list_users)
+                .service(admin::change_status)
+                .service(admin::revoke_sessions)
+                .service(admin::list_audit)
+                .service(auth::login)
+                .service(auth::me)
+                .service(auth::logout)
+                .service(auth::change_password)
+                .service(saved_searches::list)
+                .service(saved_searches::create)
+                .service(saved_searches::update)
+                .service(saved_searches::delete)
+                .service(saved_searches::mark_used)
+                .service(issues::list_issues)
+                .service(issues::create_issue)
+                .service(issues::get_issue_bundles)
+                .service(issues::delete_issue_bundle)
+                .service(issues::delete_issue)
+                .service(files::get_file_node)
+                .service(files::get_file_content)
+                .service(files::get_file_lines)
+                .service(files::download_file)
+                .service(files::delete_file_node)
+                .service(logs::search_issue_logs)
+                .service(logs::search_logs)
+                .service(temp_results::create_temp_result)
+                .service(temp_results::preview_temp_result)
+                .service(temp_results::get_temp_result)
+                .service(temp_results::get_temp_result_lines)
+                .service(temp_results::download_temp_result)
+                .service(temp_results::delete_temp_result)
+                .service(uploads::upload_logs)
+                .service(uploads::get_upload_task),
+        );
 }
 mod admin;

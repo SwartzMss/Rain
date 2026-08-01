@@ -14,6 +14,10 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: apiProxyTarget,
           changeOrigin: true
+        },
+        '/readyz': {
+          target: apiProxyTarget,
+          changeOrigin: true
         }
       }
     }

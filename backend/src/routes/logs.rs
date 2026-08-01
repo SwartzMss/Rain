@@ -65,10 +65,8 @@ pub async fn search_logs(
         .clamp(1, state.limits.api.max_search_results);
     let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
     let short_pattern = format!("%{}%", escape_like_pattern(search_term));
-    if search_term.chars().count() < 3 && from >= SHORT_SEARCH_SCAN_LIMIT {
-        return Err(AppError::BadRequest(
-            "短关键词搜索的分页范围不能超过扫描上限".into(),
-        ));
+    if search_term.chars().count() < 3 {
+        return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
 
     let truncated = if search_term.chars().count() < 3 {
@@ -314,10 +312,8 @@ pub async fn search_issue_logs(
         .clamp(1, state.limits.api.max_search_results);
     let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
     let short_pattern = format!("%{}%", escape_like_pattern(search_term));
-    if search_term.chars().count() < 3 && from >= SHORT_SEARCH_SCAN_LIMIT {
-        return Err(AppError::BadRequest(
-            "短关键词搜索的分页范围不能超过扫描上限".into(),
-        ));
+    if search_term.chars().count() < 3 {
+        return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
 
     let truncated = if search_term.chars().count() < 3 {

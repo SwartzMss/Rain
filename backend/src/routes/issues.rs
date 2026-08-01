@@ -45,7 +45,6 @@ pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, App
         FROM issues
         WHERE status = 'ACTIVE'
         ORDER BY code DESC
-        LIMIT 200
         "#,
     )
     .fetch_all(&state.pool)
@@ -340,7 +339,7 @@ pub async fn delete_issue(
 }
 
 fn reject_processing_bundle(bundle: &BundleIdRow) -> Result<(), AppError> {
-    if is_active_bundle_status(&bundle.status) {
+    if is_processing_bundle_status(&bundle.status) {
         return Err(AppError::Conflict(
             "processing bundle cannot be deleted".into(),
         ));
@@ -364,12 +363,5 @@ fn is_processing_bundle_status(status: &str) -> bool {
     matches!(
         status.to_ascii_uppercase().as_str(),
         "PENDING" | "PROCESSING"
-    )
-}
-
-fn is_active_bundle_status(status: &str) -> bool {
-    matches!(
-        status.to_ascii_uppercase().as_str(),
-        "PENDING" | "PROCESSING" | "DELETING"
     )
 }

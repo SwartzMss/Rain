@@ -210,7 +210,7 @@ pub async fn cleanup_expired_bundles(
 
 pub async fn finish_bundle_deletion(pool: &SqlitePool, bundle_id: &str) -> Result<(), AppError> {
     cleanup_bundle_content_batched(pool, bundle_id, CLEANUP_BATCH_SIZE).await?;
-    sqlx::query("UPDATE bundles SET status = 'DELETED' WHERE id = ? AND status = 'DELETING'")
+    sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
         .bind(bundle_id)
         .execute(pool)
         .await
@@ -225,7 +225,9 @@ pub async fn resume_deleting_bundles(pool: &SqlitePool) -> Result<u64, AppError>
             .await
             .map_err(AppError::Database)?;
     for bundle_id in &bundle_ids {
-        finish_bundle_deletion(pool, bundle_id).await?;
+        if let Err(error) = finish_bundle_deletion(pool, bundle_id).await {
+            tracing::warn!(bundle_id, %error, "deleting bundle recovery failed; will retry later");
+        }
     }
     Ok(bundle_ids.len() as u64)
 }
@@ -262,6 +264,7 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "DROP TABLE IF EXISTS user_sessions",
         "DROP TABLE IF EXISTS users",
         "DROP TABLE IF EXISTS temp_results",
+        "DROP TABLE IF EXISTS rain_ready_probe",
         "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
@@ -383,6 +386,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             storage_backend TEXT NOT NULL,
             storage_key TEXT NOT NULL UNIQUE,
             state TEXT NOT NULL,
+            last_attempt_at TEXT,
             unreferenced_at TEXT,
             verified_at TEXT
         )
@@ -429,6 +433,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         r#"
         CREATE TABLE IF NOT EXISTS temp_results (
             id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DELETING')),
             name TEXT NOT NULL,
             expression TEXT NOT NULL,
             source_label TEXT NOT NULL,
@@ -437,6 +442,12 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             size_bytes INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS rain_ready_probe (
+            id TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
         )
         "#,
         r#"
