@@ -3,7 +3,7 @@ use actix_web::{HttpResponse, delete, get, http::StatusCode, patch, post, web};
 use super::issues::normalize_issue_code;
 use crate::{
     AppState,
-    auth::extractor::RequireUser,
+    auth::extractor::RequireBusinessUser,
     error::AppError,
     models::saved_searches::{SavedSearchListQuery, SavedSearchPayload, SavedSearchResponse},
     repositories::saved_searches,
@@ -58,7 +58,7 @@ fn map_database_error(error: AppError) -> AppError {
 
 #[get("/me/saved-searches")]
 pub async fn list(
-    user: RequireUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     query: web::Query<SavedSearchListQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -78,7 +78,7 @@ pub async fn list(
 
 #[post("/me/saved-searches")]
 pub async fn create(
-    user: RequireUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     payload: web::Json<SavedSearchPayload>,
 ) -> Result<HttpResponse, AppError> {
@@ -91,7 +91,7 @@ pub async fn create(
 
 #[patch("/me/saved-searches/{id}")]
 pub async fn update(
-    user: RequireUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     id: web::Path<String>,
     payload: web::Json<SavedSearchPayload>,
@@ -112,7 +112,7 @@ pub async fn update(
 
 #[delete("/me/saved-searches/{id}")]
 pub async fn delete(
-    user: RequireUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     id: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
@@ -128,7 +128,7 @@ pub async fn delete(
 
 #[post("/me/saved-searches/{id}/use")]
 pub async fn mark_used(
-    user: RequireUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     id: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {

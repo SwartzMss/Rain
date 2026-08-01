@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    auth::extractor::RequireAdmin,
+    auth::extractor::RequireBusinessUser,
     error::AppError,
     log_expression,
     repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
@@ -361,7 +361,7 @@ pub async fn download_temp_result(
 
 #[delete("/temp-results/{id}")]
 pub async fn delete_temp_result(
-    _user: RequireAdmin,
+    _user: RequireBusinessUser,
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {

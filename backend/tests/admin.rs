@@ -195,10 +195,23 @@ async fn admin_api_lists_users_and_protects_self_from_disable() {
         &app,
         test::TestRequest::patch()
             .uri(&format!("/api/admin/users/{admin_id}/role"))
-            .cookie(cookie)
+            .cookie(cookie.clone())
             .set_json(serde_json::json!({"role":"USER"}))
             .to_request(),
     )
     .await;
     assert_eq!(role.status(), StatusCode::NOT_FOUND);
+
+    let business_write = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues")
+            .cookie(cookie)
+            .set_json(serde_json::json!({"code": "ADMIN_WRITE"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(business_write.status(), StatusCode::FORBIDDEN);
+    let body: serde_json::Value = test::read_body_json(business_write).await;
+    assert_eq!(body["code"], "BUSINESS_USER_REQUIRED");
 }

@@ -4,7 +4,7 @@ use sqlx::FromRow;
 
 use crate::{
     AppState,
-    auth::extractor::RequireAdmin,
+    auth::extractor::RequireBusinessUser,
     db::finish_bundle_deletion,
     error::AppError,
     models::issues::{
@@ -63,7 +63,7 @@ pub struct CreateIssueRequest {
 
 #[post("/issues")]
 pub async fn create_issue(
-    _user: RequireAdmin,
+    _user: RequireBusinessUser,
     state: web::Data<AppState>,
     payload: web::Json<CreateIssueRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -209,7 +209,7 @@ struct BundleIdRow {
 
 #[delete("/issues/{issue_id}/bundles/{bundle_hash}")]
 pub async fn delete_issue_bundle(
-    _user: RequireAdmin,
+    _user: RequireBusinessUser,
     path: web::Path<(String, String)>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
@@ -250,7 +250,7 @@ pub async fn delete_issue_bundle(
 
 #[delete("/issues/{issue_id}")]
 pub async fn delete_issue(
-    _user: RequireAdmin,
+    _user: RequireBusinessUser,
     path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {

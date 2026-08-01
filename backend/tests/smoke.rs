@@ -1956,11 +1956,6 @@ async fn test_auth_cookie(pool: &sqlx::SqlitePool) -> Cookie<'static> {
         users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate test user"),
     };
     let token = generate_session_token();
-    sqlx::query("UPDATE users SET role = 'ADMIN' WHERE id = ?")
-        .bind(&user.id)
-        .execute(pool)
-        .await
-        .expect("promote smoke test user");
     sessions::create_session(
         pool,
         &user.id,

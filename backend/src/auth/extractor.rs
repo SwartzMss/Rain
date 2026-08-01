@@ -115,6 +115,45 @@ impl FromRequest for RequireAdmin {
     }
 }
 
+pub struct RequireBusinessUser(pub AuthenticatedUser);
+
+impl FromRequest for RequireBusinessUser {
+    type Error = AppError;
+    type Future = LocalBoxFuture<'static, Result<Self, Self::Error>>;
+
+    fn from_request(request: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        let state = request.app_data::<web::Data<AppState>>().cloned();
+        let token = request
+            .cookie(SESSION_COOKIE_NAME)
+            .map(|cookie| cookie.value().to_owned());
+        Box::pin(async move {
+            let state =
+                state.ok_or_else(|| AppError::Config("missing application state".into()))?;
+            let token = token
+                .filter(|value| !value.is_empty())
+                .ok_or_else(AppError::authentication_required)?;
+            let resolved = sessions::resolve_session_user(&state.pool, &hash_session_token(&token))
+                .await?
+                .ok_or_else(AppError::authentication_required)?;
+            if resolved.status != crate::auth::UserStatus::Active {
+                return Err(AppError::api(
+                    StatusCode::FORBIDDEN,
+                    "ACCOUNT_DISABLED",
+                    "账户已停用",
+                ));
+            }
+            if resolved.user.role != crate::auth::UserRole::User {
+                return Err(AppError::api(
+                    StatusCode::FORBIDDEN,
+                    "BUSINESS_USER_REQUIRED",
+                    "此操作需要普通用户权限",
+                ));
+            }
+            Ok(Self(resolved.user))
+        })
+    }
+}
+
 impl FromRequest for GuestOnly {
     type Error = AppError;
     type Future = Ready<Result<Self, Self::Error>>;
@@ -139,7 +178,7 @@ mod tests {
         repositories::{sessions, users},
     };
 
-    use super::{OptionalUser, RequireAdmin, RequireUser};
+    use super::{OptionalUser, RequireAdmin, RequireBusinessUser, RequireUser};
 
     async fn optional(user: OptionalUser) -> HttpResponse {
         HttpResponse::Ok().json(serde_json::json!({"authenticated": user.0.is_some()}))
@@ -151,6 +190,52 @@ mod tests {
 
     async fn admin(_user: RequireAdmin) -> HttpResponse {
         HttpResponse::NoContent().finish()
+    }
+
+    async fn business_user(_user: RequireBusinessUser) -> HttpResponse {
+        HttpResponse::NoContent().finish()
+    }
+
+    #[actix_web::test]
+    async fn active_admin_is_rejected_when_business_user_is_required() {
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        sqlx::query("INSERT INTO users (id, username, username_normalized, password_hash, role) VALUES ('admin', 'admin', 'admin', 'hash', 'ADMIN')")
+            .execute(&pool)
+            .await
+            .expect("admin");
+        let token = "admin-business-session";
+        sessions::create_session(
+            &pool,
+            "admin",
+            &hash_session_token(token),
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("session");
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState::new(
+                    pool,
+                    PathBuf::from("data"),
+                    AppLimits::default(),
+                )))
+                .route("/business", web::get().to(business_user)),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/business")
+                .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["code"], "BUSINESS_USER_REQUIRED");
     }
 
     #[actix_web::test]

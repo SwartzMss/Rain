@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    auth::extractor::RequireAdmin,
+    auth::extractor::RequireBusinessUser,
     error::AppError,
     models::issues::{UploadStage, UploadStatus},
     upload::{
@@ -21,7 +21,7 @@ use super::issues::{normalize_issue_code, require_issue_exists};
 // scoped under /api in routes::register, so use relative path
 #[post("/issues/{issue_code}/uploads")]
 pub async fn upload_logs(
-    _user: RequireAdmin,
+    _user: RequireBusinessUser,
     state: web::Data<AppState>,
     path: web::Path<String>,
     payload: Multipart,
