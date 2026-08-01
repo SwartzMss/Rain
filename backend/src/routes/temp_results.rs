@@ -599,8 +599,8 @@ async fn insert_temp_result(
     sqlx::query(
         r#"
         INSERT INTO temp_results
-            (id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at)
+        VALUES (?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(id)
@@ -781,12 +781,16 @@ async fn load_and_renew(
     id: &str,
 ) -> Result<TempResultRecord, AppError> {
     let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
-    sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ?")
-        .bind(&expires_at)
-        .bind(id)
-        .execute(&state.pool)
-        .await
-        .map_err(AppError::Database)?;
+    let updated =
+        sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = 'ACTIVE'")
+            .bind(&expires_at)
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .map_err(AppError::Database)?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::NotFound(format!("temporary result {id}")));
+    }
     load_record(state, id).await
 }
 
@@ -795,22 +799,35 @@ pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), A
         r#"
         SELECT id, name, expression, source_label, storage_path, line_count,
                size_bytes, created_at, expires_at
-        FROM temp_results WHERE datetime(expires_at) < datetime('now')
+        FROM temp_results WHERE status = 'ACTIVE' AND datetime(expires_at) < datetime('now')
         "#,
     )
     .fetch_all(&state.pool)
     .await
     .map_err(AppError::Database)?;
     for record in records {
-        let path = match checked_temp_path(state, &record.storage_path) {
+        let storage_path: Option<String> = sqlx::query_scalar(
+            "UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'ACTIVE' AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path",
+        )
+        .bind(&record.id)
+        .bind(&record.expires_at)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+        let Some(storage_path) = storage_path else {
+            continue;
+        };
+        let path = match checked_temp_path(state, &storage_path) {
             Ok(path) => path,
             Err(error) => {
-                tracing::warn!(result_id = %record.id, %error, "expired temporary result path is invalid; keeping record");
+                tracing::warn!(result_id = %record.id, %error, "expired temporary result path is invalid; restoring record");
+                restore_temp_result(&state.pool, &record.id).await;
                 continue;
             }
         };
         if let Err(error) = remove_result_files(&path).await {
-            tracing::warn!(result_id = %record.id, %error, "expired temporary result files could not be removed; keeping record");
+            tracing::warn!(result_id = %record.id, %error, "expired temporary result files could not be removed; restoring record");
+            restore_temp_result(&state.pool, &record.id).await;
             continue;
         }
         if let Err(error) = sqlx::query("DELETE FROM temp_results WHERE id = ?")
@@ -819,9 +836,22 @@ pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), A
             .await
         {
             tracing::warn!(result_id = %record.id, %error, "expired temporary result database record could not be removed");
+            restore_temp_result(&state.pool, &record.id).await;
         }
     }
     Ok(())
+}
+
+async fn restore_temp_result(pool: &sqlx::SqlitePool, id: &str) {
+    if let Err(error) = sqlx::query(
+        "UPDATE temp_results SET status = 'ACTIVE' WHERE id = ? AND status = 'DELETING'",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(result_id = %id, %error, "failed to restore temporary result status");
+    }
 }
 
 async fn remove_result_files(log_path: &Path) -> Result<(), AppError> {

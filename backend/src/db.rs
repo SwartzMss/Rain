@@ -264,6 +264,7 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "DROP TABLE IF EXISTS user_sessions",
         "DROP TABLE IF EXISTS users",
         "DROP TABLE IF EXISTS temp_results",
+        "DROP TABLE IF EXISTS rain_ready_probe",
         "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
@@ -432,6 +433,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         r#"
         CREATE TABLE IF NOT EXISTS temp_results (
             id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DELETING')),
             name TEXT NOT NULL,
             expression TEXT NOT NULL,
             source_label TEXT NOT NULL,
@@ -440,6 +442,12 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             size_bytes INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS rain_ready_probe (
+            id TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
         )
         "#,
         r#"
