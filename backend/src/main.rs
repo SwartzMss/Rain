@@ -99,11 +99,11 @@ async fn main() -> std::io::Result<()> {
     )
     .await;
 
-    run_optional_recovery_stage(
-        "pending-blob-recovery",
-        STARTUP_RECOVERY_TIMEOUT,
-        recover_pending_blobs(&pool, blob_store.as_ref()),
-    )
+    run_optional_recovery_stage("pending-blob-recovery", STARTUP_RECOVERY_TIMEOUT, async {
+        recover_pending_blobs(&pool, blob_store.as_ref())
+            .await
+            .map(|stats| stats.recovered)
+    })
     .await;
 
     if let Some(retention_days) = config.retention_days {
@@ -136,6 +136,7 @@ async fn main() -> std::io::Result<()> {
         blob_store,
     ));
     backend::upload::job::spawn_temp_cleanup_worker(shared_state.temp_cleanup_queue.clone());
+    backend::routes::spawn_temp_result_cleanup(shared_state.clone());
 
     HttpServer::new(move || {
         App::new()

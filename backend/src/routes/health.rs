@@ -1,5 +1,6 @@
 use actix_web::{HttpResponse, get, http::StatusCode, web};
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -15,7 +16,7 @@ pub async fn health() -> HttpResponse {
 
 #[get("/readyz")]
 pub async fn readiness(state: web::Data<AppState>) -> HttpResponse {
-    let database_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
+    let database_ok = check_database(&state.pool).await;
     let storage_ok = check_storage(&state.data_root).await;
     let ready = database_ok && storage_ok;
     HttpResponse::build(if ready {
@@ -33,12 +34,37 @@ pub async fn readiness(state: web::Data<AppState>) -> HttpResponse {
 }
 
 async fn check_storage(root: &std::path::Path) -> bool {
-    if tokio::fs::create_dir_all(root.join("blobs")).await.is_err() {
+    let blobs = root.join("blobs");
+    if tokio::fs::create_dir_all(&blobs).await.is_err() {
         return false;
     }
-    let probe = root.join(format!(".ready-{}", Uuid::new_v4().simple()));
+    let probe = blobs.join(format!(".ready-{}", Uuid::new_v4().simple()));
     match tokio::fs::File::create(&probe).await {
-        Ok(_) => tokio::fs::remove_file(probe).await.is_ok(),
+        Ok(mut file) => {
+            file.write_all(b"ready").await.is_ok()
+                && file.sync_all().await.is_ok()
+                && tokio::fs::remove_file(probe).await.is_ok()
+        }
         Err(_) => false,
     }
+}
+
+async fn check_database(pool: &sqlx::SqlitePool) -> bool {
+    let Ok(mut transaction) = pool.begin().await else {
+        return false;
+    };
+    let result = async {
+        sqlx::query("CREATE TEMP TABLE rain_ready_probe (value INTEGER)")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("INSERT INTO rain_ready_probe (value) VALUES (1)")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DROP TABLE rain_ready_probe")
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await
+    }
+    .await;
+    result.is_ok()
 }

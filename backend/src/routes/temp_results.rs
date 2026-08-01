@@ -790,7 +790,7 @@ async fn load_and_renew(
     load_record(state, id).await
 }
 
-async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
+pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
     let records = sqlx::query_as::<_, TempResultRecord>(
         r#"
         SELECT id, name, expression, source_label, storage_path, line_count,

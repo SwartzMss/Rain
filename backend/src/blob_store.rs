@@ -351,36 +351,56 @@ pub async fn mark_blob_ready(
 pub async fn recover_pending_blobs(
     pool: &SqlitePool,
     store: &dyn BlobStore,
-) -> Result<u64, AppError> {
+) -> Result<BlobRecoveryStats, AppError> {
     let staging: Vec<(i64, String, i64, String)> = sqlx::query_as(
-        "SELECT id, content_hash, size_bytes, storage_key FROM blobs WHERE state = 'STAGING' AND storage_backend = ?",
+        "SELECT id, content_hash, size_bytes, storage_key FROM blobs WHERE state = 'STAGING' AND storage_backend = ? ORDER BY id LIMIT 100",
     )
     .bind(store.backend_name())
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
+    let mut stats = BlobRecoveryStats::default();
     for (id, expected_hash, expected_size, storage_key) in staging {
-        let state = if store
-            .verify(&storage_key, &expected_hash, expected_size.max(0) as u64)
-            .await?
-        {
-            "READY"
-        } else if store.exists(&storage_key).await? {
-            "CORRUPTED"
-        } else {
-            "MISSING"
-        };
-        sqlx::query(
+        let result = async {
+            let state = if store
+                .verify(&storage_key, &expected_hash, expected_size.max(0) as u64)
+                .await?
+            {
+                "READY"
+            } else if store.exists(&storage_key).await? {
+                "CORRUPTED"
+            } else {
+                "MISSING"
+            };
+            sqlx::query(
             "UPDATE blobs SET state = ?, verified_at = CASE WHEN ? = 'READY' THEN CURRENT_TIMESTAMP ELSE verified_at END WHERE id = ? AND state = 'STAGING'",
-        )
-            .bind(state)
-            .bind(state)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+            )
+                .bind(state)
+                .bind(state)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(AppError::Database)
+        }
+        .await;
+        match result {
+            Ok(_) => stats.recovered += 1,
+            Err(error) => {
+                stats.failed += 1;
+                tracing::warn!(blob_id = id, %error, "staging blob recovery item failed; continuing");
+            }
+        }
     }
-    garbage_collect_unreferenced_blobs(pool, store).await
+    if let Err(error) = garbage_collect_unreferenced_blobs(pool, store).await {
+        tracing::warn!(%error, "staging blob recovery garbage collection failed");
+    }
+    Ok(stats)
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BlobRecoveryStats {
+    pub recovered: u64,
+    pub failed: u64,
 }
 
 pub fn spawn_blob_recovery(pool: SqlitePool, store: Arc<dyn BlobStore>) {
@@ -392,7 +412,11 @@ pub fn spawn_blob_recovery(pool: SqlitePool, store: Arc<dyn BlobStore>) {
         loop {
             interval.tick().await;
             match recover_pending_blobs(&pool, store.as_ref()).await {
-                Ok(recovered) => tracing::info!(recovered, "staging blob recovery completed"),
+                Ok(stats) => tracing::info!(
+                    recovered = stats.recovered,
+                    failed = stats.failed,
+                    "staging blob recovery completed"
+                ),
                 Err(error) => tracing::warn!(%error, "staging blob recovery failed; will retry"),
             }
         }

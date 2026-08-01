@@ -1,6 +1,6 @@
 # 数据库设计概览
 
-当前默认使用 SQLite，数据库文件由 `DATABASE_URL` 控制，默认示例为 `sqlite://../data/rain.db`。后端启动时会自动创建数据库文件的父目录，并执行 `CREATE TABLE IF NOT EXISTS` 初始化表结构。
+当前默认使用 SQLite，数据库文件由 `DATABASE_URL` 控制，默认示例为 `sqlite://./data/rain.db`。后端启动时会自动创建数据库文件的父目录，并执行 `CREATE TABLE IF NOT EXISTS` 初始化表结构。
 
 ## 设计取舍
 
@@ -136,9 +136,9 @@ flowchart TD
     B -->|有| D[复用 issues.code]
     C --> E[创建 Bundle 记录]
     D --> E
-    E --> F[文件流式落盘到临时目录]
+    E --> F[文件流式落盘到 .tmp 接收目录]
     F --> G[返回 PROCESSING]
-    G --> H[后台任务移动文件到 bundle 目录]
+    G --> H[后台任务在 staging 中解压与索引]
     H --> I{是否支持的压缩包?}
     I -->|是| J[解压为目录树]
     I -->|否| K[单一文件节点]
@@ -150,7 +150,8 @@ flowchart TD
     M -->|是| N[流式读取并写 line offsets]
     M -->|否| O[仅 files 记录]
     N --> P[按 chunk 写完整 log_segments/FTS]
-    P --> R[Bundle 标记 READY]
+    P --> Q[BlobStore 发布 CAS Blob]
+    Q --> R[Bundle 标记 READY]
 ```
 
 递归解压、文本扫描和索引全部在 `.tmp/{task_id}/staging/{bundle_hash}` 中完成。嵌套深度、条目总数和 Issue 内容容量由同一 bundle 共享预算；任一层损坏或超过安全限制时，任务标记为 `FAILED`，并删除 staging 文件及该 bundle 的 `files`、行偏移和 FTS 半成品记录。
