@@ -61,7 +61,7 @@ function App() {
             {auth.state.status === 'GUEST' && (
               <>
                 <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-3 py-1.5 text-amber-200">
-                  只读模式
+                  访客模式
                 </span>
                 <Link
                   className="text-slate-200 no-underline hover:text-white"
