@@ -433,7 +433,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         r#"
         CREATE TABLE IF NOT EXISTS temp_results (
             id TEXT PRIMARY KEY,
-            status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DELETING')),
+            status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('STAGING', 'ACTIVE', 'DELETING')),
             name TEXT NOT NULL,
             expression TEXT NOT NULL,
             source_label TEXT NOT NULL,
