@@ -95,7 +95,7 @@ export function ViewerTabBar({
           }}
           className={`flex h-10 max-w-64 shrink-0 items-center gap-2 rounded-t-md border px-3 text-xs shadow-sm transition ${
             tab.id === activeTabId
-              ? 'border-sky-300 bg-white text-sky-800 shadow-[inset_0_-3px_0_rgba(6,182,212,0.9),0_4px_14px_rgba(7,21,34,0.06)]'
+              ? 'border-sky-500 bg-sky-50 text-sky-950 ring-1 ring-sky-300 shadow-[inset_0_-4px_0_rgba(8,145,178,0.95),0_4px_14px_rgba(7,21,34,0.10)]'
               : 'border-slate-200 bg-white/75 text-slate-600 hover:bg-white hover:text-slate-900'
           }`}
         >
