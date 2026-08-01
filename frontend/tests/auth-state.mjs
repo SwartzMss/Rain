@@ -125,7 +125,7 @@ try {
   assert.match(app, /path="\/login"/);
   assert.match(app, /path="\/register"/);
   assert.match(app, /path="\/account"/);
-  assert.match(app, /只读模式/);
+  assert.match(app, /访客模式/);
   assert.match(app, /退出登录/);
 
   const main = await readFile(
