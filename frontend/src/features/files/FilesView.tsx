@@ -124,6 +124,7 @@ export function BundleView() {
   };
 
   const bundleId = activeBundle.hash || '';
+  const hasFileContext = Boolean(issueCode || bundleId);
   const [rootIds, setRootIds] = useState<string[]>([]);
   const [treeNodes, setTreeNodes] = useState<Record<string, TreeNode>>({});
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
@@ -1434,9 +1435,9 @@ export function BundleView() {
               </div>
             ) : treeLoading ? (
               <p className="text-sm text-slate-500">文件树加载中...</p>
-            ) : (
-              <p className="text-sm text-slate-500">选择左侧 Issue / Bundle 后自动加载文件树。</p>
-            )}
+            ) : hasFileContext ? (
+              <p className="text-sm text-slate-500">暂无可用文件。</p>
+            ) : null}
             </div>
           </div>
 

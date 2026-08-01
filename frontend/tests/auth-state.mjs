@@ -203,6 +203,8 @@ try {
   assert.match(filesView, /sort_order/);
   assert.match(filesView, /detailRawExpression/);
   assert.match(filesView, /日志内容原始搜索表达式/);
+  assert.match(filesView, /const hasFileContext = Boolean\(issueCode \|\| bundleId\)/);
+  assert.doesNotMatch(filesView, /选择左侧 Issue \/ Bundle 后自动加载文件树。/);
 } finally {
   await server.close();
 }
