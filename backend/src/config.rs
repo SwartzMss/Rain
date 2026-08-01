@@ -110,7 +110,7 @@ impl Default for TempResultConfig {
     fn default() -> Self {
         Self {
             max_result_size: 64 * MIB,
-            max_total_size: 1 * GIB,
+            max_total_size: GIB,
             max_records: 1_000,
             concurrent_materializations: 2,
         }

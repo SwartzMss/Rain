@@ -48,6 +48,7 @@ pub struct PreviewLine {
 pub struct TempResultExecutor;
 
 impl TempResultExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub async fn materialize_preview(
         sources: &[TempSource],
         expression: &Expression,
