@@ -60,7 +60,7 @@ pub async fn list_users(
     let limit = limit(query.limit)?;
     let cursor = decode_cursor(query.cursor.as_deref())?;
     let mut sql = QueryBuilder::<Sqlite>::new(
-        "SELECT u.id,u.username,u.status,u.created_at,u.updated_at,u.last_login_at,(SELECT COUNT(*) FROM user_sessions s WHERE s.user_id=u.id AND s.revoked_at IS NULL AND datetime(s.expires_at)>CURRENT_TIMESTAMP) active_session_count FROM users u WHERE u.role='USER'",
+        "SELECT u.id,u.username,u.status,u.created_at,u.updated_at,u.last_login_at,(SELECT COUNT(*) FROM user_sessions s WHERE s.user_id=u.id AND s.revoked_at IS NULL AND datetime(s.expires_at)>CURRENT_TIMESTAMP) active_session_count,(SELECT COUNT(*) FROM issues i WHERE i.owner_user_id=u.id AND i.status='ACTIVE') issue_count,COALESCE((SELECT SUM(b.content_size_bytes) FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE i.owner_user_id=u.id AND i.status='ACTIVE' AND b.status IN ('READY','PROCESSING') AND b.deleted_at IS NULL),0) storage_bytes FROM users u WHERE u.role='USER'",
     );
     if let Some(q) = query.query.as_deref() {
         sql.push(" AND u.username_normalized LIKE ")

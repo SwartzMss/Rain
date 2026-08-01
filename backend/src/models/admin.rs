@@ -20,6 +20,8 @@ pub struct AdminUser {
     pub updated_at: String,
     pub last_login_at: Option<String>,
     pub active_session_count: i64,
+    pub issue_count: i64,
+    pub storage_bytes: i64,
 }
 
 #[derive(Debug, Serialize)]

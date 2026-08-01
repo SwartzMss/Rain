@@ -351,6 +351,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             code TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             description TEXT,
+            owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
             status TEXT NOT NULL DEFAULT 'ACTIVE',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
