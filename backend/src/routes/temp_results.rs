@@ -40,6 +40,29 @@ const ORPHAN_GRACE_PERIOD: StdDuration = StdDuration::from_secs(10 * 60);
 const TEMP_RESULT_RATE_LIMIT: usize = 10;
 const TEMP_RESULT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 
+struct StagingLease {
+    id: String,
+    registry: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl Drop for StagingLease {
+    fn drop(&mut self) {
+        if let Ok(mut staging) = self.registry.lock() {
+            staging.remove(&self.id);
+        }
+    }
+}
+
+fn register_staging_lease(state: &web::Data<AppState>, id: &str) -> StagingLease {
+    if let Ok(mut staging) = state.temp_result_staging.lock() {
+        staging.insert(id.to_string());
+    }
+    StagingLease {
+        id: id.to_string(),
+        registry: state.temp_result_staging.clone(),
+    }
+}
+
 fn invalid_expression(error: log_expression::ParseError) -> AppError {
     AppError::public(
         StatusCode::BAD_REQUEST,
@@ -171,6 +194,8 @@ pub async fn preview_temp_result(
     let staging_output_path = staging_path(&output_path);
     let staging_meta_path = staging_path(&meta_path);
     let staging_index_path = staging_path(&index_path);
+    let _staging_lease = register_staging_lease(&state, &id);
+    insert_staging_temp_result(&state, &id, expression_text, &source_label, &output_path).await?;
     let materialized = async {
         let mut output = File::create(&staging_output_path)
             .await
@@ -197,7 +222,7 @@ pub async fn preview_temp_result(
     let preview = match materialized {
         Ok(preview) => preview,
         Err(error) => {
-            remove_preview_artifacts(&output_path).await?;
+            abort_staging_result(&state, &id, &output_path).await;
             return Err(error);
         }
     };
@@ -210,7 +235,7 @@ pub async fn preview_temp_result(
     {
         Ok(size_bytes) => size_bytes,
         Err(error) => {
-            remove_preview_artifacts(&output_path).await?;
+            abort_staging_result(&state, &id, &output_path).await;
             return Err(AppError::Io(error));
         }
     };
@@ -228,10 +253,10 @@ pub async fn preview_temp_result(
     }
     .await;
     if let Err(error) = publish_result {
-        remove_preview_artifacts(&output_path).await?;
+        abort_staging_result(&state, &id, &output_path).await;
         return Err(error);
     }
-    if let Err(error) = insert_temp_result(
+    if let Err(error) = publish_temp_result(
         &state,
         &id,
         expression_text,
@@ -242,7 +267,7 @@ pub async fn preview_temp_result(
     )
     .await
     {
-        remove_preview_artifacts(&output_path).await?;
+        abort_staging_result(&state, &id, &output_path).await;
         return Err(error);
     }
     Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
@@ -285,6 +310,8 @@ pub async fn create_temp_result(
     let output_path = directory.join(format!("{id}.log"));
     let meta_path = output_path.with_extension("meta");
     let index_path = output_path.with_extension("idx");
+    let _staging_lease = register_staging_lease(&state, &id);
+    insert_staging_temp_result(&state, &id, expression_text, &source_label, &output_path).await?;
     let mut output = File::create(&output_path).await.map_err(AppError::Io)?;
     let mut metadata_output = File::create(&meta_path).await.map_err(AppError::Io)?;
     let mut index_output = File::create(&index_path).await.map_err(AppError::Io)?;
@@ -303,7 +330,7 @@ pub async fn create_temp_result(
             drop(output);
             drop(metadata_output);
             drop(index_output);
-            remove_result_files(&output_path).await?;
+            abort_staging_result(&state, &id, &output_path).await;
             return Err(error);
         }
     };
@@ -314,11 +341,11 @@ pub async fn create_temp_result(
     let size_bytes = match result_storage_size(&output_path, &meta_path, &index_path).await {
         Ok(size_bytes) => size_bytes,
         Err(error) => {
-            remove_result_files(&output_path).await?;
+            abort_staging_result(&state, &id, &output_path).await;
             return Err(AppError::Io(error));
         }
     };
-    let insert_result = insert_temp_result(
+    let insert_result = publish_temp_result(
         &state,
         &id,
         expression_text,
@@ -329,7 +356,7 @@ pub async fn create_temp_result(
     )
     .await;
     if let Err(error) = insert_result {
-        remove_result_files(&output_path).await?;
+        abort_staging_result(&state, &id, &output_path).await;
         return Err(error);
     }
 
@@ -588,7 +615,37 @@ fn temp_result_too_large() -> AppError {
     )
 }
 
-async fn insert_temp_result(
+async fn insert_staging_temp_result(
+    state: &web::Data<AppState>,
+    id: &str,
+    expression: &str,
+    source_label: &str,
+    output_path: &Path,
+) -> Result<(), AppError> {
+    let created_at = Utc::now();
+    let expires_at = created_at + Duration::days(RETENTION_DAYS);
+    let name = format!("filtered-{}.log", &id[..8]);
+    sqlx::query(
+        r#"
+        INSERT INTO temp_results
+            (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at)
+        VALUES (?, 'STAGING', ?, ?, ?, ?, 0, 0, ?, ?)
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(expression)
+    .bind(source_label)
+    .bind(output_path.to_string_lossy().to_string())
+    .bind(created_at.to_rfc3339())
+    .bind(expires_at.to_rfc3339())
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(())
+}
+
+async fn publish_temp_result(
     state: &web::Data<AppState>,
     id: &str,
     expression: &str,
@@ -599,29 +656,53 @@ async fn insert_temp_result(
 ) -> Result<(), AppError> {
     let _capacity_guard = state.temp_result_capacity_lock.lock().await;
     ensure_temp_result_capacity(state, size_bytes).await?;
-    let created_at = Utc::now();
-    let expires_at = created_at + Duration::days(RETENTION_DAYS);
-    let name = format!("filtered-{}.log", &id[..8]);
-    sqlx::query(
+    let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
+    let updated = sqlx::query(
         r#"
-        INSERT INTO temp_results
-            (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at)
-        VALUES (?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)
+        UPDATE temp_results
+        SET status = 'ACTIVE', expression = ?, source_label = ?, storage_path = ?,
+            line_count = ?, size_bytes = ?, expires_at = ?
+        WHERE id = ? AND status = 'STAGING'
         "#,
     )
-    .bind(id)
-    .bind(name)
     .bind(expression)
     .bind(source_label)
     .bind(output_path.to_string_lossy().to_string())
     .bind(line_count)
     .bind(size_bytes)
-    .bind(created_at.to_rfc3339())
-    .bind(expires_at.to_rfc3339())
+    .bind(expires_at)
+    .bind(id)
     .execute(&state.pool)
     .await
     .map_err(AppError::Database)?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::NotFound(format!("temporary result {id}")));
+    }
     Ok(())
+}
+
+async fn abort_staging_result(state: &web::Data<AppState>, id: &str, output_path: &Path) {
+    if let Err(error) = sqlx::query(
+        "UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'STAGING'",
+    )
+    .bind(id)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!(result_id = %id, %error, "failed to claim staging temporary result for cleanup");
+        return;
+    }
+    if let Err(error) = remove_preview_artifacts(output_path).await {
+        tracing::warn!(result_id = %id, %error, "staging temporary result files could not be removed; keeping DELETING record");
+        return;
+    }
+    if let Err(error) = sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = 'DELETING'")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+    {
+        tracing::warn!(result_id = %id, %error, "staging temporary result record could not be removed; keeping DELETING record");
+    }
 }
 
 async fn ensure_temp_result_budget(state: &web::Data<AppState>) -> Result<(), AppError> {
@@ -844,6 +925,38 @@ pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), A
         finish_deleting_temp_result(state, &claimed).await;
     }
 
+    let staging_records = sqlx::query_as::<_, TempResultRecord>(
+        r#"
+        SELECT id, name, expression, source_label, storage_path, line_count,
+               size_bytes, created_at, expires_at
+        FROM temp_results
+        WHERE status = 'STAGING' AND datetime(created_at) < datetime('now', '-600 seconds')
+        ORDER BY created_at, id
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
+    for record in staging_records {
+        if is_staging_lease_active(state, &record.id) {
+            continue;
+        }
+        let claimed: Option<String> = sqlx::query_scalar(
+            "UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'STAGING' AND created_at = ? RETURNING storage_path",
+        )
+        .bind(&record.id)
+        .bind(&record.created_at)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+        let Some(storage_path) = claimed else {
+            continue;
+        };
+        let mut claimed_record = record;
+        claimed_record.storage_path = storage_path;
+        finish_deleting_temp_result(state, &claimed_record).await;
+    }
+
     cleanup_orphan_temp_files(state).await?;
     Ok(())
 }
@@ -945,6 +1058,9 @@ async fn cleanup_orphan_temp_files(state: &web::Data<AppState>) -> Result<(), Ap
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
+        if artifact_staging_id(file_name).is_some_and(|id| is_staging_lease_active(state, &id)) {
+            continue;
+        }
         if file_name.starts_with(".ready-") || file_name.ends_with(".part") {
             remove_stale_file(&path).await;
             continue;
@@ -971,6 +1087,20 @@ async fn cleanup_orphan_temp_files(state: &web::Data<AppState>) -> Result<(), Ap
         }
     }
     Ok(())
+}
+
+fn artifact_staging_id(file_name: &str) -> Option<String> {
+    [".log.part", ".meta.part", ".idx.part"]
+        .iter()
+        .find_map(|suffix| file_name.strip_suffix(suffix).map(ToOwned::to_owned))
+}
+
+fn is_staging_lease_active(state: &web::Data<AppState>, id: &str) -> bool {
+    state
+        .temp_result_staging
+        .lock()
+        .map(|staging| staging.contains(id))
+        .unwrap_or(false)
 }
 
 async fn remove_stale_file(path: &Path) {
@@ -1145,14 +1275,38 @@ mod tests {
         .await
         .unwrap();
 
+        let active_staging_log = temp_root.join("active-staging.log");
+        tokio::fs::write(&active_staging_log, "still generating\n")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('active-staging', 'STAGING', 's.log', 'x', 'x', ?, 0, 0, ?, ?)",
+        )
+        .bind(active_staging_log.to_string_lossy().to_string())
+        .bind(&created)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let lease = super::register_staging_lease(&state, "active-staging");
+
         super::cleanup_expired(&state).await.unwrap();
 
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(remaining, 0);
+        assert_eq!(remaining, 1);
         assert!(!deleting_log.exists());
+        assert!(active_staging_log.exists());
+        drop(lease);
+        super::cleanup_expired(&state).await.unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert!(!active_staging_log.exists());
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
