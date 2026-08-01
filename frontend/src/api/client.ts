@@ -145,9 +145,8 @@ export const rainApi = {
       body: JSON.stringify(payload)
     });
   },
-  fetchSavedSearches(issueCode?: string) {
-    const query = issueCode ? `?issue_code=${encodeURIComponent(issueCode)}` : '';
-    return request<SavedSearch[]>(`/api/me/saved-searches${query}`);
+  fetchSavedSearches() {
+    return request<SavedSearch[]>('/api/me/saved-searches');
   },
   createSavedSearch(payload: SavedSearchPayload) {
     return request<SavedSearch>('/api/me/saved-searches', {

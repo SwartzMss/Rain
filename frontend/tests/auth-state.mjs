@@ -9,7 +9,7 @@ const server = await createServer({
 });
 
 try {
-  const { authStateAfterRefreshFailure, safeReturnPath, toAuthState } =
+  const { authStateAfterRefreshFailure, postLoginPath, safeReturnPath, toAuthState } =
     await server.ssrLoadModule(
     '/src/auth/authState.ts'
   );
@@ -31,6 +31,9 @@ try {
   assert.equal(safeReturnPath('/issue/CN013'), '/issue/CN013');
   assert.equal(safeReturnPath('https://evil.example'), '/');
   assert.equal(safeReturnPath('//evil.example'), '/');
+  assert.equal(postLoginPath({ role: 'USER' }, '/admin/users'), '/');
+  assert.equal(postLoginPath({ role: 'USER' }, '/issue/ABC'), '/issue/ABC');
+  assert.equal(postLoginPath({ role: 'ADMIN' }, '/'), '/admin/users');
   const authenticatedState = {
     status: 'AUTHENTICATED',
     user: { id: '1', username: 'swartz' }
@@ -197,9 +200,12 @@ try {
   assert.match(filesView, /编辑搜索条件/);
   assert.match(filesView, /搜索表达式/);
   assert.match(filesView, /is_pinned/);
-  assert.match(filesView, /sort_order/);
+  assert.doesNotMatch(filesView, /savedSearchScope|scope_type|scope_key|sort_order/);
+  assert.doesNotMatch(filesView, /fetchSavedSearches\(issueCode/);
   assert.match(filesView, /detailRawExpression/);
   assert.match(filesView, /日志内容原始搜索表达式/);
+  assert.match(filesView, /const hasFileContext = Boolean\(issueCode \|\| bundleId\)/);
+  assert.doesNotMatch(filesView, /选择左侧 Issue \/ Bundle 后自动加载文件树。/);
 } finally {
   await server.close();
 }

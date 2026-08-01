@@ -6,6 +6,7 @@ use crate::file_classification::PreviewKind;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
     pub id: String,
+    pub parent_id: Option<String>,
     pub name: String,
     pub path: String,
     pub is_dir: bool,

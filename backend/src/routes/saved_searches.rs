@@ -1,6 +1,5 @@
 use actix_web::{HttpResponse, delete, get, http::StatusCode, patch, post, web};
 
-use super::issues::normalize_issue_code;
 use crate::{
     AppState,
     auth::extractor::RequireBusinessUser,
@@ -15,9 +14,6 @@ fn normalize_and_validate(payload: &SavedSearchPayload) -> Result<SavedSearchPay
         || payload.query_text.trim().is_empty()
         || payload.query_text.chars().count() > 4096
         || !matches!(payload.search_type.as_str(), "FILENAME" | "DETAIL")
-        || !matches!(payload.scope_type.as_str(), "GLOBAL" | "ISSUE")
-        || (payload.scope_type == "GLOBAL" && payload.scope_key.is_some())
-        || (payload.scope_type == "ISSUE" && payload.scope_key.as_deref().is_none_or(str::is_empty))
         || !payload.options.is_object()
     {
         return Err(AppError::api(
@@ -34,14 +30,7 @@ fn normalize_and_validate(payload: &SavedSearchPayload) -> Result<SavedSearchPay
             "详细搜索表达式语法无效",
         ));
     }
-    let mut normalized = payload.clone();
-    normalized.scope_key = match payload.scope_type.as_str() {
-        "ISSUE" => Some(normalize_issue_code(
-            payload.scope_key.as_deref().unwrap_or_default(),
-        )?),
-        _ => None,
-    };
-    Ok(normalized)
+    Ok(payload.clone())
 }
 
 fn map_database_error(error: AppError) -> AppError {
@@ -60,14 +49,9 @@ fn map_database_error(error: AppError) -> AppError {
 pub async fn list(
     user: RequireBusinessUser,
     state: web::Data<AppState>,
-    query: web::Query<SavedSearchListQuery>,
+    _query: web::Query<SavedSearchListQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let issue_code = query
-        .issue_code
-        .as_deref()
-        .map(normalize_issue_code)
-        .transpose()?;
-    let items = saved_searches::list(&state.pool, &user.0.id, issue_code.as_deref()).await?;
+    let items = saved_searches::list(&state.pool, &user.0.id).await?;
     Ok(HttpResponse::Ok().json(
         items
             .into_iter()

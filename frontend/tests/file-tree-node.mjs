@@ -80,6 +80,8 @@ try {
     'utf8'
   );
   assert.match(filesView, /overflow-x-auto/);
+  assert.match(filesView, /revealSourceNode/);
+  assert.match(filesView, /source\.nodeId/);
   assert.doesNotMatch(filesView, /调整文件树宽度|treePanelWidth|treeResizeStartRef/);
 
   const appCss = await readFile(new URL('../src/App.css', import.meta.url), 'utf8');

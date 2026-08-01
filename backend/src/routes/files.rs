@@ -48,6 +48,7 @@ pub async fn get_file_node(
     let node = if is_root {
         FileNode {
             id: "root".into(),
+            parent_id: None,
             name: format!("{}_root", bundle.hash),
             path: format!("/{}", bundle.hash),
             is_dir: true,

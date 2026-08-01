@@ -64,8 +64,7 @@ function App() {
                 <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1.5 text-cyan-100">
                   {auth.state.user.username} · {isAdmin(auth.state.user) ? '管理员' : '普通用户'}
                 </span>
-                {isAdmin(auth.state.user) ? <Link className="text-slate-300 no-underline hover:text-white" to="/admin/users">管理</Link> : null}
-                <Link className="text-slate-300 no-underline hover:text-white" to="/account">账户</Link>
+                {!isAdmin(auth.state.user) ? <Link className="text-slate-300 no-underline hover:text-white" to="/account">账户</Link> : null}
                 <button
                   className="text-slate-300 hover:text-white"
                   onClick={() => {

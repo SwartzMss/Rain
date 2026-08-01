@@ -49,7 +49,7 @@ export const toTreeNode = (
   id: `${bundleId}:${node.id.toString()}`,
   rawId: node.id.toString(),
   bundleId,
-  parentId,
+  parentId: parentId ?? (node.parent_id == null ? null : `${bundleId}:${node.parent_id}`),
   name: node.name,
   path: node.path,
   is_dir: node.is_dir,

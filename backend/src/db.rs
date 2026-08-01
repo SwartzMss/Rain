@@ -487,6 +487,11 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             .map_err(AppError::Database)?;
     }
 
+    sqlx::query("UPDATE saved_searches SET scope_type = 'GLOBAL', scope_key = NULL WHERE scope_type != 'GLOBAL' OR scope_key IS NOT NULL")
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_files_blob ON files (blob_id)")
         .execute(pool)
         .await

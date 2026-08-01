@@ -19,8 +19,6 @@ try {
     name: '',
     search_type: 'DETAIL',
     query_text: '"ERROR"',
-    scope_type: 'ISSUE',
-    scope_key: 'CN013',
     options: { version: 1, tokens: [{ kind: 'term', value: 'ERROR' }] }
   };
   values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(pending));
@@ -28,7 +26,7 @@ try {
   assert.equal(takePendingSavedSearch(storage, false, 'CN013'), null);
   assert.ok(values.has(PENDING_SAVED_SEARCH_KEY), 'guest state must retain the pending condition');
 
-  const restored = takePendingSavedSearch(storage, true, 'CN013');
+  const restored = takePendingSavedSearch(storage, true);
   assert.deepEqual(restored, pending);
   assert.equal(values.has(PENDING_SAVED_SEARCH_KEY), false);
   assert.equal(restored.options.tokens[0].value, 'ERROR');
@@ -39,16 +37,16 @@ try {
     { ...pending, options: {} },
     { ...pending, options: { version: 1, tokens: [null] } },
     { ...pending, options: { version: 1, tokens: [{ kind: 'operator', value: 'AND' }] } },
-    { ...pending, scope_key: 42 }
+    { ...pending, options: [] }
   ]) {
     values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(corrupted));
-    assert.equal(takePendingSavedSearch(storage, true, 'CN013'), null);
+    assert.equal(takePendingSavedSearch(storage, true), null);
     assert.equal(values.has(PENDING_SAVED_SEARCH_KEY), false);
   }
 
   const queryOnly = { ...pending, options: { version: 1 } };
   values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(queryOnly));
-  assert.deepEqual(takePendingSavedSearch(storage, true, 'CN013'), queryOnly);
+  assert.deepEqual(takePendingSavedSearch(storage, true), queryOnly);
 } finally {
   await server.close();
 }

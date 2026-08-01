@@ -29,17 +29,13 @@ export interface SavedSearchPayload {
   name: string;
   search_type: 'FILENAME' | 'DETAIL';
   query_text: string;
-  scope_type: 'GLOBAL' | 'ISSUE';
-  scope_key: string | null;
   options: Record<string, unknown>;
   is_pinned?: boolean;
-  sort_order?: number;
 }
 
 export interface SavedSearch extends SavedSearchPayload {
   id: string;
   is_pinned: boolean;
-  sort_order: number;
   created_at: string;
   updated_at: string;
   last_used_at: string | null;
@@ -78,6 +74,7 @@ export interface CreateIssueRequest {
 
 export interface FileNode {
   id: number | string;
+  parent_id?: number | string | null;
   name: string;
   path: string;
   is_dir: boolean;

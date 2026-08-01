@@ -5,7 +5,7 @@ use std::time::{Duration as StdDuration, Instant};
 use crate::{
     AppState, AuthRateLimitBucket, AuthRateLimits,
     auth::{
-        extractor::{OptionalUser, RequireUser},
+        extractor::{OptionalUser, RequireBusinessUser},
         password::{
             PasswordError, hash_password, normalize_username, validate_password, validate_username,
             verify_dummy_password, verify_password,
@@ -430,7 +430,7 @@ pub async fn logout(
 #[post("/auth/change-password")]
 pub async fn change_password(
     request: HttpRequest,
-    user: RequireUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     payload: web::Json<ChangePasswordRequest>,
 ) -> Result<HttpResponse, AppError> {

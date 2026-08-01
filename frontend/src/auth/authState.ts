@@ -23,3 +23,11 @@ export function safeReturnPath(value: unknown): string {
     ? value
     : '/';
 }
+
+export function postLoginPath(user: Pick<User, 'role'>, value: unknown): string {
+  const path = safeReturnPath(value);
+  if (user.role === 'ADMIN') {
+    return path.startsWith('/admin') ? path : '/admin/users';
+  }
+  return path.startsWith('/admin') ? '/' : path;
+}
