@@ -48,11 +48,13 @@ pub struct PreviewLine {
 pub struct TempResultExecutor;
 
 impl TempResultExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub async fn materialize_preview(
         sources: &[TempSource],
         expression: &Expression,
         from: i64,
         size: i64,
+        max_output_bytes: u64,
         output: &mut File,
         metadata_output: &mut File,
         index_output: &mut File,
@@ -61,6 +63,7 @@ impl TempResultExecutor {
         let mut lines = Vec::new();
         let mut log_offset = 0_u64;
         let mut meta_offset = 0_u64;
+        let mut total_output_bytes = 0_u64;
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
@@ -116,16 +119,37 @@ impl TempResultExecutor {
                             log_offset,
                             meta_offset,
                         };
-                        write_json_line(index_output, &checkpoint).await?;
+                        write_json_line(
+                            index_output,
+                            &checkpoint,
+                            max_output_bytes,
+                            &mut total_output_bytes,
+                        )
+                        .await?;
                     }
+                    let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
+                    let next_output_size =
+                        log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
+                    ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
                     output.write_all(&bytes).await.map_err(AppError::Io)?;
-                    log_offset += bytes.len() as u64;
+                    log_offset = next_output_size;
+                    total_output_bytes = total_output_bytes
+                        .checked_add(line_bytes)
+                        .ok_or_else(too_large)?;
                     if !bytes.ends_with(b"\n") {
                         output.write_all(b"\n").await.map_err(AppError::Io)?;
-                        log_offset += 1;
                     }
-                    meta_offset += write_json_line(metadata_output, &metadata).await?;
-                    if matched >= from && matched < from + size {
+                    meta_offset += write_json_line(
+                        metadata_output,
+                        &metadata,
+                        max_output_bytes,
+                        &mut total_output_bytes,
+                    )
+                    .await?;
+                    let page_end = from
+                        .checked_add(size)
+                        .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
+                    if matched >= from && matched < page_end {
                         lines.push(PreviewLine {
                             bundle_hash: metadata.bundle_hash.clone(),
                             file_id: metadata.file_id.clone(),
@@ -167,10 +191,12 @@ impl TempResultExecutor {
         output: &mut File,
         metadata_output: &mut File,
         index_output: &mut File,
+        max_output_bytes: u64,
     ) -> Result<i64, AppError> {
         let mut matching_lines = 0_i64;
         let mut log_offset = 0_u64;
         let mut meta_offset = 0_u64;
+        let mut total_output_bytes = 0_u64;
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
@@ -227,16 +253,30 @@ impl TempResultExecutor {
                                 log_offset,
                                 meta_offset,
                             },
+                            max_output_bytes,
+                            &mut total_output_bytes,
                         )
                         .await?;
                     }
+                    let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
+                    let next_output_size =
+                        log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
+                    ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
                     output.write_all(&bytes).await.map_err(AppError::Io)?;
-                    log_offset += bytes.len() as u64;
+                    log_offset = next_output_size;
+                    total_output_bytes = total_output_bytes
+                        .checked_add(line_bytes)
+                        .ok_or_else(too_large)?;
                     if !bytes.ends_with(b"\n") {
                         output.write_all(b"\n").await.map_err(AppError::Io)?;
-                        log_offset += 1;
                     }
-                    meta_offset += write_json_line(metadata_output, &metadata).await?;
+                    meta_offset += write_json_line(
+                        metadata_output,
+                        &metadata,
+                        max_output_bytes,
+                        &mut total_output_bytes,
+                    )
+                    .await?;
                     matching_lines += 1;
                 }
                 source_line += 1;
@@ -249,12 +289,39 @@ impl TempResultExecutor {
     }
 }
 
-async fn write_json_line<T: Serialize>(output: &mut File, value: &T) -> Result<u64, AppError> {
+fn too_large() -> AppError {
+    AppError::public(
+        actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+        "TEMP_RESULT_TOO_LARGE",
+        "临时结果超过大小限制",
+    )
+}
+
+fn ensure_output_capacity(current: u64, additional: u64, limit: u64) -> Result<(), AppError> {
+    if current
+        .checked_add(additional)
+        .is_none_or(|size| size > limit)
+    {
+        return Err(too_large());
+    }
+    Ok(())
+}
+
+async fn write_json_line<T: Serialize>(
+    output: &mut File,
+    value: &T,
+    max_output_bytes: u64,
+    total_output_bytes: &mut u64,
+) -> Result<u64, AppError> {
     let mut bytes = serde_json::to_vec(value).map_err(|error| {
         AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
     bytes.push(b'\n');
+    ensure_output_capacity(*total_output_bytes, bytes.len() as u64, max_output_bytes)?;
     output.write_all(&bytes).await.map_err(AppError::Io)?;
+    *total_output_bytes = total_output_bytes
+        .checked_add(bytes.len() as u64)
+        .ok_or_else(too_large)?;
     Ok(bytes.len() as u64)
 }
 
@@ -324,6 +391,7 @@ mod tests {
             &expression,
             0,
             2,
+            u64::MAX,
             &mut log,
             &mut meta,
             &mut index,
@@ -384,6 +452,7 @@ mod tests {
             &expression,
             0,
             10,
+            u64::MAX,
             &mut first_log,
             &mut first_meta,
             &mut first_index,
@@ -410,6 +479,7 @@ mod tests {
             &nested_expression,
             0,
             10,
+            u64::MAX,
             &mut second_log,
             &mut second_meta,
             &mut second_index,

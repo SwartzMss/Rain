@@ -12,6 +12,8 @@ use super::issues::normalize_issue_code;
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
 
+const SHORT_SEARCH_SCAN_LIMIT: i64 = 10_001;
+
 #[derive(Deserialize)]
 struct LogQuery {
     q: String,
@@ -63,20 +65,28 @@ pub async fn search_logs(
         .clamp(1, state.limits.api.max_search_results);
     let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
     let short_pattern = format!("%{}%", escape_like_pattern(search_term));
+    if search_term.chars().count() < 3 && from >= SHORT_SEARCH_SCAN_LIMIT {
+        return Err(AppError::BadRequest(
+            "短关键词搜索的分页范围不能超过扫描上限".into(),
+        ));
+    }
 
-    let total: i64 = if search_term.chars().count() < 3 {
-        sqlx::query_scalar(
+    let truncated = if search_term.chars().count() < 3 {
+        let candidate_count: i64 = sqlx::query_scalar(
             r#"
-        SELECT COUNT(*) FROM log_segments ls
-        JOIN files f ON f.id = ls.file_id
-        WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
-          AND ls.bundle_id = ?
-          AND (? IS NULL OR ls.timeline = ?)
-          AND (? IS NULL OR f.path LIKE ?)
-          AND (? IS NULL OR ls.file_id = ?)
-        "#,
+            SELECT COUNT(*) FROM (
+                SELECT ls.id
+                FROM log_segments ls
+                JOIN files f ON f.id = ls.file_id
+                WHERE ls.bundle_id = ?
+                  AND (? IS NULL OR ls.timeline = ?)
+                  AND (? IS NULL OR f.path LIKE ?)
+                  AND (? IS NULL OR ls.file_id = ?)
+                ORDER BY ls.id
+                LIMIT ?
+            )
+            "#,
         )
-        .bind(&short_pattern)
         .bind(&bundle.id)
         .bind(&timeline)
         .bind(&timeline)
@@ -84,6 +94,43 @@ pub async fn search_logs(
         .bind(&path_pattern)
         .bind(file_id)
         .bind(file_id)
+        .bind(SHORT_SEARCH_SCAN_LIMIT + 1)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+        candidate_count > SHORT_SEARCH_SCAN_LIMIT
+    } else {
+        false
+    };
+
+    let total: i64 = if search_term.chars().count() < 3 {
+        sqlx::query_scalar(
+            r#"
+        WITH candidates AS MATERIALIZED (
+        SELECT ls.content, ls.file_id, ls.timeline, ls.line_offset AS offset,
+               ls.line_end, ls.chunk_index, f.path
+        FROM log_segments ls
+        JOIN files f ON f.id = ls.file_id
+        WHERE ls.bundle_id = ?
+          AND (? IS NULL OR ls.timeline = ?)
+          AND (? IS NULL OR f.path LIKE ?)
+          AND (? IS NULL OR ls.file_id = ?)
+        ORDER BY ls.id
+        LIMIT ?
+        )
+        SELECT COUNT(*) FROM candidates
+        WHERE content LIKE ? ESCAPE '\' COLLATE NOCASE
+        "#,
+        )
+        .bind(&bundle.id)
+        .bind(&timeline)
+        .bind(&timeline)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(SHORT_SEARCH_SCAN_LIMIT)
+        .bind(&short_pattern)
         .fetch_one(&state.pool)
         .await
         .map_err(AppError::Database)?
@@ -116,20 +163,25 @@ pub async fn search_logs(
     let rows = if search_term.chars().count() < 3 {
         sqlx::query_as::<_, LogRow>(
             r#"
-        SELECT ls.file_id, f.path, ls.timeline, ls.line_offset AS offset,
+        WITH candidates AS MATERIALIZED (
+        SELECT ls.id, ls.file_id, f.path, ls.timeline, ls.line_offset AS offset,
                ls.line_end, ls.chunk_index, ls.content
         FROM log_segments ls
         JOIN files f ON f.id = ls.file_id
-        WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
-          AND ls.bundle_id = ?
+        WHERE ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
           AND (? IS NULL OR ls.file_id = ?)
-        ORDER BY ls.line_offset NULLS FIRST, ls.id
+        ORDER BY ls.id
+        LIMIT ?
+        )
+        SELECT file_id, path, timeline, offset, line_end, chunk_index, content
+        FROM candidates
+        WHERE content LIKE ? ESCAPE '\' COLLATE NOCASE
+        ORDER BY offset NULLS FIRST, id
         LIMIT ? OFFSET ?
         "#,
         )
-        .bind(&short_pattern)
         .bind(&bundle.id)
         .bind(&timeline)
         .bind(&timeline)
@@ -137,6 +189,8 @@ pub async fn search_logs(
         .bind(&path_pattern)
         .bind(file_id)
         .bind(file_id)
+        .bind(SHORT_SEARCH_SCAN_LIMIT)
+        .bind(&short_pattern)
         .bind(size)
         .bind(from)
         .fetch_all(&state.pool)
@@ -197,6 +251,7 @@ pub async fn search_logs(
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,
         hits,
+        truncated,
     }))
 }
 
@@ -259,23 +314,63 @@ pub async fn search_issue_logs(
         .clamp(1, state.limits.api.max_search_results);
     let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
     let short_pattern = format!("%{}%", escape_like_pattern(search_term));
+    if search_term.chars().count() < 3 && from >= SHORT_SEARCH_SCAN_LIMIT {
+        return Err(AppError::BadRequest(
+            "短关键词搜索的分页范围不能超过扫描上限".into(),
+        ));
+    }
+
+    let truncated = if search_term.chars().count() < 3 {
+        let candidate_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM (
+                SELECT ls.id
+                FROM log_segments ls
+                JOIN bundles b ON b.id = ls.bundle_id
+                JOIN files f ON f.id = ls.file_id
+                WHERE b.issue_code = ?
+                  AND b.status = 'READY'
+                  AND (? IS NULL OR f.path LIKE ?)
+                ORDER BY ls.id
+                LIMIT ?
+            )
+            "#,
+        )
+        .bind(&issue_code)
+        .bind(&path_pattern)
+        .bind(&path_pattern)
+        .bind(SHORT_SEARCH_SCAN_LIMIT + 1)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+        candidate_count > SHORT_SEARCH_SCAN_LIMIT
+    } else {
+        false
+    };
 
     let total: i64 = if search_term.chars().count() < 3 {
         sqlx::query_scalar(
             r#"
-        SELECT COUNT(*) FROM log_segments ls
+        WITH candidates AS MATERIALIZED (
+        SELECT ls.content, f.path
+        FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
-        WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
-          AND b.issue_code = ?
+        WHERE b.issue_code = ?
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
+        ORDER BY ls.id
+        LIMIT ?
+        )
+        SELECT COUNT(*) FROM candidates
+        WHERE content LIKE ? ESCAPE '\' COLLATE NOCASE
         "#,
         )
-        .bind(&short_pattern)
         .bind(&issue_code)
         .bind(&path_pattern)
         .bind(&path_pattern)
+        .bind(SHORT_SEARCH_SCAN_LIMIT)
+        .bind(&short_pattern)
         .fetch_one(&state.pool)
         .await
         .map_err(AppError::Database)?
@@ -304,23 +399,30 @@ pub async fn search_issue_logs(
     let rows = if search_term.chars().count() < 3 {
         sqlx::query_as::<_, IssueLogRow>(
             r#"
-        SELECT ls.file_id, f.path, ls.line_offset AS offset, ls.line_end,
+        WITH candidates AS MATERIALIZED (
+        SELECT ls.id, ls.file_id, f.path, ls.line_offset AS offset, ls.line_end,
                ls.chunk_index, ls.content, b.hash AS bundle_hash
         FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
-        WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
-          AND b.issue_code = ?
+        WHERE b.issue_code = ?
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
-        ORDER BY ls.line_offset NULLS FIRST, ls.id
+        ORDER BY ls.id
+        LIMIT ?
+        )
+        SELECT file_id, path, offset, line_end, chunk_index, content, bundle_hash
+        FROM candidates
+        WHERE content LIKE ? ESCAPE '\' COLLATE NOCASE
+        ORDER BY offset NULLS FIRST, id
         LIMIT ? OFFSET ?
         "#,
         )
-        .bind(&short_pattern)
         .bind(&issue_code)
         .bind(&path_pattern)
         .bind(&path_pattern)
+        .bind(SHORT_SEARCH_SCAN_LIMIT)
+        .bind(&short_pattern)
         .bind(size)
         .bind(from)
         .fetch_all(&state.pool)
@@ -377,6 +479,7 @@ pub async fn search_issue_logs(
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,
         hits,
+        truncated,
     }))
 }
 
@@ -464,6 +567,7 @@ async fn search_issue_files(
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,
         hits,
+        truncated: false,
     }))
 }
 

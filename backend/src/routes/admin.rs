@@ -60,7 +60,7 @@ pub async fn list_users(
     let limit = limit(query.limit)?;
     let cursor = decode_cursor(query.cursor.as_deref())?;
     let mut sql = QueryBuilder::<Sqlite>::new(
-        "SELECT u.id,u.username,u.status,u.created_at,u.updated_at,u.last_login_at,(SELECT COUNT(*) FROM user_sessions s WHERE s.user_id=u.id AND s.revoked_at IS NULL AND datetime(s.expires_at)>CURRENT_TIMESTAMP) active_session_count FROM users u WHERE u.role='USER'",
+        "SELECT u.id,u.username,u.status,u.created_at,u.updated_at,u.last_login_at,(SELECT COUNT(*) FROM user_sessions s WHERE s.user_id=u.id AND s.revoked_at IS NULL AND datetime(s.expires_at)>CURRENT_TIMESTAMP) active_session_count,(SELECT COUNT(*) FROM issues i WHERE i.owner_user_id=u.id AND i.status='ACTIVE') issue_count,COALESCE((SELECT SUM(b.content_size_bytes) FROM bundles b WHERE b.uploader_user_id=u.id AND b.status IN ('READY','PROCESSING') AND b.deleted_at IS NULL),0) storage_bytes FROM users u WHERE u.role='USER'",
     );
     if let Some(q) = query.query.as_deref() {
         sql.push(" AND u.username_normalized LIKE ")
@@ -187,24 +187,24 @@ pub async fn list_audit(
     let limit = limit(query.limit)?;
     let cursor = decode_cursor(query.cursor.as_deref())?;
     let mut sql = QueryBuilder::<Sqlite>::new(
-        "SELECT id,actor_type,actor_user_id,target_user_id,action,old_value,new_value,client_ip,user_agent,created_at FROM admin_audit_logs WHERE 1=1",
+        "SELECT l.id,l.actor_type,l.actor_user_id,l.target_user_id,u.username AS target_username,l.action,l.old_value,l.new_value,l.client_ip,l.user_agent,l.created_at FROM admin_audit_logs l LEFT JOIN users u ON u.id=l.target_user_id WHERE 1=1",
     );
     if let Some(v) = query.action.as_deref() {
-        sql.push(" AND action=").push_bind(v);
+        sql.push(" AND l.action=").push_bind(v);
     }
     if let Some(v) = query.target_user_id.as_deref() {
-        sql.push(" AND target_user_id=").push_bind(v);
+        sql.push(" AND l.target_user_id=").push_bind(v);
     }
     if let Some((created, id)) = cursor {
-        sql.push(" AND (created_at<")
+        sql.push(" AND (l.created_at<")
             .push_bind(created.clone())
-            .push(" OR (created_at=")
+            .push(" OR (l.created_at=")
             .push_bind(created)
-            .push(" AND id<")
+            .push(" AND l.id<")
             .push_bind(id)
             .push("))");
     }
-    sql.push(" ORDER BY created_at DESC,id DESC LIMIT ")
+    sql.push(" ORDER BY l.created_at DESC,l.id DESC LIMIT ")
         .push_bind(limit + 1);
     let mut items = sql
         .build_query_as::<AuditLog>()

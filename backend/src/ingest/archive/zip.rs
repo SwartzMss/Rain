@@ -65,6 +65,7 @@ pub(crate) async fn extract_zip_archive(
 
             archive_budget.reserve_entry()?;
             archive_budget.reserve_bytes(uncompressed_size)?;
+            archive_budget.reserve_temp_bytes(uncompressed_size)?;
 
             validate_zip_ratio(
                 entry.name(),

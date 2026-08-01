@@ -7,11 +7,12 @@ pub async fn create_processing_bundle(
     bundle_hash: &str,
     bundle_name: &str,
     total_bytes: u64,
+    uploader_user_id: Option<&str>,
 ) -> Result<(), AppError> {
     let result = sqlx::query(
         r#"
-        INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, size_bytes)
-        SELECT ?, code, ?, ?, 'PROCESSING', 'RECEIVING', ?
+        INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, uploader_user_id, size_bytes)
+        SELECT ?, code, ?, ?, 'PROCESSING', 'RECEIVING', ?, ?
         FROM issues
         WHERE code = ? AND status = 'ACTIVE'
         "#,
@@ -19,6 +20,7 @@ pub async fn create_processing_bundle(
     .bind(bundle_id)
     .bind(bundle_hash)
     .bind(bundle_name)
+    .bind(uploader_user_id)
     .bind(Some(total_bytes as i64))
     .bind(issue_code)
     .execute(pool)
@@ -102,7 +104,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            create_processing_bundle(&pool, "bundle", "RACE", "hash", "name", 1)
+            create_processing_bundle(&pool, "bundle", "RACE", "hash", "name", 1, None)
                 .await
                 .is_err()
         );

@@ -72,6 +72,7 @@ pub(crate) async fn extract_tar_gz_archive(
                 .ok_or_else(|| AppError::BadRequest("tar.gz extracted size overflow".into()))?;
             archive_budget.reserve_entry()?;
             archive_budget.reserve_bytes(entry_size)?;
+            archive_budget.reserve_temp_bytes(entry_size)?;
             validate_archive_ratio(
                 &raw_path.display().to_string(),
                 total_uncompressed,

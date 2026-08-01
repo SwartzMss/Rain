@@ -34,12 +34,16 @@ impl BootstrapAdminConfig {
 #[derive(Debug, Clone)]
 pub struct UploadConfig {
     pub concurrent_processing_tasks: usize,
+    pub concurrent_receive_tasks: usize,
+    pub max_tmp_bytes: u64,
 }
 
 impl Default for UploadConfig {
     fn default() -> Self {
         Self {
             concurrent_processing_tasks: 4,
+            concurrent_receive_tasks: 4,
+            max_tmp_bytes: 16 * GIB,
         }
     }
 }
@@ -98,6 +102,25 @@ pub struct ApiConfig {
     pub max_search_results: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct TempResultConfig {
+    pub max_result_size: u64,
+    pub max_total_size: u64,
+    pub max_records: i64,
+    pub concurrent_materializations: usize,
+}
+
+impl Default for TempResultConfig {
+    fn default() -> Self {
+        Self {
+            max_result_size: 64 * MIB,
+            max_total_size: GIB,
+            max_records: 1_000,
+            concurrent_materializations: 2,
+        }
+    }
+}
+
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
@@ -117,6 +140,7 @@ pub struct AppLimits {
     pub upload: UploadConfig,
     pub indexing: IndexingConfig,
     pub api: ApiConfig,
+    pub temp_results: TempResultConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +240,7 @@ impl Default for AppLimits {
             upload: UploadConfig::default(),
             indexing: IndexingConfig::default(),
             api: ApiConfig::default(),
+            temp_results: TempResultConfig::default(),
         }
     }
 }
@@ -285,6 +310,14 @@ impl AppLimits {
                     "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS",
                     defaults.upload.concurrent_processing_tasks,
                 )?,
+                concurrent_receive_tasks: env_value(
+                    "RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS",
+                    defaults.upload.concurrent_receive_tasks,
+                )?,
+                max_tmp_bytes: env_size(
+                    "RAIN_UPLOAD_MAX_TMP_BYTES",
+                    defaults.upload.max_tmp_bytes,
+                )?,
             },
             indexing: IndexingConfig {
                 max_indexed_line_size: env_size(
@@ -318,6 +351,24 @@ impl AppLimits {
                     defaults.api.max_search_results,
                 )?,
             },
+            temp_results: TempResultConfig {
+                max_result_size: env_size(
+                    "RAIN_TEMP_RESULT_MAX_SIZE",
+                    defaults.temp_results.max_result_size,
+                )?,
+                max_total_size: env_size(
+                    "RAIN_TEMP_RESULT_MAX_TOTAL_SIZE",
+                    defaults.temp_results.max_total_size,
+                )?,
+                max_records: env_value(
+                    "RAIN_TEMP_RESULT_MAX_RECORDS",
+                    defaults.temp_results.max_records,
+                )?,
+                concurrent_materializations: env_value(
+                    "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
+                    defaults.temp_results.concurrent_materializations,
+                )?,
+            },
         };
         limits.validate()?;
         Ok(limits)
@@ -340,6 +391,11 @@ impl AppLimits {
             "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS"
         );
         positive!(
+            self.upload.concurrent_receive_tasks,
+            "RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS"
+        );
+        positive!(self.upload.max_tmp_bytes, "RAIN_UPLOAD_MAX_TMP_BYTES");
+        positive!(
             self.indexing.max_indexed_line_size,
             "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE"
         );
@@ -358,6 +414,27 @@ impl AppLimits {
             "RAIN_API_DEFAULT_SEARCH_RESULTS"
         );
         positive!(self.api.max_search_results, "RAIN_API_MAX_SEARCH_RESULTS");
+        positive!(
+            self.temp_results.max_result_size,
+            "RAIN_TEMP_RESULT_MAX_SIZE"
+        );
+        positive!(
+            self.temp_results.max_total_size,
+            "RAIN_TEMP_RESULT_MAX_TOTAL_SIZE"
+        );
+        positive!(
+            self.temp_results.max_records,
+            "RAIN_TEMP_RESULT_MAX_RECORDS"
+        );
+        positive!(
+            self.temp_results.concurrent_materializations,
+            "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS"
+        );
+        if self.temp_results.max_result_size > self.temp_results.max_total_size {
+            return Err(AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SIZE must not exceed RAIN_TEMP_RESULT_MAX_TOTAL_SIZE".into(),
+            ));
+        }
         if self.api.default_line_page_size > self.api.max_line_page_size {
             return Err(AppError::Config(
                 "RAIN_API_DEFAULT_LINE_PAGE_SIZE must not exceed RAIN_API_MAX_LINE_PAGE_SIZE"

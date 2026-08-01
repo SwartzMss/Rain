@@ -1,5 +1,8 @@
-use actix_multipart::Multipart;
-use actix_web::{HttpResponse, get, http::StatusCode, post, web};
+use actix_web::{
+    HttpRequest, HttpResponse, get,
+    http::{StatusCode, header::CONTENT_LENGTH},
+    post, web,
+};
 use serde::Serialize;
 use tokio::fs;
 use uuid::Uuid;
@@ -12,7 +15,9 @@ use crate::{
     upload::{
         job::{UploadJob, spawn_upload_job},
         lifecycle::create_processing_bundle,
-        multipart::collect_multipart_upload,
+        multipart::{
+            ReceiveReservation, collect_multipart_upload, limited_multipart, raw_payload_limit,
+        },
     },
 };
 
@@ -21,23 +26,67 @@ use super::issues::{normalize_issue_code, require_issue_exists};
 // scoped under /api in routes::register, so use relative path
 #[post("/issues/{issue_code}/uploads")]
 pub async fn upload_logs(
-    _user: RequireBusinessUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     path: web::Path<String>,
-    payload: Multipart,
+    req: HttpRequest,
+    payload: web::Payload,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     require_issue_exists(&state.pool, &issue_code).await?;
+    let request_limit = raw_payload_limit(state.limits.issue_max_content_size.saturating_mul(2));
+    if let Some(length) = req.headers().get(CONTENT_LENGTH) {
+        let length = length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| AppError::BadRequest("invalid Content-Length header".into()))?;
+        if length > request_limit {
+            return Err(AppError::BadRequest(format!(
+                "upload request exceeds the maximum size of {}",
+                crate::upload::filename::format_bytes(request_limit)
+            )));
+        }
+    }
+    let receive_permit = state
+        .receive_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::api(
+                StatusCode::TOO_MANY_REQUESTS,
+                "UPLOAD_RECEIVE_BUSY",
+                "上传接收任务过多，请稍后重试",
+            )
+        })?;
 
     let upload_id = Uuid::new_v4().simple().to_string();
     let temp_dir = state.data_root.join(".tmp").join(&upload_id);
     fs::create_dir_all(&temp_dir).await.map_err(AppError::Io)?;
 
-    let upload = match collect_multipart_upload(payload, &temp_dir).await {
+    let reservation =
+        ReceiveReservation::new(state.tmp_bytes.clone(), state.limits.upload.max_tmp_bytes);
+    let upload = match collect_multipart_upload(
+        limited_multipart(&req, payload, request_limit),
+        &temp_dir,
+        state.limits.issue_max_content_size.saturating_mul(2),
+        reservation,
+    )
+    .await
+    {
         Ok(upload) => upload,
         Err(error) => {
-            let _ = fs::remove_dir_all(&temp_dir).await;
-            return Err(error);
+            if let Err(cleanup_error) = fs::remove_dir_all(&temp_dir).await {
+                tracing::error!(
+                    path = %temp_dir.display(),
+                    error = %cleanup_error,
+                    "failed to remove temporary upload directory after receive failure; queueing retry"
+                );
+                state
+                    .temp_cleanup_queue
+                    .enqueue(temp_dir.clone(), error.receive_reservation);
+            }
+            return Err(error.error);
         }
     };
 
@@ -61,10 +110,20 @@ pub async fn upload_logs(
         &bundle_hash,
         &bundle_name,
         upload.total_bytes,
+        Some(&user.0.id),
     )
     .await
     {
-        let _ = fs::remove_dir_all(&temp_dir).await;
+        if let Err(cleanup_error) = fs::remove_dir_all(&temp_dir).await {
+            tracing::error!(
+                path = %temp_dir.display(),
+                error = %cleanup_error,
+                "failed to remove temporary upload directory; retaining budget reservation"
+            );
+            state
+                .temp_cleanup_queue
+                .enqueue(temp_dir.clone(), upload.receive_reservation);
+        }
         return Err(error);
     }
 
@@ -86,7 +145,11 @@ pub async fn upload_logs(
         bundle_id: bundle_id.clone(),
         bundle_hash: bundle_hash.clone(),
         files: upload.files,
+        receive_reservation: upload.receive_reservation,
+        temp_cleanup_queue: state.temp_cleanup_queue.clone(),
     });
+
+    drop(receive_permit);
 
     Ok(
         HttpResponse::build(StatusCode::ACCEPTED).json(UploadResponse {

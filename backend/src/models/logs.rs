@@ -17,4 +17,5 @@ pub struct LogSearchHit {
 pub struct LogSearchResponse {
     pub total: u64,
     pub hits: Vec<LogSearchHit>,
+    pub truncated: bool,
 }

@@ -92,7 +92,7 @@ export function AuthPage({ mode }: AuthPageProps) {
             autoComplete={isLogin ? 'current-password' : 'new-password'}
             className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-100"
             maxLength={128}
-            minLength={8}
+            minLength={isLogin ? undefined : 8}
             required
             type="password"
             value={password}

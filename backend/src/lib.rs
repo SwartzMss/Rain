@@ -14,12 +14,12 @@ pub mod upload;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicU64},
     time::{Duration, Instant},
 };
 
 use sqlx::SqlitePool;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AppLimits, AuthConfig};
@@ -71,6 +71,7 @@ pub struct AuthRateLimits {
     pub register_ip: HashMap<String, AuthRateLimitBucket>,
     pub change_password_user_attempt: HashMap<String, AuthRateLimitBucket>,
     pub change_password_in_flight: HashSet<String>,
+    pub temp_result_ip: HashMap<String, AuthRateLimitBucket>,
 }
 
 pub struct AppState {
@@ -79,6 +80,11 @@ pub struct AppState {
     pub limits: AppLimits,
     pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
+    pub receive_permits: Arc<Semaphore>,
+    pub tmp_bytes: Arc<AtomicU64>,
+    pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
+    pub temp_result_permits: Arc<Semaphore>,
+    pub temp_result_capacity_lock: Arc<AsyncMutex<()>>,
     pub auth_hash_permits: Arc<Semaphore>,
     pub auth_rate_limits: Arc<Mutex<AuthRateLimits>>,
     pub blob_store: Arc<dyn BlobStore>,
@@ -108,6 +114,10 @@ impl AppState {
     ) -> Self {
         let processing_permits =
             Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
+        let receive_permits = Arc::new(Semaphore::new(limits.upload.concurrent_receive_tasks));
+        let temp_result_permits = Arc::new(Semaphore::new(
+            limits.temp_results.concurrent_materializations,
+        ));
         let auth_hash_permits = Arc::new(Semaphore::new(auth.argon2_concurrency));
         Self {
             pool,
@@ -115,6 +125,11 @@ impl AppState {
             limits,
             auth,
             processing_permits,
+            receive_permits,
+            tmp_bytes: Arc::new(AtomicU64::new(0)),
+            temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
+            temp_result_permits,
+            temp_result_capacity_lock: Arc::new(AsyncMutex::new(())),
             auth_hash_permits,
             auth_rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
             blob_store,

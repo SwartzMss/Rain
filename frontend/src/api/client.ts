@@ -23,6 +23,17 @@ import type {
 const API_BASE_URL = '';
 const ISSUE_CODE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly code?: string
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 export function normalizeApiError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error || '');
 
@@ -43,10 +54,14 @@ export function normalizeIssueCode(value: string): string {
 
 const encodePathSegment = (value: string) => encodeURIComponent(value);
 
-function parseErrorResponse(text: string, status: number): string {
+function parseErrorResponse(text: string, status: number): ApiError {
   let message = text;
+  let code: string | undefined;
   try {
-    const payload = JSON.parse(text) as { error?: unknown; message?: unknown };
+    const payload = JSON.parse(text) as { code?: unknown; error?: unknown; message?: unknown };
+    if (typeof payload.code === 'string' && payload.code.trim()) {
+      code = payload.code;
+    }
     if (typeof payload.message === 'string' && payload.message.trim()) {
       message = payload.message;
     }
@@ -57,7 +72,7 @@ function parseErrorResponse(text: string, status: number): string {
     // Keep the original response text when it is not JSON.
   }
 
-  return message || `请求失败：${status}`;
+  return new ApiError(message || `请求失败：${status}`, status, code);
 }
 
 export function shouldRevalidateAuthentication(status: number, text: string): boolean {
@@ -103,7 +118,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (shouldRevalidateAuthentication(response.status, text)) {
       window.dispatchEvent(new Event('rain:authentication-required'));
     }
-    throw new Error(parseErrorResponse(text, response.status));
+    throw parseErrorResponse(text, response.status);
   }
 
   if (!text) {
@@ -281,7 +296,7 @@ export const rainApi = {
           if (shouldRevalidateAuthentication(xhr.status, xhr.responseText)) {
             window.dispatchEvent(new Event('rain:authentication-required'));
           }
-          reject(new Error(parseErrorResponse(xhr.responseText, xhr.status)));
+          reject(parseErrorResponse(xhr.responseText, xhr.status));
           return;
         }
 

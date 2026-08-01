@@ -1408,7 +1408,7 @@ export function BundleView() {
                         type="button"
                         className={`group flex h-10 w-full items-center gap-2 rounded border px-2 text-left transition ${
                           selected
-                            ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-[inset_3px_0_0_rgba(37,99,235,0.82)]'
+                            ? 'border-sky-400 bg-sky-100 text-sky-950 shadow-[inset_4px_0_0_rgba(14,116,144,0.95),0_0_0_2px_rgba(14,165,233,0.16)]'
                             : 'border-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-950'
                         }`}
                         onClick={() => {

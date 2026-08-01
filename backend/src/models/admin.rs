@@ -20,6 +20,8 @@ pub struct AdminUser {
     pub updated_at: String,
     pub last_login_at: Option<String>,
     pub active_session_count: i64,
+    pub issue_count: i64,
+    pub storage_bytes: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +53,7 @@ pub struct AuditLog {
     pub actor_type: String,
     pub actor_user_id: Option<String>,
     pub target_user_id: Option<String>,
+    pub target_username: Option<String>,
     pub action: String,
     pub old_value: Option<String>,
     pub new_value: Option<String>,

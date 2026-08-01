@@ -62,7 +62,7 @@ function App() {
             {auth.state.status === 'AUTHENTICATED' && (
               <>
                 <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1.5 text-cyan-100">
-                  {auth.state.user.username} · {isAdmin(auth.state.user) ? '管理员' : '普通用户'}
+                  {auth.state.user.username}
                 </span>
                 {!isAdmin(auth.state.user) ? <Link className="text-slate-300 no-underline hover:text-white" to="/account">账户</Link> : null}
                 <button

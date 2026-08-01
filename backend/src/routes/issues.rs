@@ -63,7 +63,7 @@ pub struct CreateIssueRequest {
 
 #[post("/issues")]
 pub async fn create_issue(
-    _user: RequireBusinessUser,
+    user: RequireBusinessUser,
     state: web::Data<AppState>,
     payload: web::Json<CreateIssueRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -84,13 +84,14 @@ pub async fn create_issue(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO issues (code, name)
-        VALUES (?, ?)
+        INSERT INTO issues (code, name, owner_user_id)
+        VALUES (?, ?, ?)
         ON CONFLICT(code) DO NOTHING
         "#,
     )
     .bind(&code)
     .bind(&name)
+    .bind(&user.0.id)
     .execute(&state.pool)
     .await
     .map_err(AppError::Database)?;

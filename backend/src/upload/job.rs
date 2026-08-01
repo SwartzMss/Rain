@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use tokio::{fs, sync::Semaphore};
 use tracing::error;
@@ -12,8 +16,54 @@ use crate::{
 
 use super::{
     finalizer::{finalize_bundle_failed, finalize_bundle_ready_with_retry},
-    multipart::UploadedFile,
+    multipart::{ReceiveReservation, UploadedFile},
 };
+
+struct PendingTempCleanup {
+    path: PathBuf,
+    reservation: ReceiveReservation,
+}
+
+#[derive(Clone, Default)]
+pub struct TempCleanupQueue(Arc<Mutex<VecDeque<PendingTempCleanup>>>);
+
+impl TempCleanupQueue {
+    pub fn enqueue(&self, path: PathBuf, reservation: ReceiveReservation) {
+        if let Ok(mut pending) = self.0.lock() {
+            pending.push_back(PendingTempCleanup { path, reservation });
+        } else {
+            std::mem::forget(reservation);
+        }
+    }
+}
+
+pub fn spawn_temp_cleanup_worker(queue: TempCleanupQueue) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let pending = queue
+                .0
+                .lock()
+                .map(|mut items| items.drain(..).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for item in pending {
+                match fs::remove_dir_all(&item.path).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        error!(
+                            path = %item.path.display(),
+                            error = %error,
+                            "temporary upload cleanup retry failed"
+                        );
+                        queue.enqueue(item.path, item.reservation);
+                    }
+                }
+            }
+        }
+    });
+}
 
 pub struct UploadJob {
     pub pool: sqlx::SqlitePool,
@@ -29,6 +79,8 @@ pub struct UploadJob {
     pub bundle_id: String,
     pub bundle_hash: String,
     pub files: Vec<UploadedFile>,
+    pub receive_reservation: ReceiveReservation,
+    pub temp_cleanup_queue: TempCleanupQueue,
 }
 
 pub fn spawn_upload_job(job: UploadJob) {
@@ -51,7 +103,16 @@ pub fn spawn_upload_job(job: UploadJob) {
                     &AppError::Conflict("上传处理任务已停止".into()),
                 )
                 .await;
-                let _ = fs::remove_dir_all(&job.temp_dir).await;
+                if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
+                    error!(
+                        bundle_id = %job.bundle_id,
+                        path = %job.temp_dir.display(),
+                        error = %cleanup_error,
+                        "failed to remove temporary upload directory; retaining budget reservation"
+                    );
+                    job.temp_cleanup_queue
+                        .enqueue(job.temp_dir.clone(), job.receive_reservation);
+                }
                 return;
             }
         };
@@ -76,12 +137,22 @@ pub fn spawn_upload_job(job: UploadJob) {
             .await;
         }
 
-        let _ = fs::remove_dir_all(&job.temp_dir).await;
+        if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
+            error!(
+                bundle_id = %job.bundle_id,
+                path = %job.temp_dir.display(),
+                error = %cleanup_error,
+                "failed to remove temporary upload directory; retaining budget reservation"
+            );
+            job.temp_cleanup_queue
+                .enqueue(job.temp_dir.clone(), job.receive_reservation);
+        }
     });
 }
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
-    let archive_budget = ArchiveBudget::new(job.archive_config.clone());
+    let archive_budget = ArchiveBudget::new(job.archive_config.clone())
+        .with_temp_budget(job.receive_reservation.temp_budget());
     let issue_quota = IssueQuota::new(
         job.pool.clone(),
         &job.issue_code,

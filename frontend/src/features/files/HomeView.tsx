@@ -31,7 +31,12 @@ export function HomeView() {
   const selectedIssueRef = useRef(issues.currentIssueCode);
   selectedIssueRef.current = issues.currentIssueCode;
 
-  const bundles = useIssueBundles(issues.currentIssueCode, issues.clearSelectedIssue);
+  const handleIssueMissing = useCallback(() => {
+    issues.clearSelectedIssue();
+    navigate('/', { replace: true });
+  }, [issues.clearSelectedIssue, navigate]);
+
+  const bundles = useIssueBundles(issues.currentIssueCode, handleIssueMissing);
   const upload = useUploadTask({
     currentIssueCode: issues.currentIssueCode,
     getSelectedIssueCode: () => selectedIssueRef.current,

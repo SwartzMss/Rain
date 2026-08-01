@@ -169,6 +169,7 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
               </div>
             </div>
           </div>
+          {result.truncated ? <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">短关键词搜索已达到扫描上限，结果可能不完整。请使用至少 3 个字符的关键词。</p> : null}
           <ul className="space-y-3">
             {result.hits.map((hit) => (
               <li key={`${hit.file_id}-${hit.offset ?? hit.path}`} className="rounded-lg border border-slate-200 bg-white p-4">

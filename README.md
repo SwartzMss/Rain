@@ -142,6 +142,8 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | --- | ---: | --- |
 | `RAIN_ISSUE_MAX_CONTENT_SIZE` | `4 GiB` | 每个 Issue 最终可浏览文件总量；压缩包按解压后内容计算 |
 | `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` | `4` | 并发后台处理任务 |
+| `RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS` | `4` | 并发 Multipart 接收任务 |
+| `RAIN_UPLOAD_MAX_TMP_BYTES` | `16 GiB` | 所有上传任务 `.tmp` 工作区的全局字节预算，包含原始接收文件和解压后的 staging 文件 |
 | `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
 | `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
@@ -149,6 +151,10 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_MAX_LINE_PAGE_SIZE` | `10000` | 最大行分页大小 |
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
+| `RAIN_TEMP_RESULT_MAX_SIZE` | `64 MiB` | 单个临时搜索结果的 `.log/.meta/.idx` 总大小上限 |
+| `RAIN_TEMP_RESULT_MAX_TOTAL_SIZE` | `1 GiB` | 临时结果目录的数据库登记总容量上限 |
+| `RAIN_TEMP_RESULT_MAX_RECORDS` | `1000` | 临时结果最多保留的记录数 |
+| `RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS` | `2` | 并发物化临时结果的任务数 |
 | `RAIN_SESSION_TTL_SECONDS` | `604800` | 登录 Session 有效期（秒），默认 7 天 |
 | `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
 | `RAIN_AUTH_ARGON2_CONCURRENCY` | `5` | Argon2 哈希与校验并发上限 |
@@ -187,7 +193,9 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 
 游客可以查看、下载和搜索；创建 Issue、上传、删除 Issue、删除 Bundle、删除文件节点
 以及删除临时搜索结果需要登录。详细搜索会生成可过期清理的临时结果文件，但仍属于
-游客可用的搜索流程。
+游客可用的搜索流程。临时结果物化按 IP 每分钟最多 10 次；单个结果默认最多 64 MiB，
+目录默认最多 1 GiB 或 1000 条记录，并发物化默认最多 2 个任务。结果默认保留 7 天，
+访问结果会刷新过期时间。
 
 登录用户可以将文件名搜索或详细搜索保存为个人条件，选择全局或当前 Issue 范围，
 之后从“我的搜索条件”重新使用或删除。条件只保存查询与稳定选项，不保存会过期的
@@ -215,7 +223,7 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 - 文件树浏览。
 - 文本文件分页读取，后端按行偏移索引快速跳转。
 - 单行默认超过 8 MiB 时索引和分页展示会截断该行，并标记 `[line truncated]`；该限制可配置。
-- Issue 范围和 bundle 范围采用 SQLite FTS5 trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符时使用有界回退搜索。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
+- Issue 范围和 bundle 范围采用 SQLite FTS5 trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符时只在最多 10001 个候选日志分块内进行有界回退搜索，深分页不能超过该扫描窗口。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
 - 原始文件下载。
 - 删除 Issue、Bundle、单个文件节点。
 - 可选过期清理：设置 `RAIN_RETENTION_DAYS` 后启动时清理过期上传。
@@ -224,10 +232,12 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 
 - 暂不支持 `.rar`、`.7z` 解压。
 - 上传传输有前端进度；后台任务通过 `RECEIVING/EXTRACTING/INDEXING/PUBLISHING` 阶段提供处理状态，暂未提供阶段内百分比。
+- 上传接收阶段按单次请求限制文件总数和字节数，并受并发接收数与 `.tmp` 工作区全局字节预算限制；预算覆盖原始接收文件、递归解压后的 staging 文件和解压过程中的中间输出。接收字节上限为 Issue 最终内容上限的 2 倍，最终可浏览内容仍受 `RAIN_ISSUE_MAX_CONTENT_SIZE` 限制。Multipart 中的每个文件字段都会计入文件数量，即使字段内容为空。
 - 后台处理在 `.tmp/{task_id}/staging` 中完成解压和索引；真实文件同步写入内容寻址 BlobStore，完成或失败后 staging 工作区会被清理。
 - SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务最多 2 个并发。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。
 - 搜索使用 SQLite FTS5 trigram external-content 索引；日志 chunk 正文仅存于 `log_segments.content`，FTS 不保存正文副本。
+- 短关键词回退搜索使用按 `log_segments.id` 稳定排序的物化候选集限制实际扫描量；返回的总数只针对该有界候选窗口，不代表整个 Issue 或 Bundle 的精确全量统计，并通过 `truncated` 标记窗口外仍有候选记录。
 - 真实文件使用 SHA-256 内容寻址 Blob 存储，保存到数据根目录下的 `blobs/<hash前两位>/<完整hash>`；多个 Bundle 中的相同内容只保存一份。
 - 文件字节访问统一经过 `BlobStore` 接口；当前使用 `LocalCasBlobStore`，上层业务不依赖本地物理路径。
 - Bundle 使用逻辑删除；无引用 Blob 由后台 GC 基于数据库实际引用扫描，并在 24 小时宽限期后回收。
