@@ -15,7 +15,9 @@ use crate::{
     upload::{
         job::{UploadJob, spawn_upload_job},
         lifecycle::create_processing_bundle,
-        multipart::{collect_multipart_upload, limited_multipart, raw_payload_limit},
+        multipart::{
+            ReceiveReservation, collect_multipart_upload, limited_multipart, raw_payload_limit,
+        },
     },
 };
 
@@ -62,19 +64,29 @@ pub async fn upload_logs(
     let temp_dir = state.data_root.join(".tmp").join(&upload_id);
     fs::create_dir_all(&temp_dir).await.map_err(AppError::Io)?;
 
+    let reservation =
+        ReceiveReservation::new(state.tmp_bytes.clone(), state.limits.upload.max_tmp_bytes);
     let upload = match collect_multipart_upload(
         limited_multipart(&req, payload, request_limit),
         &temp_dir,
         state.limits.issue_max_content_size.saturating_mul(2),
-        state.tmp_bytes.clone(),
-        state.limits.upload.max_tmp_bytes,
+        reservation,
     )
     .await
     {
         Ok(upload) => upload,
         Err(error) => {
-            let _ = fs::remove_dir_all(&temp_dir).await;
-            return Err(error);
+            if let Err(cleanup_error) = fs::remove_dir_all(&temp_dir).await {
+                tracing::error!(
+                    path = %temp_dir.display(),
+                    error = %cleanup_error,
+                    "failed to remove temporary upload directory after receive failure; queueing retry"
+                );
+                state
+                    .temp_cleanup_queue
+                    .enqueue(temp_dir.clone(), error.receive_reservation);
+            }
+            return Err(error.error);
         }
     };
 

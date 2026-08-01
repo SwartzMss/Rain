@@ -25,7 +25,7 @@ use crate::{
 
 use super::filename::{format_bytes, sanitize_filename, unique_storage_name};
 
-pub const MAX_MULTIPART_FIELDS: usize = 64;
+pub const MAX_MULTIPART_FIELDS: usize = MAX_UPLOAD_FILES + 1;
 const MAX_MULTIPART_OVERHEAD_BYTES: u64 = 256 * 1024;
 
 pub struct UploadedFile {
@@ -43,6 +43,11 @@ pub struct MultipartUpload {
     pub receive_reservation: ReceiveReservation,
 }
 
+pub struct MultipartUploadError {
+    pub error: AppError,
+    pub receive_reservation: ReceiveReservation,
+}
+
 pub struct ReceiveReservation {
     budget: TempBudget,
 }
@@ -55,7 +60,7 @@ pub struct TempBudget {
 }
 
 impl ReceiveReservation {
-    fn new(used: Arc<AtomicU64>, max: u64) -> Self {
+    pub fn new(used: Arc<AtomicU64>, max: u64) -> Self {
         Self {
             budget: TempBudget {
                 used,
@@ -110,19 +115,38 @@ fn tmp_budget_error() -> AppError {
 }
 
 pub async fn collect_multipart_upload(
+    payload: Multipart,
+    temp_dir: &Path,
+    max_total_bytes: u64,
+    receive_reservation: ReceiveReservation,
+) -> Result<MultipartUpload, MultipartUploadError> {
+    match collect_multipart_upload_inner(payload, temp_dir, max_total_bytes, &receive_reservation)
+        .await
+    {
+        Ok((files, total_bytes)) => Ok(MultipartUpload {
+            files,
+            total_bytes,
+            receive_reservation,
+        }),
+        Err(error) => Err(MultipartUploadError {
+            error,
+            receive_reservation,
+        }),
+    }
+}
+
+async fn collect_multipart_upload_inner(
     mut payload: Multipart,
     temp_dir: &Path,
     max_total_bytes: u64,
-    tmp_bytes: Arc<AtomicU64>,
-    max_tmp_bytes: u64,
-) -> Result<MultipartUpload, AppError> {
+    receive_reservation: &ReceiveReservation,
+) -> Result<(Vec<UploadedFile>, u64), AppError> {
     let mut files: Vec<UploadedFile> = Vec::new();
     let mut total_file_bytes: u64 = 0;
     let mut total_request_bytes: u64 = 0;
     let mut file_fields = 0;
     let mut field_count = 0;
     let mut issue_code_fields = 0;
-    let receive_reservation = ReceiveReservation::new(tmp_bytes, max_tmp_bytes);
 
     while let Some(mut field) = payload
         .try_next()
@@ -186,7 +210,7 @@ pub async fn collect_multipart_upload(
                     &temp_path,
                     remaining_bytes,
                     &filename,
-                    &receive_reservation,
+                    receive_reservation,
                     &mut total_request_bytes,
                     max_total_bytes,
                 )
@@ -221,11 +245,7 @@ pub async fn collect_multipart_upload(
         return Err(AppError::BadRequest("no files provided".into()));
     }
 
-    Ok(MultipartUpload {
-        files,
-        total_bytes: total_file_bytes,
-        receive_reservation,
-    })
+    Ok((files, total_file_bytes))
 }
 
 pub fn raw_payload_limit(max_total_bytes: u64) -> u64 {
