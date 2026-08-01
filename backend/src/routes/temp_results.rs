@@ -655,7 +655,7 @@ async fn publish_temp_result(
     size_bytes: i64,
 ) -> Result<(), AppError> {
     let _capacity_guard = state.temp_result_capacity_lock.lock().await;
-    ensure_temp_result_capacity(state, size_bytes).await?;
+    ensure_temp_result_capacity(state, size_bytes, Some(id)).await?;
     let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
     let updated = sqlx::query(
         r#"
@@ -726,12 +726,22 @@ async fn ensure_temp_result_budget(state: &web::Data<AppState>) -> Result<(), Ap
 async fn ensure_temp_result_capacity(
     state: &web::Data<AppState>,
     size_bytes: i64,
+    current_id: Option<&str>,
 ) -> Result<(), AppError> {
-    let (count, total): (i64, i64) =
+    let (count, total): (i64, i64) = if let Some(current_id) = current_id {
+        sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results WHERE id != ?",
+        )
+        .bind(current_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?
+    } else {
         sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results")
             .fetch_one(&state.pool)
             .await
-            .map_err(AppError::Database)?;
+            .map_err(AppError::Database)?
+    };
     let next_total = total.checked_add(size_bytes).ok_or_else(|| {
         AppError::api(
             StatusCode::TOO_MANY_REQUESTS,
@@ -1215,6 +1225,48 @@ mod tests {
         assert_eq!(
             staging_path(final_path),
             std::path::PathBuf::from("temp-results/result.log.part")
+        );
+    }
+
+    #[tokio::test]
+    async fn publishing_staging_result_does_not_count_it_twice() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_records = 1;
+        let state = web::Data::new(AppState::new(pool.clone(), PathBuf::from("data"), limits));
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('current', 'STAGING', 'current.log', 'x', 'x', 'data/temp-results/current.log', 0, 0, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            super::ensure_temp_result_capacity(&state, 10, Some("current"))
+                .await
+                .is_ok()
+        );
+
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('other', 'ACTIVE', 'other.log', 'x', 'x', 'data/temp-results/other.log', 0, 0, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            super::ensure_temp_result_capacity(&state, 10, Some("current"))
+                .await
+                .is_err()
         );
     }
 
