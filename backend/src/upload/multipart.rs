@@ -28,6 +28,7 @@ pub struct MultipartUpload {
 pub async fn collect_multipart_upload(
     mut payload: Multipart,
     temp_dir: &Path,
+    max_total_bytes: u64,
 ) -> Result<MultipartUpload, AppError> {
     let mut files: Vec<UploadedFile> = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -45,6 +46,12 @@ pub async fn collect_multipart_upload(
                 collect_text_field(&mut field, MAX_MULTIPART_TEXT_FIELD_SIZE).await?;
             }
             "files" => {
+                if files.len() >= MAX_UPLOAD_FILES {
+                    return Err(AppError::BadRequest(format!(
+                        "too many files; max {} files per upload",
+                        MAX_UPLOAD_FILES
+                    )));
+                }
                 let filename = content_disposition
                     .get_filename()
                     .map(|name| name.to_string())
@@ -55,17 +62,20 @@ pub async fn collect_multipart_upload(
                 let storage_name = unique_storage_name(&filename);
                 let temp_name = format!("{}-{storage_name}", files.len());
                 let temp_path = temp_dir.join(temp_name);
+                let remaining_bytes =
+                    max_total_bytes.checked_sub(total_bytes).ok_or_else(|| {
+                        AppError::BadRequest(format!(
+                            "upload exceeds the maximum size of {}",
+                            format_bytes(max_total_bytes)
+                        ))
+                    })?;
                 let size_bytes =
-                    collect_file_field(&mut field, &temp_path, u64::MAX, &filename).await?;
+                    collect_file_field(&mut field, &temp_path, remaining_bytes, &filename).await?;
 
                 if size_bytes > 0 {
-                    if files.len() >= MAX_UPLOAD_FILES {
-                        return Err(AppError::BadRequest(format!(
-                            "too many files; max {} files per upload",
-                            MAX_UPLOAD_FILES
-                        )));
-                    }
-                    total_bytes = total_bytes.saturating_add(size_bytes);
+                    total_bytes = total_bytes.checked_add(size_bytes).ok_or_else(|| {
+                        AppError::BadRequest("upload size exceeds the supported limit".into())
+                    })?;
                     files.push(UploadedFile {
                         original_name: filename,
                         display_name,
@@ -111,7 +121,15 @@ async fn collect_binary_field(
         .await
         .map_err(|err| AppError::BadRequest(format!("failed to read field: {err}")))?
     {
-        if (data.len() as u64).saturating_add(chunk.len() as u64) > limit {
+        let next_size = (data.len() as u64)
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "{label} is too large; max size is {}",
+                    format_bytes(limit)
+                ))
+            })?;
+        if next_size > limit {
             return Err(AppError::BadRequest(format!(
                 "{label} is too large; max size is {}",
                 format_bytes(limit)
@@ -135,14 +153,20 @@ async fn collect_file_field(
         .await
         .map_err(|err| AppError::BadRequest(format!("failed to read field: {err}")))?
     {
-        written = written.saturating_add(chunk.len() as u64);
-        if written > limit {
+        let next_written = written.checked_add(chunk.len() as u64).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "{label} is too large; max size is {}",
+                format_bytes(limit)
+            ))
+        })?;
+        if next_written > limit {
             return Err(AppError::BadRequest(format!(
                 "{label} is too large; max size is {}",
                 format_bytes(limit)
             )));
         }
         file.write_all(&chunk).await.map_err(AppError::Io)?;
+        written = next_written;
     }
     file.flush().await.map_err(AppError::Io)?;
     Ok(written)

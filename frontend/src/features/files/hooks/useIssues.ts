@@ -1,16 +1,23 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { normalizeApiError, normalizeIssueCode, rainApi } from '../../../api/client';
+import { useAuth } from '../../../auth/AuthContext';
 import type { IssueSummary } from '../../../api/types';
 
-const LAST_ISSUE_STORAGE_KEY = 'rain:last_issue_id';
+const LAST_ISSUE_STORAGE_KEY_PREFIX = 'rain:last_issue_id:';
 
 export function useIssues() {
+  const auth = useAuth();
   const [selectedIssueCode, setSelectedIssueCode] = useState('');
   const [issueSearchText, setIssueSearchText] = useState('');
   const [issueError, setIssueError] = useState<string | null>(null);
   const [issues, setIssues] = useState<IssueSummary[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [issuesError, setIssuesError] = useState<string | null>(null);
+  const skipPersistRef = useRef(false);
+  const storageKey =
+    auth.state.status === 'AUTHENTICATED'
+      ? `${LAST_ISSUE_STORAGE_KEY_PREFIX}${auth.state.user.id}`
+      : null;
 
   const currentIssueCode = selectedIssueCode.trim();
 
@@ -24,23 +31,30 @@ export function useIssues() {
   }, [issueSearchText, issues]);
 
   useEffect(() => {
-    const stored = localStorage.getItem(LAST_ISSUE_STORAGE_KEY);
+    skipPersistRef.current = true;
+    setSelectedIssueCode('');
+    if (!storageKey) return;
+    const stored = localStorage.getItem(storageKey);
     if (stored) {
       try {
         setSelectedIssueCode(normalizeIssueCode(stored));
       } catch {
-        localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
+        localStorage.removeItem(storageKey);
       }
     }
-  }, []);
+  }, [storageKey]);
 
   useEffect(() => {
-    if (currentIssueCode) {
-      localStorage.setItem(LAST_ISSUE_STORAGE_KEY, currentIssueCode);
-    } else {
-      localStorage.removeItem(LAST_ISSUE_STORAGE_KEY);
+    if (skipPersistRef.current) {
+      skipPersistRef.current = false;
+      return;
     }
-  }, [currentIssueCode]);
+    if (currentIssueCode) {
+      if (storageKey) localStorage.setItem(storageKey, currentIssueCode);
+    } else if (storageKey) {
+      localStorage.removeItem(storageKey);
+    }
+  }, [currentIssueCode, storageKey]);
 
   const loadIssues = useCallback(async () => {
     setIssuesLoading(true);

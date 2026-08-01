@@ -71,6 +71,7 @@ pub struct AuthRateLimits {
     pub register_ip: HashMap<String, AuthRateLimitBucket>,
     pub change_password_user_attempt: HashMap<String, AuthRateLimitBucket>,
     pub change_password_in_flight: HashSet<String>,
+    pub temp_result_ip: HashMap<String, AuthRateLimitBucket>,
 }
 
 pub struct AppState {
@@ -79,6 +80,7 @@ pub struct AppState {
     pub limits: AppLimits,
     pub auth: AuthConfig,
     pub processing_permits: Arc<Semaphore>,
+    pub temp_result_permits: Arc<Semaphore>,
     pub auth_hash_permits: Arc<Semaphore>,
     pub auth_rate_limits: Arc<Mutex<AuthRateLimits>>,
     pub blob_store: Arc<dyn BlobStore>,
@@ -108,6 +110,9 @@ impl AppState {
     ) -> Self {
         let processing_permits =
             Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
+        let temp_result_permits = Arc::new(Semaphore::new(
+            limits.temp_results.concurrent_materializations,
+        ));
         let auth_hash_permits = Arc::new(Semaphore::new(auth.argon2_concurrency));
         Self {
             pool,
@@ -115,6 +120,7 @@ impl AppState {
             limits,
             auth,
             processing_permits,
+            temp_result_permits,
             auth_hash_permits,
             auth_rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
             blob_store,

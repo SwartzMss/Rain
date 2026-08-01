@@ -98,6 +98,25 @@ pub struct ApiConfig {
     pub max_search_results: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct TempResultConfig {
+    pub max_result_size: u64,
+    pub max_total_size: u64,
+    pub max_records: i64,
+    pub concurrent_materializations: usize,
+}
+
+impl Default for TempResultConfig {
+    fn default() -> Self {
+        Self {
+            max_result_size: 64 * MIB,
+            max_total_size: 1 * GIB,
+            max_records: 1_000,
+            concurrent_materializations: 2,
+        }
+    }
+}
+
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
@@ -117,6 +136,7 @@ pub struct AppLimits {
     pub upload: UploadConfig,
     pub indexing: IndexingConfig,
     pub api: ApiConfig,
+    pub temp_results: TempResultConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +236,7 @@ impl Default for AppLimits {
             upload: UploadConfig::default(),
             indexing: IndexingConfig::default(),
             api: ApiConfig::default(),
+            temp_results: TempResultConfig::default(),
         }
     }
 }
@@ -318,6 +339,24 @@ impl AppLimits {
                     defaults.api.max_search_results,
                 )?,
             },
+            temp_results: TempResultConfig {
+                max_result_size: env_size(
+                    "RAIN_TEMP_RESULT_MAX_SIZE",
+                    defaults.temp_results.max_result_size,
+                )?,
+                max_total_size: env_size(
+                    "RAIN_TEMP_RESULT_MAX_TOTAL_SIZE",
+                    defaults.temp_results.max_total_size,
+                )?,
+                max_records: env_value(
+                    "RAIN_TEMP_RESULT_MAX_RECORDS",
+                    defaults.temp_results.max_records,
+                )?,
+                concurrent_materializations: env_value(
+                    "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
+                    defaults.temp_results.concurrent_materializations,
+                )?,
+            },
         };
         limits.validate()?;
         Ok(limits)
@@ -358,6 +397,27 @@ impl AppLimits {
             "RAIN_API_DEFAULT_SEARCH_RESULTS"
         );
         positive!(self.api.max_search_results, "RAIN_API_MAX_SEARCH_RESULTS");
+        positive!(
+            self.temp_results.max_result_size,
+            "RAIN_TEMP_RESULT_MAX_SIZE"
+        );
+        positive!(
+            self.temp_results.max_total_size,
+            "RAIN_TEMP_RESULT_MAX_TOTAL_SIZE"
+        );
+        positive!(
+            self.temp_results.max_records,
+            "RAIN_TEMP_RESULT_MAX_RECORDS"
+        );
+        positive!(
+            self.temp_results.concurrent_materializations,
+            "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS"
+        );
+        if self.temp_results.max_result_size > self.temp_results.max_total_size {
+            return Err(AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SIZE must not exceed RAIN_TEMP_RESULT_MAX_TOTAL_SIZE".into(),
+            ));
+        }
         if self.api.default_line_page_size > self.api.max_line_page_size {
             return Err(AppError::Config(
                 "RAIN_API_DEFAULT_LINE_PAGE_SIZE must not exceed RAIN_API_MAX_LINE_PAGE_SIZE"

@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use actix_files::NamedFile;
-use actix_web::{HttpResponse, delete, get, http::StatusCode, http::header, post, web};
+use actix_web::{
+    HttpRequest, HttpResponse, delete, get, http::StatusCode, http::header, post, web,
+};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::time::Duration as StdDuration;
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom},
@@ -12,7 +15,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    AppState,
+    AppState, AuthRateLimitBucket,
     auth::extractor::RequireBusinessUser,
     error::AppError,
     log_expression,
@@ -29,6 +32,8 @@ use super::{
 };
 
 const RETENTION_DAYS: i64 = 7;
+const TEMP_RESULT_RATE_LIMIT: usize = 10;
+const TEMP_RESULT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 
 fn invalid_expression(error: log_expression::ParseError) -> AppError {
     AppError::public(
@@ -119,10 +124,24 @@ struct MaterializedPreviewResponse {
 
 #[post("/temp-results/preview")]
 pub async fn preview_temp_result(
+    request: HttpRequest,
     payload: web::Json<PreviewTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    check_temp_result_rate_limit(&state, &request)?;
+    let _permit = state
+        .temp_result_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::api(
+                StatusCode::TOO_MANY_REQUESTS,
+                "TEMP_RESULT_BUSY",
+                "临时结果生成任务过多，请稍后重试",
+            )
+        })?;
     cleanup_expired(&state).await?;
+    ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
     let source_request = CreateTempResultRequest {
@@ -162,6 +181,7 @@ pub async fn preview_temp_result(
             &expression,
             from,
             size,
+            state.limits.temp_results.max_result_size,
             &mut output,
             &mut metadata,
             &mut index,
@@ -183,6 +203,10 @@ pub async fn preview_temp_result(
             return Err(AppError::Io(error));
         }
     };
+    if let Err(error) = ensure_temp_result_capacity(&state, metadata.len()).await {
+        remove_preview_artifacts(&output_path).await?;
+        return Err(error);
+    }
     let publish_result = async {
         tokio::fs::rename(&staging_output_path, &output_path)
             .await
@@ -223,10 +247,24 @@ pub async fn preview_temp_result(
 
 #[post("/temp-results")]
 pub async fn create_temp_result(
+    request: HttpRequest,
     payload: web::Json<CreateTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    check_temp_result_rate_limit(&state, &request)?;
+    let _permit = state
+        .temp_result_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::api(
+                StatusCode::TOO_MANY_REQUESTS,
+                "TEMP_RESULT_BUSY",
+                "临时结果生成任务过多，请稍后重试",
+            )
+        })?;
     cleanup_expired(&state).await?;
+    ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
 
@@ -249,12 +287,17 @@ pub async fn create_temp_result(
         &mut output,
         &mut metadata_output,
         &mut index_output,
+        state.limits.temp_results.max_result_size,
     )
     .await?;
 
     let metadata = tokio::fs::metadata(&output_path)
         .await
         .map_err(AppError::Io)?;
+    if let Err(error) = ensure_temp_result_capacity(&state, metadata.len()).await {
+        remove_result_files(&output_path).await?;
+        return Err(error);
+    }
     let created_at = Utc::now();
     let expires_at = created_at + Duration::days(RETENTION_DAYS);
     let name = format!("filtered-{}.log", &id[..8]);
@@ -332,7 +375,14 @@ pub async fn get_temp_result_lines(
         result.line_count,
     )
     .await?;
-    let next_start = (start + (lines.len() as i64) < result.line_count).then_some(start + limit);
+    let next_start = if start
+        .checked_add(lines.len() as i64)
+        .is_some_and(|end| end < result.line_count)
+    {
+        Some(checked_page_end(start, limit)?)
+    } else {
+        None
+    };
     Ok(HttpResponse::Ok().json(TempResultLines {
         start,
         limit,
@@ -366,13 +416,13 @@ pub async fn delete_temp_result(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let result = load_record(&state, &id).await?;
+    let path = checked_temp_path(&state, &result.storage_path)?;
+    remove_result_files(&path).await?;
     sqlx::query("DELETE FROM temp_results WHERE id = ?")
         .bind(&result.id)
         .execute(&state.pool)
         .await
         .map_err(AppError::Database)?;
-    let path = checked_temp_path(&state, &result.storage_path)?;
-    remove_result_files(&path).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -540,6 +590,60 @@ async fn insert_temp_result(
     Ok(())
 }
 
+async fn ensure_temp_result_budget(state: &web::Data<AppState>) -> Result<(), AppError> {
+    let (count, total): (i64, i64) =
+        sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results")
+            .fetch_one(&state.pool)
+            .await
+            .map_err(AppError::Database)?;
+    if count >= state.limits.temp_results.max_records
+        || total >= i64::try_from(state.limits.temp_results.max_total_size).unwrap_or(i64::MAX)
+    {
+        return Err(AppError::api(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TEMP_RESULT_BUDGET_EXCEEDED",
+            "临时结果存储配额已用尽，请稍后重试",
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_temp_result_capacity(
+    state: &web::Data<AppState>,
+    size_bytes: u64,
+) -> Result<(), AppError> {
+    let (count, total): (i64, i64) =
+        sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results")
+            .fetch_one(&state.pool)
+            .await
+            .map_err(AppError::Database)?;
+    let next_total = total
+        .checked_add(i64::try_from(size_bytes).map_err(|_| {
+            AppError::public(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "TEMP_RESULT_TOO_LARGE",
+                "临时结果超过大小限制",
+            )
+        })?)
+        .ok_or_else(|| {
+            AppError::api(
+                StatusCode::TOO_MANY_REQUESTS,
+                "TEMP_RESULT_BUDGET_EXCEEDED",
+                "临时结果存储配额已用尽，请稍后重试",
+            )
+        })?;
+    if count >= state.limits.temp_results.max_records
+        || next_total > i64::try_from(state.limits.temp_results.max_total_size).unwrap_or(i64::MAX)
+    {
+        return Err(AppError::api(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TEMP_RESULT_BUDGET_EXCEEDED",
+            "临时结果存储配额已用尽，请稍后重试",
+        ));
+    }
+    Ok(())
+}
+
 async fn read_indexed_lines(
     result_path: &Path,
     meta_path: &Path,
@@ -584,7 +688,7 @@ async fn read_indexed_lines(
     let mut content = String::new();
     let mut metadata_line = String::new();
     let mut lines = Vec::new();
-    let expected_end = (start + limit).min(line_count);
+    let expected_end = checked_page_end(start, limit)?.min(line_count);
     while lines.len() < limit as usize {
         content.clear();
         metadata_line.clear();
@@ -678,14 +782,14 @@ async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
     .await
     .map_err(AppError::Database)?;
     for record in records {
+        if let Ok(path) = checked_temp_path(state, &record.storage_path) {
+            remove_result_files(&path).await?;
+        }
         sqlx::query("DELETE FROM temp_results WHERE id = ?")
             .bind(&record.id)
             .execute(&state.pool)
             .await
             .map_err(AppError::Database)?;
-        if let Ok(path) = checked_temp_path(state, &record.storage_path) {
-            remove_result_files(&path).await?;
-        }
     }
     Ok(())
 }
@@ -744,6 +848,44 @@ fn preview_page_size(requested: Option<i64>) -> i64 {
     requested.unwrap_or(5_000).clamp(1, 10_000)
 }
 
+fn check_temp_result_rate_limit(
+    state: &web::Data<AppState>,
+    request: &HttpRequest,
+) -> Result<(), AppError> {
+    let key = request
+        .peer_addr()
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let mut limits = state.auth_rate_limits.lock().map_err(|_| {
+        AppError::api(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "RATE_LIMIT_UNAVAILABLE",
+            "服务暂时不可用",
+        )
+    })?;
+    let bucket = limits
+        .temp_result_ip
+        .entry(key)
+        .or_insert_with(|| AuthRateLimitBucket::new(TEMP_RESULT_RATE_WINDOW));
+    let now = std::time::Instant::now();
+    bucket.prune(now);
+    if bucket.len() >= TEMP_RESULT_RATE_LIMIT {
+        return Err(AppError::api(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TEMP_RESULT_RATE_LIMITED",
+            "临时结果请求过于频繁，请稍后重试",
+        ));
+    }
+    bucket.push(now);
+    Ok(())
+}
+
+fn checked_page_end(start: i64, limit: i64) -> Result<i64, AppError> {
+    start
+        .checked_add(limit)
+        .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))
+}
+
 fn to_response(record: TempResultRecord) -> TempResult {
     TempResult {
         id: record.id,
@@ -761,7 +903,13 @@ fn to_response(record: TempResultRecord) -> TempResult {
 mod tests {
     use uuid::Uuid;
 
-    use super::{preview_page_size, read_indexed_lines, staging_path};
+    use super::{checked_page_end, preview_page_size, read_indexed_lines, staging_path};
+
+    #[test]
+    fn pagination_end_rejects_i64_overflow() {
+        assert_eq!(checked_page_end(10, 5).unwrap(), 15);
+        assert!(checked_page_end(i64::MAX, 1).is_err());
+    }
 
     #[test]
     fn preview_supports_log_viewer_page_sizes() {

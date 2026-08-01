@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { normalizeApiError, rainApi } from '../../../api/client';
+import { ApiError, normalizeApiError, rainApi } from '../../../api/client';
 import type { IssueBundlesResponse, UploadSummary } from '../../../api/types';
 import type { BundleFileState } from '../homeRows';
 
@@ -46,7 +46,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
       } catch (error) {
         if (requestId !== bundleRequestIdRef.current) return;
         const message = normalizeApiError(error);
-        if (/not found|404/i.test(message)) {
+        if (error instanceof ApiError && error.code === 'RESOURCE_NOT_FOUND') {
           clearBundles();
           setBundlesError('Issue 不存在或已被删除');
           if (selectedIssueRef.current === trimmed) {

@@ -53,6 +53,7 @@ impl TempResultExecutor {
         expression: &Expression,
         from: i64,
         size: i64,
+        max_output_bytes: u64,
         output: &mut File,
         metadata_output: &mut File,
         index_output: &mut File,
@@ -118,14 +119,31 @@ impl TempResultExecutor {
                         };
                         write_json_line(index_output, &checkpoint).await?;
                     }
+                    let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
+                    let next_output_size = log_offset.checked_add(line_bytes).ok_or_else(|| {
+                        AppError::public(
+                            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+                            "TEMP_RESULT_TOO_LARGE",
+                            "临时结果超过大小限制",
+                        )
+                    })?;
+                    if next_output_size > max_output_bytes {
+                        return Err(AppError::public(
+                            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+                            "TEMP_RESULT_TOO_LARGE",
+                            "临时结果超过大小限制",
+                        ));
+                    }
                     output.write_all(&bytes).await.map_err(AppError::Io)?;
-                    log_offset += bytes.len() as u64;
+                    log_offset = next_output_size;
                     if !bytes.ends_with(b"\n") {
                         output.write_all(b"\n").await.map_err(AppError::Io)?;
-                        log_offset += 1;
                     }
                     meta_offset += write_json_line(metadata_output, &metadata).await?;
-                    if matched >= from && matched < from + size {
+                    let page_end = from
+                        .checked_add(size)
+                        .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
+                    if matched >= from && matched < page_end {
                         lines.push(PreviewLine {
                             bundle_hash: metadata.bundle_hash.clone(),
                             file_id: metadata.file_id.clone(),
@@ -167,6 +185,7 @@ impl TempResultExecutor {
         output: &mut File,
         metadata_output: &mut File,
         index_output: &mut File,
+        max_output_bytes: u64,
     ) -> Result<i64, AppError> {
         let mut matching_lines = 0_i64;
         let mut log_offset = 0_u64;
@@ -230,11 +249,25 @@ impl TempResultExecutor {
                         )
                         .await?;
                     }
+                    let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
+                    let next_output_size = log_offset.checked_add(line_bytes).ok_or_else(|| {
+                        AppError::public(
+                            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+                            "TEMP_RESULT_TOO_LARGE",
+                            "临时结果超过大小限制",
+                        )
+                    })?;
+                    if next_output_size > max_output_bytes {
+                        return Err(AppError::public(
+                            actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+                            "TEMP_RESULT_TOO_LARGE",
+                            "临时结果超过大小限制",
+                        ));
+                    }
                     output.write_all(&bytes).await.map_err(AppError::Io)?;
-                    log_offset += bytes.len() as u64;
+                    log_offset = next_output_size;
                     if !bytes.ends_with(b"\n") {
                         output.write_all(b"\n").await.map_err(AppError::Io)?;
-                        log_offset += 1;
                     }
                     meta_offset += write_json_line(metadata_output, &metadata).await?;
                     matching_lines += 1;
@@ -324,6 +357,7 @@ mod tests {
             &expression,
             0,
             2,
+            u64::MAX,
             &mut log,
             &mut meta,
             &mut index,
@@ -384,6 +418,7 @@ mod tests {
             &expression,
             0,
             10,
+            u64::MAX,
             &mut first_log,
             &mut first_meta,
             &mut first_index,
@@ -410,6 +445,7 @@ mod tests {
             &nested_expression,
             0,
             10,
+            u64::MAX,
             &mut second_log,
             &mut second_meta,
             &mut second_index,

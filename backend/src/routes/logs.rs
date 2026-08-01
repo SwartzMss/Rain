@@ -12,6 +12,8 @@ use super::issues::normalize_issue_code;
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
 
+const SHORT_SEARCH_SCAN_LIMIT: i64 = 10_001;
+
 #[derive(Deserialize)]
 struct LogQuery {
     q: String,
@@ -63,17 +65,25 @@ pub async fn search_logs(
         .clamp(1, state.limits.api.max_search_results);
     let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
     let short_pattern = format!("%{}%", escape_like_pattern(search_term));
+    if search_term.chars().count() < 3 && from >= SHORT_SEARCH_SCAN_LIMIT {
+        return Err(AppError::BadRequest(
+            "短关键词搜索的分页范围不能超过扫描上限".into(),
+        ));
+    }
 
     let total: i64 = if search_term.chars().count() < 3 {
         sqlx::query_scalar(
             r#"
-        SELECT COUNT(*) FROM log_segments ls
+        SELECT COUNT(*) FROM (
+        SELECT ls.id FROM log_segments ls
         JOIN files f ON f.id = ls.file_id
         WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
           AND ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
           AND (? IS NULL OR ls.file_id = ?)
+        LIMIT ?
+        )
         "#,
         )
         .bind(&short_pattern)
@@ -84,6 +94,7 @@ pub async fn search_logs(
         .bind(&path_pattern)
         .bind(file_id)
         .bind(file_id)
+        .bind(SHORT_SEARCH_SCAN_LIMIT)
         .fetch_one(&state.pool)
         .await
         .map_err(AppError::Database)?
@@ -259,23 +270,32 @@ pub async fn search_issue_logs(
         .clamp(1, state.limits.api.max_search_results);
     let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
     let short_pattern = format!("%{}%", escape_like_pattern(search_term));
+    if search_term.chars().count() < 3 && from >= SHORT_SEARCH_SCAN_LIMIT {
+        return Err(AppError::BadRequest(
+            "短关键词搜索的分页范围不能超过扫描上限".into(),
+        ));
+    }
 
     let total: i64 = if search_term.chars().count() < 3 {
         sqlx::query_scalar(
             r#"
-        SELECT COUNT(*) FROM log_segments ls
+        SELECT COUNT(*) FROM (
+        SELECT ls.id FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN files f ON f.id = ls.file_id
         WHERE ls.content LIKE ? ESCAPE '\' COLLATE NOCASE
           AND b.issue_code = ?
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
+        LIMIT ?
+        )
         "#,
         )
         .bind(&short_pattern)
         .bind(&issue_code)
         .bind(&path_pattern)
         .bind(&path_pattern)
+        .bind(SHORT_SEARCH_SCAN_LIMIT)
         .fetch_one(&state.pool)
         .await
         .map_err(AppError::Database)?

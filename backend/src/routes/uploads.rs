@@ -33,7 +33,13 @@ pub async fn upload_logs(
     let temp_dir = state.data_root.join(".tmp").join(&upload_id);
     fs::create_dir_all(&temp_dir).await.map_err(AppError::Io)?;
 
-    let upload = match collect_multipart_upload(payload, &temp_dir).await {
+    let upload = match collect_multipart_upload(
+        payload,
+        &temp_dir,
+        state.limits.issue_max_content_size.saturating_mul(2),
+    )
+    .await
+    {
         Ok(upload) => upload,
         Err(error) => {
             let _ = fs::remove_dir_all(&temp_dir).await;
