@@ -52,23 +52,24 @@ pub(crate) async fn extract_gzip_file(
         let mut outfile = StdFile::create(&out_path)
             .map_err(|error| io_error_at("create gzip output", &out_path, error))?;
         let temp_budget = archive_budget.clone();
-        let copied = copy_with_limit(&mut decoder, &mut outfile, copy_limit, &temp_budget).map_err(|error| {
-            if matches!(error, AppError::BadRequest(_)) {
-                if remaining <= entry_limit {
-                    AppError::BadRequest(format!(
-                        "archive bundle exceeds configured extracted size; max bundle size {}",
-                        format_binary_size(archive_budget.config.max_extracted_size)
-                    ))
+        let copied = copy_with_limit(&mut decoder, &mut outfile, copy_limit, &temp_budget)
+            .map_err(|error| {
+                if matches!(error, AppError::BadRequest(_)) {
+                    if remaining <= entry_limit {
+                        AppError::BadRequest(format!(
+                            "archive bundle exceeds configured extracted size; max bundle size {}",
+                            format_binary_size(archive_budget.config.max_extracted_size)
+                        ))
+                    } else {
+                        AppError::BadRequest(format!(
+                            "archive entry exceeds configured limit; max entry size {}",
+                            format_binary_size(entry_limit)
+                        ))
+                    }
                 } else {
-                    AppError::BadRequest(format!(
-                        "archive entry exceeds configured limit; max entry size {}",
-                        format_binary_size(entry_limit)
-                    ))
+                    error
                 }
-            } else {
-                error
-            }
-        })?;
+            })?;
         archive_budget.reserve_bytes(copied)?;
         validate_archive_ratio(
             "gzip file",
