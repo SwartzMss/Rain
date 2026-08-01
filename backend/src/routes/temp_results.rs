@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use actix_files::NamedFile;
 use actix_web::{
@@ -32,6 +36,7 @@ use super::{
 };
 
 const RETENTION_DAYS: i64 = 7;
+const ORPHAN_GRACE_PERIOD: StdDuration = StdDuration::from_secs(10 * 60);
 const TEMP_RESULT_RATE_LIMIT: usize = 10;
 const TEMP_RESULT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 
@@ -796,17 +801,33 @@ async fn load_and_renew(
 }
 
 pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
-    let records = sqlx::query_as::<_, TempResultRecord>(
+    let deleting_records = sqlx::query_as::<_, TempResultRecord>(
         r#"
         SELECT id, name, expression, source_label, storage_path, line_count,
                size_bytes, created_at, expires_at
-        FROM temp_results WHERE status = 'ACTIVE' AND datetime(expires_at) < datetime('now')
+        FROM temp_results WHERE status = 'DELETING' ORDER BY created_at, id
         "#,
     )
     .fetch_all(&state.pool)
     .await
     .map_err(AppError::Database)?;
-    for record in records {
+    for record in deleting_records {
+        finish_deleting_temp_result(state, &record).await;
+    }
+
+    let expired_records = sqlx::query_as::<_, TempResultRecord>(
+        r#"
+        SELECT id, name, expression, source_label, storage_path, line_count,
+               size_bytes, created_at, expires_at
+        FROM temp_results
+        WHERE status = 'ACTIVE' AND datetime(expires_at) < datetime('now')
+        ORDER BY expires_at, id
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::Database)?;
+    for record in expired_records {
         let storage_path: Option<String> = sqlx::query_scalar(
             "UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'ACTIVE' AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path",
         )
@@ -818,40 +839,33 @@ pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), A
         let Some(storage_path) = storage_path else {
             continue;
         };
-        let path = match checked_temp_path(state, &storage_path) {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(result_id = %record.id, %error, "expired temporary result path is invalid; restoring record");
-                restore_temp_result(&state.pool, &record.id).await;
-                continue;
-            }
-        };
-        if let Err(error) = remove_result_files(&path).await {
-            tracing::warn!(result_id = %record.id, %error, "expired temporary result files could not be removed; restoring record");
-            restore_temp_result(&state.pool, &record.id).await;
-            continue;
-        }
-        if let Err(error) = sqlx::query("DELETE FROM temp_results WHERE id = ?")
-            .bind(&record.id)
-            .execute(&state.pool)
-            .await
-        {
-            tracing::warn!(result_id = %record.id, %error, "expired temporary result database record could not be removed");
-            restore_temp_result(&state.pool, &record.id).await;
-        }
+        let mut claimed = record;
+        claimed.storage_path = storage_path;
+        finish_deleting_temp_result(state, &claimed).await;
     }
+
+    cleanup_orphan_temp_files(state).await?;
     Ok(())
 }
 
-async fn restore_temp_result(pool: &sqlx::SqlitePool, id: &str) {
-    if let Err(error) = sqlx::query(
-        "UPDATE temp_results SET status = 'ACTIVE' WHERE id = ? AND status = 'DELETING'",
-    )
-    .bind(id)
-    .execute(pool)
-    .await
+async fn finish_deleting_temp_result(state: &web::Data<AppState>, record: &TempResultRecord) {
+    let path = match checked_temp_path(state, &record.storage_path) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(result_id = %record.id, %error, "temporary result path is invalid; keeping DELETING record");
+            return;
+        }
+    };
+    if let Err(error) = remove_result_files(&path).await {
+        tracing::warn!(result_id = %record.id, %error, "temporary result files could not be removed; keeping DELETING record");
+        return;
+    }
+    if let Err(error) = sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = 'DELETING'")
+        .bind(&record.id)
+        .execute(&state.pool)
+        .await
     {
-        tracing::warn!(result_id = %id, %error, "failed to restore temporary result status");
+        tracing::warn!(result_id = %record.id, %error, "temporary result database record could not be removed; keeping DELETING record");
     }
 }
 
@@ -892,6 +906,83 @@ async fn remove_preview_artifacts(log_path: &Path) -> Result<(), AppError> {
         }
     }
     Ok(())
+}
+
+async fn cleanup_orphan_temp_files(state: &web::Data<AppState>) -> Result<(), AppError> {
+    let root = data_root(state).join("temp-results");
+    let mut directory = match tokio::fs::read_dir(&root).await {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    let storage_paths: HashSet<String> =
+        sqlx::query_scalar("SELECT storage_path FROM temp_results")
+            .fetch_all(&state.pool)
+            .await
+            .map_err(AppError::Database)?
+            .into_iter()
+            .collect();
+    let cutoff = SystemTime::now()
+        .checked_sub(ORPHAN_GRACE_PERIOD)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut orphan_stems = HashSet::new();
+    while let Some(entry) = directory.next_entry().await.map_err(AppError::Io)? {
+        let path = entry.path();
+        let metadata = match entry.metadata().await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(AppError::Io(error)),
+        };
+        if metadata
+            .modified()
+            .ok()
+            .is_some_and(|modified| modified > cutoff)
+        {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if file_name.starts_with(".ready-") || file_name.ends_with(".part") {
+            remove_stale_file(&path).await;
+            continue;
+        }
+        if matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("log" | "meta" | "idx")
+        ) && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+        {
+            orphan_stems.insert(stem.to_string());
+        }
+    }
+    for stem in orphan_stems {
+        let log_path = root.join(format!("{stem}.log"));
+        if storage_paths.contains(&log_path.to_string_lossy().to_string()) {
+            continue;
+        }
+        for path in [
+            log_path,
+            root.join(format!("{stem}.meta")),
+            root.join(format!("{stem}.idx")),
+        ] {
+            remove_stale_file(&path).await;
+        }
+    }
+    Ok(())
+}
+
+async fn remove_stale_file(path: &Path) {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {
+            tracing::debug!(path = %path.display(), "removed stale temporary result artifact")
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "stale temporary result artifact could not be removed")
+        }
+    }
 }
 
 fn checked_temp_path(state: &web::Data<AppState>, stored_path: &str) -> Result<PathBuf, AppError> {
@@ -962,7 +1053,14 @@ fn to_response(record: TempResultRecord) -> TempResult {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use actix_web::web;
+    use chrono::{Duration, Utc};
+    use sqlx::sqlite::SqlitePoolOptions;
     use uuid::Uuid;
+
+    use crate::{AppState, config::AppLimits, db};
 
     use super::{checked_page_end, preview_page_size, read_indexed_lines, staging_path};
 
@@ -988,6 +1086,74 @@ mod tests {
             staging_path(final_path),
             std::path::PathBuf::from("temp-results/result.log.part")
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_recovers_from_each_deletion_checkpoint_after_restart() {
+        let root = std::env::temp_dir().join(format!("rain-temp-cleanup-{}", Uuid::new_v4()));
+        let temp_root = root.join("temp-results");
+        tokio::fs::create_dir_all(&temp_root).await.unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from(&root),
+            AppLimits::default(),
+        ));
+        let expired = (Utc::now() - Duration::days(1)).to_rfc3339();
+        let created = (Utc::now() - Duration::days(2)).to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('active-expired', 'ACTIVE', 'a.log', 'x', 'x', ?, 0, 10, ?, ?)",
+        )
+        .bind(temp_root.join("active-expired.log").to_string_lossy().to_string())
+        .bind(&created)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let deleting_log = temp_root.join("deleting.log");
+        tokio::fs::write(&deleting_log, "stale\n").await.unwrap();
+        tokio::fs::write(temp_root.join("deleting.meta"), "{}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(temp_root.join("deleting.idx"), "{}\n")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('deleting-files', 'DELETING', 'd.log', 'x', 'x', ?, 1, 10, ?, ?)",
+        )
+        .bind(deleting_log.to_string_lossy().to_string())
+        .bind(&created)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('deleting-missing', 'DELETING', 'm.log', 'x', 'x', ?, 0, 10, ?, ?)",
+        )
+        .bind(temp_root.join("deleting-missing.log").to_string_lossy().to_string())
+        .bind(&created)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        super::cleanup_expired(&state).await.unwrap();
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert!(!deleting_log.exists());
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]
