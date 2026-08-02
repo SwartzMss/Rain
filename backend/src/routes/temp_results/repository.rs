@@ -14,6 +14,22 @@ pub(crate) enum TransitionResult<T> {
     StateMismatch,
 }
 
+async fn classify_transition_failure(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<TransitionResult<()>, AppError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_results WHERE id = ?)")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(if exists {
+        TransitionResult::StateMismatch
+    } else {
+        TransitionResult::NotFound
+    })
+}
+
 impl TempResultStatus {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -98,7 +114,7 @@ pub(crate) async fn publish_temp_result(
     .await
     .map_err(AppError::Database)?;
     if updated.rows_affected() != 1 {
-        return Ok(TransitionResult::StateMismatch);
+        return classify_transition_failure(state, id).await;
     }
     Ok(TransitionResult::Applied(()))
 }
@@ -140,11 +156,11 @@ pub(crate) async fn claim_active_for_delete(
         .execute(&state.pool)
         .await
         .map_err(AppError::Database)?;
-    Ok(if updated.rows_affected() == 1 {
-        TransitionResult::Applied(())
+    if updated.rows_affected() == 1 {
+        Ok(TransitionResult::Applied(()))
     } else {
-        TransitionResult::StateMismatch
-    })
+        classify_transition_failure(state, id).await
+    }
 }
 
 pub(crate) async fn delete_deleting_record(
@@ -252,11 +268,11 @@ pub(crate) async fn renew_active(
             .execute(&state.pool)
             .await
             .map_err(AppError::Database)?;
-    Ok(if updated.rows_affected() == 1 {
-        TransitionResult::Applied(())
+    if updated.rows_affected() == 1 {
+        Ok(TransitionResult::Applied(()))
     } else {
-        TransitionResult::StateMismatch
-    })
+        classify_transition_failure(state, id).await
+    }
 }
 
 pub(crate) async fn list_deleting(
@@ -276,9 +292,17 @@ pub(crate) async fn claim_expired_active(
     id: &str,
     expires_at: &str,
 ) -> Result<TransitionResult<String>, AppError> {
-    sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
+    let value: Option<String> = sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
         .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Active.as_str()).bind(expires_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
-        .map(|value| value.map_or(TransitionResult::StateMismatch, TransitionResult::Applied))
+        ?;
+    match value {
+        Some(path) => Ok(TransitionResult::Applied(path)),
+        None => match classify_transition_failure(state, id).await? {
+            TransitionResult::NotFound => Ok(TransitionResult::NotFound),
+            TransitionResult::StateMismatch => Ok(TransitionResult::StateMismatch),
+            TransitionResult::Applied(()) => unreachable!(),
+        },
+    }
 }
 pub(crate) async fn list_stale_staging(
     state: &web::Data<AppState>,
@@ -291,9 +315,17 @@ pub(crate) async fn claim_stale_staging(
     id: &str,
     created_at: &str,
 ) -> Result<TransitionResult<String>, AppError> {
-    sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? RETURNING storage_path")
+    let value: Option<String> = sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? RETURNING storage_path")
         .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Staging.as_str()).bind(created_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
-        .map(|value| value.map_or(TransitionResult::StateMismatch, TransitionResult::Applied))
+        ?;
+    match value {
+        Some(path) => Ok(TransitionResult::Applied(path)),
+        None => match classify_transition_failure(state, id).await? {
+            TransitionResult::NotFound => Ok(TransitionResult::NotFound),
+            TransitionResult::StateMismatch => Ok(TransitionResult::StateMismatch),
+            TransitionResult::Applied(()) => unreachable!(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -307,8 +339,9 @@ mod tests {
     use crate::{AppState, config::AppLimits, db};
 
     use super::{
-        TempResultStatus, TransitionResult, claim_expired_active, claim_staging_for_delete,
-        delete_deleting_record, renew_active,
+        TempResultStatus, TransitionResult, claim_active_for_delete, claim_expired_active,
+        claim_staging_for_delete, delete_deleting_record, insert_staging_temp_result,
+        publish_temp_result, renew_active,
     };
 
     #[test]
@@ -387,6 +420,51 @@ mod tests {
         assert_eq!(
             delete_deleting_record(&state, "staging").await.unwrap(),
             TransitionResult::NotFound
+        );
+        assert_eq!(
+            claim_active_for_delete(&state, "staging").await.unwrap(),
+            TransitionResult::NotFound
+        );
+        assert_eq!(
+            claim_active_for_delete(&state, "missing").await.unwrap(),
+            TransitionResult::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_is_applied_once_and_classifies_missing_records() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool,
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let path = PathBuf::from("data/temp-results/publish.log");
+        assert_eq!(
+            publish_temp_result(&state, "missing01", "x", "x", &path, 0, 0)
+                .await
+                .unwrap(),
+            TransitionResult::NotFound
+        );
+        insert_staging_temp_result(&state, "publish01", "x", "x", &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            publish_temp_result(&state, "publish01", "x", "x", &path, 0, 0)
+                .await
+                .unwrap(),
+            TransitionResult::Applied(())
+        );
+        assert_eq!(
+            publish_temp_result(&state, "publish01", "x", "x", &path, 0, 0)
+                .await
+                .unwrap(),
+            TransitionResult::StateMismatch
         );
     }
 
