@@ -1,6 +1,7 @@
 use actix_web::{HttpResponse, delete, get, post, web};
 use serde::Deserialize;
 use sqlx::FromRow;
+use uuid::Uuid;
 
 use crate::{
     AppState,
@@ -14,6 +15,18 @@ use crate::{
 
 const ISSUE_CODE_MAX_LEN: usize = 64;
 const ISSUE_NAME_MAX_LEN: usize = 128;
+
+pub(crate) async fn touch_issue_activity(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE issues SET last_activity_at = CURRENT_TIMESTAMP WHERE code = ? AND status = 'ACTIVE' AND datetime(last_activity_at) < datetime('now', '-1 hour')")
+        .bind(code)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(())
+}
 
 pub fn normalize_issue_code(value: &str) -> Result<String, AppError> {
     let code = value.trim().to_uppercase();
@@ -179,7 +192,134 @@ pub async fn get_issue_bundles(
             .collect(),
     };
 
+    touch_issue_activity(&state.db.pool, &issue_code).await?;
+
     Ok(HttpResponse::Ok().json(response))
+}
+
+pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usize, AppError> {
+    let days = state
+        .issue_inactive_days
+        .load(std::sync::atomic::Ordering::Acquire);
+    if days == 0 {
+        return Ok(0);
+    }
+    let deleting: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT code, owner_user_id, last_activity_at FROM issues WHERE status='DELETING' AND deletion_reason='INACTIVE' ORDER BY code LIMIT 20",
+    )
+    .fetch_all(&state.db.pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut cleaned = 0usize;
+    for (code, owner, last_activity_at) in deleting {
+        match finish_auto_issue_deletion(
+            &state.db.pool,
+            &code,
+            owner.as_deref(),
+            &last_activity_at,
+            days,
+        )
+        .await
+        {
+            Ok(_) => cleaned += 1,
+            Err(error) => {
+                tracing::error!(issue_code = code, %error, "deleting issue recovery failed")
+            }
+        }
+    }
+    let modifier = format!("-{days} days");
+    let candidates: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT code, owner_user_id, last_activity_at FROM issues WHERE status='ACTIVE' AND datetime(last_activity_at) < datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM bundles WHERE bundles.issue_code=issues.code AND bundles.status IN ('PENDING','PROCESSING')) ORDER BY last_activity_at LIMIT 20",
+    )
+    .bind(&modifier)
+    .fetch_all(&state.db.pool)
+    .await
+    .map_err(AppError::Database)?;
+    for (code, owner, last_activity_at) in candidates {
+        if !claim_inactive_issue(&state.db.pool, &code, &modifier).await? {
+            continue;
+        }
+        match finish_auto_issue_deletion(
+            &state.db.pool,
+            &code,
+            owner.as_deref(),
+            &last_activity_at,
+            days,
+        )
+        .await
+        {
+            Ok(_) => cleaned += 1,
+            Err(error) => {
+                tracing::error!(issue_code = code, %error, "inactive issue cleanup failed")
+            }
+        }
+    }
+    Ok(cleaned)
+}
+
+async fn claim_inactive_issue(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+    modifier: &str,
+) -> Result<bool, AppError> {
+    let claimed = sqlx::query("UPDATE issues SET status='DELETING', deletion_reason='INACTIVE' WHERE code=? AND status='ACTIVE' AND datetime(last_activity_at) < datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM bundles WHERE bundles.issue_code=issues.code AND bundles.status IN ('PENDING','PROCESSING'))")
+        .bind(code)
+        .bind(modifier)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?
+        .rows_affected();
+    Ok(claimed == 1)
+}
+
+async fn finish_auto_issue_deletion(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+    owner: Option<&str>,
+    last_activity_at: &str,
+    days: usize,
+) -> Result<usize, AppError> {
+    let bundles: Vec<BundleIdRow> =
+        sqlx::query_as("SELECT id, issue_code, status FROM bundles WHERE issue_code = ?")
+            .bind(code)
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Database)?;
+    reject_processing_bundles(&bundles)?;
+    for bundle in &bundles {
+        if bundle.status != "DELETED" {
+            if bundle.status != "DELETING" {
+                sqlx::query(
+                    "UPDATE bundles SET status='DELETING', deleted_at=CURRENT_TIMESTAMP WHERE id=?",
+                )
+                .bind(&bundle.id)
+                .execute(pool)
+                .await
+                .map_err(AppError::Database)?;
+            }
+            finish_bundle_deletion(pool, &bundle.id).await?;
+        }
+    }
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
+        .bind(code)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+    sqlx::query("DELETE FROM issues WHERE code=? AND status='DELETING'")
+        .bind(code)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,action,old_value,new_value) VALUES(?,'SYSTEM','ISSUE_AUTO_EXPIRED',?,?)")
+        .bind(Uuid::new_v4().to_string())
+        .bind(format!("issue={code};owner={};last_activity_at={last_activity_at}", owner.unwrap_or("")))
+        .bind(format!("inactive_days={days};bundles={}", bundles.len()))
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+    tx.commit().await.map_err(AppError::Database)?;
+    Ok(bundles.len())
 }
 
 pub async fn require_issue_owner(
@@ -313,6 +453,8 @@ pub async fn delete_issue_bundle(
         }
     });
 
+    touch_issue_activity(&state.db.pool, &issue_code).await?;
+
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -325,7 +467,7 @@ pub async fn delete_issue(
     let issue_code =
         require_issue_owner_for_delete(&state.db.pool, &path.into_inner(), &user.0.id).await?;
     let claimed =
-        sqlx::query("UPDATE issues SET status = 'DELETING' WHERE code = ? AND status = 'ACTIVE'")
+        sqlx::query("UPDATE issues SET status = 'DELETING', deletion_reason = 'MANUAL' WHERE code = ? AND status = 'ACTIVE'")
             .bind(&issue_code)
             .execute(&state.db.pool)
             .await
@@ -361,6 +503,11 @@ pub async fn delete_issue(
     .map_err(AppError::Database)?;
 
     if bundles.is_empty() {
+        sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
+            .bind(&issue_code)
+            .execute(&state.db.pool)
+            .await
+            .map_err(AppError::Database)?;
         sqlx::query("DELETE FROM issues WHERE code = ?")
             .bind(&issue_code)
             .execute(&state.db.pool)
@@ -372,7 +519,7 @@ pub async fn delete_issue(
     if let Err(error) = reject_processing_bundles(&bundles) {
         if newly_claimed {
             sqlx::query(
-                "UPDATE issues SET status = 'ACTIVE' WHERE code = ? AND status = 'DELETING'",
+                "UPDATE issues SET status = 'ACTIVE', deletion_reason = NULL WHERE code = ? AND status = 'DELETING'",
             )
             .bind(&issue_code)
             .execute(&state.db.pool)
@@ -398,6 +545,11 @@ pub async fn delete_issue(
         finish_bundle_deletion(&state.db.pool, &bundle.id).await?;
     }
 
+    sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
+        .bind(&issue_code)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
     sqlx::query("DELETE FROM issues WHERE code = ?")
         .bind(&issue_code)
         .execute(&state.db.pool)
@@ -437,14 +589,20 @@ fn is_processing_bundle_status(status: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use actix_web::web;
     use sqlx::sqlite::SqlitePoolOptions;
 
     use crate::{
+        AppState,
+        config::AppLimits,
         db,
         repositories::users::{self, CreateUserOutcome},
     };
 
-    use super::{require_issue_owner, require_issue_owner_for_delete};
+    use super::{
+        claim_inactive_issue, cleanup_inactive_issues, require_issue_owner,
+        require_issue_owner_for_delete, touch_issue_activity,
+    };
 
     #[tokio::test]
     async fn issue_owner_checks_reject_null_and_foreign_users_and_allow_delete_retry() {
@@ -489,5 +647,147 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn activity_is_throttled_and_inactive_cleanup_skips_fresh_and_processing_issues() {
+        let pool = db::init_pool("sqlite::memory:").unwrap();
+        db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name,last_activity_at) VALUES ('OLD','Old',datetime('now','-3 days')),('FRESH','Fresh',CURRENT_TIMESTAMP),('BUSY','Busy',datetime('now','-3 days'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('busy-bundle','BUSY','busy-hash','busy','PROCESSING','INDEXING')")
+            .execute(&pool).await.unwrap();
+        let owner = match users::create_user(&pool, "cleanup-owner", "hash")
+            .await
+            .unwrap()
+        {
+            CreateUserOutcome::Created(user) => user,
+            CreateUserOutcome::DuplicateUsername => unreachable!(),
+        };
+        sqlx::query("UPDATE issues SET owner_user_id=? WHERE code='OLD'")
+            .bind(&owner.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO saved_searches(id,user_id,name,search_type,query_text,scope_type,scope_key) VALUES('saved-old',?,'old','DETAIL','x','ISSUE','OLD')")
+            .bind(&owner.id).execute(&pool).await.unwrap();
+        let before: String =
+            sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='FRESH'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        touch_issue_activity(&pool, "FRESH").await.unwrap();
+        let after: String =
+            sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='FRESH'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        sqlx::query(
+            "UPDATE issues SET last_activity_at=datetime('now','-2 hours') WHERE code='FRESH'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stale: String =
+            sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='FRESH'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        touch_issue_activity(&pool, "FRESH").await.unwrap();
+        let refreshed: String =
+            sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='FRESH'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_ne!(refreshed, stale);
+
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            "data".into(),
+            AppLimits::default(),
+        ));
+        assert_eq!(cleanup_inactive_issues(&state).await.unwrap(), 0);
+        state
+            .issue_inactive_days
+            .store(1, std::sync::atomic::Ordering::Release);
+        assert_eq!(cleanup_inactive_issues(&state).await.unwrap(), 1);
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT code FROM issues ORDER BY code")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, vec!["BUSY", "FRESH"]);
+        let audit: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_logs WHERE action='ISSUE_AUTO_EXPIRED'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audit, 1);
+        let saved: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM saved_searches WHERE scope_key='OLD'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(saved, 0);
+
+        sqlx::query("INSERT INTO issues(code,name,status,last_activity_at,deletion_reason) VALUES ('RECOVER','Recover','DELETING',datetime('now','-3 days'),'INACTIVE'),('MANUAL','Manual','DELETING',datetime('now','-3 days'),'MANUAL')")
+            .execute(&pool).await.unwrap();
+        assert_eq!(cleanup_inactive_issues(&state).await.unwrap(), 1);
+        let deleting: Vec<String> =
+            sqlx::query_scalar("SELECT code FROM issues WHERE status='DELETING' ORDER BY code")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(deleting, vec!["MANUAL"]);
+
+        sqlx::query("INSERT INTO issues(code,name,last_activity_at) VALUES ('FAIL','Fail',datetime('now','-5 days')),('GOOD','Good',datetime('now','-4 days'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_fail_issue_delete BEFORE DELETE ON issues WHEN OLD.code='FAIL' BEGIN SELECT RAISE(FAIL, 'forced cleanup failure'); END")
+            .execute(&pool).await.unwrap();
+        assert_eq!(cleanup_inactive_issues(&state).await.unwrap(), 1);
+        let failed_status: String =
+            sqlx::query_scalar("SELECT status FROM issues WHERE code='FAIL'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(failed_status, "DELETING");
+        let good_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE code='GOOD'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(good_exists, 0);
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_logs WHERE action='ISSUE_AUTO_EXPIRED'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 3);
+    }
+
+    #[tokio::test]
+    async fn inactive_issue_claim_is_single_winner() {
+        let pool = db::init_pool("sqlite:file:issue-claim?mode=memory&cache=shared").unwrap();
+        db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name,last_activity_at) VALUES('RACE','Race',datetime('now','-3 days'))")
+            .execute(&pool).await.unwrap();
+        let (first, second) = tokio::join!(
+            claim_inactive_issue(&pool, "RACE", "-1 days"),
+            claim_inactive_issue(&pool, "RACE", "-1 days")
+        );
+        assert_eq!(
+            [first.unwrap(), second.unwrap()]
+                .into_iter()
+                .filter(|won| *won)
+                .count(),
+            1
+        );
+        let state: (String, Option<String>) =
+            sqlx::query_as("SELECT status,deletion_reason FROM issues WHERE code='RACE'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, ("DELETING".into(), Some("INACTIVE".into())));
     }
 }

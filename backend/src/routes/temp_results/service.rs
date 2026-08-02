@@ -306,6 +306,9 @@ pub(crate) async fn create_preview_result(
         },
     )
     .await?;
+    if let Some(issue_code) = payload.issue_code.as_deref() {
+        touch_issue_activity(&state.db.pool, &normalize_issue_code(issue_code)?).await?;
+    }
     Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
         result_id: outcome.id,
         total: outcome.total,
@@ -345,6 +348,9 @@ pub(crate) async fn create_full_result(
         MaterializeMode::Full,
     )
     .await?;
+    if let Some(issue_code) = payload.issue_code.as_deref() {
+        touch_issue_activity(&state.db.pool, &normalize_issue_code(issue_code)?).await?;
+    }
     let result = load_and_renew(&state, &outcome.id).await?;
     Ok(HttpResponse::Created().json(to_response(result)))
 }

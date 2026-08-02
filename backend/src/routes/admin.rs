@@ -272,7 +272,7 @@ pub async fn get_settings(
     )
     .await?;
     let settings = sqlx::query_as::<_, RegistrationSettings>(
-        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
+        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes, s.issue_inactive_days FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
     ).fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "allow_registration": settings.allow_registration != 0,
@@ -280,6 +280,7 @@ pub async fn get_settings(
         "updated_by_username": settings.updated_by_username,
         "login_ip_limit_per_minute": settings.login_ip_limit_per_minute,
         "login_username_failure_limit_per_5_minutes": settings.login_username_failure_limit_per_5_minutes,
+        "issue_inactive_days": settings.issue_inactive_days,
     })))
 }
 
@@ -291,7 +292,7 @@ pub async fn update_settings(
     body: web::Json<UpdateRegistrationSettings>,
 ) -> Result<HttpResponse, AppError> {
     let _settings_guard = state.auth_runtime.registration_settings_lock.lock().await;
-    let old: (i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes FROM system_settings WHERE id=1")
+    let old: (i64, i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days FROM system_settings WHERE id=1")
         .fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
         .bind(state.auth_runtime.registration_allowed() as i64)
@@ -319,10 +320,18 @@ pub async fn update_settings(
             "IP 限流阈值必须为 1 到 1000，用户名限流阈值必须为 1 到 100",
         ));
     }
+    let issue_inactive_days = body.issue_inactive_days.unwrap_or(old.3 as usize);
+    if issue_inactive_days > 30 {
+        return Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ISSUE_INACTIVE_DAYS",
+            "Issue 非活跃天数必须为 0 到 30",
+        ));
+    }
     let mut settings_tx = state.db.pool.begin().await.map_err(AppError::Database)?;
     let allow_registration = body.allow_registration.unwrap_or(old.0 != 0);
-    sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
-        .bind(allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
+    sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, issue_inactive_days=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
+        .bind(allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(issue_inactive_days as i64).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
     let mut changes = Vec::new();
     if old.0 != allow_registration as i64 {
         changes.push(format!(
@@ -337,9 +346,24 @@ pub async fn update_settings(
     if old.2 != username_limit as i64 {
         changes.push(format!("username_limit:{}->{username_limit}", old.2));
     }
-    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?, 'AUTH_SETTINGS_UPDATED', ?, ?, ?, ?)")
-        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id)
-        .bind(format!("registration={};ip_limit={};username_limit={}", old.0 != 0, old.1, old.2))
+    if old.3 != issue_inactive_days as i64 {
+        changes.push(format!(
+            "issue_inactive_days:{}->{issue_inactive_days}",
+            old.3
+        ));
+    }
+    let action = if body.issue_inactive_days.is_some()
+        && body.allow_registration.is_none()
+        && body.login_ip_limit_per_minute.is_none()
+        && body.login_username_failure_limit_per_5_minutes.is_none()
+    {
+        "ISSUE_INACTIVE_SETTINGS_UPDATED"
+    } else {
+        "AUTH_SETTINGS_UPDATED"
+    };
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?, ?, ?, ?, ?, ?)")
+        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(action)
+        .bind(format!("registration={};ip_limit={};username_limit={};issue_inactive_days={}", old.0 != 0, old.1, old.2, old.3))
         .bind(changes.join(";"))
         .bind(req.peer_addr().map(|a| a.ip().to_string()))
         .bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok()))
@@ -356,8 +380,11 @@ pub async fn update_settings(
         .auth_runtime
         .login_username_failure_limit_per_5_minutes
         .store(username_limit, std::sync::atomic::Ordering::Release);
+    state
+        .issue_inactive_days
+        .store(issue_inactive_days, std::sync::atomic::Ordering::Release);
     let settings = sqlx::query_as::<_, RegistrationSettings>(
-        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
+        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes, s.issue_inactive_days FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
     ).fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "allow_registration": settings.allow_registration != 0,
@@ -365,6 +392,7 @@ pub async fn update_settings(
         "updated_by_username": settings.updated_by_username,
         "login_ip_limit_per_minute": settings.login_ip_limit_per_minute,
         "login_username_failure_limit_per_5_minutes": settings.login_username_failure_limit_per_5_minutes,
+        "issue_inactive_days": settings.issue_inactive_days,
     })))
 }
 

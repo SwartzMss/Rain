@@ -499,6 +499,7 @@ pub struct AppConfig {
     pub log_dir: PathBuf,
     pub reset_db: bool,
     pub retention_days: Option<u64>,
+    pub issue_inactive_days: usize,
     pub limits: AppLimits,
     pub auth: AuthConfig,
     pub bootstrap_admin: BootstrapAdminConfig,
@@ -541,6 +542,8 @@ impl AppConfig {
             }
             _ => None,
         };
+        let issue_inactive_days =
+            parse_issue_inactive_days(env::var("RAIN_ISSUE_INACTIVE_DAYS").ok().as_deref())?;
 
         let limits = AppLimits::from_env()?;
         let auth = AuthConfig::from_env()?;
@@ -562,11 +565,24 @@ impl AppConfig {
             log_dir,
             reset_db,
             retention_days,
+            issue_inactive_days,
             limits,
             auth,
             bootstrap_admin,
         })
     }
+}
+
+fn parse_issue_inactive_days(value: Option<&str>) -> Result<usize, AppError> {
+    let days = value.unwrap_or("0").parse::<usize>().map_err(|_| {
+        AppError::Config("RAIN_ISSUE_INACTIVE_DAYS must be an integer between 0 and 30".into())
+    })?;
+    if days > 30 {
+        return Err(AppError::Config(
+            "RAIN_ISSUE_INACTIVE_DAYS must be an integer between 0 and 30".into(),
+        ));
+    }
+    Ok(days)
 }
 
 #[cfg(test)]
@@ -575,7 +591,19 @@ mod tests {
 
     use super::{
         AppLimits, ArchiveConfig, AuthConfig, dotenv_path_for_executable, parse_byte_size,
+        parse_issue_inactive_days,
     };
+
+    #[test]
+    fn issue_inactive_days_accepts_only_zero_through_thirty() {
+        assert_eq!(parse_issue_inactive_days(None).unwrap(), 0);
+        assert_eq!(parse_issue_inactive_days(Some("0")).unwrap(), 0);
+        assert_eq!(parse_issue_inactive_days(Some("1")).unwrap(), 1);
+        assert_eq!(parse_issue_inactive_days(Some("30")).unwrap(), 30);
+        for invalid in ["-1", "31", "1.5", "disabled"] {
+            assert!(parse_issue_inactive_days(Some(invalid)).is_err());
+        }
+    }
 
     #[test]
     fn resolves_dotenv_next_to_executable() {

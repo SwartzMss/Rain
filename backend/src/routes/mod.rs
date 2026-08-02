@@ -33,6 +33,25 @@ pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) -> tokio::ta
     )
 }
 
+pub fn spawn_inactive_issue_cleanup(
+    state: web::Data<crate::AppState>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "inactive-issue-cleanup",
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(60 * 60),
+        move || {
+            let state = state.clone();
+            async move {
+                issues::cleanup_inactive_issues(&state)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        },
+    )
+}
+
 async fn prevent_session_response_caching(
     request: ServiceRequest,
     next: Next<impl MessageBody>,

@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-use super::issues::{normalize_issue_code, require_issue_owner};
+use super::issues::{normalize_issue_code, require_issue_owner, touch_issue_activity};
 
 // scoped under /api in routes::register, so use relative path
 #[post("/issues/{issue_code}/uploads")]
@@ -155,6 +155,7 @@ pub async fn upload_logs(
     });
 
     drop(receive_permit);
+    touch_issue_activity(&state.db.pool, &issue_code).await?;
 
     Ok(
         HttpResponse::build(StatusCode::ACCEPTED).json(UploadResponse {
@@ -207,6 +208,7 @@ pub async fn get_upload_task(
         UploadStatus::Processing => 0,
         UploadStatus::Pending => 0,
     };
+    touch_issue_activity(&state.db.pool, &row.issue_code).await?;
 
     Ok(HttpResponse::Ok().json(UploadTaskResponse {
         task_id: row.hash.clone(),

@@ -32,7 +32,7 @@ use crate::{
 
 use super::{
     helpers::{data_root, ensure_bundle_ready, load_bundle},
-    issues::normalize_issue_code,
+    issues::{normalize_issue_code, touch_issue_activity},
 };
 
 const RETENTION_DAYS: i64 = 7;

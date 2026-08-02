@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
-use super::issues::require_issue_owner;
+use super::issues::{require_issue_owner, touch_issue_activity};
 
 #[derive(Deserialize)]
 struct FilePath {
@@ -81,6 +81,7 @@ pub async fn get_file_node(
     };
     let children_records = fetch_children(&state.db.pool, &bundle.id, parent_id).await?;
     let children = children_records.into_iter().map(to_file_node).collect();
+    touch_issue_activity(&state.db.pool, &bundle.issue_code).await?;
 
     Ok(HttpResponse::Ok().json(FileNodeResponse { node, children }))
 }
@@ -103,6 +104,7 @@ pub async fn get_file_content(
         &state.limits.api,
     )
     .await?;
+    touch_issue_activity(&state.db.pool, &bundle.issue_code).await?;
     Ok(HttpResponse::Ok().json(preview))
 }
 
@@ -133,6 +135,7 @@ pub async fn get_file_lines(
         limit,
     )
     .await?;
+    touch_issue_activity(&state.db.pool, &bundle.issue_code).await?;
 
     Ok(HttpResponse::Ok().json(lines))
 }
@@ -170,6 +173,7 @@ pub async fn download_file(
                 DispositionParam::Filename(fallback_name),
             ],
         });
+    touch_issue_activity(&state.db.pool, &bundle.issue_code).await?;
     Ok(named)
 }
 
@@ -206,6 +210,7 @@ pub async fn delete_file_node(
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
     let _record = fetch_file(&state.db.pool, &bundle.id, parsed_id).await?;
     delete_file_tree(&state.db.pool, &bundle.id, parsed_id).await?;
+    touch_issue_activity(&state.db.pool, &bundle.issue_code).await?;
 
     Ok(HttpResponse::NoContent().finish())
 }
