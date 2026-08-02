@@ -179,18 +179,28 @@ function AdminPageHeader({
           <p className="mt-1 text-sm leading-6 text-slate-500">{description}</p>
         </div>
       </div>
-      {actions ? <div className="shrink-0">{actions}</div> : null}
+      {actions ? (
+        <div className="w-full lg:w-auto lg:shrink-0" data-testid="admin-page-actions">
+          {actions}
+        </div>
+      ) : null}
     </>
   );
   if (embedded) {
     return (
-      <div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+      <div
+        className="flex flex-col gap-4 border-b border-slate-100 px-5 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between"
+        data-testid="admin-page-header"
+      >
         {content}
       </div>
     );
   }
   return (
-    <section className="flex flex-col gap-4 rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur sm:flex-row sm:items-center sm:justify-between sm:p-6">
+    <section
+      className="flex flex-col gap-4 rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur sm:p-6 lg:flex-row lg:items-center lg:justify-between"
+      data-testid="admin-page-header"
+    >
       {content}
     </section>
   );
@@ -900,11 +910,13 @@ export function AdminUsersPage() {
           </p>
         ) : null}
         <div className="mx-5 my-4 overflow-x-auto rounded-xl border border-slate-200">
-          <table className="w-full min-w-[860px] text-left text-sm">
+          <table className="w-full min-w-[980px] text-left text-sm">
             <thead className="bg-slate-50 text-xs font-semibold text-slate-500">
               <tr className="border-b border-slate-200">
                 <th className="px-4 py-3">用户名</th>
                 <th className="px-4 py-3">状态</th>
+                <th className="px-4 py-3">Issue 数</th>
+                <th className="px-4 py-3">占用容量</th>
                 <th className="px-4 py-3">活跃会话</th>
                 <th className="px-4 py-3">创建时间</th>
                 <th className="px-4 py-3">最近登录</th>
@@ -916,14 +928,14 @@ export function AdminUsersPage() {
                 <tr>
                   <td
                     className="py-12 text-center text-sm text-slate-500"
-                    colSpan={6}
+                    colSpan={8}
                   >
                     用户加载中…
                   </td>
                 </tr>
               ) : users.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={8}>
                     <EmptyState
                       title="暂无匹配的普通用户"
                       description="请尝试调整搜索条件或状态筛选"
@@ -1017,6 +1029,12 @@ function UserRow({
         </span>
       </td>
       <td className="px-4 py-3.5 font-medium tabular-nums text-slate-700">
+        {user.issue_count}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3.5 font-medium tabular-nums text-slate-700">
+        {formatBytes(user.storage_bytes)}
+      </td>
+      <td className="px-4 py-3.5 font-medium tabular-nums text-slate-700">
         {user.active_session_count}
       </td>
       <td className="whitespace-nowrap px-4 py-3.5 tabular-nums text-slate-600">
@@ -1062,6 +1080,19 @@ function UserRow({
   );
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = "B";
+  for (const nextUnit of units) {
+    value /= 1024;
+    unit = nextUnit;
+    if (value < 1024 || nextUnit === "TiB") break;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${unit}`;
+}
+
 export function AuditLogsPage() {
   const auth = useAuth();
   const [logs, setLogs] = useState<AuditLog[]>([]);
@@ -1105,7 +1136,10 @@ export function AuditLogsPage() {
           description="查看管理员对用户、会话和系统配置执行的安全操作。"
           embedded
           actions={
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div
+              className="grid w-full grid-cols-2 gap-2 lg:w-auto lg:grid-cols-4"
+              data-testid="audit-metrics"
+            >
               <AuditMetric label="本页事件" value={logs.length} tone="indigo" />
               <AuditMetric
                 label="本页今日操作"
