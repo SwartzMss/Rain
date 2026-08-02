@@ -1,5 +1,5 @@
 import { createRef } from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { IssueSelector } from '../src/features/files/components/IssueSelector';
 import { UploadFileTable } from '../src/features/files/components/UploadFileTable';
@@ -28,6 +28,22 @@ describe('write permission behavior', () => {
     expect(screen.queryByRole('button', { name: /新建 Issue/ })).not.toBeInTheDocument();
     rerender(<IssueSelector {...issueProps(true)} />);
     expect(screen.getByRole('button', { name: /新建 Issue/ })).toBeInTheDocument();
+  });
+
+  it('keeps the double-click hint in the Issue list', () => {
+    const props = { ...issueProps(false), filteredIssues: [
+      { code: 'OWNED', name: 'Owned', bundle_count: 0, can_write: false, owner_username: 'owner' },
+      { code: 'UNKNOWN', name: 'Unknown', bundle_count: 0, can_write: false, owner_username: null }
+    ] };
+    render(<IssueSelector {...props} />);
+    expect(screen.getAllByText('双击查看日志')).toHaveLength(2);
+  });
+
+  it('keeps double-click navigation for an Issue', () => {
+    const onViewIssue = vi.fn();
+    render(<IssueSelector {...issueProps(false)} filteredIssues={[{ code: 'ISSUE', name: 'Issue', bundle_count: 0, can_write: false, owner_username: 'owner' }]} onViewIssue={onViewIssue} />);
+    fireEvent.doubleClick(screen.getByRole('button', { name: /ISSUE/ }));
+    expect(onViewIssue).toHaveBeenCalledWith('ISSUE');
   });
 
   it('shows file deletion only for a writable authenticated user', async () => {

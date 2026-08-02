@@ -43,6 +43,7 @@ pub struct UploadStatusWrapper {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueBundlesResponse {
     pub name: String,
+    pub owner_username: Option<String>,
     pub can_write: bool,
     #[serde(rename = "log_bundles")]
     pub log_bundles: Vec<UploadSummary>,
@@ -54,6 +55,7 @@ pub struct IssueSummary {
     pub name: String,
     pub bundle_count: i64,
     pub can_write: bool,
+    pub owner_username: Option<String>,
 }
 
 impl UploadStatus {
