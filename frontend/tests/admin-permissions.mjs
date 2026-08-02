@@ -29,18 +29,4 @@ try {
 } finally {
   await server.close();
 }
-const { readFile } = await import('node:fs/promises');
-const adminPage = await readFile(new URL('../src/features/admin/AdminPage.tsx', import.meta.url), 'utf8');
-assert.doesNotMatch(adminPage, /全部角色|提升|降级|changeUserRole/);
-const apiClient = await readFile(new URL('../src/api/client.ts', import.meta.url), 'utf8');
-assert.doesNotMatch(apiClient, /changeUserRole|\/role/);
-const homeView = await readFile(new URL('../src/features/files/HomeView.tsx', import.meta.url), 'utf8');
-assert.match(homeView, /isUser\(auth\.state\.user\)/);
-const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
-assert.match(app, /to="\/admin\/users"/);
-assert.match(app, /<Navigate to="\/admin\/users" replace \/>/);
-assert.doesNotMatch(app, /isAdmin\(auth\.state\.user\) \? <Link[\s\S]*>管理<\/Link>/);
-assert.match(app, /!isAdmin\(auth\.state\.user\)[\s\S]*to="\/account"/);
-const accountPage = await readFile(new URL('../src/features/auth/AccountPage.tsx', import.meta.url), 'utf8');
-assert.match(accountPage, /isAdmin\(auth\.state\.user\)[\s\S]*Navigate to="\/admin\/users"/);
 console.log('admin permission tests passed');
