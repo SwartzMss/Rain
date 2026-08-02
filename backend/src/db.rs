@@ -292,6 +292,8 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             allow_registration INTEGER NOT NULL CHECK (allow_registration IN (0, 1)),
             updated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            ,login_ip_limit_per_minute INTEGER NOT NULL DEFAULT 20 CHECK (login_ip_limit_per_minute BETWEEN 1 AND 1000)
+            ,login_username_failure_limit_per_5_minutes INTEGER NOT NULL DEFAULT 10 CHECK (login_username_failure_limit_per_5_minutes BETWEEN 1 AND 100)
         )
         "#,
         r#"
@@ -544,17 +546,36 @@ pub async fn load_or_initialize_registration_setting(
     pool: &SqlitePool,
     default_value: bool,
 ) -> Result<bool, AppError> {
-    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
-        .bind(default_value as i64)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
-    let value: i64 =
-        sqlx::query_scalar("SELECT allow_registration FROM system_settings WHERE id=1")
-            .fetch_one(pool)
-            .await
-            .map_err(AppError::Database)?;
+    let (value, _, _) = load_or_initialize_auth_settings(pool, default_value, 20, 10).await?;
     Ok(value != 0)
+}
+
+pub async fn load_or_initialize_rate_limits(
+    pool: &SqlitePool,
+    ip: usize,
+    username: usize,
+) -> Result<(usize, usize), AppError> {
+    let (_, ip, username) = load_or_initialize_auth_settings(pool, true, ip, username).await?;
+    Ok((ip, username))
+}
+
+pub async fn load_or_initialize_auth_settings(
+    pool: &SqlitePool,
+    allow_registration: bool,
+    ip: usize,
+    username: usize,
+) -> Result<(i64, usize, usize), AppError> {
+    let ip = i64::try_from(ip).map_err(|_| AppError::Config("IP 限流阈值过大".into()))?;
+    let username =
+        i64::try_from(username).map_err(|_| AppError::Config("用户名限流阈值过大".into()))?;
+    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes) VALUES(1, ?, ?, ?)")
+        .bind(allow_registration as i64).bind(ip).bind(username).execute(pool).await.map_err(AppError::Database)?;
+    let row: (i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes FROM system_settings WHERE id=1").fetch_one(pool).await.map_err(AppError::Database)?;
+    let ip = usize::try_from(row.1)
+        .map_err(|_| AppError::Config("数据库中的 IP 限流阈值无效".into()))?;
+    let username = usize::try_from(row.2)
+        .map_err(|_| AppError::Config("数据库中的用户名限流阈值无效".into()))?;
+    Ok((row.0, ip, username))
 }
 
 #[cfg(test)]

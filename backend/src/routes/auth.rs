@@ -121,6 +121,22 @@ fn check_rate_limit(
     check_rate_limit_at(state, policy, key, limit, window, record, Instant::now())
 }
 
+fn check_login_rate_limit(
+    state: &AppState,
+    policy: AuthRateLimitPolicy,
+    key: &str,
+    limit: usize,
+    window: StdDuration,
+    record: bool,
+    enabled: bool,
+) -> Result<(), AppError> {
+    if enabled {
+        check_rate_limit(state, policy, key, limit, window, record)
+    } else {
+        Ok(())
+    }
+}
+
 fn check_rate_limit_at(
     state: &AppState,
     policy: AuthRateLimitPolicy,
@@ -297,25 +313,36 @@ pub async fn login(
     state: web::Data<AppState>,
     payload: web::Json<CredentialsRequest>,
 ) -> Result<HttpResponse, AppError> {
+    let normalized_username = normalize_username(&payload.username);
+    let is_admin = state
+        .auth_runtime
+        .admin_username_normalized
+        .get()
+        .is_some_and(|admin| admin == &normalized_username);
     let username_key = username_failure_key(&payload.username);
-    check_rate_limit(
+    check_login_rate_limit(
         &state,
         AuthRateLimitPolicy::LoginIp,
         &client_rate_limit_key(&request, "login"),
-        state.auth_runtime.config.login_ip_limit_per_minute,
+        state
+            .auth_runtime
+            .login_ip_limit_per_minute
+            .load(std::sync::atomic::Ordering::Acquire),
         LOGIN_IP_WINDOW,
         true,
+        !is_admin,
     )?;
-    check_rate_limit(
+    check_login_rate_limit(
         &state,
         AuthRateLimitPolicy::LoginUsernameFailure,
         &username_key,
         state
             .auth_runtime
-            .config
-            .login_username_failure_limit_per_5_minutes,
+            .login_username_failure_limit_per_5_minutes
+            .load(std::sync::atomic::Ordering::Acquire),
         LOGIN_USERNAME_FAILURE_WINDOW,
         false,
+        !is_admin,
     )?;
     let credentials_valid = validate_username(&payload.username).is_ok()
         && validate_password(&payload.password).is_ok();
@@ -325,16 +352,17 @@ pub async fn login(
             dummy_password_for_credentials(&payload.password, credentials_valid),
         )
         .await?;
-        check_rate_limit(
+        check_login_rate_limit(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
             state
                 .auth_runtime
-                .config
-                .login_username_failure_limit_per_5_minutes,
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire),
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
+            !is_admin,
         )?;
         return Err(invalid_credentials());
     }
@@ -345,16 +373,17 @@ pub async fn login(
             dummy_password_for_credentials(&payload.password, credentials_valid),
         )
         .await?;
-        check_rate_limit(
+        check_login_rate_limit(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
             state
                 .auth_runtime
-                .config
-                .login_username_failure_limit_per_5_minutes,
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire),
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
+            !is_admin,
         )?;
         return Err(invalid_credentials());
     };
@@ -364,16 +393,17 @@ pub async fn login(
             dummy_password_for_credentials(&payload.password, credentials_valid),
         )
         .await?;
-        check_rate_limit(
+        check_login_rate_limit(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
             state
                 .auth_runtime
-                .config
-                .login_username_failure_limit_per_5_minutes,
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire),
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
+            !is_admin,
         )?;
         return Err(invalid_credentials());
     }
@@ -382,16 +412,17 @@ pub async fn login(
     let password_hash = user.password_hash.clone();
     let verified = run_argon2(&state, move || verify_password(&password, &password_hash)).await?;
     if !verified {
-        check_rate_limit(
+        check_login_rate_limit(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
             state
                 .auth_runtime
-                .config
-                .login_username_failure_limit_per_5_minutes,
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire),
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
+            !is_admin,
         )?;
         return Err(invalid_credentials());
     }

@@ -44,11 +44,28 @@ pub struct RegistrationSettings {
     pub allow_registration: i64,
     pub updated_at: String,
     pub updated_by_username: Option<String>,
+    pub login_ip_limit_per_minute: i64,
+    pub login_username_failure_limit_per_5_minutes: i64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateRegistrationSettings {
-    pub allow_registration: bool,
+    pub allow_registration: Option<bool>,
+    pub login_ip_limit_per_minute: Option<usize>,
+    pub login_username_failure_limit_per_5_minutes: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthRateLimitEntry {
+    pub key: String,
+    pub username: Option<String>,
+    pub ip: Option<String>,
+    pub current_count: usize,
+    pub limit: usize,
+    pub window_seconds: u64,
+    pub last_event_at: Option<String>,
+    pub retry_after_seconds: u64,
+    pub limited: bool,
 }
 
 #[derive(Debug, Deserialize)]

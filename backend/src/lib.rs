@@ -11,13 +11,14 @@ pub mod routes;
 pub mod services;
 pub mod upload;
 
+use chrono::{DateTime, Utc};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -30,7 +31,8 @@ use crate::config::{AppLimits, AuthConfig};
 
 pub struct AuthRateLimitBucket {
     window: Duration,
-    events: VecDeque<Instant>,
+    pub events: VecDeque<Instant>,
+    pub event_times: VecDeque<DateTime<Utc>>,
 }
 
 impl AuthRateLimitBucket {
@@ -38,6 +40,7 @@ impl AuthRateLimitBucket {
         Self {
             window,
             events: VecDeque::new(),
+            event_times: VecDeque::new(),
         }
     }
 
@@ -48,6 +51,7 @@ impl AuthRateLimitBucket {
             .is_some_and(|timestamp| now.duration_since(*timestamp) >= self.window)
         {
             self.events.pop_front();
+            self.event_times.pop_front();
         }
     }
 
@@ -61,6 +65,7 @@ impl AuthRateLimitBucket {
 
     pub fn push(&mut self, timestamp: Instant) {
         self.events.push_back(timestamp);
+        self.event_times.push_back(Utc::now());
     }
 
     pub fn set_window(&mut self, window: Duration) {
@@ -125,20 +130,28 @@ impl TempResultRuntime {
 pub struct AuthRuntime {
     pub config: AuthConfig,
     pub allow_registration: AtomicBool,
+    pub login_ip_limit_per_minute: AtomicUsize,
+    pub login_username_failure_limit_per_5_minutes: AtomicUsize,
     pub registration_settings_lock: Arc<AsyncMutex<()>>,
     pub hash_permits: Arc<Semaphore>,
     pub rate_limits: Arc<Mutex<AuthRateLimits>>,
+    pub admin_username_normalized: Arc<OnceLock<String>>,
 }
 
 impl AuthRuntime {
     pub fn new(config: AuthConfig) -> Self {
         let allow_registration = config.allow_registration;
+        let ip_limit = config.login_ip_limit_per_minute;
+        let username_limit = config.login_username_failure_limit_per_5_minutes;
         Self {
             hash_permits: Arc::new(Semaphore::new(config.argon2_concurrency)),
             config,
             allow_registration: AtomicBool::new(allow_registration),
+            login_ip_limit_per_minute: AtomicUsize::new(ip_limit),
+            login_username_failure_limit_per_5_minutes: AtomicUsize::new(username_limit),
             registration_settings_lock: Arc::new(AsyncMutex::new(())),
             rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
+            admin_username_normalized: Arc::new(OnceLock::new()),
         }
     }
 

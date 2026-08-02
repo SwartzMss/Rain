@@ -1,6 +1,7 @@
-use actix_web::{HttpRequest, HttpResponse, get, http::StatusCode, patch, post, web};
+use actix_web::{HttpRequest, HttpResponse, delete, get, http::StatusCode, patch, post, web};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sqlx::{QueryBuilder, Sqlite};
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::{
@@ -51,6 +52,215 @@ fn parse_status(value: &str) -> Result<UserStatus, AppError> {
     })
 }
 
+#[get("/admin/auth-rate-limits")]
+pub async fn auth_rate_limits(
+    _admin: RequireAdmin,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let now = Instant::now();
+    let mut limits = state
+        .auth_runtime
+        .rate_limits
+        .lock()
+        .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+    let username_limit = state
+        .auth_runtime
+        .login_username_failure_limit_per_5_minutes
+        .load(std::sync::atomic::Ordering::Acquire);
+    let ip_limit = state
+        .auth_runtime
+        .login_ip_limit_per_minute
+        .load(std::sync::atomic::Ordering::Acquire);
+    let mut usernames = Vec::new();
+    limits.login_username_failure.retain(|_, bucket| {
+        bucket.prune(now);
+        !bucket.events.is_empty()
+    });
+    for (key, bucket) in &mut limits.login_username_failure {
+        let retry_from = if bucket.events.len() >= username_limit {
+            bucket
+                .events
+                .get(bucket.events.len() - username_limit)
+                .copied()
+        } else {
+            None
+        };
+        usernames.push(AuthRateLimitEntry {
+            key: key.clone(),
+            username: Some(
+                key.strip_prefix("login:username:")
+                    .unwrap_or(key)
+                    .to_owned(),
+            ),
+            ip: None,
+            current_count: bucket.events.len(),
+            limit: username_limit,
+            window_seconds: 300,
+            last_event_at: bucket.event_times.back().map(ToString::to_string),
+            retry_after_seconds: retry_from
+                .map(|event| 300u64.saturating_sub(now.duration_since(event).as_secs()))
+                .unwrap_or(0),
+            limited: bucket.events.len() >= username_limit,
+        });
+    }
+    let mut ips = Vec::new();
+    limits.login_ip.retain(|_, bucket| {
+        bucket.prune(now);
+        !bucket.events.is_empty()
+    });
+    for (key, bucket) in &mut limits.login_ip {
+        let retry_from = if bucket.events.len() >= ip_limit {
+            bucket.events.get(bucket.events.len() - ip_limit).copied()
+        } else {
+            None
+        };
+        ips.push(AuthRateLimitEntry {
+            key: key.clone(),
+            username: None,
+            ip: Some(key.strip_prefix("login:ip:").unwrap_or(key).to_owned()),
+            current_count: bucket.events.len(),
+            limit: ip_limit,
+            window_seconds: 60,
+            last_event_at: bucket.event_times.back().map(ToString::to_string),
+            retry_after_seconds: retry_from
+                .map(|event| 60u64.saturating_sub(now.duration_since(event).as_secs()))
+                .unwrap_or(0),
+            limited: bucket.events.len() >= ip_limit,
+        });
+    }
+    Ok(HttpResponse::Ok()
+        .json(serde_json::json!({"username_failures": usernames, "login_ips": ips})))
+}
+
+async fn clear_auth_bucket(
+    state: &web::Data<AppState>,
+    admin: &RequireAdmin,
+    key: &str,
+    username: bool,
+    req: &HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    let count = {
+        let limits = state
+            .auth_runtime
+            .rate_limits
+            .lock()
+            .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+        let bucket = if username {
+            limits.login_username_failure.get(key)
+        } else {
+            limits.login_ip.get(key)
+        };
+        bucket.map(|v| v.events.len()).unwrap_or(0)
+    };
+    let action = if username {
+        "AUTH_RATE_LIMIT_USERNAME_CLEARED"
+    } else {
+        "AUTH_RATE_LIMIT_IP_CLEARED"
+    };
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,client_ip,user_agent) VALUES(?,'USER',?,?,?, ?, ?)")
+        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(action).bind(format!("{key}:count={count}"))
+        .bind(req.peer_addr().map(|a| a.ip().to_string())).bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok())).execute(&state.db.pool).await.map_err(AppError::Database)?;
+    let mut limits = state
+        .auth_runtime
+        .rate_limits
+        .lock()
+        .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+    if username {
+        limits.login_username_failure.remove(key);
+    } else {
+        limits.login_ip.remove(key);
+    }
+    Ok(HttpResponse::NoContent().finish())
+}
+
+#[delete("/admin/auth-rate-limits/usernames/{key}")]
+pub async fn clear_username_rate_limit(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    clear_auth_bucket(&state, &admin, &path, true, &req).await
+}
+
+#[delete("/admin/auth-rate-limits/ips/{key}")]
+pub async fn clear_ip_rate_limit(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    clear_auth_bucket(&state, &admin, &path, false, &req).await
+}
+
+#[delete("/admin/auth-rate-limits/usernames")]
+pub async fn clear_username_rate_limits(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    clear_all_auth_limits(&state, &admin, true, &req).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+#[delete("/admin/auth-rate-limits/ips")]
+pub async fn clear_ip_rate_limits(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    clear_all_auth_limits(&state, &admin, false, &req).await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+async fn clear_all_auth_limits(
+    state: &web::Data<AppState>,
+    admin: &RequireAdmin,
+    username: bool,
+    req: &HttpRequest,
+) -> Result<(), AppError> {
+    let (key_count, event_count) = {
+        let limits = state
+            .auth_runtime
+            .rate_limits
+            .lock()
+            .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+        let source = if username {
+            &limits.login_username_failure
+        } else {
+            &limits.login_ip
+        };
+        (
+            source.len(),
+            source
+                .values()
+                .map(|bucket| bucket.events.len())
+                .sum::<usize>(),
+        )
+    };
+    let action = if username {
+        "AUTH_RATE_LIMIT_USERNAMES_CLEARED"
+    } else {
+        "AUTH_RATE_LIMIT_IPS_CLEARED"
+    };
+    let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,client_ip,user_agent) VALUES(?,'USER',?,?,?, ?, ?)")
+        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(action).bind(format!("keys={key_count};count={event_count}"))
+        .bind(req.peer_addr().map(|a| a.ip().to_string())).bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok())).execute(&mut *tx).await.map_err(AppError::Database)?;
+    tx.commit().await.map_err(AppError::Database)?;
+    let mut limits = state
+        .auth_runtime
+        .rate_limits
+        .lock()
+        .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+    if username {
+        limits.login_username_failure.clear();
+    } else {
+        limits.login_ip.clear();
+    }
+    Ok(())
+}
+
 #[get("/admin/settings")]
 pub async fn get_settings(
     _admin: RequireAdmin,
@@ -62,39 +272,99 @@ pub async fn get_settings(
     )
     .await?;
     let settings = sqlx::query_as::<_, RegistrationSettings>(
-        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
+        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
     ).fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "allow_registration": settings.allow_registration != 0,
         "updated_at": settings.updated_at,
         "updated_by_username": settings.updated_by_username,
+        "login_ip_limit_per_minute": settings.login_ip_limit_per_minute,
+        "login_username_failure_limit_per_5_minutes": settings.login_username_failure_limit_per_5_minutes,
     })))
 }
 
 #[patch("/admin/settings")]
 pub async fn update_settings(
+    req: HttpRequest,
     admin: RequireAdmin,
     state: web::Data<AppState>,
     body: web::Json<UpdateRegistrationSettings>,
 ) -> Result<HttpResponse, AppError> {
     let _settings_guard = state.auth_runtime.registration_settings_lock.lock().await;
+    let old: (i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes FROM system_settings WHERE id=1")
+        .fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
         .bind(state.auth_runtime.registration_allowed() as i64)
         .execute(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
-    sqlx::query("UPDATE system_settings SET allow_registration=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
-        .bind(body.allow_registration as i64).bind(&admin.0.id).execute(&state.db.pool).await.map_err(AppError::Database)?;
+    let ip_limit = body.login_ip_limit_per_minute.unwrap_or_else(|| {
+        state
+            .auth_runtime
+            .login_ip_limit_per_minute
+            .load(std::sync::atomic::Ordering::Acquire)
+    });
+    let username_limit = body
+        .login_username_failure_limit_per_5_minutes
+        .unwrap_or_else(|| {
+            state
+                .auth_runtime
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire)
+        });
+    if !(1..=1000).contains(&ip_limit) || !(1..=100).contains(&username_limit) {
+        return Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "INVALID_RATE_LIMIT",
+            "IP 限流阈值必须为 1 到 1000，用户名限流阈值必须为 1 到 100",
+        ));
+    }
+    let mut settings_tx = state.db.pool.begin().await.map_err(AppError::Database)?;
+    let allow_registration = body.allow_registration.unwrap_or(old.0 != 0);
+    sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
+        .bind(allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
+    let mut changes = Vec::new();
+    if old.0 != allow_registration as i64 {
+        changes.push(format!(
+            "registration:{}->{}",
+            old.0 != 0,
+            allow_registration
+        ));
+    }
+    if old.1 != ip_limit as i64 {
+        changes.push(format!("ip_limit:{}->{ip_limit}", old.1));
+    }
+    if old.2 != username_limit as i64 {
+        changes.push(format!("username_limit:{}->{username_limit}", old.2));
+    }
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?, 'AUTH_SETTINGS_UPDATED', ?, ?, ?, ?)")
+        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id)
+        .bind(format!("registration={};ip_limit={};username_limit={}", old.0 != 0, old.1, old.2))
+        .bind(changes.join(";"))
+        .bind(req.peer_addr().map(|a| a.ip().to_string()))
+        .bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok()))
+        .execute(&mut *settings_tx).await.map_err(AppError::Database)?;
+    settings_tx.commit().await.map_err(AppError::Database)?;
     state
         .auth_runtime
-        .set_registration_allowed(body.allow_registration);
+        .set_registration_allowed(allow_registration);
+    state
+        .auth_runtime
+        .login_ip_limit_per_minute
+        .store(ip_limit, std::sync::atomic::Ordering::Release);
+    state
+        .auth_runtime
+        .login_username_failure_limit_per_5_minutes
+        .store(username_limit, std::sync::atomic::Ordering::Release);
     let settings = sqlx::query_as::<_, RegistrationSettings>(
-        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
+        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
     ).fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "allow_registration": settings.allow_registration != 0,
         "updated_at": settings.updated_at,
         "updated_by_username": settings.updated_by_username,
+        "login_ip_limit_per_minute": settings.login_ip_limit_per_minute,
+        "login_username_failure_limit_per_5_minutes": settings.login_username_failure_limit_per_5_minutes,
     })))
 }
 

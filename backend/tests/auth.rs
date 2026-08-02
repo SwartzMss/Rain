@@ -7,8 +7,116 @@ use actix_web::{
     middleware::from_fn,
     test, web,
 };
-use backend::{AppState, config::AppLimits, db, routes};
+use backend::{AppState, config::AppLimits, db, repositories::bootstrap_admin, routes};
 use serde_json::{Value, json};
+
+#[actix_web::test]
+async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    bootstrap_admin::bootstrap_admin(&pool, "admin", "strong-password")
+        .await
+        .expect("bootstrap");
+    let state = web::Data::new(AppState::new(
+        pool,
+        PathBuf::from("data"),
+        AppLimits::default(),
+    ));
+    state
+        .auth_runtime
+        .admin_username_normalized
+        .set("admin".into())
+        .expect("admin identity");
+    state
+        .auth_runtime
+        .login_ip_limit_per_minute
+        .store(100, std::sync::atomic::Ordering::Release);
+    state
+        .auth_runtime
+        .login_username_failure_limit_per_5_minutes
+        .store(2, std::sync::atomic::Ordering::Release);
+    let app = test::init_service(
+        App::new()
+            .app_data(state.clone())
+            .configure(routes::register),
+    )
+    .await;
+
+    for _ in 0..4 {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(json!({"username": "admin", "password": "wrong-password"}))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let success = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "admin", "password": "strong-password"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(success.status(), StatusCode::OK);
+    {
+        let limits = state.auth_runtime.rate_limits.lock().expect("limits");
+        assert!(limits.login_ip.is_empty());
+        assert!(limits.login_username_failure.is_empty());
+    }
+
+    for attempt in 0..3 {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(json!({"username": "missing-user", "password": "wrong-password"}))
+                .to_request(),
+        )
+        .await;
+        if attempt < 2 {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        } else {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+    {
+        let limits = state.auth_runtime.rate_limits.lock().expect("limits");
+        let bucket = limits
+            .login_username_failure
+            .get("login:username:missing-user")
+            .expect("unknown user bucket");
+        assert_eq!(bucket.events.len(), 2);
+    }
+
+    let registered = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username": "ordinary-user", "password": "strong-password"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(registered.status(), StatusCode::CREATED);
+    for attempt in 0..3 {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(json!({"username": "ordinary-user", "password": "wrong-password"}))
+                .to_request(),
+        )
+        .await;
+        if attempt < 2 {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        } else {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+}
 
 #[actix_web::test]
 async fn session_dependent_responses_are_not_cacheable() {

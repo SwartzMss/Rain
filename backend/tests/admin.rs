@@ -12,6 +12,7 @@ use backend::{
 };
 use chrono::{Duration, Utc};
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[tokio::test]
 async fn bootstrap_creates_exactly_one_active_admin_and_audit_record() {
@@ -251,6 +252,25 @@ async fn registration_settings_are_persistent_and_admin_only() {
     )
     .await
     .expect("session");
+    let user_hash = backend::auth::password::hash_password("password123").expect("hash");
+    let user = match backend::repositories::users::create_user(&pool, "ordinary", &user_hash)
+        .await
+        .expect("user")
+    {
+        backend::repositories::users::CreateUserOutcome::Created(user) => user,
+        _ => panic!("ordinary user creation"),
+    };
+    let user_token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &user.id,
+        &hash_session_token(&user_token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .expect("user session");
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
@@ -278,11 +298,14 @@ async fn registration_settings_are_persistent_and_admin_only() {
         test::TestRequest::patch()
             .uri("/api/admin/settings")
             .cookie(cookie.clone())
-            .set_json(serde_json::json!({"allow_registration": true}))
+            .set_json(serde_json::json!({"allow_registration": true, "login_ip_limit_per_minute": 7, "login_username_failure_limit_per_5_minutes": 4}))
             .to_request(),
     )
     .await;
     assert_eq!(update.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(update).await;
+    assert_eq!(body["login_ip_limit_per_minute"], 7);
+    assert_eq!(body["login_username_failure_limit_per_5_minutes"], 4);
     let status = test::call_service(
         &app,
         test::TestRequest::get()
@@ -292,10 +315,192 @@ async fn registration_settings_are_persistent_and_admin_only() {
     .await;
     let body: serde_json::Value = test::read_body_json(status).await;
     assert_eq!(body["allow_registration"], true);
+    let thresholds_only = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"login_ip_limit_per_minute": 9, "login_username_failure_limit_per_5_minutes": 6}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(thresholds_only.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(thresholds_only).await;
+    assert_eq!(body["allow_registration"], true);
+    assert_eq!(body["login_ip_limit_per_minute"], 9);
+    assert_eq!(body["login_username_failure_limit_per_5_minutes"], 6);
+    let immediate = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"login_username_failure_limit_per_5_minutes": 2}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(immediate.status(), StatusCode::OK);
+    for attempt in 0..3 {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(serde_json::json!({"username": "threshold-check", "password": "wrong-password"}))
+                .to_request(),
+        )
+        .await;
+        if attempt < 2 {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        } else {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+    let invalid = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"login_ip_limit_per_minute": 1001}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let settings_after_invalid = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(settings_after_invalid).await;
+    assert_eq!(body["allow_registration"], true);
+    assert_eq!(body["login_ip_limit_per_minute"], 9);
+    assert_eq!(body["login_username_failure_limit_per_5_minutes"], 2);
     let guest = test::call_service(
         &app,
         test::TestRequest::get()
             .uri("/api/admin/settings")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(guest.status(), StatusCode::UNAUTHORIZED);
+    let ordinary = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/settings")
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, user_token))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(ordinary.status(), StatusCode::FORBIDDEN);
+}
+
+#[actix_web::test]
+async fn admin_can_view_and_clear_auth_rate_limits_with_audit() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    bootstrap_admin::bootstrap_admin(&pool, "admin", "strong-password")
+        .await
+        .expect("bootstrap");
+    let admin_id: String = sqlx::query_scalar("SELECT id FROM users WHERE role='ADMIN'")
+        .fetch_one(&pool)
+        .await
+        .expect("admin");
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &admin_id,
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .expect("session");
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    {
+        let mut limits = state.auth_runtime.rate_limits.lock().expect("limits");
+        let bucket = limits
+            .login_username_failure
+            .entry("login:username:alice".into())
+            .or_insert_with(|| {
+                backend::AuthRateLimitBucket::new(std::time::Duration::from_secs(300))
+            });
+        bucket.push(Instant::now());
+        let bucket = limits
+            .login_ip
+            .entry("login:ip:127.0.0.1".into())
+            .or_insert_with(|| {
+                backend::AuthRateLimitBucket::new(std::time::Duration::from_secs(60))
+            });
+        bucket.push(Instant::now());
+    }
+    let pool = state.db.pool.clone();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(routes::register),
+    )
+    .await;
+    let cookie = Cookie::new(SESSION_COOKIE_NAME, token);
+    let list = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/auth-rate-limits")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(list.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(list).await;
+    assert_eq!(body["username_failures"][0]["username"], "alice");
+    let clear = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/admin/auth-rate-limits/usernames/login%3Ausername%3Aalice")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(clear.status(), StatusCode::NO_CONTENT);
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_audit_logs WHERE action='AUTH_RATE_LIMIT_USERNAME_CLEARED'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("audit");
+    assert_eq!(remaining, 1);
+    let clear_ips = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/admin/auth-rate-limits/ips")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(clear_ips.status(), StatusCode::NO_CONTENT);
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_audit_logs WHERE action='AUTH_RATE_LIMIT_IPS_CLEARED'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("bulk audit");
+    assert_eq!(audit_count, 1);
+    let body = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/auth-rate-limits")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(body.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(body).await;
+    assert!(body["login_ips"].as_array().unwrap().is_empty());
+    let guest = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/auth-rate-limits")
             .to_request(),
     )
     .await;

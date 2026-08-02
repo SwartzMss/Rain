@@ -18,7 +18,8 @@ vi.mock('../src/features/admin/AdminPage', () => ({
   AdminPage: () => <p>admin page</p>,
   AdminUsersPage: () => <p>admin users page</p>,
   AuditLogsPage: () => <p>audit logs</p>,
-  AdminSettingsPage: () => <p>admin settings</p>
+  AdminSettingsPage: () => <p>admin settings</p>,
+  AuthRateLimitsPage: () => <p>auth rate limits</p>
 }));
 
 function renderApp(path = '/') {
