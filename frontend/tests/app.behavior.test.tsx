@@ -43,6 +43,18 @@ describe('application behavior', () => {
     expect(screen.getByText('服务正常')).toBeInTheDocument();
   });
 
+  it('keeps the readiness indicator in checking state until the request settles', async () => {
+    let resolveReadiness!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => new Promise<Response>((resolve) => {
+      resolveReadiness = resolve;
+    })));
+    vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: false, user: null });
+    renderApp();
+    expect(screen.getByText('检测中')).toBeInTheDocument();
+    resolveReadiness(new Response(null, { status: 200 }));
+    await waitFor(() => expect(screen.getByText('服务正常')).toBeInTheDocument());
+  });
+
   it('redirects an administrator from home to admin users and hides the account link', async () => {
     vi.mocked(rainApi.me).mockResolvedValueOnce({
       authenticated: true,

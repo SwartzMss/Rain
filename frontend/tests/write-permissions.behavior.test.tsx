@@ -30,8 +30,10 @@ describe('write permission behavior', () => {
 
   it('shows file deletion only for a writable authenticated user', async () => {
     vi.mocked(rainApi.me).mockResolvedValue({ authenticated: true, user: { id: 'u', username: 'u', role: 'USER' } });
-    render(<AuthProvider><UploadFileTable bundlesError={null} currentIssueCode="ISSUE" deletingKey={null} fileRows={[row]} canWrite={false} onDeleteRow={vi.fn()} /></AuthProvider>);
+    const { rerender } = render(<AuthProvider><UploadFileTable bundlesError={null} currentIssueCode="ISSUE" deletingKey={null} fileRows={[row]} canWrite={false} onDeleteRow={vi.fn()} /></AuthProvider>);
     expect(await screen.findByText('文件列表')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '删除' })).not.toBeInTheDocument();
+    rerender(<AuthProvider><UploadFileTable bundlesError={null} currentIssueCode="ISSUE" deletingKey={null} fileRows={[row]} canWrite onDeleteRow={vi.fn()} /></AuthProvider>);
+    expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument();
   });
 });
