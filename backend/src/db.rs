@@ -292,6 +292,8 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             allow_registration INTEGER NOT NULL CHECK (allow_registration IN (0, 1)),
             updated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            ,login_ip_limit_per_minute INTEGER NOT NULL DEFAULT 20
+            ,login_username_failure_limit_per_5_minutes INTEGER NOT NULL DEFAULT 10
         )
         "#,
         r#"
@@ -555,6 +557,17 @@ pub async fn load_or_initialize_registration_setting(
             .await
             .map_err(AppError::Database)?;
     Ok(value != 0)
+}
+
+pub async fn load_or_initialize_rate_limits(
+    pool: &SqlitePool,
+    ip: usize,
+    username: usize,
+) -> Result<(usize, usize), AppError> {
+    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes) VALUES(1, 1, ?, ?)")
+        .bind(ip as i64).bind(username as i64).execute(pool).await.map_err(AppError::Database)?;
+    let row: (i64, i64) = sqlx::query_as("SELECT login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes FROM system_settings WHERE id=1").fetch_one(pool).await.map_err(AppError::Database)?;
+    Ok((row.0 as usize, row.1 as usize))
 }
 
 #[cfg(test)]

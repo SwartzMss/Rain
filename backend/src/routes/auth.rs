@@ -302,7 +302,10 @@ pub async fn login(
         &state,
         AuthRateLimitPolicy::LoginIp,
         &client_rate_limit_key(&request, "login"),
-        state.auth_runtime.config.login_ip_limit_per_minute,
+        state
+            .auth_runtime
+            .login_ip_limit_per_minute
+            .load(std::sync::atomic::Ordering::Acquire),
         LOGIN_IP_WINDOW,
         true,
     )?;
@@ -312,8 +315,8 @@ pub async fn login(
         &username_key,
         state
             .auth_runtime
-            .config
-            .login_username_failure_limit_per_5_minutes,
+            .login_username_failure_limit_per_5_minutes
+            .load(std::sync::atomic::Ordering::Acquire),
         LOGIN_USERNAME_FAILURE_WINDOW,
         false,
     )?;
@@ -331,8 +334,8 @@ pub async fn login(
             &username_key,
             state
                 .auth_runtime
-                .config
-                .login_username_failure_limit_per_5_minutes,
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire),
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
         )?;
@@ -351,8 +354,8 @@ pub async fn login(
             &username_key,
             state
                 .auth_runtime
-                .config
-                .login_username_failure_limit_per_5_minutes,
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire),
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
         )?;
@@ -370,8 +373,8 @@ pub async fn login(
             &username_key,
             state
                 .auth_runtime
-                .config
-                .login_username_failure_limit_per_5_minutes,
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire),
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
         )?;
@@ -388,8 +391,8 @@ pub async fn login(
             &username_key,
             state
                 .auth_runtime
-                .config
-                .login_username_failure_limit_per_5_minutes,
+                .login_username_failure_limit_per_5_minutes
+                .load(std::sync::atomic::Ordering::Acquire),
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
         )?;

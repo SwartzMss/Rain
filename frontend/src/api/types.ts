@@ -15,7 +15,7 @@ export interface AdminUserPage { items: AdminUser[]; next_cursor: string | null;
 export interface AuditLog { id: string; actor_type: 'USER' | 'SYSTEM'; actor_user_id: string | null; target_user_id: string | null; target_username: string | null; action: string; old_value: string | null; new_value: string | null; client_ip: string | null; user_agent?: string | null; created_at: string; }
 export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }
 export interface RegistrationStatus { allow_registration: boolean; }
-export interface RegistrationSettings extends RegistrationStatus { updated_at: string; updated_by_username: string | null; }
+export interface RegistrationSettings extends RegistrationStatus { updated_at: string; updated_by_username: string | null; login_ip_limit_per_minute: number; login_username_failure_limit_per_5_minutes: number; }
 export interface AuthRateLimitEntry { key: string; username: string | null; ip: string | null; current_count: number; limit: number; window_seconds: number; last_event_at: string | null; retry_after_seconds: number; limited: boolean; }
 export interface AuthRateLimitsResponse { username_failures: AuthRateLimitEntry[]; login_ips: AuthRateLimitEntry[]; }
 

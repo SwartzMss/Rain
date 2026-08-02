@@ -18,7 +18,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -130,6 +130,8 @@ impl TempResultRuntime {
 pub struct AuthRuntime {
     pub config: AuthConfig,
     pub allow_registration: AtomicBool,
+    pub login_ip_limit_per_minute: AtomicUsize,
+    pub login_username_failure_limit_per_5_minutes: AtomicUsize,
     pub registration_settings_lock: Arc<AsyncMutex<()>>,
     pub hash_permits: Arc<Semaphore>,
     pub rate_limits: Arc<Mutex<AuthRateLimits>>,
@@ -138,10 +140,14 @@ pub struct AuthRuntime {
 impl AuthRuntime {
     pub fn new(config: AuthConfig) -> Self {
         let allow_registration = config.allow_registration;
+        let ip_limit = config.login_ip_limit_per_minute;
+        let username_limit = config.login_username_failure_limit_per_5_minutes;
         Self {
             hash_permits: Arc::new(Semaphore::new(config.argon2_concurrency)),
             config,
             allow_registration: AtomicBool::new(allow_registration),
+            login_ip_limit_per_minute: AtomicUsize::new(ip_limit),
+            login_username_failure_limit_per_5_minutes: AtomicUsize::new(username_limit),
             registration_settings_lock: Arc::new(AsyncMutex::new(())),
             rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
         }

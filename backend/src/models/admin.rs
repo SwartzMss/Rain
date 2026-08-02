@@ -44,11 +44,15 @@ pub struct RegistrationSettings {
     pub allow_registration: i64,
     pub updated_at: String,
     pub updated_by_username: Option<String>,
+    pub login_ip_limit_per_minute: i64,
+    pub login_username_failure_limit_per_5_minutes: i64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateRegistrationSettings {
     pub allow_registration: bool,
+    pub login_ip_limit_per_minute: Option<usize>,
+    pub login_username_failure_limit_per_5_minutes: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
