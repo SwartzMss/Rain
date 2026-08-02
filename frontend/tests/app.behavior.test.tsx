@@ -17,7 +17,8 @@ vi.mock('../src/features/files/TempResultView', () => ({ TempResultView: () => <
 vi.mock('../src/features/admin/AdminPage', () => ({
   AdminPage: () => <p>admin page</p>,
   AdminUsersPage: () => <p>admin users page</p>,
-  AuditLogsPage: () => <p>audit logs</p>
+  AuditLogsPage: () => <p>audit logs</p>,
+  AdminSettingsPage: () => <p>admin settings</p>
 }));
 
 function renderApp(path = '/') {

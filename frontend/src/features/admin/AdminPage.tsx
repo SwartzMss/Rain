@@ -19,6 +19,7 @@ function AdminShell({ children }: { children: ReactNode }) {
       <nav className="inline-flex rounded-xl border border-slate-200 bg-white/80 p-1 text-sm shadow-sm">
         <NavLink className={({ isActive }) => `rounded-lg px-4 py-2 font-medium transition ${isActive ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'}`} to="/admin/users">用户管理</NavLink>
         <NavLink className={({ isActive }) => `rounded-lg px-4 py-2 font-medium transition ${isActive ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'}`} to="/admin/audit-logs">审计日志</NavLink>
+        <NavLink className={({ isActive }) => `rounded-lg px-4 py-2 font-medium transition ${isActive ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'}`} to="/admin/settings">系统设置</NavLink>
       </nav>
       {children}
     </div>
@@ -35,6 +36,18 @@ function AdminGuard({ children }: { children: ReactNode }) {
 
 export function AdminPage() {
   return <Navigate to="/admin/users" replace />;
+}
+
+export function AdminSettingsPage() {
+  const [allowed, setAllowed] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => { setLoading(true); setError(null); try { const value = await rainApi.fetchAdminSettings(); setAllowed(value.allow_registration); } catch (e) { setError(normalizeApiError(e)); } finally { setLoading(false); } }, []);
+  useEffect(() => { void load(); }, [load]);
+  const save = async (value: boolean) => { setSaving(true); setMessage(null); setError(null); try { const result = await rainApi.updateAdminSettings(value); setAllowed(result.allow_registration); setMessage('设置已保存'); } catch (e) { setError(normalizeApiError(e)); await load(); } finally { setSaving(false); } };
+  return <AdminGuard><section className="max-w-3xl rounded-2xl border border-slate-200 bg-white/95 p-6 shadow-xl"><h1 className="text-xl font-semibold text-slate-950">系统设置</h1><div className="mt-6 flex items-center justify-between rounded-xl border border-slate-200 p-4"><div><h2 className="font-semibold">用户注册</h2><p className="mt-1 text-sm text-slate-500">关闭后，新用户将无法注册；已有用户仍可正常登录和使用系统。</p></div><button type="button" disabled={loading || saving} onClick={() => void save(!allowed)} className={`relative h-7 w-12 rounded-full transition ${allowed ? 'bg-cyan-600' : 'bg-slate-300'} disabled:opacity-50`}><span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition ${allowed ? 'left-6' : 'left-1'}`} /></button></div>{message ? <p className="mt-4 text-sm text-emerald-700">{message}</p> : null}{error ? <p className="mt-4 text-sm text-rose-700">{error}</p> : null}</section></AdminGuard>;
 }
 
 export function AdminUsersPage() {

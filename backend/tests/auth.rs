@@ -940,8 +940,8 @@ async fn registration_switch_does_not_block_existing_user_login() {
     backend::repositories::users::create_user(&pool, "existing-user", &password_hash)
         .await
         .expect("user");
-    let mut state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
-    state.auth_runtime.config.allow_registration = false;
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    state.auth_runtime.set_registration_allowed(false);
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(state))

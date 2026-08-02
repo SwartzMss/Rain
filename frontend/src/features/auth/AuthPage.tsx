@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { normalizeApiError } from '../../api/client';
+import { normalizeApiError, rainApi } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { postLoginPath, safeReturnPath } from '../../auth/authState';
 
@@ -23,9 +23,23 @@ export function AuthPage({ mode }: AuthPageProps) {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const isLogin = mode === 'login';
+  const [registrationAllowed, setRegistrationAllowed] = useState(true);
+  const [registrationChecked, setRegistrationChecked] = useState(isLogin);
+
+  useEffect(() => {
+    if (isLogin) return;
+    void rainApi.fetchRegistrationStatus().then((status) => {
+      setRegistrationAllowed(status.allow_registration);
+      setRegistrationChecked(true);
+    }).catch(() => setRegistrationChecked(true));
+  }, [isLogin]);
 
   if (auth.state.status === 'AUTHENTICATED') {
     return <Navigate to={postLoginPath(auth.state.user, state.from)} replace />;
+  }
+
+  if (!isLogin && registrationChecked && !registrationAllowed) {
+    return <section className="mx-auto mt-10 max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-xl"><h2 className="text-2xl font-semibold text-slate-950">注册已关闭</h2><p className="mt-3 text-sm text-slate-500">当前系统未开放用户注册，请联系管理员。</p><Link className="mt-6 inline-block font-semibold text-cyan-700" to="/login">返回登录</Link></section>;
   }
 
   const submit = async (event: FormEvent) => {

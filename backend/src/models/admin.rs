@@ -39,6 +39,18 @@ pub struct RevokedSessions {
     pub revoked_sessions: u64,
 }
 
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct RegistrationSettings {
+    pub allow_registration: i64,
+    pub updated_at: String,
+    pub updated_by_username: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateRegistrationSettings {
+    pub allow_registration: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AuditListQuery {
     pub action: Option<String>,

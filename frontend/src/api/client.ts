@@ -17,7 +17,7 @@ import type {
   User,
   SavedSearch,
   SavedSearchPayload
-  , AdminUserPage, AuditLogPage, UserStatus
+  , AdminUserPage, AuditLogPage, UserStatus, RegistrationStatus, RegistrationSettings
 } from './types';
 
 const API_BASE_URL = '';
@@ -134,6 +134,8 @@ export const rainApi = {
     return request<AdminUserPage>(`/api/admin/users?${query}`);
   },
   fetchAuditLogs(cursor?: string) { return request<AuditLogPage>(`/api/admin/audit-logs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`); },
+  fetchAdminSettings() { return request<RegistrationSettings>('/api/admin/settings'); },
+  updateAdminSettings(allow_registration: boolean) { return request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ allow_registration }) }); },
   changeUserStatus(id: string, status: UserStatus) { return request(`/api/admin/users/${encodePathSegment(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }); },
   revokeUserSessions(id: string) { return request<{ revoked_sessions: number }>(`/api/admin/users/${encodePathSegment(id)}/revoke-sessions`, { method: 'POST' }); },
   register(payload: Credentials) {
@@ -142,6 +144,7 @@ export const rainApi = {
       body: JSON.stringify(payload)
     });
   },
+  fetchRegistrationStatus() { return request<RegistrationStatus>('/api/auth/registration-status'); },
   login(payload: Credentials) {
     return request<User>('/api/auth/login', {
       method: 'POST',

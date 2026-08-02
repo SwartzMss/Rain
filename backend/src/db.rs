@@ -260,6 +260,7 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
         "DROP TABLE IF EXISTS log_segments_fts",
         "DROP TABLE IF EXISTS admin_audit_logs",
+        "DROP TABLE IF EXISTS system_settings",
         "DROP TABLE IF EXISTS saved_searches",
         "DROP TABLE IF EXISTS user_sessions",
         "DROP TABLE IF EXISTS users",
@@ -285,6 +286,14 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
 
 async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
+        r#"
+        CREATE TABLE IF NOT EXISTS system_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            allow_registration INTEGER NOT NULL CHECK (allow_registration IN (0, 1)),
+            updated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
         r#"
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
@@ -529,6 +538,23 @@ fn ensure_sqlite_parent(database_url: &str) -> Result<(), AppError> {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
     Ok(())
+}
+
+pub async fn load_or_initialize_registration_setting(
+    pool: &SqlitePool,
+    default_value: bool,
+) -> Result<bool, AppError> {
+    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
+        .bind(default_value as i64)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+    let value: i64 =
+        sqlx::query_scalar("SELECT allow_registration FROM system_settings WHERE id=1")
+            .fetch_one(pool)
+            .await
+            .map_err(AppError::Database)?;
+    Ok(value != 0)
 }
 
 #[cfg(test)]
