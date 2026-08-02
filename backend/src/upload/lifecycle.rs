@@ -1,5 +1,69 @@
 use crate::error::AppError;
 
+pub async fn reserve_upload_bundle(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    issue_code: &str,
+    bundle_hash: &str,
+    uploader_user_id: &str,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, uploader_user_id, size_bytes)
+        SELECT ?, code, ?, '正在接收上传', 'PENDING', 'RECEIVING', ?, 0
+        FROM issues
+        WHERE code = ? AND status = 'ACTIVE' AND owner_user_id = ?
+        "#,
+    )
+    .bind(bundle_id)
+    .bind(bundle_hash)
+    .bind(uploader_user_id)
+    .bind(issue_code)
+    .bind(uploader_user_id)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::Conflict(format!(
+            "issue {issue_code} is missing, being deleted, or not owned by the uploader"
+        )));
+    }
+    Ok(())
+}
+
+pub async fn finalize_upload_reservation(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    bundle_name: &str,
+    total_bytes: u64,
+) -> Result<(), AppError> {
+    let result = sqlx::query("UPDATE bundles SET name=?, size_bytes=?, status='PROCESSING' WHERE id=? AND status='PENDING' AND process_stage='RECEIVING'")
+        .bind(bundle_name)
+        .bind(total_bytes as i64)
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::Conflict(
+            "upload reservation is missing or no longer pending".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn remove_upload_reservation(pool: &sqlx::SqlitePool, bundle_id: &str) {
+    if let Err(error) = sqlx::query(
+        "DELETE FROM bundles WHERE id=? AND status='PENDING' AND process_stage='RECEIVING'",
+    )
+    .bind(bundle_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(bundle_id, %error, "failed to remove upload reservation");
+    }
+}
+
 pub async fn create_processing_bundle(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
@@ -90,9 +154,20 @@ pub(crate) fn user_facing_failure_reason(error: &AppError) -> String {
 mod tests {
     use std::io;
 
-    use crate::error::AppError;
+    use actix_web::web;
 
-    use super::{create_processing_bundle, set_bundle_stage, user_facing_failure_reason};
+    use crate::{
+        AppState,
+        config::AppLimits,
+        error::AppError,
+        repositories::users::{self, CreateUserOutcome},
+        routes::cleanup_inactive_issues,
+    };
+
+    use super::{
+        create_processing_bundle, remove_upload_reservation, reserve_upload_bundle,
+        set_bundle_stage, user_facing_failure_reason,
+    };
 
     #[tokio::test]
     async fn bundle_creation_requires_an_active_issue_atomically() {
@@ -137,6 +212,49 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(state, ("PROCESSING".into(), "EXTRACTING".into()));
+    }
+
+    #[tokio::test]
+    async fn pending_upload_reservation_protects_inactive_issue_during_receive() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        let owner = match users::create_user(&pool, "upload-owner", "hash")
+            .await
+            .unwrap()
+        {
+            CreateUserOutcome::Created(user) => user,
+            CreateUserOutcome::DuplicateUsername => unreachable!(),
+        };
+        sqlx::query("INSERT INTO issues(code,name,owner_user_id,last_activity_at) VALUES('UPLOAD_ACTIVE','Upload',?,datetime('now','-5 days'))")
+            .bind(&owner.id).execute(&pool).await.unwrap();
+        reserve_upload_bundle(
+            &pool,
+            "upload-reservation",
+            "UPLOAD_ACTIVE",
+            "upload-reservation-hash",
+            &owner.id,
+        )
+        .await
+        .unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            "data".into(),
+            AppLimits::default(),
+        ));
+        state
+            .issue_inactive_days
+            .store(1, std::sync::atomic::Ordering::Release);
+
+        assert_eq!(cleanup_inactive_issues(&state).await.unwrap(), 0);
+        let issue_status: String =
+            sqlx::query_scalar("SELECT status FROM issues WHERE code='UPLOAD_ACTIVE'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(issue_status, "ACTIVE");
+
+        remove_upload_reservation(&pool, "upload-reservation").await;
+        assert_eq!(cleanup_inactive_issues(&state).await.unwrap(), 1);
     }
 
     #[test]

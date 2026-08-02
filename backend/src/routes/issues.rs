@@ -6,7 +6,10 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::extractor::{OptionalUser, RequireBusinessUser},
-    db::finish_bundle_deletion,
+    db::{
+        finish_bundle_deletion, finish_bundle_deletion_with_inactive_lease,
+        renew_inactive_issue_lease,
+    },
     error::AppError,
     models::issues::{
         IssueBundlesResponse, IssueSummary, UploadStage, UploadStatus, UploadStatusWrapper,
@@ -15,6 +18,7 @@ use crate::{
 
 const ISSUE_CODE_MAX_LEN: usize = 64;
 const ISSUE_NAME_MAX_LEN: usize = 128;
+const INACTIVE_CLEANUP_LEASE_SECONDS: u64 = 10 * 60;
 
 pub(crate) async fn touch_issue_activity(
     pool: &sqlx::SqlitePool,
@@ -208,11 +212,23 @@ pub async fn get_issue_bundles(
 }
 
 pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usize, AppError> {
+    cleanup_inactive_issues_with_lease(state, INACTIVE_CLEANUP_LEASE_SECONDS).await
+}
+
+async fn cleanup_inactive_issues_with_lease(
+    state: &web::Data<AppState>,
+    lease_seconds: u64,
+) -> Result<usize, AppError> {
+    if lease_seconds == 0 {
+        return Err(AppError::Config(
+            "inactive cleanup lease must be positive".into(),
+        ));
+    }
     let days = state
         .issue_inactive_days
         .load(std::sync::atomic::Ordering::Acquire);
     let deleting: Vec<(String, Option<String>, String, i64)> = sqlx::query_as(
-        "SELECT code, owner_user_id, last_activity_at, inactive_claim_days FROM issues WHERE status='DELETING' AND deletion_reason='INACTIVE' AND inactive_claim_days IS NOT NULL AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now')) ORDER BY code LIMIT 20",
+        "SELECT code, owner_user_id, last_activity_at, inactive_claim_days FROM issues WHERE status='DELETING' AND deletion_reason='INACTIVE' AND inactive_claim_days IS NOT NULL AND (deletion_retry_at IS NULL OR datetime(deletion_retry_at) <= datetime('now')) AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now')) ORDER BY COALESCE(deletion_retry_at, ''), code LIMIT 20",
     )
     .fetch_all(&state.db.pool)
     .await
@@ -220,7 +236,7 @@ pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usiz
     let mut cleaned = 0usize;
     for (code, owner, last_activity_at, claimed_days) in deleting {
         let lease_token = Uuid::new_v4().to_string();
-        if !claim_inactive_recovery(&state.db.pool, &code, &lease_token).await? {
+        if !claim_inactive_recovery(&state.db.pool, &code, &lease_token, lease_seconds).await? {
             continue;
         }
         match finish_auto_issue_deletion(
@@ -230,13 +246,14 @@ pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usiz
             &last_activity_at,
             claimed_days as usize,
             &lease_token,
+            lease_seconds,
         )
         .await
         {
             Ok(true) => cleaned += 1,
             Ok(false) => {}
             Err(error) => {
-                release_inactive_lease(&state.db.pool, &code, &lease_token).await;
+                schedule_inactive_retry(&state.db.pool, &code, &lease_token).await;
                 tracing::error!(issue_code = code, %error, "deleting issue recovery failed")
             }
         }
@@ -254,7 +271,16 @@ pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usiz
     .map_err(AppError::Database)?;
     for (code, owner, last_activity_at) in candidates {
         let lease_token = Uuid::new_v4().to_string();
-        if !claim_inactive_issue(&state.db.pool, &code, &modifier, days, &lease_token).await? {
+        if !claim_inactive_issue(
+            &state.db.pool,
+            &code,
+            &modifier,
+            days,
+            &lease_token,
+            lease_seconds,
+        )
+        .await?
+        {
             continue;
         }
         match finish_auto_issue_deletion(
@@ -264,13 +290,14 @@ pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usiz
             &last_activity_at,
             days,
             &lease_token,
+            lease_seconds,
         )
         .await
         {
             Ok(true) => cleaned += 1,
             Ok(false) => {}
             Err(error) => {
-                release_inactive_lease(&state.db.pool, &code, &lease_token).await;
+                schedule_inactive_retry(&state.db.pool, &code, &lease_token).await;
                 tracing::error!(issue_code = code, %error, "inactive issue cleanup failed")
             }
         }
@@ -284,10 +311,13 @@ async fn claim_inactive_issue(
     modifier: &str,
     days: usize,
     lease_token: &str,
+    lease_seconds: u64,
 ) -> Result<bool, AppError> {
-    let claimed = sqlx::query("UPDATE issues SET status='DELETING', deletion_reason='INACTIVE', inactive_claim_days=?, deletion_lease_token=?, deletion_lease_until=datetime('now','+10 minutes') WHERE code=? AND status='ACTIVE' AND datetime(last_activity_at) < datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM bundles WHERE bundles.issue_code=issues.code AND bundles.status IN ('PENDING','PROCESSING'))")
+    let lease_modifier = format!("+{lease_seconds} seconds");
+    let claimed = sqlx::query("UPDATE issues SET status='DELETING', deletion_reason='INACTIVE', inactive_claim_days=?, deletion_lease_token=?, deletion_lease_until=datetime('now',?), deletion_retry_at=NULL, deletion_attempts=0 WHERE code=? AND status='ACTIVE' AND datetime(last_activity_at) < datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM bundles WHERE bundles.issue_code=issues.code AND bundles.status IN ('PENDING','PROCESSING'))")
         .bind(days as i64)
         .bind(lease_token)
+        .bind(lease_modifier)
         .bind(code)
         .bind(modifier)
         .execute(pool)
@@ -301,9 +331,12 @@ async fn claim_inactive_recovery(
     pool: &sqlx::SqlitePool,
     code: &str,
     lease_token: &str,
+    lease_seconds: u64,
 ) -> Result<bool, AppError> {
-    let claimed = sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now','+10 minutes') WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND inactive_claim_days IS NOT NULL AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
+    let lease_modifier = format!("+{lease_seconds} seconds");
+    let claimed = sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now',?) WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND inactive_claim_days IS NOT NULL AND (deletion_retry_at IS NULL OR datetime(deletion_retry_at) <= datetime('now')) AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
         .bind(lease_token)
+        .bind(lease_modifier)
         .bind(code)
         .execute(pool)
         .await
@@ -312,14 +345,14 @@ async fn claim_inactive_recovery(
     Ok(claimed == 1)
 }
 
-async fn release_inactive_lease(pool: &sqlx::SqlitePool, code: &str, lease_token: &str) {
-    if let Err(error) = sqlx::query("UPDATE issues SET deletion_lease_token=NULL, deletion_lease_until=NULL WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=?")
+async fn schedule_inactive_retry(pool: &sqlx::SqlitePool, code: &str, lease_token: &str) {
+    if let Err(error) = sqlx::query("UPDATE issues SET deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_attempts=deletion_attempts+1, deletion_retry_at=datetime('now', '+' || MIN((deletion_attempts + 1) * 60, 3600) || ' seconds') WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=?")
         .bind(code)
         .bind(lease_token)
         .execute(pool)
         .await
     {
-        tracing::warn!(issue_code = code, %error, "failed to release inactive issue cleanup lease");
+        tracing::warn!(issue_code = code, %error, "failed to schedule inactive issue cleanup retry");
     }
 }
 
@@ -330,6 +363,7 @@ async fn finish_auto_issue_deletion(
     last_activity_at: &str,
     days: usize,
     lease_token: &str,
+    lease_seconds: u64,
 ) -> Result<bool, AppError> {
     let bundles: Vec<BundleIdRow> =
         sqlx::query_as("SELECT id, issue_code, status FROM bundles WHERE issue_code = ?")
@@ -339,6 +373,7 @@ async fn finish_auto_issue_deletion(
             .map_err(AppError::Database)?;
     reject_processing_bundles(&bundles)?;
     for bundle in &bundles {
+        require_inactive_lease(pool, code, lease_token, lease_seconds).await?;
         if bundle.status != "DELETED" {
             if bundle.status != "DELETING" {
                 sqlx::query(
@@ -349,8 +384,16 @@ async fn finish_auto_issue_deletion(
                 .await
                 .map_err(AppError::Database)?;
             }
-            finish_bundle_deletion(pool, &bundle.id).await?;
+            finish_bundle_deletion_with_inactive_lease(
+                pool,
+                &bundle.id,
+                code,
+                lease_token,
+                lease_seconds,
+            )
+            .await?;
         }
+        require_inactive_lease(pool, code, lease_token, lease_seconds).await?;
     }
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
@@ -378,6 +421,21 @@ async fn finish_auto_issue_deletion(
         .map_err(AppError::Database)?;
     tx.commit().await.map_err(AppError::Database)?;
     Ok(true)
+}
+
+async fn require_inactive_lease(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+    lease_token: &str,
+    lease_seconds: u64,
+) -> Result<(), AppError> {
+    if renew_inactive_issue_lease(pool, code, lease_token, lease_seconds).await? {
+        Ok(())
+    } else {
+        Err(AppError::Conflict(format!(
+            "inactive cleanup lease for issue {code} was lost"
+        )))
+    }
 }
 
 pub async fn require_issue_owner(
@@ -525,7 +583,7 @@ pub async fn delete_issue(
     let issue_code =
         require_issue_owner_for_delete(&state.db.pool, &path.into_inner(), &user.0.id).await?;
     let claimed =
-        sqlx::query("UPDATE issues SET status = 'DELETING', deletion_reason = 'MANUAL', inactive_claim_days = NULL, deletion_lease_token = NULL, deletion_lease_until = NULL WHERE code = ? AND status = 'ACTIVE'")
+        sqlx::query("UPDATE issues SET status = 'DELETING', deletion_reason = 'MANUAL', inactive_claim_days = NULL, deletion_lease_token = NULL, deletion_lease_until = NULL, deletion_retry_at = NULL, deletion_attempts = 0 WHERE code = ? AND status = 'ACTIVE'")
             .bind(&issue_code)
             .execute(&state.db.pool)
             .await
@@ -586,7 +644,7 @@ pub async fn delete_issue(
     if let Err(error) = reject_processing_bundles(&bundles) {
         if newly_claimed {
             sqlx::query(
-                "UPDATE issues SET status = 'ACTIVE', deletion_reason = NULL, inactive_claim_days = NULL, deletion_lease_token = NULL, deletion_lease_until = NULL WHERE code = ? AND status = 'DELETING'",
+                "UPDATE issues SET status = 'ACTIVE', deletion_reason = NULL, inactive_claim_days = NULL, deletion_lease_token = NULL, deletion_lease_until = NULL, deletion_retry_at = NULL, deletion_attempts = 0 WHERE code = ? AND status = 'DELETING'",
             )
             .bind(&issue_code)
             .execute(&state.db.pool)
@@ -667,7 +725,8 @@ mod tests {
     };
 
     use super::{
-        claim_inactive_issue, cleanup_inactive_issues, require_issue_owner,
+        claim_inactive_issue, claim_inactive_recovery, cleanup_inactive_issues,
+        cleanup_inactive_issues_with_lease, require_inactive_lease, require_issue_owner,
         require_issue_owner_for_delete, touch_issue_activity,
     };
 
@@ -868,8 +927,8 @@ mod tests {
         sqlx::query("INSERT INTO issues(code,name,last_activity_at) VALUES('RACE','Race',datetime('now','-3 days'))")
             .execute(&pool).await.unwrap();
         let (first, second) = tokio::join!(
-            claim_inactive_issue(&pool, "RACE", "-1 days", 1, "first"),
-            claim_inactive_issue(&pool, "RACE", "-1 days", 1, "second")
+            claim_inactive_issue(&pool, "RACE", "-1 days", 1, "first", 600),
+            claim_inactive_issue(&pool, "RACE", "-1 days", 1, "second", 600)
         );
         assert_eq!(
             [first.unwrap(), second.unwrap()]
@@ -885,6 +944,34 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state, ("DELETING".into(), Some("INACTIVE".into()), Some(1)));
+    }
+
+    #[tokio::test]
+    async fn inactive_lease_renewal_prevents_takeover_after_original_expiry() {
+        let pool = db::init_pool("sqlite:file:lease-renewal?mode=memory&cache=shared").unwrap();
+        db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name,last_activity_at) VALUES('LEASE','Lease',datetime('now','-3 days'))")
+            .execute(&pool).await.unwrap();
+        assert!(
+            claim_inactive_issue(&pool, "LEASE", "-1 days", 1, "worker", 3)
+                .await
+                .unwrap()
+        );
+        let active_token: String =
+            sqlx::query_scalar("SELECT deletion_lease_token FROM issues WHERE code='LEASE'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        require_inactive_lease(&pool, "LEASE", &active_token, 3)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        assert!(
+            !claim_inactive_recovery(&pool, "LEASE", "takeover", 3)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -907,5 +994,51 @@ mod tests {
             .fetch_one(&pool).await.unwrap();
         assert_eq!(audit.0, 1);
         assert!(audit.1.contains("inactive_days=4"));
+    }
+
+    #[tokio::test]
+    async fn failed_recovery_batch_backs_off_and_does_not_starve_later_issues() {
+        let pool = db::init_pool("sqlite:file:issue-fairness?mode=memory&cache=shared").unwrap();
+        db::prepare_schema(&pool, true).await.unwrap();
+        for index in 0..20 {
+            let code = format!("A{index:02}");
+            sqlx::query("INSERT INTO issues(code,name,status,last_activity_at,deletion_reason,inactive_claim_days) VALUES(?,?,'DELETING',datetime('now','-5 days'),'INACTIVE',1)")
+                .bind(&code)
+                .bind(&code)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO issues(code,name,status,last_activity_at,deletion_reason,inactive_claim_days) VALUES('Z_SUCCESS','Success','DELETING',datetime('now','-5 days'),'INACTIVE',1)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_first_twenty BEFORE DELETE ON issues WHEN OLD.code LIKE 'A%' BEGIN SELECT RAISE(FAIL, 'permanent cleanup failure'); END")
+            .execute(&pool).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            "data".into(),
+            AppLimits::default(),
+        ));
+
+        assert_eq!(
+            cleanup_inactive_issues_with_lease(&state, 60)
+                .await
+                .unwrap(),
+            0
+        );
+        let backed_off: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE code LIKE 'A%' AND deletion_attempts=1 AND datetime(deletion_retry_at)>datetime('now')")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(backed_off, 20);
+        assert_eq!(
+            cleanup_inactive_issues_with_lease(&state, 60)
+                .await
+                .unwrap(),
+            1
+        );
+        let success_exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE code='Z_SUCCESS'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(success_exists, 0);
     }
 }

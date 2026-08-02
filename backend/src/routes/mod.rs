@@ -12,6 +12,8 @@ mod files;
 mod health;
 mod helpers;
 mod issues;
+#[cfg(test)]
+pub(crate) use issues::cleanup_inactive_issues;
 mod logs;
 mod saved_searches;
 mod temp_results;
