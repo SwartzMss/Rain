@@ -46,6 +46,7 @@ pub struct RegistrationSettings {
     pub updated_by_username: Option<String>,
     pub login_ip_limit_per_minute: i64,
     pub login_username_failure_limit_per_5_minutes: i64,
+    pub issue_inactive_days: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +54,7 @@ pub struct UpdateRegistrationSettings {
     pub allow_registration: Option<bool>,
     pub login_ip_limit_per_minute: Option<usize>,
     pub login_username_failure_limit_per_5_minutes: Option<usize>,
+    pub issue_inactive_days: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

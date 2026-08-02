@@ -12,6 +12,8 @@ mod files;
 mod health;
 mod helpers;
 mod issues;
+#[cfg(test)]
+pub(crate) use issues::cleanup_inactive_issues;
 mod logs;
 mod saved_searches;
 mod temp_results;
@@ -27,6 +29,25 @@ pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) -> tokio::ta
             async move {
                 temp_results::cleanup_expired(&state)
                     .await
+                    .map_err(|error| error.to_string())
+            }
+        },
+    )
+}
+
+pub fn spawn_inactive_issue_cleanup(
+    state: web::Data<crate::AppState>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "inactive-issue-cleanup",
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(60 * 60),
+        move || {
+            let state = state.clone();
+            async move {
+                issues::cleanup_inactive_issues(&state)
+                    .await
+                    .map(|_| ())
                     .map_err(|error| error.to_string())
             }
         },

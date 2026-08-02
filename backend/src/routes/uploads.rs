@@ -14,14 +14,16 @@ use crate::{
     models::issues::{UploadStage, UploadStatus},
     upload::{
         job::{UploadJob, spawn_upload_job},
-        lifecycle::create_processing_bundle,
+        lifecycle::{
+            finalize_upload_reservation, remove_upload_reservation, reserve_upload_bundle,
+        },
         multipart::{
             ReceiveReservation, collect_multipart_upload, limited_multipart, raw_payload_limit,
         },
     },
 };
 
-use super::issues::{normalize_issue_code, require_issue_owner};
+use super::issues::{normalize_issue_code, require_issue_owner, touch_issue_activity_best_effort};
 
 // scoped under /api in routes::register, so use relative path
 #[post("/issues/{issue_code}/uploads")]
@@ -62,8 +64,21 @@ pub async fn upload_logs(
         })?;
 
     let upload_id = Uuid::new_v4().simple().to_string();
+    let bundle_id = Uuid::new_v4().simple().to_string();
+    let bundle_hash = Uuid::new_v4().simple().to_string();
+    reserve_upload_bundle(
+        &state.db.pool,
+        &bundle_id,
+        &issue_code,
+        &bundle_hash,
+        &user.0.id,
+    )
+    .await?;
     let temp_dir = state.storage.data_root.join(".tmp").join(&upload_id);
-    fs::create_dir_all(&temp_dir).await.map_err(AppError::Io)?;
+    if let Err(error) = fs::create_dir_all(&temp_dir).await {
+        remove_upload_reservation(&state.db.pool, &bundle_id).await;
+        return Err(AppError::Io(error));
+    }
 
     let reservation = ReceiveReservation::new(
         state.upload.tmp_bytes.clone(),
@@ -79,6 +94,7 @@ pub async fn upload_logs(
     {
         Ok(upload) => upload,
         Err(error) => {
+            remove_upload_reservation(&state.db.pool, &bundle_id).await;
             if let Err(cleanup_error) = fs::remove_dir_all(&temp_dir).await {
                 tracing::error!(
                     path = %temp_dir.display(),
@@ -94,7 +110,6 @@ pub async fn upload_logs(
         }
     };
 
-    let bundle_hash = Uuid::new_v4().simple().to_string();
     let bundle_name = if upload.files.len() == 1 {
         upload.files[0].display_name.clone()
     } else {
@@ -105,19 +120,11 @@ pub async fn upload_logs(
         )
     };
 
-    let bundle_id = Uuid::new_v4().simple().to_string();
-
-    if let Err(error) = create_processing_bundle(
-        &state.db.pool,
-        &bundle_id,
-        &issue_code,
-        &bundle_hash,
-        &bundle_name,
-        upload.total_bytes,
-        Some(&user.0.id),
-    )
-    .await
+    if let Err(error) =
+        finalize_upload_reservation(&state.db.pool, &bundle_id, &bundle_name, upload.total_bytes)
+            .await
     {
+        remove_upload_reservation(&state.db.pool, &bundle_id).await;
         if let Err(cleanup_error) = fs::remove_dir_all(&temp_dir).await {
             tracing::error!(
                 path = %temp_dir.display(),
@@ -155,6 +162,7 @@ pub async fn upload_logs(
     });
 
     drop(receive_permit);
+    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "upload accepted").await;
 
     Ok(
         HttpResponse::build(StatusCode::ACCEPTED).json(UploadResponse {
@@ -207,6 +215,7 @@ pub async fn get_upload_task(
         UploadStatus::Processing => 0,
         UploadStatus::Pending => 0,
     };
+    touch_issue_activity_best_effort(&state.db.pool, &row.issue_code, "upload task read").await;
 
     Ok(HttpResponse::Ok().json(UploadTaskResponse {
         task_id: row.hash.clone(),

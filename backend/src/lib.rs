@@ -169,6 +169,7 @@ pub struct AppState {
     pub upload: UploadRuntime,
     pub temp_results: TempResultRuntime,
     pub auth_runtime: AuthRuntime,
+    pub issue_inactive_days: AtomicUsize,
     pub limits: AppLimits,
 }
 
@@ -241,6 +242,7 @@ impl AppState {
             upload,
             temp_results,
             auth_runtime,
+            issue_inactive_days: AtomicUsize::new(0),
             limits,
         }
     }

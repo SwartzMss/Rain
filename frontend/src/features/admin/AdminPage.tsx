@@ -102,6 +102,7 @@ export function AdminSettingsPage() {
   const [allowed, setAllowed] = useState(true);
   const [ipLimit, setIpLimit] = useState(20);
   const [usernameLimit, setUsernameLimit] = useState(10);
+  const [issueInactiveDays, setIssueInactiveDays] = useState<number | "">(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [hasLoadedSettings, setHasLoadedSettings] = useState(false);
@@ -116,6 +117,7 @@ export function AdminSettingsPage() {
       setAllowed(value.allow_registration);
       setIpLimit(value.login_ip_limit_per_minute);
       setUsernameLimit(value.login_username_failure_limit_per_5_minutes);
+      setIssueInactiveDays(value.issue_inactive_days);
       setHasLoadedSettings(true);
     } catch (e) {
       setHasLoadedSettings(false);
@@ -138,6 +140,7 @@ export function AdminSettingsPage() {
       setAllowed(result.allow_registration);
       setIpLimit(result.login_ip_limit_per_minute);
       setUsernameLimit(result.login_username_failure_limit_per_5_minutes);
+      setIssueInactiveDays(result.issue_inactive_days);
       setMessage("设置已保存");
     } catch (e) {
       setSaveError(normalizeApiError(e));
@@ -147,6 +150,25 @@ export function AdminSettingsPage() {
     }
   };
   const saveThresholds = () => void save(undefined, true);
+  const saveIssueExpiry = async () => {
+    if (issueInactiveDays === "" || !Number.isInteger(issueInactiveDays) || issueInactiveDays < 0 || issueInactiveDays > 30) {
+      setSaveError("Issue 非活跃天数必须为 0 到 30");
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    setSaveError(null);
+    try {
+      const result = await rainApi.updateAdminSettings(undefined, undefined, undefined, issueInactiveDays);
+      setIssueInactiveDays(result.issue_inactive_days);
+      setMessage("Issue 过期配置已保存");
+    } catch (e) {
+      setSaveError(normalizeApiError(e));
+      await load();
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <AdminGuard>
       <section className="max-w-3xl rounded-2xl border border-slate-200 bg-white/95 p-6 shadow-xl">
@@ -207,6 +229,30 @@ export function AdminSettingsPage() {
         >
           保存限流配置
         </button>
+        <div className="mt-6 rounded-xl border border-slate-200 p-4">
+          <h2 className="font-semibold">Issue 非活跃自动过期</h2>
+          <p className="mt-1 text-sm text-slate-500">0 表示关闭，最大 30 天。修改后从下一次后台扫描开始生效。</p>
+          <label className="mt-3 block text-sm text-slate-600">
+            非活跃天数
+            <input
+              type="number"
+              min="0"
+              max="30"
+              value={issueInactiveDays}
+              disabled={loading || saving || !hasLoadedSettings}
+              onChange={(e) => setIssueInactiveDays(e.target.value === "" ? "" : Number(e.target.value))}
+              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 sm:max-w-xs"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={loading || saving || !hasLoadedSettings || issueInactiveDays === "" || issueInactiveDays < 0 || issueInactiveDays > 30 || !Number.isInteger(issueInactiveDays)}
+            onClick={() => void saveIssueExpiry()}
+            className="mt-3 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+          >
+            保存 Issue 过期配置
+          </button>
+        </div>
         {message ? (
           <p className="mt-4 text-sm text-emerald-700">{message}</p>
         ) : null}

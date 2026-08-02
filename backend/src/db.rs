@@ -31,6 +31,13 @@ pub struct BundleCleanupStats {
     pub files: CleanupPhaseStats,
 }
 
+#[derive(Clone, Copy)]
+struct InactiveCleanupLease<'a> {
+    issue_code: &'a str,
+    token: &'a str,
+    seconds: u64,
+}
+
 impl BundleCleanupStats {
     pub fn total_rows(self) -> u64 {
         self.line_offsets.rows + self.fts_segments.rows + self.segments.rows + self.files.rows
@@ -79,6 +86,15 @@ pub async fn cleanup_bundle_content_batched(
     bundle_id: &str,
     batch_size: u64,
 ) -> Result<BundleCleanupStats, AppError> {
+    cleanup_bundle_content_batched_inner(pool, bundle_id, batch_size, None).await
+}
+
+async fn cleanup_bundle_content_batched_inner(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    batch_size: u64,
+    lease: Option<InactiveCleanupLease<'_>>,
+) -> Result<BundleCleanupStats, AppError> {
     if batch_size == 0 {
         return Err(AppError::Config(
             "cleanup batch size must be positive".into(),
@@ -92,6 +108,7 @@ pub async fn cleanup_bundle_content_batched(
             batch_size,
             "log_line_offsets",
             "DELETE FROM log_line_offsets WHERE rowid IN (SELECT rowid FROM log_line_offsets WHERE file_id IN (SELECT id FROM files WHERE bundle_id = ?) LIMIT ?)",
+            lease,
         )
         .await?,
         // The external-content FTS index is maintained by log_segments triggers.
@@ -102,6 +119,7 @@ pub async fn cleanup_bundle_content_batched(
             batch_size,
             "log_segments",
             "DELETE FROM log_segments WHERE rowid IN (SELECT rowid FROM log_segments WHERE bundle_id = ? LIMIT ?)",
+            lease,
         )
         .await?,
         files: delete_bundle_rows_in_batches(
@@ -110,9 +128,14 @@ pub async fn cleanup_bundle_content_batched(
             batch_size,
             "files",
             "DELETE FROM files WHERE rowid IN (SELECT rowid FROM files WHERE bundle_id = ? LIMIT ?)",
+            lease,
         )
         .await?,
     };
+
+    if let Some(lease) = lease {
+        require_inactive_issue_lease(pool, lease.issue_code, lease.token, lease.seconds).await?;
+    }
 
     if stats.total_rows() >= LARGE_CLEANUP_CHECKPOINT_ROWS {
         let started = std::time::Instant::now();
@@ -134,6 +157,10 @@ pub async fn cleanup_bundle_content_batched(
         }
     }
 
+    if let Some(lease) = lease {
+        require_inactive_issue_lease(pool, lease.issue_code, lease.token, lease.seconds).await?;
+    }
+
     Ok(stats)
 }
 
@@ -143,10 +170,15 @@ async fn delete_bundle_rows_in_batches(
     batch_size: u64,
     phase: &'static str,
     statement: &'static str,
+    lease: Option<InactiveCleanupLease<'_>>,
 ) -> Result<CleanupPhaseStats, AppError> {
     let started = std::time::Instant::now();
     let mut stats = CleanupPhaseStats::default();
     loop {
+        if let Some(lease) = lease {
+            require_inactive_issue_lease(pool, lease.issue_code, lease.token, lease.seconds)
+                .await?;
+        }
         let affected = sqlx::query(statement)
             .bind(bundle_id)
             .bind(batch_size as i64)
@@ -218,9 +250,71 @@ pub async fn finish_bundle_deletion(pool: &SqlitePool, bundle_id: &str) -> Resul
     Ok(())
 }
 
+pub async fn finish_bundle_deletion_with_inactive_lease(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    issue_code: &str,
+    lease_token: &str,
+    lease_seconds: u64,
+) -> Result<(), AppError> {
+    let lease = InactiveCleanupLease {
+        issue_code,
+        token: lease_token,
+        seconds: lease_seconds,
+    };
+    cleanup_bundle_content_batched_inner(pool, bundle_id, CLEANUP_BATCH_SIZE, Some(lease)).await?;
+    require_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds).await?;
+    sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+    require_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds).await?;
+    Ok(())
+}
+
+pub async fn renew_inactive_issue_lease(
+    pool: &SqlitePool,
+    issue_code: &str,
+    lease_token: &str,
+    lease_seconds: u64,
+) -> Result<bool, AppError> {
+    if lease_seconds == 0 {
+        return Err(AppError::Config(
+            "inactive cleanup lease must be positive".into(),
+        ));
+    }
+    let modifier = format!("+{lease_seconds} seconds");
+    let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
+        .bind(modifier)
+        .bind(issue_code)
+        .bind(lease_token)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?
+        .rows_affected();
+    Ok(renewed == 1)
+}
+
+async fn require_inactive_issue_lease(
+    pool: &SqlitePool,
+    issue_code: &str,
+    lease_token: &str,
+    lease_seconds: u64,
+) -> Result<(), AppError> {
+    if renew_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds).await? {
+        Ok(())
+    } else {
+        Err(AppError::Conflict(format!(
+            "inactive cleanup lease for issue {issue_code} was lost"
+        )))
+    }
+}
+
 pub async fn resume_deleting_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
-    let bundle_ids: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM bundles WHERE status = 'DELETING'")
+    let bundle_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT bundles.id FROM bundles JOIN issues ON issues.code=bundles.issue_code WHERE bundles.status='DELETING' AND NOT (issues.status='DELETING' AND issues.deletion_reason='INACTIVE')",
+    )
             .fetch_all(pool)
             .await
             .map_err(AppError::Database)?;
@@ -294,6 +388,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             ,login_ip_limit_per_minute INTEGER NOT NULL DEFAULT 20 CHECK (login_ip_limit_per_minute BETWEEN 1 AND 1000)
             ,login_username_failure_limit_per_5_minutes INTEGER NOT NULL DEFAULT 10 CHECK (login_username_failure_limit_per_5_minutes BETWEEN 1 AND 100)
+            ,issue_inactive_days INTEGER NOT NULL DEFAULT 0 CHECK (issue_inactive_days BETWEEN 0 AND 30)
         )
         "#,
         r#"
@@ -367,7 +462,14 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             description TEXT,
             owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
             status TEXT NOT NULL DEFAULT 'ACTIVE',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_activity_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            deletion_reason TEXT CHECK (deletion_reason IS NULL OR deletion_reason IN ('MANUAL', 'INACTIVE')),
+            inactive_claim_days INTEGER CHECK (inactive_claim_days BETWEEN 1 AND 30),
+            deletion_lease_token TEXT,
+            deletion_lease_until TEXT,
+            deletion_retry_at TEXT,
+            deletion_attempts INTEGER NOT NULL DEFAULT 0 CHECK (deletion_attempts >= 0)
         )
         "#,
         r#"
@@ -488,6 +590,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         END
         "#,
         "CREATE INDEX IF NOT EXISTS idx_bundles_issue ON bundles (issue_code, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_issues_activity ON issues (status, last_activity_at)",
         "CREATE INDEX IF NOT EXISTS idx_files_parent ON files (parent_id)",
         "CREATE INDEX IF NOT EXISTS idx_files_bundle ON files (bundle_id)",
         "CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)",
@@ -565,22 +668,38 @@ pub async fn load_or_initialize_auth_settings(
     ip: usize,
     username: usize,
 ) -> Result<(i64, usize, usize), AppError> {
+    let (registration, ip, username, _) =
+        load_or_initialize_system_settings(pool, allow_registration, ip, username, 0).await?;
+    Ok((registration, ip, username))
+}
+
+pub async fn load_or_initialize_system_settings(
+    pool: &SqlitePool,
+    allow_registration: bool,
+    ip: usize,
+    username: usize,
+    issue_inactive_days: usize,
+) -> Result<(i64, usize, usize, usize), AppError> {
     let ip = i64::try_from(ip).map_err(|_| AppError::Config("IP 限流阈值过大".into()))?;
     let username =
         i64::try_from(username).map_err(|_| AppError::Config("用户名限流阈值过大".into()))?;
-    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes) VALUES(1, ?, ?, ?)")
-        .bind(allow_registration as i64).bind(ip).bind(username).execute(pool).await.map_err(AppError::Database)?;
-    let row: (i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes FROM system_settings WHERE id=1").fetch_one(pool).await.map_err(AppError::Database)?;
+    let issue_inactive_days = i64::try_from(issue_inactive_days)
+        .map_err(|_| AppError::Config("Issue 非活跃天数过大".into()))?;
+    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days) VALUES(1, ?, ?, ?, ?)")
+        .bind(allow_registration as i64).bind(ip).bind(username).bind(issue_inactive_days).execute(pool).await.map_err(AppError::Database)?;
+    let row: (i64, i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days FROM system_settings WHERE id=1").fetch_one(pool).await.map_err(AppError::Database)?;
     let ip = usize::try_from(row.1)
         .map_err(|_| AppError::Config("数据库中的 IP 限流阈值无效".into()))?;
     let username = usize::try_from(row.2)
         .map_err(|_| AppError::Config("数据库中的用户名限流阈值无效".into()))?;
-    Ok((row.0, ip, username))
+    let issue_inactive_days = usize::try_from(row.3)
+        .map_err(|_| AppError::Config("数据库中的 Issue 非活跃天数无效".into()))?;
+    Ok((row.0, ip, username, issue_inactive_days))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::checkpoint_wal;
+    use super::{checkpoint_wal, load_or_initialize_system_settings};
 
     #[tokio::test]
     async fn checkpoint_returns_sqlite_page_counts() {
@@ -593,6 +712,20 @@ mod tests {
         assert!(stats.busy >= 0);
         assert!(stats.log_pages >= -1);
         assert!(stats.checkpointed_pages >= -1);
+    }
+
+    #[tokio::test]
+    async fn issue_inactivity_uses_first_start_default_then_database_value() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true).await.expect("schema");
+        let (_, _, _, days) = load_or_initialize_system_settings(&pool, true, 20, 10, 15)
+            .await
+            .unwrap();
+        assert_eq!(days, 15);
+        let (_, _, _, days) = load_or_initialize_system_settings(&pool, false, 30, 20, 3)
+            .await
+            .unwrap();
+        assert_eq!(days, 15);
     }
 
     #[tokio::test]

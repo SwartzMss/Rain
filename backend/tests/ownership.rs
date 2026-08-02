@@ -191,3 +191,57 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     assert_eq!(delete_file.status(), actix_web::http::StatusCode::FORBIDDEN);
     let _ = owner_cookie;
 }
+
+#[tokio::test]
+async fn committed_bundle_deletion_is_not_reported_as_failed_when_activity_touch_fails() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, true).await.unwrap();
+    let owner_cookie = user_with_session(&pool, "activity-owner").await;
+    let owner_id: String =
+        sqlx::query_scalar("SELECT id FROM users WHERE username='activity-owner'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO issues(code,name,owner_user_id,last_activity_at) VALUES('ACTIVITY','Activity',?,datetime('now','-2 hours'))")
+        .bind(owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('activity-bundle','ACTIVITY','activity-hash','activity.log','READY','READY')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER fail_activity_touch BEFORE UPDATE OF last_activity_at ON issues BEGIN SELECT RAISE(FAIL, 'forced activity failure'); END")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let data_root = std::env::temp_dir().join(format!("rain-activity-{}", Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(&data_root).await.unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                data_root.clone(),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/issues/ACTIVITY/bundles/activity-hash")
+            .cookie(owner_cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), actix_web::http::StatusCode::NO_CONTENT);
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM bundles WHERE id='activity-bundle'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(matches!(status.as_str(), "DELETING" | "DELETED"));
+    let _ = tokio::fs::remove_dir_all(data_root).await;
+}

@@ -274,7 +274,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
-                pool,
+                pool.clone(),
                 PathBuf::from("data"),
                 AppLimits::default(),
             )))
@@ -306,6 +306,70 @@ async fn registration_settings_are_persistent_and_admin_only() {
     let body: serde_json::Value = test::read_body_json(update).await;
     assert_eq!(body["login_ip_limit_per_minute"], 7);
     assert_eq!(body["login_username_failure_limit_per_5_minutes"], 4);
+    assert_eq!(body["issue_inactive_days"], 0);
+    let issue_expiry = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .peer_addr("127.0.0.1:4567".parse().unwrap())
+            .insert_header(("user-agent", "rain-admin-test"))
+            .set_json(serde_json::json!({"issue_inactive_days": 15}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(issue_expiry.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(issue_expiry).await;
+    assert_eq!(body["issue_inactive_days"], 15);
+    assert_eq!(body["allow_registration"], true);
+    assert_eq!(body["login_ip_limit_per_minute"], 7);
+    let audit: (String, Option<String>, Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT action,old_value,new_value,client_ip,user_agent FROM admin_audit_logs WHERE action='ISSUE_INACTIVE_SETTINGS_UPDATED' ORDER BY created_at DESC LIMIT 1")
+            .fetch_one(&pool).await.expect("issue settings audit");
+    assert_eq!(audit.0, "ISSUE_INACTIVE_SETTINGS_UPDATED");
+    assert!(
+        audit
+            .1
+            .as_deref()
+            .is_some_and(|value| value.contains("issue_inactive_days=0"))
+    );
+    assert_eq!(audit.2.as_deref(), Some("issue_inactive_days=15"));
+    assert_eq!(audit.3.as_deref(), Some("127.0.0.1"));
+    assert_eq!(audit.4.as_deref(), Some("rain-admin-test"));
+    for invalid in [
+        serde_json::json!(-1),
+        serde_json::json!(31),
+        serde_json::json!(1.5),
+        serde_json::json!("invalid"),
+    ] {
+        let invalid_issue_expiry = test::call_service(
+            &app,
+            test::TestRequest::patch()
+                .uri("/api/admin/settings")
+                .cookie(cookie.clone())
+                .set_json(serde_json::json!({"issue_inactive_days": invalid}))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(invalid_issue_expiry.status(), StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = test::read_body_json(invalid_issue_expiry).await;
+        assert_eq!(error["code"], "INVALID_ISSUE_INACTIVE_DAYS");
+    }
+    let mixed_update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(
+                serde_json::json!({"issue_inactive_days": 20, "login_ip_limit_per_minute": 8}),
+            )
+            .to_request(),
+    )
+    .await;
+    assert_eq!(mixed_update.status(), StatusCode::OK);
+    let audit_counts: (i64, i64) = sqlx::query_as("SELECT SUM(action='AUTH_SETTINGS_UPDATED'),SUM(action='ISSUE_INACTIVE_SETTINGS_UPDATED') FROM admin_audit_logs")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(audit_counts, (2, 2));
     let status = test::call_service(
         &app,
         test::TestRequest::get()

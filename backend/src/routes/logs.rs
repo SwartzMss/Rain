@@ -8,7 +8,7 @@ use crate::{
     models::logs::{LogSearchHit, LogSearchResponse},
 };
 
-use super::issues::normalize_issue_code;
+use super::issues::{normalize_issue_code, touch_issue_activity_best_effort};
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
 
@@ -246,6 +246,8 @@ pub async fn search_logs(
         })
         .collect();
 
+    touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "bundle log search").await;
+
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,
         hits,
@@ -285,7 +287,7 @@ pub async fn search_issue_logs(
     }
 
     if matches!(term.mode, IssueSearchMode::Filename) {
-        return search_issue_files(
+        let response = search_issue_files(
             &state.db.pool,
             &state.limits.api,
             &issue_code,
@@ -293,7 +295,10 @@ pub async fn search_issue_logs(
             term.from,
             term.size,
         )
-        .await;
+        .await?;
+        touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue filename search")
+            .await;
+        return Ok(response);
     }
 
     let fts_query = build_fts_query(search_term);
@@ -471,6 +476,8 @@ pub async fn search_issue_logs(
             chunk_index: row.chunk_index,
         })
         .collect();
+
+    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue log search").await;
 
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,

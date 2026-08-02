@@ -13,7 +13,7 @@ use backend::{
     config::AppConfig,
     db::{
         cleanup_expired_bundles, fail_stale_processing_bundles, init_pool,
-        load_or_initialize_auth_settings, prepare_schema, resume_deleting_bundles,
+        load_or_initialize_system_settings, prepare_schema, resume_deleting_bundles,
     },
     routes::register,
 };
@@ -73,14 +73,16 @@ async fn main() -> std::io::Result<()> {
     .fetch_one(&pool)
     .await
     .expect("failed to load administrator identity");
-    let (registration_value, ip_limit, username_limit) = load_or_initialize_auth_settings(
-        &pool,
-        config.auth.allow_registration,
-        config.auth.login_ip_limit_per_minute,
-        config.auth.login_username_failure_limit_per_5_minutes,
-    )
-    .await
-    .expect("failed to initialize auth rate limits");
+    let (registration_value, ip_limit, username_limit, issue_inactive_days) =
+        load_or_initialize_system_settings(
+            &pool,
+            config.auth.allow_registration,
+            config.auth.login_ip_limit_per_minute,
+            config.auth.login_username_failure_limit_per_5_minutes,
+            config.issue_inactive_days,
+        )
+        .await
+        .expect("failed to initialize auth rate limits");
     let registration_allowed = registration_value != 0;
     log_sqlite_file_sizes(&config.database_url).await;
 
@@ -168,11 +170,17 @@ async fn main() -> std::io::Result<()> {
         .auth_runtime
         .login_username_failure_limit_per_5_minutes
         .store(username_limit, std::sync::atomic::Ordering::Release);
+    app_state
+        .issue_inactive_days
+        .store(issue_inactive_days, std::sync::atomic::Ordering::Release);
     let shared_state = web::Data::new(app_state);
     background_tasks.push(backend::upload::job::spawn_temp_cleanup_worker(
         shared_state.upload.temp_cleanup_queue.clone(),
     ));
     background_tasks.push(backend::routes::spawn_temp_result_cleanup(
+        shared_state.clone(),
+    ));
+    background_tasks.push(backend::routes::spawn_inactive_issue_cleanup(
         shared_state.clone(),
     ));
 
