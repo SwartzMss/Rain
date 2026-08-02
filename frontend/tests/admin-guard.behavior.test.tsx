@@ -21,7 +21,7 @@ it('keeps the registration switch disabled when settings loading fails', async (
   vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'a', username: 'admin', role: 'ADMIN' } });
   vi.mocked(rainApi.fetchAdminSettings).mockRejectedValueOnce(new Error('settings unavailable'));
   render(<MemoryRouter initialEntries={['/admin/settings']}><AuthProvider><AdminSettingsPage /></AuthProvider></MemoryRouter>);
-  const toggle = await screen.findByRole('button');
+  const toggle = (await screen.findAllByRole('button'))[0];
   await waitFor(() => expect(toggle).toBeDisabled());
   expect(screen.getByText('settings unavailable')).toBeInTheDocument();
 });

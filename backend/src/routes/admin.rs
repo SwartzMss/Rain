@@ -300,11 +300,11 @@ pub async fn update_settings(
                 .login_username_failure_limit_per_5_minutes
                 .load(std::sync::atomic::Ordering::Acquire)
         });
-    if ip_limit == 0 || username_limit == 0 {
+    if !(1..=1000).contains(&ip_limit) || !(1..=100).contains(&username_limit) {
         return Err(AppError::api(
             StatusCode::BAD_REQUEST,
             "INVALID_RATE_LIMIT",
-            "认证限流阈值必须为正数",
+            "IP 限流阈值必须为 1 到 1000，用户名限流阈值必须为 1 到 100",
         ));
     }
     let mut settings_tx = state.db.pool.begin().await.map_err(AppError::Database)?;

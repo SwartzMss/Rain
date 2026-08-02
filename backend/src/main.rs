@@ -13,8 +13,7 @@ use backend::{
     config::AppConfig,
     db::{
         cleanup_expired_bundles, fail_stale_processing_bundles, init_pool,
-        load_or_initialize_rate_limits, load_or_initialize_registration_setting, prepare_schema,
-        resume_deleting_bundles,
+        load_or_initialize_auth_settings, prepare_schema, resume_deleting_bundles,
     },
     routes::register,
 };
@@ -68,17 +67,15 @@ async fn main() -> std::io::Result<()> {
     )
     .await
     .expect("failed to bootstrap administrator");
-    let registration_allowed =
-        load_or_initialize_registration_setting(&pool, config.auth.allow_registration)
-            .await
-            .expect("failed to initialize registration setting");
-    let (ip_limit, username_limit) = load_or_initialize_rate_limits(
+    let (registration_value, ip_limit, username_limit) = load_or_initialize_auth_settings(
         &pool,
+        config.auth.allow_registration,
         config.auth.login_ip_limit_per_minute,
         config.auth.login_username_failure_limit_per_5_minutes,
     )
     .await
     .expect("failed to initialize auth rate limits");
+    let registration_allowed = registration_value != 0;
     log_sqlite_file_sizes(&config.database_url).await;
 
     if config.reset_db {
