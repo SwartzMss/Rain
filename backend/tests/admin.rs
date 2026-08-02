@@ -315,6 +315,42 @@ async fn registration_settings_are_persistent_and_admin_only() {
     .await;
     let body: serde_json::Value = test::read_body_json(status).await;
     assert_eq!(body["allow_registration"], true);
+    let thresholds_only = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"login_ip_limit_per_minute": 9, "login_username_failure_limit_per_5_minutes": 6}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(thresholds_only.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(thresholds_only).await;
+    assert_eq!(body["allow_registration"], true);
+    assert_eq!(body["login_ip_limit_per_minute"], 9);
+    assert_eq!(body["login_username_failure_limit_per_5_minutes"], 6);
+    let invalid = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"login_ip_limit_per_minute": 1001}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let settings_after_invalid = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(settings_after_invalid).await;
+    assert_eq!(body["allow_registration"], true);
+    assert_eq!(body["login_ip_limit_per_minute"], 9);
+    assert_eq!(body["login_username_failure_limit_per_5_minutes"], 6);
     let guest = test::call_service(
         &app,
         test::TestRequest::get()
