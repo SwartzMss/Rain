@@ -279,11 +279,14 @@ async fn registration_settings_are_persistent_and_admin_only() {
         test::TestRequest::patch()
             .uri("/api/admin/settings")
             .cookie(cookie.clone())
-            .set_json(serde_json::json!({"allow_registration": true}))
+            .set_json(serde_json::json!({"allow_registration": true, "login_ip_limit_per_minute": 7, "login_username_failure_limit_per_5_minutes": 4}))
             .to_request(),
     )
     .await;
     assert_eq!(update.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(update).await;
+    assert_eq!(body["login_ip_limit_per_minute"], 7);
+    assert_eq!(body["login_username_failure_limit_per_5_minutes"], 4);
     let status = test::call_service(
         &app,
         test::TestRequest::get()
