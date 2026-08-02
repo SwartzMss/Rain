@@ -1,9 +1,8 @@
-use std::path::PathBuf;
-
 use actix_web::{App, body::to_bytes, cookie::Cookie, test, web};
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;
+use uuid::Uuid;
 
 use backend::{
     AppState,
@@ -58,11 +57,25 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
         .execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir, size_bytes, line_count, status) VALUES ('bundle-private', 'private.log', 'private.log', 0, 4, 1, 'READY')")
         .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES ('hash-content', 4, 'local', 'blobs/ha/hash-content', 'READY')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE files SET blob_id = 1 WHERE bundle_id = 'bundle-private' AND id = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let data_root =
+        std::env::temp_dir().join(format!("rain-ownership-{}", Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(data_root.join("blobs/ha"))
+        .await
+        .unwrap();
+    tokio::fs::write(data_root.join("blobs/ha/hash-content"), b"log\n")
+        .await
+        .unwrap();
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
                 pool,
-                PathBuf::from("data"),
+                data_root.clone(),
                 AppLimits::default(),
             )))
             .configure(routes::register),
@@ -90,6 +103,25 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     )
     .await;
     assert_eq!(read_file.status(), actix_web::http::StatusCode::OK);
+    let download = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/files/v1/hash-private/files/1/download")
+            .cookie(foreign_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(download.status(), actix_web::http::StatusCode::OK);
+    let search = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/log/v2/hash-private/search?q=log")
+            .cookie(foreign_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(search.status(), actix_web::http::StatusCode::OK);
+    let _ = tokio::fs::remove_dir_all(data_root).await;
 
     let delete = test::call_service(
         &app,
