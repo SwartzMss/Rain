@@ -1,11 +1,13 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from '../src/auth/AuthContext';
 import { rainApi } from '../src/api/client';
+import { AuthPage } from '../src/features/auth/AuthPage';
 
 vi.mock('../src/api/client', () => ({
-  rainApi: { me: vi.fn(), login: vi.fn(), register: vi.fn(), logout: vi.fn(), changePassword: vi.fn() }
+  rainApi: { me: vi.fn(), login: vi.fn(), register: vi.fn(), logout: vi.fn(), changePassword: vi.fn(), fetchRegistrationStatus: vi.fn() }
 }));
 
 function AuthProbe() {
@@ -44,5 +46,15 @@ describe('authentication behavior', () => {
     window.dispatchEvent(new Event('rain:authentication-required'));
     await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument());
     expect(rainApi.me).toHaveBeenCalledTimes(2);
+  });
+
+  it('hides the login registration link and blocks the registration form when disabled', async () => {
+    vi.mocked(rainApi.me).mockResolvedValue({ authenticated: false, user: null });
+    vi.mocked(rainApi.fetchRegistrationStatus).mockResolvedValue({ allow_registration: false });
+    const { rerender } = render(<MemoryRouter><AuthProvider><AuthPage mode="login" /></AuthProvider></MemoryRouter>);
+    await waitFor(() => expect(screen.queryByRole('link', { name: '注册' })).not.toBeInTheDocument());
+    rerender(<MemoryRouter><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter>);
+    expect(await screen.findByText('注册已关闭')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '注册' })).not.toBeInTheDocument();
   });
 });

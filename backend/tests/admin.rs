@@ -217,6 +217,92 @@ async fn admin_api_lists_users_and_protects_self_from_disable() {
 }
 
 #[actix_web::test]
+async fn registration_settings_are_persistent_and_admin_only() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let initial = db::load_or_initialize_registration_setting(&pool, true)
+        .await
+        .expect("initial");
+    assert!(initial);
+    sqlx::query("UPDATE system_settings SET allow_registration=0 WHERE id=1")
+        .execute(&pool)
+        .await
+        .expect("persist");
+    assert!(
+        !db::load_or_initialize_registration_setting(&pool, true)
+            .await
+            .expect("existing")
+    );
+    bootstrap_admin::bootstrap_admin(&pool, "admin", "strong-password")
+        .await
+        .expect("bootstrap");
+    let admin_id: String = sqlx::query_scalar("SELECT id FROM users WHERE role='ADMIN'")
+        .fetch_one(&pool)
+        .await
+        .expect("admin");
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &admin_id,
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .expect("session");
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+    let cookie = Cookie::new(SESSION_COOKIE_NAME, token);
+    let settings = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(settings.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(settings).await;
+    assert_eq!(body["allow_registration"], false);
+    let update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"allow_registration": true}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+    let status = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/auth/registration-status")
+            .to_request(),
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(status).await;
+    assert_eq!(body["allow_registration"], true);
+    let guest = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/settings")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(guest.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
 async fn administrator_cannot_change_password() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
