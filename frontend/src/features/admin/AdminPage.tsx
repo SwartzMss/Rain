@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Navigate, NavLink } from 'react-router-dom';
 import { normalizeApiError, rainApi } from '../../api/client';
-import type { AdminUser, AuditLog, UserStatus } from '../../api/types';
+import type { AdminUser, AuditLog, UserStatus, AuthRateLimitEntry } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { isAdmin } from '../../auth/permissions';
 import {
@@ -19,6 +19,7 @@ function AdminShell({ children }: { children: ReactNode }) {
       <nav className="inline-flex rounded-xl border border-slate-200 bg-white/80 p-1 text-sm shadow-sm">
         <NavLink className={({ isActive }) => `rounded-lg px-4 py-2 font-medium transition ${isActive ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'}`} to="/admin/users">用户管理</NavLink>
         <NavLink className={({ isActive }) => `rounded-lg px-4 py-2 font-medium transition ${isActive ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'}`} to="/admin/audit-logs">审计日志</NavLink>
+        <NavLink className={({ isActive }) => `rounded-lg px-4 py-2 font-medium transition ${isActive ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'}`} to="/admin/auth-rate-limits">认证限流</NavLink>
         <NavLink className={({ isActive }) => `rounded-lg px-4 py-2 font-medium transition ${isActive ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950'}`} to="/admin/settings">系统设置</NavLink>
       </nav>
       {children}
@@ -50,6 +51,19 @@ export function AdminSettingsPage() {
   useEffect(() => { void load(); }, [load]);
   const save = async (value: boolean) => { setSaving(true); setMessage(null); setSaveError(null); try { const result = await rainApi.updateAdminSettings(value); setAllowed(result.allow_registration); setMessage('设置已保存'); } catch (e) { setSaveError(normalizeApiError(e)); await load(); } finally { setSaving(false); } };
   return <AdminGuard><section className="max-w-3xl rounded-2xl border border-slate-200 bg-white/95 p-6 shadow-xl"><h1 className="text-xl font-semibold text-slate-950">系统设置</h1><div className="mt-6 flex items-center justify-between rounded-xl border border-slate-200 p-4"><div><h2 className="font-semibold">用户注册</h2><p className="mt-1 text-sm text-slate-500">关闭后，新用户将无法注册；已有用户仍可正常登录和使用系统。</p></div><button type="button" disabled={loading || saving || !hasLoadedSettings || Boolean(loadError)} onClick={() => void save(!allowed)} className={`relative h-7 w-12 rounded-full transition ${allowed ? 'bg-cyan-600' : 'bg-slate-300'} disabled:opacity-50`}><span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition ${allowed ? 'left-6' : 'left-1'}`} /></button></div>{message ? <p className="mt-4 text-sm text-emerald-700">{message}</p> : null}{loadError ? <p className="mt-4 text-sm text-rose-700">{loadError}</p> : null}{saveError ? <p className="mt-4 text-sm text-rose-700">保存失败：{saveError}</p> : null}</section></AdminGuard>;
+}
+
+export function AuthRateLimitsPage() {
+  const [usernameFailures, setUsernameFailures] = useState<AuthRateLimitEntry[]>([]);
+  const [loginIps, setLoginIps] = useState<AuthRateLimitEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const load = useCallback(async () => { setLoading(true); setError(null); try { const data = await rainApi.fetchAuthRateLimits(); setUsernameFailures(data.username_failures); setLoginIps(data.login_ips); } catch (e) { setError(normalizeApiError(e)); } finally { setLoading(false); } }, []);
+  useEffect(() => { void load(); }, [load]);
+  const clear = async (type: 'usernames' | 'ips', key?: string) => { if (!window.confirm(key ? '确认解除该限流？' : '确认清除全部该类限流？')) return; try { if (key) await rainApi.clearAuthRateLimit(type, key); else await rainApi.clearAllAuthRateLimits(type); setNotice('限流已清除'); await load(); } catch (e) { setError(normalizeApiError(e)); } };
+  const table = (title: string, type: 'usernames' | 'ips', items: AuthRateLimitEntry[], label: (item: AuthRateLimitEntry) => string) => <section className="mt-5 overflow-hidden rounded-xl border border-slate-200"><div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-4 py-3"><h2 className="font-semibold">{title}</h2><button type="button" disabled={loading || !items.length} onClick={() => void clear(type)} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs disabled:opacity-50">清除全部</button></div>{!items.length ? <p className="p-5 text-sm text-slate-500">当前没有认证限流记录</p> : <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-white text-xs text-slate-500"><tr><th className="px-4 py-2">标识</th><th className="px-4 py-2">次数/阈值</th><th className="px-4 py-2">最近事件</th><th className="px-4 py-2">恢复倒计时</th><th className="px-4 py-2">操作</th></tr></thead><tbody>{items.map((item) => <tr key={item.key} className="border-t border-slate-100"><td className="px-4 py-3">{label(item)}</td><td className="px-4 py-3">{item.current_count}/{item.limit} {item.limited ? <span className="text-rose-600">受限中</span> : null}</td><td className="px-4 py-3 text-slate-500">{item.last_event_at ?? '—'}</td><td className="px-4 py-3 text-slate-500">{item.retry_after_seconds}s</td><td className="px-4 py-3"><button type="button" disabled={loading} onClick={() => void clear(type, item.key)} className="text-rose-600 disabled:opacity-50">清除</button></td></tr>)}</tbody></table></div>}</section>;
+  return <AdminGuard><section className="rounded-2xl border border-slate-200 bg-white/95 p-5 shadow-xl"><div className="flex items-center justify-between"><div><h1 className="text-xl font-semibold">认证限流</h1><p className="mt-2 text-sm text-slate-500">限流用于防止暴力破解，命中后返回 429；限流临时保存在当前进程内，重启后清空。</p></div><button type="button" onClick={() => void load()} disabled={loading} className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:opacity-50">刷新</button></div>{notice ? <p className="mt-3 text-sm text-emerald-700">{notice}</p> : null}{error ? <p className="mt-3 text-sm text-rose-700">{error}</p> : null}{table('用户名失败限流', 'usernames', usernameFailures, (item) => item.username ?? item.key)}{table('登录 IP 限流', 'ips', loginIps, (item) => item.ip ?? item.key)}</section></AdminGuard>;
 }
 
 export function AdminUsersPage() {

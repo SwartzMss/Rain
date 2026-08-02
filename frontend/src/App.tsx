@@ -8,7 +8,7 @@ import { TempResultView } from './features/files/TempResultView';
 import { APP_VERSION } from './version';
 import './App.css';
 import { isAdmin } from './auth/permissions';
-import { AdminPage, AdminUsersPage, AuditLogsPage, AdminSettingsPage } from './features/admin/AdminPage';
+import { AdminPage, AdminUsersPage, AuditLogsPage, AdminSettingsPage, AuthRateLimitsPage } from './features/admin/AdminPage';
 import { useEffect, useState } from 'react';
 
 function App() {
@@ -112,6 +112,7 @@ function App() {
           <Route path="/admin/users" element={<AdminUsersPage />} />
           <Route path="/admin/audit-logs" element={<AuditLogsPage />} />
           <Route path="/admin/settings" element={<AdminSettingsPage />} />
+          <Route path="/admin/auth-rate-limits" element={<AuthRateLimitsPage />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />
           <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
           <Route path="/temp-results/:resultId" element={<TempResultView />} />

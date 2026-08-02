@@ -11,6 +11,7 @@ pub mod routes;
 pub mod services;
 pub mod upload;
 
+use chrono::{DateTime, Utc};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
@@ -30,7 +31,8 @@ use crate::config::{AppLimits, AuthConfig};
 
 pub struct AuthRateLimitBucket {
     window: Duration,
-    events: VecDeque<Instant>,
+    pub events: VecDeque<Instant>,
+    pub event_times: VecDeque<DateTime<Utc>>,
 }
 
 impl AuthRateLimitBucket {
@@ -38,6 +40,7 @@ impl AuthRateLimitBucket {
         Self {
             window,
             events: VecDeque::new(),
+            event_times: VecDeque::new(),
         }
     }
 
@@ -48,6 +51,7 @@ impl AuthRateLimitBucket {
             .is_some_and(|timestamp| now.duration_since(*timestamp) >= self.window)
         {
             self.events.pop_front();
+            self.event_times.pop_front();
         }
     }
 
@@ -61,6 +65,7 @@ impl AuthRateLimitBucket {
 
     pub fn push(&mut self, timestamp: Instant) {
         self.events.push_back(timestamp);
+        self.event_times.push_back(Utc::now());
     }
 
     pub fn set_window(&mut self, window: Duration) {

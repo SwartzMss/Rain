@@ -1,6 +1,7 @@
-use actix_web::{HttpRequest, HttpResponse, get, http::StatusCode, patch, post, web};
+use actix_web::{HttpRequest, HttpResponse, delete, get, http::StatusCode, patch, post, web};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sqlx::{QueryBuilder, Sqlite};
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::{
@@ -49,6 +50,155 @@ fn parse_status(value: &str) -> Result<UserStatus, AppError> {
             "用户状态无效",
         )
     })
+}
+
+#[get("/admin/auth-rate-limits")]
+pub async fn auth_rate_limits(
+    _admin: RequireAdmin,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let now = Instant::now();
+    let mut limits = state
+        .auth_runtime
+        .rate_limits
+        .lock()
+        .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+    let config = &state.auth_runtime.config;
+    let mut usernames = Vec::new();
+    for (key, bucket) in &mut limits.login_username_failure {
+        bucket.prune(now);
+        if bucket.events.is_empty() {
+            continue;
+        }
+        let oldest = bucket.events.front().copied().unwrap_or(now);
+        usernames.push(AuthRateLimitEntry {
+            key: key.clone(),
+            username: Some(
+                key.strip_prefix("login:username:")
+                    .unwrap_or(key)
+                    .to_owned(),
+            ),
+            ip: None,
+            current_count: bucket.events.len(),
+            limit: config.login_username_failure_limit_per_5_minutes,
+            window_seconds: 300,
+            last_event_at: bucket.event_times.back().map(ToString::to_string),
+            retry_after_seconds: 300u64.saturating_sub(now.duration_since(oldest).as_secs()),
+            limited: bucket.events.len() >= config.login_username_failure_limit_per_5_minutes,
+        });
+    }
+    let mut ips = Vec::new();
+    for (key, bucket) in &mut limits.login_ip {
+        bucket.prune(now);
+        if bucket.events.is_empty() {
+            continue;
+        }
+        let oldest = bucket.events.front().copied().unwrap_or(now);
+        ips.push(AuthRateLimitEntry {
+            key: key.clone(),
+            username: None,
+            ip: Some(key.strip_prefix("login:ip:").unwrap_or(key).to_owned()),
+            current_count: bucket.events.len(),
+            limit: config.login_ip_limit_per_minute,
+            window_seconds: 60,
+            last_event_at: bucket.event_times.back().map(ToString::to_string),
+            retry_after_seconds: 60u64.saturating_sub(now.duration_since(oldest).as_secs()),
+            limited: bucket.events.len() >= config.login_ip_limit_per_minute,
+        });
+    }
+    Ok(HttpResponse::Ok()
+        .json(serde_json::json!({"username_failures": usernames, "login_ips": ips})))
+}
+
+async fn clear_auth_bucket(
+    state: &web::Data<AppState>,
+    admin: &RequireAdmin,
+    key: &str,
+    username: bool,
+    req: &HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    let count = {
+        let mut limits = state
+            .auth_runtime
+            .rate_limits
+            .lock()
+            .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+        let bucket = if username {
+            limits.login_username_failure.remove(key)
+        } else {
+            limits.login_ip.remove(key)
+        };
+        bucket.map(|v| v.events.len()).unwrap_or(0)
+    };
+    let action = if username {
+        "AUTH_RATE_LIMIT_USERNAME_CLEARED"
+    } else {
+        "AUTH_RATE_LIMIT_IP_CLEARED"
+    };
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,client_ip,user_agent) VALUES(?,'USER',?,?,?, ?, ?)")
+        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(action).bind(format!("{key}:count={count}"))
+        .bind(req.peer_addr().map(|a| a.ip().to_string())).bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok())).execute(&state.db.pool).await.map_err(AppError::Database)?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+#[delete("/admin/auth-rate-limits/usernames/{key}")]
+pub async fn clear_username_rate_limit(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    clear_auth_bucket(&state, &admin, &path, true, &req).await
+}
+
+#[delete("/admin/auth-rate-limits/ips/{key}")]
+pub async fn clear_ip_rate_limit(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    clear_auth_bucket(&state, &admin, &path, false, &req).await
+}
+
+#[delete("/admin/auth-rate-limits/usernames")]
+pub async fn clear_username_rate_limits(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    let keys: Vec<String> = {
+        let mut l = state
+            .auth_runtime
+            .rate_limits
+            .lock()
+            .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+        l.login_username_failure.drain().map(|(k, _)| k).collect()
+    };
+    for key in keys {
+        let _ = clear_auth_bucket(&state, &admin, &key, true, &req).await?;
+    }
+    Ok(HttpResponse::NoContent().finish())
+}
+
+#[delete("/admin/auth-rate-limits/ips")]
+pub async fn clear_ip_rate_limits(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> Result<HttpResponse, AppError> {
+    let keys: Vec<String> = {
+        let mut l = state
+            .auth_runtime
+            .rate_limits
+            .lock()
+            .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+        l.login_ip.drain().map(|(k, _)| k).collect()
+    };
+    for key in keys {
+        let _ = clear_auth_bucket(&state, &admin, &key, false, &req).await?;
+    }
+    Ok(HttpResponse::NoContent().finish())
 }
 
 #[get("/admin/settings")]

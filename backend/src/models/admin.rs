@@ -51,6 +51,19 @@ pub struct UpdateRegistrationSettings {
     pub allow_registration: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AuthRateLimitEntry {
+    pub key: String,
+    pub username: Option<String>,
+    pub ip: Option<String>,
+    pub current_count: usize,
+    pub limit: usize,
+    pub window_seconds: u64,
+    pub last_event_at: Option<String>,
+    pub retry_after_seconds: u64,
+    pub limited: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AuditListQuery {
     pub action: Option<String>,

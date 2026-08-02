@@ -17,7 +17,7 @@ import type {
   User,
   SavedSearch,
   SavedSearchPayload
-  , AdminUserPage, AuditLogPage, UserStatus, RegistrationStatus, RegistrationSettings
+  , AdminUserPage, AuditLogPage, UserStatus, RegistrationStatus, RegistrationSettings, AuthRateLimitsResponse
 } from './types';
 
 const API_BASE_URL = '';
@@ -136,6 +136,9 @@ export const rainApi = {
   fetchAuditLogs(cursor?: string) { return request<AuditLogPage>(`/api/admin/audit-logs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`); },
   fetchAdminSettings() { return request<RegistrationSettings>('/api/admin/settings'); },
   updateAdminSettings(allow_registration: boolean) { return request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ allow_registration }) }); },
+  fetchAuthRateLimits() { return request<AuthRateLimitsResponse>('/api/admin/auth-rate-limits'); },
+  clearAuthRateLimit(type: 'usernames' | 'ips', key: string) { return request<void>(`/api/admin/auth-rate-limits/${type}/${encodePathSegment(key)}`, { method: 'DELETE' }); },
+  clearAllAuthRateLimits(type: 'usernames' | 'ips') { return request<void>(`/api/admin/auth-rate-limits/${type}`, { method: 'DELETE' }); },
   changeUserStatus(id: string, status: UserStatus) { return request(`/api/admin/users/${encodePathSegment(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }); },
   revokeUserSessions(id: string) { return request<{ revoked_sessions: number }>(`/api/admin/users/${encodePathSegment(id)}/revoke-sessions`, { method: 'POST' }); },
   register(payload: Credentials) {
