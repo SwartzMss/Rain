@@ -1,5 +1,5 @@
 use super::*;
-use super::{lifecycle::*, service::*, storage::*};
+use super::{lifecycle::*, repository::*, service::*, storage::*};
 
 #[post("/temp-results/preview")]
 pub(crate) async fn preview_temp_result(

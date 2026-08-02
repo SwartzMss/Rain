@@ -1,4 +1,5 @@
-use super::lifecycle::{checked_temp_path, load_and_renew};
+use super::lifecycle::load_and_renew;
+use super::storage::checked_temp_path;
 use super::storage::invalid_sidecar;
 use super::*;
 
