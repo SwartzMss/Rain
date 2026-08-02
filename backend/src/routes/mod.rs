@@ -18,19 +18,19 @@ mod temp_results;
 mod uploads;
 
 pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
-            std::time::Duration::from_secs(300),
-        );
-        loop {
-            interval.tick().await;
-            match temp_results::cleanup_expired(&state).await {
-                Ok(()) => tracing::debug!("expired temporary results cleanup completed"),
-                Err(error) => tracing::warn!(%error, "expired temporary results cleanup failed"),
+    crate::spawn_periodic_job(
+        "temporary-result-cleanup",
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(300),
+        move || {
+            let state = state.clone();
+            async move {
+                temp_results::cleanup_expired(&state)
+                    .await
+                    .map_err(|error| error.to_string())
             }
-        }
-    });
+        },
+    );
 }
 
 async fn prevent_session_response_caching(

@@ -90,6 +90,17 @@ pub struct UploadRuntime {
     pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
 }
 
+impl UploadRuntime {
+    pub fn new(processing: usize, receiving: usize) -> Self {
+        Self {
+            processing_permits: Arc::new(Semaphore::new(processing)),
+            receive_permits: Arc::new(Semaphore::new(receiving)),
+            tmp_bytes: Arc::new(AtomicU64::new(0)),
+            temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
+        }
+    }
+}
+
 pub struct TempResultRuntime {
     pub permits: Arc<Semaphore>,
     pub capacity_lock: Arc<AsyncMutex<()>>,
@@ -97,10 +108,31 @@ pub struct TempResultRuntime {
     pub ip_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
 }
 
+impl TempResultRuntime {
+    pub fn new(materializations: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(materializations)),
+            capacity_lock: Arc::new(AsyncMutex::new(())),
+            staging: Arc::new(Mutex::new(HashSet::new())),
+            ip_limits: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
 pub struct AuthRuntime {
     pub config: AuthConfig,
     pub hash_permits: Arc<Semaphore>,
     pub rate_limits: Arc<Mutex<AuthRateLimits>>,
+}
+
+impl AuthRuntime {
+    pub fn new(config: AuthConfig) -> Self {
+        Self {
+            hash_permits: Arc::new(Semaphore::new(config.argon2_concurrency)),
+            config,
+            rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
+        }
+    }
 }
 
 pub struct AppState {
@@ -119,7 +151,8 @@ pub fn spawn_periodic_job<F, Fut>(
     initial_delay: Duration,
     interval_duration: Duration,
     mut job: F,
-) where
+) -> tokio::task::JoinHandle<()>
+where
     F: FnMut() -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), String>> + Send + 'static,
 {
@@ -140,7 +173,7 @@ pub fn spawn_periodic_job<F, Fut>(
                 }
             }
         }
-    });
+    })
 }
 
 impl AppState {
@@ -165,36 +198,21 @@ impl AppState {
         auth: AuthConfig,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
-        let processing_permits =
-            Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
-        let receive_permits = Arc::new(Semaphore::new(limits.upload.concurrent_receive_tasks));
-        let temp_result_permits = Arc::new(Semaphore::new(
-            limits.temp_results.concurrent_materializations,
-        ));
-        let auth_hash_permits = Arc::new(Semaphore::new(auth.argon2_concurrency));
+        let upload = UploadRuntime::new(
+            limits.upload.concurrent_processing_tasks,
+            limits.upload.concurrent_receive_tasks,
+        );
+        let temp_results = TempResultRuntime::new(limits.temp_results.concurrent_materializations);
+        let auth_runtime = AuthRuntime::new(auth);
         Self {
             db: DatabaseContext { pool },
             storage: StorageContext {
                 data_root,
                 blob_store,
             },
-            upload: UploadRuntime {
-                processing_permits,
-                receive_permits,
-                tmp_bytes: Arc::new(AtomicU64::new(0)),
-                temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
-            },
-            temp_results: TempResultRuntime {
-                permits: temp_result_permits,
-                capacity_lock: Arc::new(AsyncMutex::new(())),
-                staging: Arc::new(Mutex::new(HashSet::new())),
-                ip_limits: Arc::new(Mutex::new(HashMap::new())),
-            },
-            auth_runtime: AuthRuntime {
-                config: auth,
-                hash_permits: auth_hash_permits,
-                rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
-            },
+            upload,
+            temp_results,
+            auth_runtime,
             limits,
         }
     }
