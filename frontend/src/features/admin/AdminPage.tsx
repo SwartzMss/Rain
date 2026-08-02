@@ -151,8 +151,8 @@ export function AdminSettingsPage() {
   };
   const saveThresholds = () => void save(undefined, true);
   const saveIssueExpiry = async () => {
-    if (issueInactiveDays === "" || !Number.isInteger(issueInactiveDays) || issueInactiveDays < 0 || issueInactiveDays > 30) {
-      setSaveError("Issue 非活跃天数必须为 0 到 30");
+    if (issueInactiveDays === "" || !Number.isInteger(issueInactiveDays) || (issueInactiveDays !== 0 && (issueInactiveDays < 7 || issueInactiveDays > 30))) {
+      setSaveError("Issue 非活跃天数必须为 0，或 7 到 30");
       return;
     }
     setSaving(true);
@@ -231,7 +231,7 @@ export function AdminSettingsPage() {
         </button>
         <div className="mt-6 rounded-xl border border-slate-200 p-4">
           <h2 className="font-semibold">Issue 非活跃自动过期</h2>
-          <p className="mt-1 text-sm text-slate-500">0 表示关闭，最大 30 天。修改后从下一次后台扫描开始生效。</p>
+          <p className="mt-1 text-sm text-slate-500">0 表示关闭；启用时可设置为 7 到 30 天。修改后从下一次后台扫描开始生效。</p>
           <label className="mt-3 block text-sm text-slate-600">
             非活跃天数
             <input
@@ -246,7 +246,7 @@ export function AdminSettingsPage() {
           </label>
           <button
             type="button"
-            disabled={loading || saving || !hasLoadedSettings || issueInactiveDays === "" || issueInactiveDays < 0 || issueInactiveDays > 30 || !Number.isInteger(issueInactiveDays)}
+            disabled={loading || saving || !hasLoadedSettings || issueInactiveDays === "" || (issueInactiveDays !== 0 && (issueInactiveDays < 7 || issueInactiveDays > 30)) || !Number.isInteger(issueInactiveDays)}
             onClick={() => void saveIssueExpiry()}
             className="mt-3 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
           >

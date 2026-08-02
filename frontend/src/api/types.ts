@@ -64,7 +64,13 @@ export interface IssueBundlesResponse {
   name: string;
   can_write: boolean;
   owner_username: string | null;
+  inactivity_expiry: IssueInactivityExpiry | null;
   log_bundles: UploadSummary[];
+}
+
+export interface IssueInactivityExpiry {
+  inactive_days: number;
+  expires_at: string;
 }
 
 export interface IssueSummary {

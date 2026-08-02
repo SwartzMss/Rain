@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, delete, get, post, web};
+use actix_web::{HttpResponse, delete, get, http::header::CACHE_CONTROL, post, web};
 use serde::Deserialize;
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -12,7 +12,8 @@ use crate::{
     },
     error::AppError,
     models::issues::{
-        IssueBundlesResponse, IssueSummary, UploadStage, UploadStatus, UploadStatusWrapper,
+        IssueBundlesResponse, IssueInactivityExpiry, IssueSummary, UploadStage, UploadStatus,
+        UploadStatusWrapper,
     },
 };
 
@@ -176,13 +177,38 @@ pub async fn get_issue_bundles(
     .await
     .map_err(AppError::Database)?;
 
+    let can_write = user
+        .0
+        .as_ref()
+        .is_some_and(|user| issue.owner_user_id.as_deref() == Some(user.id.as_str()));
+
+    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue detail read").await;
+
+    let inactive_days = state
+        .issue_inactive_days
+        .load(std::sync::atomic::Ordering::Acquire);
+    let inactivity_expiry = if can_write && (7..=30).contains(&inactive_days) {
+        sqlx::query_scalar::<_, String>(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', datetime(last_activity_at, '+' || ? || ' days')) FROM issues WHERE code = ? AND status = 'ACTIVE'",
+        )
+        .bind(inactive_days as i64)
+        .bind(&issue_code)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(AppError::Database)?
+        .map(|expires_at| IssueInactivityExpiry {
+            inactive_days,
+            expires_at,
+        })
+    } else {
+        None
+    };
+
     let response = IssueBundlesResponse {
         name: issue.name,
         owner_username: user.0.as_ref().and_then(|_| issue.owner_username.clone()),
-        can_write: user
-            .0
-            .as_ref()
-            .is_some_and(|user| issue.owner_user_id.as_deref() == Some(user.id.as_str())),
+        can_write,
+        inactivity_expiry,
         log_bundles: rows
             .into_iter()
             .map(|bundle| {
@@ -206,9 +232,9 @@ pub async fn get_issue_bundles(
             .collect(),
     };
 
-    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue detail read").await;
-
-    Ok(HttpResponse::Ok().json(response))
+    Ok(HttpResponse::Ok()
+        .insert_header((CACHE_CONTROL, "no-store, private"))
+        .json(response))
 }
 
 pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usize, AppError> {

@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, normalizeApiError, rainApi } from '../../../api/client';
-import type { IssueBundlesResponse, UploadSummary } from '../../../api/types';
+import type { IssueBundlesResponse, IssueInactivityExpiry, UploadSummary } from '../../../api/types';
 import type { BundleFileState } from '../homeRows';
+import { visibleInactivityExpiry } from '../issueExpiration';
 
 export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => void) {
   const [bundles, setBundles] = useState<UploadSummary[]>([]);
   const [canWrite, setCanWrite] = useState(false);
   const [ownerUsername, setOwnerUsername] = useState<string | null>(null);
+  const [inactivityExpiry, setInactivityExpiry] = useState<IssueInactivityExpiry | null>(null);
   const [, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
@@ -21,6 +23,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
     setBundles([]);
     setCanWrite(false);
     setOwnerUsername(null);
+    setInactivityExpiry(null);
     setBundleFiles({});
     setBundlesError(null);
   }, []);
@@ -38,6 +41,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
       setBundlesLoading(true);
       setBundlesError(null);
       setOwnerUsername(null);
+      setInactivityExpiry(null);
       try {
         const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
         if (requestId !== bundleRequestIdRef.current || selectedIssueRef.current !== trimmed) {
@@ -46,6 +50,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
         setBundles(data.log_bundles);
         setCanWrite(data.can_write);
         setOwnerUsername(data.owner_username);
+        setInactivityExpiry(visibleInactivityExpiry(data.inactivity_expiry));
         setBundleFiles((prev) => {
           const validHashes = new Set(data.log_bundles.map((bundle) => bundle.hash));
           return Object.fromEntries(Object.entries(prev).filter(([hash]) => validHashes.has(hash)));
@@ -62,6 +67,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
           return;
         }
         setBundles([]);
+        setInactivityExpiry(null);
         setBundlesError(message);
       } finally {
         if (requestId === bundleRequestIdRef.current) {
@@ -126,6 +132,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
     bundleFiles,
     bundles,
     canWrite,
+    inactivityExpiry,
     ownerUsername,
     bundlesError,
     clearBundles,
