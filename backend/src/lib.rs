@@ -125,6 +125,7 @@ impl TempResultRuntime {
 pub struct AuthRuntime {
     pub config: AuthConfig,
     pub allow_registration: AtomicBool,
+    pub registration_settings_lock: Arc<AsyncMutex<()>>,
     pub hash_permits: Arc<Semaphore>,
     pub rate_limits: Arc<Mutex<AuthRateLimits>>,
 }
@@ -136,6 +137,7 @@ impl AuthRuntime {
             hash_permits: Arc::new(Semaphore::new(config.argon2_concurrency)),
             config,
             allow_registration: AtomicBool::new(allow_registration),
+            registration_settings_lock: Arc::new(AsyncMutex::new(())),
             rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
         }
     }

@@ -24,10 +24,9 @@ export function AuthPage({ mode }: AuthPageProps) {
   const [submitting, setSubmitting] = useState(false);
   const isLogin = mode === 'login';
   const [registrationAllowed, setRegistrationAllowed] = useState(true);
-  const [registrationChecked, setRegistrationChecked] = useState(isLogin);
+  const [registrationChecked, setRegistrationChecked] = useState(false);
 
   useEffect(() => {
-    if (isLogin) return;
     void rainApi.fetchRegistrationStatus().then((status) => {
       setRegistrationAllowed(status.allow_registration);
       setRegistrationChecked(true);
@@ -130,14 +129,7 @@ export function AuthPage({ mode }: AuthPageProps) {
       </form>
 
       <p className="mt-6 text-center text-sm text-slate-500">
-        {isLogin ? '还没有账户？' : '已经有账户？'}{' '}
-        <Link
-          className="font-semibold text-cyan-700 hover:text-cyan-900"
-          state={{ from: safeReturnPath(state.from) }}
-          to={isLogin ? '/register' : '/login'}
-        >
-          {isLogin ? '注册' : '登录'}
-        </Link>
+        {isLogin ? (registrationChecked && registrationAllowed ? <><span>还没有账户？ </span><Link className="font-semibold text-cyan-700 hover:text-cyan-900" state={{ from: safeReturnPath(state.from) }} to="/register">注册</Link></> : null) : <><span>已经有账户？ </span><Link className="font-semibold text-cyan-700 hover:text-cyan-900" state={{ from: safeReturnPath(state.from) }} to="/login">登录</Link></>}
       </p>
     </section>
   );

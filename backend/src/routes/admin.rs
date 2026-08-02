@@ -77,6 +77,7 @@ pub async fn update_settings(
     state: web::Data<AppState>,
     body: web::Json<UpdateRegistrationSettings>,
 ) -> Result<HttpResponse, AppError> {
+    let _settings_guard = state.auth_runtime.registration_settings_lock.lock().await;
     sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
         .bind(state.auth_runtime.registration_allowed() as i64)
         .execute(&state.db.pool)
