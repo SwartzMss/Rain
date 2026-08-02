@@ -13,6 +13,122 @@ use super::storage::{
     temp_result_too_large,
 };
 use super::*;
+use crate::services::temp_results::MaterializedPreview;
+
+enum MaterializeMode {
+    Full,
+    Preview { from: i64, size: i64 },
+}
+
+struct MaterializeOutcome {
+    id: String,
+    total: i64,
+    lines: Vec<PreviewLine>,
+}
+
+async fn materialize_result(
+    state: &web::Data<AppState>,
+    expression_text: &str,
+    expression: &log_expression::Expression,
+    sources: &[TempSource],
+    source_label: &str,
+    mode: MaterializeMode,
+) -> Result<MaterializeOutcome, AppError> {
+    let id = Uuid::new_v4().simple().to_string();
+    let directory = data_root(state).join("temp-results");
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .map_err(AppError::Io)?;
+    let output_path = directory.join(format!("{id}.log"));
+    let meta_path = output_path.with_extension("meta");
+    let index_path = output_path.with_extension("idx");
+    let staging_output_path = staging_path(&output_path);
+    let staging_meta_path = staging_path(&meta_path);
+    let staging_index_path = staging_path(&index_path);
+    let _staging_lease = register_staging_lease(state, &id);
+    insert_staging_temp_result(state, &id, expression_text, source_label, &output_path).await?;
+    let result = async {
+        let mut output = File::create(&staging_output_path)
+            .await
+            .map_err(AppError::Io)?;
+        let mut metadata = File::create(&staging_meta_path)
+            .await
+            .map_err(AppError::Io)?;
+        let mut index = File::create(&staging_index_path)
+            .await
+            .map_err(AppError::Io)?;
+        let materialized = match mode {
+            MaterializeMode::Full => TempResultExecutor::write_matches(
+                sources,
+                expression,
+                &mut output,
+                &mut metadata,
+                &mut index,
+                state.limits.temp_results.max_result_size,
+            )
+            .await
+            .map(|total| MaterializedPreview {
+                total,
+                lines: Vec::new(),
+            }),
+            MaterializeMode::Preview { from, size } => {
+                TempResultExecutor::materialize_preview(
+                    sources,
+                    expression,
+                    from,
+                    size,
+                    state.limits.temp_results.max_result_size,
+                    &mut output,
+                    &mut metadata,
+                    &mut index,
+                )
+                .await
+            }
+        }?;
+        drop(output);
+        drop(metadata);
+        drop(index);
+        let size_bytes = result_storage_size(
+            &staging_output_path,
+            &staging_meta_path,
+            &staging_index_path,
+        )
+        .await
+        .map_err(AppError::Io)?;
+        tokio::fs::rename(&staging_output_path, &output_path)
+            .await
+            .map_err(AppError::Io)?;
+        tokio::fs::rename(&staging_meta_path, &meta_path)
+            .await
+            .map_err(AppError::Io)?;
+        tokio::fs::rename(&staging_index_path, &index_path)
+            .await
+            .map_err(AppError::Io)?;
+        publish_temp_result(
+            state,
+            &id,
+            expression_text,
+            source_label,
+            &output_path,
+            materialized.total,
+            i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
+        )
+        .await?;
+        Ok::<MaterializedPreview, AppError>(materialized)
+    }
+    .await;
+    match result {
+        Ok(materialized) => Ok(MaterializeOutcome {
+            id,
+            total: materialized.total,
+            lines: materialized.lines,
+        }),
+        Err(error) => {
+            abort_staging_result(state, &id, &output_path).await;
+            Err(error)
+        }
+    }
+}
 
 #[derive(FromRow)]
 struct IssueSourceRow {
@@ -165,108 +281,31 @@ pub(crate) async fn create_preview_result(
     ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
-    let source_request = CreateTempResultRequest {
+    let request = CreateTempResultRequest {
         expression: expression_text.to_string(),
         bundle_hash: payload.bundle_hash.clone(),
         file_id: payload.file_id.clone(),
         issue_code: payload.issue_code.clone(),
         source_temp_id: payload.source_temp_id.clone(),
     };
-    let sources = resolve_sources(&source_request, &state).await?;
-    let from = payload.from.unwrap_or(0).max(0);
-    let size = preview_page_size(payload.size);
+    let sources = resolve_sources(&request, &state).await?;
     let source_label = source_label(&sources);
-    let id = Uuid::new_v4().simple().to_string();
-    let directory = data_root(&state).join("temp-results");
-    tokio::fs::create_dir_all(&directory)
-        .await
-        .map_err(AppError::Io)?;
-    let output_path = directory.join(format!("{id}.log"));
-    let meta_path = output_path.with_extension("meta");
-    let index_path = output_path.with_extension("idx");
-    let staging_output_path = staging_path(&output_path);
-    let staging_meta_path = staging_path(&meta_path);
-    let staging_index_path = staging_path(&index_path);
-    let _staging_lease = register_staging_lease(&state, &id);
-    insert_staging_temp_result(&state, &id, expression_text, &source_label, &output_path).await?;
-    let materialized = async {
-        let mut output = File::create(&staging_output_path)
-            .await
-            .map_err(AppError::Io)?;
-        let mut metadata = File::create(&staging_meta_path)
-            .await
-            .map_err(AppError::Io)?;
-        let mut index = File::create(&staging_index_path)
-            .await
-            .map_err(AppError::Io)?;
-        TempResultExecutor::materialize_preview(
-            &sources,
-            &expression,
-            from,
-            size,
-            state.limits.temp_results.max_result_size,
-            &mut output,
-            &mut metadata,
-            &mut index,
-        )
-        .await
-    }
-    .await;
-    let preview = match materialized {
-        Ok(preview) => preview,
-        Err(error) => {
-            abort_staging_result(&state, &id, &output_path).await;
-            return Err(error);
-        }
-    };
-    let size_bytes = match result_storage_size(
-        &staging_output_path,
-        &staging_meta_path,
-        &staging_index_path,
-    )
-    .await
-    {
-        Ok(size_bytes) => size_bytes,
-        Err(error) => {
-            abort_staging_result(&state, &id, &output_path).await;
-            return Err(AppError::Io(error));
-        }
-    };
-    let publish_result = async {
-        tokio::fs::rename(&staging_output_path, &output_path)
-            .await
-            .map_err(AppError::Io)?;
-        tokio::fs::rename(&staging_meta_path, &meta_path)
-            .await
-            .map_err(AppError::Io)?;
-        tokio::fs::rename(&staging_index_path, &index_path)
-            .await
-            .map_err(AppError::Io)?;
-        Ok::<(), AppError>(())
-    }
-    .await;
-    if let Err(error) = publish_result {
-        abort_staging_result(&state, &id, &output_path).await;
-        return Err(error);
-    }
-    if let Err(error) = publish_temp_result(
+    let outcome = materialize_result(
         &state,
-        &id,
         expression_text,
+        &expression,
+        &sources,
         &source_label,
-        &output_path,
-        preview.total,
-        i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
+        MaterializeMode::Preview {
+            from: payload.from.unwrap_or(0).max(0),
+            size: preview_page_size(payload.size),
+        },
     )
-    .await
-    {
-        abort_staging_result(&state, &id, &output_path).await;
-        return Err(error);
-    }
+    .await?;
     Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
-        result_id: id,
-        total: preview.total,
-        lines: preview.lines,
+        result_id: outcome.id,
+        total: outcome.total,
+        lines: outcome.lines,
     }))
 }
 
@@ -291,68 +330,18 @@ pub(crate) async fn create_full_result(
     ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
-
     let sources = resolve_sources(&payload, &state).await?;
     let source_label = source_label(&sources);
-    let id = Uuid::new_v4().simple().to_string();
-    let directory = data_root(&state).join("temp-results");
-    tokio::fs::create_dir_all(&directory)
-        .await
-        .map_err(AppError::Io)?;
-    let output_path = directory.join(format!("{id}.log"));
-    let meta_path = output_path.with_extension("meta");
-    let index_path = output_path.with_extension("idx");
-    let _staging_lease = register_staging_lease(&state, &id);
-    insert_staging_temp_result(&state, &id, expression_text, &source_label, &output_path).await?;
-    let mut output = File::create(&output_path).await.map_err(AppError::Io)?;
-    let mut metadata_output = File::create(&meta_path).await.map_err(AppError::Io)?;
-    let mut index_output = File::create(&index_path).await.map_err(AppError::Io)?;
-    let matching_lines = match TempResultExecutor::write_matches(
-        &sources,
-        &expression,
-        &mut output,
-        &mut metadata_output,
-        &mut index_output,
-        state.limits.temp_results.max_result_size,
-    )
-    .await
-    {
-        Ok(matching_lines) => matching_lines,
-        Err(error) => {
-            drop(output);
-            drop(metadata_output);
-            drop(index_output);
-            abort_staging_result(&state, &id, &output_path).await;
-            return Err(error);
-        }
-    };
-    drop(output);
-    drop(metadata_output);
-    drop(index_output);
-
-    let size_bytes = match result_storage_size(&output_path, &meta_path, &index_path).await {
-        Ok(size_bytes) => size_bytes,
-        Err(error) => {
-            abort_staging_result(&state, &id, &output_path).await;
-            return Err(AppError::Io(error));
-        }
-    };
-    let insert_result = publish_temp_result(
+    let outcome = materialize_result(
         &state,
-        &id,
         expression_text,
+        &expression,
+        &sources,
         &source_label,
-        &output_path,
-        matching_lines,
-        i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
+        MaterializeMode::Full,
     )
-    .await;
-    if let Err(error) = insert_result {
-        abort_staging_result(&state, &id, &output_path).await;
-        return Err(error);
-    }
-
-    let result = load_and_renew(&state, &id).await?;
+    .await?;
+    let result = load_and_renew(&state, &outcome.id).await?;
     Ok(HttpResponse::Created().json(to_response(result)))
 }
 

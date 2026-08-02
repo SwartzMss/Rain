@@ -350,6 +350,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_and_preview_write_identical_artifacts() {
+        let source_path = test_path("shared-source.log");
+        tokio::fs::write(&source_path, "ERROR one\nINFO skip\nERROR two\n")
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: Some("bundle".into()),
+            file_id: Some("1".into()),
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let full_paths = [
+            test_path("full.log"),
+            test_path("full.meta"),
+            test_path("full.idx"),
+        ];
+        let preview_paths = [
+            test_path("preview.log"),
+            test_path("preview.meta"),
+            test_path("preview.idx"),
+        ];
+        let mut full = (
+            File::create(&full_paths[0]).await.unwrap(),
+            File::create(&full_paths[1]).await.unwrap(),
+            File::create(&full_paths[2]).await.unwrap(),
+        );
+        let mut preview = (
+            File::create(&preview_paths[0]).await.unwrap(),
+            File::create(&preview_paths[1]).await.unwrap(),
+            File::create(&preview_paths[2]).await.unwrap(),
+        );
+        let total = TempResultExecutor::write_matches(
+            &sources,
+            &expression,
+            &mut full.0,
+            &mut full.1,
+            &mut full.2,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+        let outcome = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            1,
+            1,
+            u64::MAX,
+            &mut preview.0,
+            &mut preview.1,
+            &mut preview.2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, outcome.total);
+        assert_eq!(outcome.lines.len(), 1);
+        drop(full);
+        drop(preview);
+        for (full_path, preview_path) in full_paths.iter().zip(preview_paths.iter()) {
+            assert_eq!(
+                tokio::fs::read(full_path).await.unwrap(),
+                tokio::fs::read(preview_path).await.unwrap()
+            );
+        }
+        for path in full_paths
+            .into_iter()
+            .chain(preview_paths)
+            .chain([source_path])
+        {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
     async fn rematerializing_an_indexed_result_preserves_original_metadata() {
         let source_path = test_path("source.log");
         let first_log_path = test_path("first.log");
