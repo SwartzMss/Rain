@@ -150,6 +150,7 @@ struct MaterializedPreviewResponse {
     lines: Vec<PreviewLine>,
 }
 
+mod common;
 mod lifecycle;
 mod repository;
 mod routes;
@@ -173,35 +174,7 @@ mod tests {
 
     use crate::{AppState, config::AppLimits, db};
 
-    use super::{
-        lifecycle::{checked_page_end, preview_page_size},
-        repository::ensure_temp_result_capacity,
-        storage::{read_indexed_lines, staging_path},
-    };
-
-    #[test]
-    fn pagination_end_rejects_i64_overflow() {
-        assert_eq!(checked_page_end(10, 5).unwrap(), 15);
-        assert!(checked_page_end(i64::MAX, 1).is_err());
-    }
-
-    #[test]
-    fn preview_supports_log_viewer_page_sizes() {
-        assert_eq!(preview_page_size(None), 5_000);
-        assert_eq!(preview_page_size(Some(5_000)), 5_000);
-        assert_eq!(preview_page_size(Some(10_000)), 10_000);
-        assert_eq!(preview_page_size(Some(20_000)), 10_000);
-    }
-
-    #[test]
-    fn preview_uses_distinct_staging_paths_before_publication() {
-        let final_path = std::path::Path::new("temp-results/result.log");
-
-        assert_eq!(
-            staging_path(final_path),
-            std::path::PathBuf::from("temp-results/result.log.part")
-        );
-    }
+    use super::{repository::ensure_temp_result_capacity, storage::read_indexed_lines};
 
     #[tokio::test]
     async fn publishing_staging_result_does_not_count_it_twice() {
