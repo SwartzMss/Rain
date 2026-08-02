@@ -62,10 +62,11 @@ async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
     )
     .await;
     assert_eq!(success.status(), StatusCode::OK);
-    let limits = state.auth_runtime.rate_limits.lock().expect("limits");
-    assert!(limits.login_ip.is_empty());
-    assert!(limits.login_username_failure.is_empty());
-    drop(limits);
+    {
+        let limits = state.auth_runtime.rate_limits.lock().expect("limits");
+        assert!(limits.login_ip.is_empty());
+        assert!(limits.login_username_failure.is_empty());
+    }
 
     for _ in 0..3 {
         let response = test::call_service(

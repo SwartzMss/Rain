@@ -329,6 +329,31 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(body["allow_registration"], true);
     assert_eq!(body["login_ip_limit_per_minute"], 9);
     assert_eq!(body["login_username_failure_limit_per_5_minutes"], 6);
+    let immediate = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"login_username_failure_limit_per_5_minutes": 2}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(immediate.status(), StatusCode::OK);
+    for attempt in 0..3 {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(serde_json::json!({"username": "threshold-check", "password": "wrong-password"}))
+                .to_request(),
+        )
+        .await;
+        if attempt < 2 {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        } else {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
     let invalid = test::call_service(
         &app,
         test::TestRequest::patch()
@@ -350,7 +375,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
     let body: serde_json::Value = test::read_body_json(settings_after_invalid).await;
     assert_eq!(body["allow_registration"], true);
     assert_eq!(body["login_ip_limit_per_minute"], 9);
-    assert_eq!(body["login_username_failure_limit_per_5_minutes"], 6);
+    assert_eq!(body["login_username_failure_limit_per_5_minutes"], 2);
     let guest = test::call_service(
         &app,
         test::TestRequest::get()
