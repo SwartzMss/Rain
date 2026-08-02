@@ -174,8 +174,9 @@ mod tests {
     use crate::{AppState, config::AppLimits, db};
 
     use super::{
-        lifecycle::{checked_page_end, preview_page_size, staging_path},
-        storage::{ensure_temp_result_capacity, read_indexed_lines},
+        lifecycle::{checked_page_end, preview_page_size},
+        repository::ensure_temp_result_capacity,
+        storage::{read_indexed_lines, staging_path},
     };
 
     #[test]
