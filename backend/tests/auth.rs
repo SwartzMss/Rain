@@ -328,6 +328,7 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("SameSite=Lax"));
     assert!(!set_cookie.contains("Secure"));
+    assert!(username_failures_before_success > 0);
     assert_eq!(
         state
             .auth_runtime
@@ -337,7 +338,7 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
             .login_username_failure
             .get("login:username:swartz")
             .map_or(0, backend::AuthRateLimitBucket::len),
-        username_failures_before_success
+        0
     );
     let cookie = Cookie::parse(set_cookie)
         .expect("parse cookie")
