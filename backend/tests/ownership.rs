@@ -121,6 +121,23 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     )
     .await;
     assert_eq!(search.status(), actix_web::http::StatusCode::OK);
+    let issue_list = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues")
+            .cookie(foreign_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let issue_list: Value = test::read_body_json(issue_list).await;
+    assert_eq!(issue_list[0]["owner_username"], "owner-http");
+    let guest_list = test::call_service(
+        &app,
+        test::TestRequest::get().uri("/api/issues").to_request(),
+    )
+    .await;
+    let guest_list: Value = test::read_body_json(guest_list).await;
+    assert!(guest_list[0]["owner_username"].is_null());
     let _ = tokio::fs::remove_dir_all(data_root).await;
 
     let delete = test::call_service(

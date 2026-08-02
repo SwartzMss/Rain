@@ -30,6 +30,17 @@ describe('write permission behavior', () => {
     expect(screen.getByRole('button', { name: /新建 Issue/ })).toBeInTheDocument();
   });
 
+  it('shows the owner username and a stable fallback in the Issue list', () => {
+    const props = { ...issueProps(false), filteredIssues: [
+      { code: 'OWNED', name: 'Owned', bundle_count: 0, can_write: false, owner_username: 'owner' },
+      { code: 'UNKNOWN', name: 'Unknown', bundle_count: 0, can_write: false, owner_username: null }
+    ] };
+    render(<IssueSelector {...props} />);
+    expect(screen.getByText('owner')).toBeInTheDocument();
+    expect(screen.getByText('未知用户')).toBeInTheDocument();
+    expect(screen.queryByText('双击查看日志')).not.toBeInTheDocument();
+  });
+
   it('shows file deletion only for a writable authenticated user', async () => {
     vi.mocked(rainApi.me).mockResolvedValue({ authenticated: true, user: { id: 'u', username: 'u', role: 'USER' } });
     const { rerender } = render(<AuthProvider><UploadFileTable bundlesError={null} currentIssueCode="ISSUE" deletingKey={null} fileRows={[row]} canWrite={false} onDeleteRow={vi.fn()} /></AuthProvider>);

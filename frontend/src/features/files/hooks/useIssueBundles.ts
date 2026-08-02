@@ -6,6 +6,7 @@ import type { BundleFileState } from '../homeRows';
 export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => void) {
   const [bundles, setBundles] = useState<UploadSummary[]>([]);
   const [canWrite, setCanWrite] = useState(false);
+  const [ownerUsername, setOwnerUsername] = useState<string | null>(null);
   const [, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
@@ -19,6 +20,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   const clearBundles = useCallback(() => {
     setBundles([]);
     setCanWrite(false);
+    setOwnerUsername(null);
     setBundleFiles({});
     setBundlesError(null);
   }, []);
@@ -42,6 +44,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
         }
         setBundles(data.log_bundles);
         setCanWrite(data.can_write);
+        setOwnerUsername(data.owner_username);
         setBundleFiles((prev) => {
           const validHashes = new Set(data.log_bundles.map((bundle) => bundle.hash));
           return Object.fromEntries(Object.entries(prev).filter(([hash]) => validHashes.has(hash)));
@@ -122,6 +125,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
     bundleFiles,
     bundles,
     canWrite,
+    ownerUsername,
     bundlesError,
     clearBundles,
     loadBundleFiles,

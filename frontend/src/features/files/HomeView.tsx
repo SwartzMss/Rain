@@ -39,6 +39,7 @@ export function HomeView() {
 
   const bundles = useIssueBundles(issues.currentIssueCode, handleIssueMissing);
   const canWrite = Boolean(selectedIssue?.can_write && bundles.canWrite);
+  const ownerUsername = bundles.ownerUsername ?? selectedIssue?.owner_username ?? null;
   const upload = useUploadTask({
     currentIssueCode: issues.currentIssueCode,
     getSelectedIssueCode: () => selectedIssueRef.current,
@@ -178,7 +179,6 @@ export function HomeView() {
         onIssueSearchTextChange={issues.setIssueSearchText}
         onRefreshIssues={() => issues.loadIssues().catch(() => undefined)}
         onSelectIssue={selectIssue}
-        onViewIssue={(issueCode) => navigate(`/issue/${encodeURIComponent(issueCode)}`)}
       />
 
       <section className="min-w-0 space-y-4">
@@ -188,6 +188,7 @@ export function HomeView() {
               <h2 className="text-2xl font-semibold text-slate-950">
                 {issues.currentIssueCode || '请选择 Issue'}
               </h2>
+              {selectedIssue ? <p className="mt-1 text-sm text-slate-500">所有者：{ownerUsername ?? '未知用户'}</p> : null}
             </div>
             {canWrite && issues.currentIssueCode ? (
               <button

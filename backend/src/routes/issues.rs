@@ -42,19 +42,31 @@ pub async fn list_issues(
     let rows = sqlx::query_as::<_, IssueSummary>(
         r#"
         SELECT
-            code,
-            name,
+            issues.code,
+            issues.name,
             (SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code AND b.deleted_at IS NULL) AS bundle_count,
-            CASE WHEN owner_user_id = ? THEN 1 ELSE 0 END AS can_write
+            CASE WHEN issues.owner_user_id = ? THEN 1 ELSE 0 END AS can_write,
+            issue_owner.username AS owner_username
         FROM issues
-        WHERE status = 'ACTIVE'
-        ORDER BY code DESC
+        LEFT JOIN users issue_owner ON issue_owner.id = issues.owner_user_id
+        WHERE issues.status = 'ACTIVE'
+        ORDER BY issues.code DESC
         "#,
     )
     .bind(user.0.as_ref().map(|user| user.id.as_str()).unwrap_or(""))
     .fetch_all(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
+    let authenticated = user.0.is_some();
+    let rows = rows
+        .into_iter()
+        .map(|mut row| {
+            if !authenticated {
+                row.owner_username = None;
+            }
+            row
+        })
+        .collect::<Vec<_>>();
 
     Ok(HttpResponse::Ok().json(rows))
 }
@@ -109,6 +121,7 @@ pub async fn create_issue(
         name,
         bundle_count: 0,
         can_write: true,
+        owner_username: Some(user.0.username.clone()),
     }))
 }
 
@@ -120,7 +133,7 @@ pub async fn get_issue_bundles(
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     let issue = sqlx::query_as::<_, IssueRow>(
-        "SELECT code, name, owner_user_id FROM issues WHERE code = ? AND status = 'ACTIVE' LIMIT 1",
+        "SELECT issues.code, issues.name, issues.owner_user_id, issue_owner.username AS owner_username FROM issues LEFT JOIN users issue_owner ON issue_owner.id = issues.owner_user_id WHERE issues.code = ? AND issues.status = 'ACTIVE' LIMIT 1",
     )
     .bind(&issue_code)
     .fetch_optional(&state.db.pool)
@@ -138,6 +151,7 @@ pub async fn get_issue_bundles(
 
     let response = IssueBundlesResponse {
         name: issue.name,
+        owner_username: user.0.as_ref().and_then(|_| issue.owner_username.clone()),
         can_write: user
             .0
             .as_ref()
@@ -237,6 +251,7 @@ struct IssueRow {
     code: String,
     name: String,
     owner_user_id: Option<String>,
+    owner_username: Option<String>,
 }
 
 #[derive(FromRow)]
