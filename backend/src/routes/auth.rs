@@ -453,6 +453,13 @@ pub async fn login(
         return Err(invalid_credentials());
     }
 
+    // A successful login resets only this username's failure history. Keep
+    // the IP bucket intact so one successful login cannot hide abuse from the
+    // same client address against other accounts.
+    if let Ok(mut limits) = state.auth_runtime.rate_limits.lock() {
+        limits.login_username_failure.remove(&username_key);
+    }
+
     Ok(HttpResponse::Ok()
         .cookie(session_cookie(token, ttl))
         .json(PublicUser {

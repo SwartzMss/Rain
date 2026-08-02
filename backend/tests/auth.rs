@@ -101,6 +101,24 @@ async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
     )
     .await;
     assert_eq!(registered.status(), StatusCode::CREATED);
+    let first_failure = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "ordinary-user", "password": "wrong-password"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(first_failure.status(), StatusCode::UNAUTHORIZED);
+    let successful_login = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "ordinary-user", "password": "strong-password"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(successful_login.status(), StatusCode::OK);
     for attempt in 0..3 {
         let response = test::call_service(
             &app,
@@ -310,6 +328,7 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("SameSite=Lax"));
     assert!(!set_cookie.contains("Secure"));
+    assert!(username_failures_before_success > 0);
     assert_eq!(
         state
             .auth_runtime
@@ -319,7 +338,7 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
             .login_username_failure
             .get("login:username:swartz")
             .map_or(0, backend::AuthRateLimitBucket::len),
-        username_failures_before_success
+        0
     );
     let cookie = Cookie::parse(set_cookie)
         .expect("parse cookie")
