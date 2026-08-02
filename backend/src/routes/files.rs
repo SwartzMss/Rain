@@ -41,7 +41,7 @@ pub async fn get_file_node(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
-    let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
     ensure_bundle_ready(&bundle)?;
     let is_root = file_id.eq_ignore_ascii_case("root");
 
@@ -65,7 +65,7 @@ pub async fn get_file_node(
         let parsed_id = file_id
             .parse::<i64>()
             .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-        let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
+        let record = fetch_file(&state.db.pool, &bundle.id, parsed_id).await?;
         to_file_node(record)
     };
 
@@ -78,7 +78,7 @@ pub async fn get_file_node(
                 .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?,
         )
     };
-    let children_records = fetch_children(&state.pool, &bundle.id, parent_id).await?;
+    let children_records = fetch_children(&state.db.pool, &bundle.id, parent_id).await?;
     let children = children_records.into_iter().map(to_file_node).collect();
 
     Ok(HttpResponse::Ok().json(FileNodeResponse { node, children }))
@@ -90,13 +90,18 @@ pub async fn get_file_content(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
-    let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
     ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-    let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
-    let preview = read_file_preview(&record, state.blob_store.as_ref(), &state.limits.api).await?;
+    let record = fetch_file(&state.db.pool, &bundle.id, parsed_id).await?;
+    let preview = read_file_preview(
+        &record,
+        state.storage.blob_store.as_ref(),
+        &state.limits.api,
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(preview))
 }
 
@@ -107,21 +112,21 @@ pub async fn get_file_lines(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
-    let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
     ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-    let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
+    let record = fetch_file(&state.db.pool, &bundle.id, parsed_id).await?;
     let start = query.start.unwrap_or(0).max(0);
     let limit = query
         .limit
         .unwrap_or(state.limits.api.default_line_page_size)
         .clamp(1, state.limits.api.max_line_page_size);
     let lines = read_file_lines(
-        &state.pool,
+        &state.db.pool,
         &record,
-        state.blob_store.as_ref(),
+        state.storage.blob_store.as_ref(),
         &state.limits.api,
         start,
         limit,
@@ -138,17 +143,17 @@ pub async fn download_file(
     state: web::Data<AppState>,
 ) -> Result<NamedFile, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
-    let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
     ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-    let record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
+    let record = fetch_file(&state.db.pool, &bundle.id, parsed_id).await?;
     if record.is_dir {
         return Err(AppError::BadRequest("cannot download directory".into()));
     }
 
-    let disk_path = resolve_file_path(&record, state.blob_store.as_ref()).await?;
+    let disk_path = resolve_file_path(&record, state.storage.blob_store.as_ref()).await?;
     let fallback_name = ascii_filename_fallback(&record.name);
     let named = NamedFile::open_async(disk_path)
         .await
@@ -192,13 +197,13 @@ pub async fn delete_file_node(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
-    let bundle = load_bundle(&state.pool, &bundle_id).await?;
+    let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
     ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-    let _record = fetch_file(&state.pool, &bundle.id, parsed_id).await?;
-    delete_file_tree(&state.pool, &bundle.id, parsed_id).await?;
+    let _record = fetch_file(&state.db.pool, &bundle.id, parsed_id).await?;
+    delete_file_tree(&state.db.pool, &bundle.id, parsed_id).await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

@@ -51,7 +51,7 @@ pub async fn list(
     state: web::Data<AppState>,
     _query: web::Query<SavedSearchListQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let items = saved_searches::list(&state.pool, &user.0.id).await?;
+    let items = saved_searches::list(&state.db.pool, &user.0.id).await?;
     Ok(HttpResponse::Ok().json(
         items
             .into_iter()
@@ -67,7 +67,7 @@ pub async fn create(
     payload: web::Json<SavedSearchPayload>,
 ) -> Result<HttpResponse, AppError> {
     let payload = normalize_and_validate(&payload)?;
-    let item = saved_searches::create(&state.pool, &user.0.id, &payload)
+    let item = saved_searches::create(&state.db.pool, &user.0.id, &payload)
         .await
         .map_err(map_database_error)?;
     Ok(HttpResponse::Created().json(SavedSearchResponse::from(item)))
@@ -81,7 +81,7 @@ pub async fn update(
     payload: web::Json<SavedSearchPayload>,
 ) -> Result<HttpResponse, AppError> {
     let payload = normalize_and_validate(&payload)?;
-    let item = saved_searches::update(&state.pool, &user.0.id, &id, &payload)
+    let item = saved_searches::update(&state.db.pool, &user.0.id, &id, &payload)
         .await
         .map_err(map_database_error)?
         .ok_or_else(|| {
@@ -100,7 +100,7 @@ pub async fn delete(
     state: web::Data<AppState>,
     id: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    if !saved_searches::delete(&state.pool, &user.0.id, &id).await? {
+    if !saved_searches::delete(&state.db.pool, &user.0.id, &id).await? {
         return Err(AppError::api(
             StatusCode::NOT_FOUND,
             "SAVED_SEARCH_NOT_FOUND",
@@ -116,7 +116,7 @@ pub async fn mark_used(
     state: web::Data<AppState>,
     id: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    if !saved_searches::mark_used(&state.pool, &user.0.id, &id).await? {
+    if !saved_searches::mark_used(&state.db.pool, &user.0.id, &id).await? {
         return Err(AppError::api(
             StatusCode::NOT_FOUND,
             "SAVED_SEARCH_NOT_FOUND",

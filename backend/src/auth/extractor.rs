@@ -32,7 +32,7 @@ impl FromRequest for OptionalUser {
                 return Ok(Self(None));
             };
             let user =
-                sessions::resolve_active_user(&state.pool, &hash_session_token(&token)).await?;
+                sessions::resolve_active_user(&state.db.pool, &hash_session_token(&token)).await?;
             Ok(Self(user))
         })
     }
@@ -58,7 +58,7 @@ impl FromRequest for RequireUser {
                 return Err(AppError::authentication_required());
             };
             let Some(resolved) =
-                sessions::resolve_session_user(&state.pool, &hash_session_token(&token)).await?
+                sessions::resolve_session_user(&state.db.pool, &hash_session_token(&token)).await?
             else {
                 return Err(AppError::authentication_required());
             };
@@ -93,9 +93,10 @@ impl FromRequest for RequireAdmin {
             let token = token
                 .filter(|value| !value.is_empty())
                 .ok_or_else(AppError::authentication_required)?;
-            let resolved = sessions::resolve_session_user(&state.pool, &hash_session_token(&token))
-                .await?
-                .ok_or_else(AppError::authentication_required)?;
+            let resolved =
+                sessions::resolve_session_user(&state.db.pool, &hash_session_token(&token))
+                    .await?
+                    .ok_or_else(AppError::authentication_required)?;
             if resolved.status != crate::auth::UserStatus::Active {
                 return Err(AppError::api(
                     StatusCode::FORBIDDEN,
@@ -132,9 +133,10 @@ impl FromRequest for RequireBusinessUser {
             let token = token
                 .filter(|value| !value.is_empty())
                 .ok_or_else(AppError::authentication_required)?;
-            let resolved = sessions::resolve_session_user(&state.pool, &hash_session_token(&token))
-                .await?
-                .ok_or_else(AppError::authentication_required)?;
+            let resolved =
+                sessions::resolve_session_user(&state.db.pool, &hash_session_token(&token))
+                    .await?
+                    .ok_or_else(AppError::authentication_required)?;
             if resolved.status != crate::auth::UserStatus::Active {
                 return Err(AppError::api(
                     StatusCode::FORBIDDEN,

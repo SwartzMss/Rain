@@ -83,7 +83,7 @@ pub async fn list_users(
         .push_bind(limit + 1);
     let mut items = sql
         .build_query_as::<AdminUser>()
-        .fetch_all(&state.pool)
+        .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     let next_cursor = if items.len() as i64 > limit {
@@ -102,7 +102,7 @@ async fn mutate_user_status(
     new_status: UserStatus,
     req: &HttpRequest,
 ) -> Result<(UserStatus, u64), AppError> {
-    let mut conn = state.pool.acquire().await.map_err(AppError::Database)?;
+    let mut conn = state.db.pool.acquire().await.map_err(AppError::Database)?;
     sqlx::query("BEGIN IMMEDIATE")
         .execute(&mut *conn)
         .await
@@ -156,7 +156,7 @@ pub async fn revoke_sessions(
     let target = path.into_inner();
     let role: Option<UserRole> = sqlx::query_scalar("SELECT role FROM users WHERE id=?")
         .bind(&target)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     let role = role.ok_or_else(|| {
@@ -169,7 +169,7 @@ pub async fn revoke_sessions(
             "管理员账户不可修改",
         ));
     }
-    let mut tx = state.pool.begin().await.map_err(AppError::Database)?;
+    let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
     let revoked=sqlx::query("UPDATE user_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL").bind(&target).execute(&mut *tx).await.map_err(AppError::Database)?.rows_affected();
     sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,target_user_id,action,new_value,client_ip,user_agent) VALUES(?,'USER',?,?,'USER_SESSIONS_REVOKED',?,?,?)").bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(&target).bind(revoked.to_string()).bind(req.peer_addr().map(|a|a.ip().to_string())).bind(req.headers().get("user-agent").and_then(|v|v.to_str().ok())).execute(&mut *tx).await.map_err(AppError::Database)?;
     tx.commit().await.map_err(AppError::Database)?;
@@ -208,7 +208,7 @@ pub async fn list_audit(
         .push_bind(limit + 1);
     let mut items = sql
         .build_query_as::<AuditLog>()
-        .fetch_all(&state.pool)
+        .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     let next_cursor = if items.len() as i64 > limit {

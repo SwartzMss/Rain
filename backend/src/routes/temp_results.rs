@@ -54,12 +54,12 @@ impl Drop for StagingLease {
 }
 
 fn register_staging_lease(state: &web::Data<AppState>, id: &str) -> StagingLease {
-    if let Ok(mut staging) = state.temp_result_staging.lock() {
+    if let Ok(mut staging) = state.temp_results.staging.lock() {
         staging.insert(id.to_string());
     }
     StagingLease {
         id: id.to_string(),
-        registry: state.temp_result_staging.clone(),
+        registry: state.temp_results.staging.clone(),
     }
 }
 

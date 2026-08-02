@@ -38,7 +38,7 @@ pub async fn search_logs(
         return Err(AppError::BadRequest("query parameter q is required".into()));
     }
 
-    let bundle = load_bundle(&state.pool, &bundle_hash).await?;
+    let bundle = load_bundle(&state.db.pool, &bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
     let fts_query = build_fts_query(search_term);
     let timeline = term.timeline.and_then(|value| {
@@ -93,7 +93,7 @@ pub async fn search_logs(
         .bind(file_id)
         .bind(file_id)
         .bind(SHORT_SEARCH_SCAN_LIMIT + 1)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
         candidate_count > SHORT_SEARCH_SCAN_LIMIT
@@ -129,7 +129,7 @@ pub async fn search_logs(
         .bind(file_id)
         .bind(SHORT_SEARCH_SCAN_LIMIT)
         .bind(&short_pattern)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     } else {
@@ -153,7 +153,7 @@ pub async fn search_logs(
         .bind(&path_pattern)
         .bind(file_id)
         .bind(file_id)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     };
@@ -191,7 +191,7 @@ pub async fn search_logs(
         .bind(&short_pattern)
         .bind(size)
         .bind(from)
-        .fetch_all(&state.pool)
+        .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     } else {
@@ -226,7 +226,7 @@ pub async fn search_logs(
         .bind(file_id)
         .bind(size)
         .bind(from)
-        .fetch_all(&state.pool)
+        .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     };
@@ -286,7 +286,7 @@ pub async fn search_issue_logs(
 
     if matches!(term.mode, IssueSearchMode::Filename) {
         return search_issue_files(
-            &state.pool,
+            &state.db.pool,
             &state.limits.api,
             &issue_code,
             search_term,
@@ -336,7 +336,7 @@ pub async fn search_issue_logs(
         .bind(&path_pattern)
         .bind(&path_pattern)
         .bind(SHORT_SEARCH_SCAN_LIMIT + 1)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
         candidate_count > SHORT_SEARCH_SCAN_LIMIT
@@ -367,7 +367,7 @@ pub async fn search_issue_logs(
         .bind(&path_pattern)
         .bind(SHORT_SEARCH_SCAN_LIMIT)
         .bind(&short_pattern)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     } else {
@@ -387,7 +387,7 @@ pub async fn search_issue_logs(
         .bind(&issue_code)
         .bind(&path_pattern)
         .bind(&path_pattern)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     };
@@ -421,7 +421,7 @@ pub async fn search_issue_logs(
         .bind(&short_pattern)
         .bind(size)
         .bind(from)
-        .fetch_all(&state.pool)
+        .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     } else {
@@ -452,7 +452,7 @@ pub async fn search_issue_logs(
         .bind(&path_pattern)
         .bind(size)
         .bind(from)
-        .fetch_all(&state.pool)
+        .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     };

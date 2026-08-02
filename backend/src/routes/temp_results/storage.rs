@@ -232,7 +232,8 @@ pub(crate) fn artifact_staging_id(file_name: &str) -> Option<String> {
 
 pub(crate) fn is_staging_lease_active(state: &web::Data<AppState>, id: &str) -> bool {
     state
-        .temp_result_staging
+        .temp_results
+        .staging
         .lock()
         .map(|staging| staging.contains(id))
         .unwrap_or(false)

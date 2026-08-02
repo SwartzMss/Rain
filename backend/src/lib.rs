@@ -13,6 +13,7 @@ pub mod upload;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    future::Future,
     path::PathBuf,
     sync::{Arc, Mutex, atomic::AtomicU64},
     time::{Duration, Instant},
@@ -71,24 +72,108 @@ pub struct AuthRateLimits {
     pub register_ip: HashMap<String, AuthRateLimitBucket>,
     pub change_password_user_attempt: HashMap<String, AuthRateLimitBucket>,
     pub change_password_in_flight: HashSet<String>,
-    pub temp_result_ip: HashMap<String, AuthRateLimitBucket>,
 }
 
-pub struct AppState {
+pub struct DatabaseContext {
     pub pool: SqlitePool,
+}
+
+pub struct StorageContext {
     pub data_root: PathBuf,
-    pub limits: AppLimits,
-    pub auth: AuthConfig,
+    pub blob_store: Arc<dyn BlobStore>,
+}
+
+pub struct UploadRuntime {
     pub processing_permits: Arc<Semaphore>,
     pub receive_permits: Arc<Semaphore>,
     pub tmp_bytes: Arc<AtomicU64>,
     pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
-    pub temp_result_permits: Arc<Semaphore>,
-    pub temp_result_capacity_lock: Arc<AsyncMutex<()>>,
-    pub temp_result_staging: Arc<Mutex<HashSet<String>>>,
-    pub auth_hash_permits: Arc<Semaphore>,
-    pub auth_rate_limits: Arc<Mutex<AuthRateLimits>>,
-    pub blob_store: Arc<dyn BlobStore>,
+}
+
+impl UploadRuntime {
+    pub fn new(processing: usize, receiving: usize) -> Self {
+        Self {
+            processing_permits: Arc::new(Semaphore::new(processing)),
+            receive_permits: Arc::new(Semaphore::new(receiving)),
+            tmp_bytes: Arc::new(AtomicU64::new(0)),
+            temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
+        }
+    }
+}
+
+pub struct TempResultRuntime {
+    pub permits: Arc<Semaphore>,
+    pub capacity_lock: Arc<AsyncMutex<()>>,
+    pub staging: Arc<Mutex<HashSet<String>>>,
+    pub ip_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
+}
+
+impl TempResultRuntime {
+    pub fn new(materializations: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(materializations)),
+            capacity_lock: Arc::new(AsyncMutex::new(())),
+            staging: Arc::new(Mutex::new(HashSet::new())),
+            ip_limits: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+pub struct AuthRuntime {
+    pub config: AuthConfig,
+    pub hash_permits: Arc<Semaphore>,
+    pub rate_limits: Arc<Mutex<AuthRateLimits>>,
+}
+
+impl AuthRuntime {
+    pub fn new(config: AuthConfig) -> Self {
+        Self {
+            hash_permits: Arc::new(Semaphore::new(config.argon2_concurrency)),
+            config,
+            rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
+        }
+    }
+}
+
+pub struct AppState {
+    pub db: DatabaseContext,
+    pub storage: StorageContext,
+    pub upload: UploadRuntime,
+    pub temp_results: TempResultRuntime,
+    pub auth_runtime: AuthRuntime,
+    pub limits: AppLimits,
+}
+
+/// Start a resilient Tokio periodic job. A failed iteration is logged and does
+/// not terminate the worker, so unrelated maintenance jobs keep running.
+pub fn spawn_periodic_job<F, Fut>(
+    name: &'static str,
+    initial_delay: Duration,
+    interval_duration: Duration,
+    mut job: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::time::sleep(initial_delay).await;
+        let mut interval = tokio::time::interval(interval_duration);
+        loop {
+            interval.tick().await;
+            let started = Instant::now();
+            match job().await {
+                Ok(()) => tracing::debug!(
+                    job = name,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "periodic job completed"
+                ),
+                Err(error) => {
+                    tracing::warn!(job = name, elapsed_ms = started.elapsed().as_millis(), %error, "periodic job failed; will retry")
+                }
+            }
+        }
+    })
 }
 
 impl AppState {
@@ -113,28 +198,22 @@ impl AppState {
         auth: AuthConfig,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
-        let processing_permits =
-            Arc::new(Semaphore::new(limits.upload.concurrent_processing_tasks));
-        let receive_permits = Arc::new(Semaphore::new(limits.upload.concurrent_receive_tasks));
-        let temp_result_permits = Arc::new(Semaphore::new(
-            limits.temp_results.concurrent_materializations,
-        ));
-        let auth_hash_permits = Arc::new(Semaphore::new(auth.argon2_concurrency));
+        let upload = UploadRuntime::new(
+            limits.upload.concurrent_processing_tasks,
+            limits.upload.concurrent_receive_tasks,
+        );
+        let temp_results = TempResultRuntime::new(limits.temp_results.concurrent_materializations);
+        let auth_runtime = AuthRuntime::new(auth);
         Self {
-            pool,
-            data_root,
+            db: DatabaseContext { pool },
+            storage: StorageContext {
+                data_root,
+                blob_store,
+            },
+            upload,
+            temp_results,
+            auth_runtime,
             limits,
-            auth,
-            processing_permits,
-            receive_permits,
-            tmp_bytes: Arc::new(AtomicU64::new(0)),
-            temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
-            temp_result_permits,
-            temp_result_capacity_lock: Arc::new(AsyncMutex::new(())),
-            temp_result_staging: Arc::new(Mutex::new(HashSet::new())),
-            auth_hash_permits,
-            auth_rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
-            blob_store,
         }
     }
 }
@@ -159,7 +238,24 @@ mod tests {
 
         let state = AppState::new(pool, PathBuf::from("data"), limits);
 
-        assert_eq!(state.processing_permits.available_permits(), 7);
+        assert_eq!(state.upload.processing_permits.available_permits(), 7);
+    }
+
+    #[test]
+    fn domain_runtimes_can_be_constructed_independently() {
+        let upload = super::UploadRuntime::new(3, 2);
+        assert_eq!(upload.processing_permits.available_permits(), 3);
+        assert_eq!(upload.receive_permits.available_permits(), 2);
+
+        let temp_results = super::TempResultRuntime::new(4);
+        assert_eq!(temp_results.permits.available_permits(), 4);
+        assert!(temp_results.ip_limits.lock().unwrap().is_empty());
+
+        let auth = super::AuthRuntime::new(crate::config::AuthConfig::default());
+        assert_eq!(
+            auth.hash_permits.available_permits(),
+            crate::config::AuthConfig::default().argon2_concurrency
+        );
     }
 }
 pub mod blob_store;

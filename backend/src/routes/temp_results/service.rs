@@ -196,7 +196,7 @@ pub(crate) async fn resolve_sources(
             "#,
         )
         .bind(&issue_code)
-        .fetch_all(&state.pool)
+        .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
         let mut sources = Vec::new();
@@ -218,7 +218,7 @@ pub(crate) async fn resolve_sources(
                 blob_state: row.blob_state,
             };
             sources.push(TempSource {
-                path: resolve_file_path(&file, state.blob_store.as_ref()).await?,
+                path: resolve_file_path(&file, state.storage.blob_store.as_ref()).await?,
                 metadata_path: None,
                 label: file.name.clone(),
                 bundle_hash: Some(row.bundle_hash),
@@ -242,11 +242,11 @@ pub(crate) async fn resolve_sources(
         .ok_or_else(|| AppError::BadRequest("file_id is required".into()))?
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest("invalid file_id".into()))?;
-    let bundle = load_bundle(&state.pool, bundle_hash).await?;
+    let bundle = load_bundle(&state.db.pool, bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
-    let file = fetch_file(&state.pool, &bundle.id, file_id).await?;
+    let file = fetch_file(&state.db.pool, &bundle.id, file_id).await?;
     ensure_text_preview(&file)?;
-    let path = resolve_file_path(&file, state.blob_store.as_ref()).await?;
+    let path = resolve_file_path(&file, state.storage.blob_store.as_ref()).await?;
     Ok(vec![TempSource {
         path,
         metadata_path: None,
@@ -271,7 +271,8 @@ pub(crate) async fn create_preview_result(
 ) -> Result<HttpResponse, AppError> {
     check_temp_result_rate_limit(&state, &request)?;
     let _permit = state
-        .temp_result_permits
+        .temp_results
+        .permits
         .clone()
         .try_acquire_owned()
         .map_err(|_| {
@@ -319,7 +320,8 @@ pub(crate) async fn create_full_result(
 ) -> Result<HttpResponse, AppError> {
     check_temp_result_rate_limit(&state, &request)?;
     let _permit = state
-        .temp_result_permits
+        .temp_results
+        .permits
         .clone()
         .try_acquire_owned()
         .map_err(|_| {

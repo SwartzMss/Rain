@@ -131,7 +131,8 @@ fn check_rate_limit_at(
     now: Instant,
 ) -> Result<(), AppError> {
     let mut rate_limits = state
-        .auth_rate_limits
+        .auth_runtime
+        .rate_limits
         .lock()
         .map_err(|_| internal_auth_error())?;
     let (buckets, max_buckets) = match policy {
@@ -193,7 +194,8 @@ fn acquire_password_change_guard(
     user_id: &str,
 ) -> Result<PasswordChangeGuard, AppError> {
     let mut rate_limits = state
-        .auth_rate_limits
+        .auth_runtime
+        .rate_limits
         .lock()
         .map_err(|_| internal_auth_error())?;
     if !rate_limits
@@ -204,7 +206,7 @@ fn acquire_password_change_guard(
     }
     drop(rate_limits);
     Ok(PasswordChangeGuard {
-        rate_limits: state.auth_rate_limits.clone(),
+        rate_limits: state.auth_runtime.rate_limits.clone(),
         user_id: user_id.to_owned(),
     })
 }
@@ -215,7 +217,8 @@ where
     F: FnOnce() -> Result<T, PasswordError> + Send + 'static,
 {
     let permit = state
-        .auth_hash_permits
+        .auth_runtime
+        .hash_permits
         .clone()
         .try_acquire_owned()
         .map_err(|_| rate_limited())?;
@@ -247,7 +250,7 @@ pub async fn register_user(
     state: web::Data<AppState>,
     payload: web::Json<CredentialsRequest>,
 ) -> Result<HttpResponse, AppError> {
-    if !state.auth.allow_registration {
+    if !state.auth_runtime.config.allow_registration {
         return Err(AppError::api(
             StatusCode::FORBIDDEN,
             "REGISTRATION_DISABLED",
@@ -258,7 +261,7 @@ pub async fn register_user(
         &state,
         AuthRateLimitPolicy::RegisterIp,
         &client_rate_limit_key(&request, "register"),
-        state.auth.register_ip_limit_per_hour,
+        state.auth_runtime.config.register_ip_limit_per_hour,
         REGISTER_IP_WINDOW,
         true,
     )?;
@@ -267,7 +270,7 @@ pub async fn register_user(
     let password = payload.password.clone();
     let password_hash = run_argon2(&state, move || hash_password(&password)).await?;
 
-    match users::create_user(&state.pool, &payload.username, &password_hash).await? {
+    match users::create_user(&state.db.pool, &payload.username, &password_hash).await? {
         CreateUserOutcome::Created(user) => Ok(HttpResponse::Created().json(PublicUser {
             id: user.id,
             username: user.username,
@@ -292,7 +295,7 @@ pub async fn login(
         &state,
         AuthRateLimitPolicy::LoginIp,
         &client_rate_limit_key(&request, "login"),
-        state.auth.login_ip_limit_per_minute,
+        state.auth_runtime.config.login_ip_limit_per_minute,
         LOGIN_IP_WINDOW,
         true,
     )?;
@@ -300,7 +303,10 @@ pub async fn login(
         &state,
         AuthRateLimitPolicy::LoginUsernameFailure,
         &username_key,
-        state.auth.login_username_failure_limit_per_5_minutes,
+        state
+            .auth_runtime
+            .config
+            .login_username_failure_limit_per_5_minutes,
         LOGIN_USERNAME_FAILURE_WINDOW,
         false,
     )?;
@@ -316,14 +322,17 @@ pub async fn login(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
-            state.auth.login_username_failure_limit_per_5_minutes,
+            state
+                .auth_runtime
+                .config
+                .login_username_failure_limit_per_5_minutes,
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
         )?;
         return Err(invalid_credentials());
     }
     let normalized = normalize_username(&payload.username);
-    let Some(user) = users::find_by_normalized_username(&state.pool, &normalized).await? else {
+    let Some(user) = users::find_by_normalized_username(&state.db.pool, &normalized).await? else {
         burn_dummy_argon2(
             &state,
             dummy_password_for_credentials(&payload.password, credentials_valid),
@@ -333,7 +342,10 @@ pub async fn login(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
-            state.auth.login_username_failure_limit_per_5_minutes,
+            state
+                .auth_runtime
+                .config
+                .login_username_failure_limit_per_5_minutes,
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
         )?;
@@ -349,7 +361,10 @@ pub async fn login(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
-            state.auth.login_username_failure_limit_per_5_minutes,
+            state
+                .auth_runtime
+                .config
+                .login_username_failure_limit_per_5_minutes,
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
         )?;
@@ -364,7 +379,10 @@ pub async fn login(
             &state,
             AuthRateLimitPolicy::LoginUsernameFailure,
             &username_key,
-            state.auth.login_username_failure_limit_per_5_minutes,
+            state
+                .auth_runtime
+                .config
+                .login_username_failure_limit_per_5_minutes,
             LOGIN_USERNAME_FAILURE_WINDOW,
             true,
         )?;
@@ -373,7 +391,7 @@ pub async fn login(
 
     let token = generate_session_token();
     let token_hash = hash_session_token(&token);
-    let ttl = state.auth.session_ttl_seconds;
+    let ttl = state.auth_runtime.config.session_ttl_seconds;
     let ttl_i64 = i64::try_from(ttl).unwrap_or(i64::MAX);
     let user_agent = request
         .headers()
@@ -382,7 +400,7 @@ pub async fn login(
         .map(str::to_owned);
     let client_ip = request.peer_addr().map(|address| address.ip().to_string());
     let created = sessions::create_session_if_password_unchanged(
-        &state.pool,
+        &state.db.pool,
         &user.id,
         &user.password_hash,
         &token_hash,
@@ -420,7 +438,7 @@ pub async fn logout(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     if let Some(cookie) = request.cookie(SESSION_COOKIE_NAME) {
-        sessions::revoke_by_token_hash(&state.pool, &hash_session_token(cookie.value())).await?;
+        sessions::revoke_by_token_hash(&state.db.pool, &hash_session_token(cookie.value())).await?;
     }
     Ok(HttpResponse::NoContent()
         .cookie(cleared_session_cookie())
@@ -448,7 +466,7 @@ pub async fn change_password(
     if validate_password(&payload.current_password).is_err() {
         return Err(current_password_invalid());
     }
-    let record = users::find_by_id(&state.pool, &user.0.id)
+    let record = users::find_by_id(&state.db.pool, &user.0.id)
         .await?
         .ok_or_else(internal_auth_error)?;
     let current = payload.current_password.clone();
@@ -462,7 +480,7 @@ pub async fn change_password(
     let new_hash = run_argon2(&state, move || hash_password(&new_password)).await?;
     let token = generate_session_token();
     let token_hash = hash_session_token(&token);
-    let ttl = state.auth.session_ttl_seconds;
+    let ttl = state.auth_runtime.config.session_ttl_seconds;
     let expires_at = Utc::now()
         .checked_add_signed(Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX)))
         .ok_or_else(internal_auth_error)?;
@@ -476,7 +494,7 @@ pub async fn change_password(
         .map(|cookie| hash_session_token(cookie.value()))
         .ok_or_else(AppError::authentication_required)?;
     let changed = sessions::change_password_and_replace_sessions(
-        &state.pool,
+        &state.db.pool,
         &user.0.id,
         &expected_password_hash,
         &current_token_hash,
@@ -728,7 +746,8 @@ mod tests {
         .expect("username bucket capacity must not block a new registration IP");
         assert!(
             state
-                .auth_rate_limits
+                .auth_runtime
+                .rate_limits
                 .lock()
                 .expect("rate limits")
                 .login_username_failure
@@ -792,7 +811,8 @@ mod tests {
         .expect("successful request remains recorded");
         assert!(
             state
-                .auth_rate_limits
+                .auth_runtime
+                .rate_limits
                 .lock()
                 .expect("rate limits")
                 .change_password_user_attempt
@@ -886,7 +906,7 @@ mod tests {
         )
         .expect("cleanup trigger");
 
-        let buckets = state.auth_rate_limits.lock().expect("rate limits");
+        let buckets = state.auth_runtime.rate_limits.lock().expect("rate limits");
         assert!(!buckets.login_ip.contains_key("login:ip:short"));
         assert!(buckets.register_ip.contains_key("register:ip:long"));
     }
