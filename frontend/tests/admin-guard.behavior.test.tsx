@@ -1,14 +1,14 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { AuthProvider } from '../src/auth/AuthContext';
-import { AdminSettingsPage, AdminUsersPage, AuthRateLimitsPage } from '../src/features/admin/AdminPage';
+import { AdminSettingsPage, AdminUsersPage, AuditLogsPage, AuthRateLimitsPage } from '../src/features/admin/AdminPage';
 import { rainApi } from '../src/api/client';
 
 vi.mock('../src/api/client', () => ({
   normalizeApiError: (error: unknown) => error instanceof Error ? error.message : String(error),
-  rainApi: { me: vi.fn(), fetchAdminUsers: vi.fn(), fetchAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), fetchAuthRateLimits: vi.fn(), clearAuthRateLimit: vi.fn(), clearAllAuthRateLimits: vi.fn() }
+  rainApi: { me: vi.fn(), fetchAdminUsers: vi.fn(), fetchAuditLogs: vi.fn(), fetchAdminSettings: vi.fn(), updateAdminSettings: vi.fn(), fetchAuthRateLimits: vi.fn(), clearAuthRateLimit: vi.fn(), clearAllAuthRateLimits: vi.fn() }
 }));
 
 it('shows a forbidden state when a normal user opens the admin route directly', async () => {
@@ -98,4 +98,53 @@ it('loads rate limit records and clears a selected record after confirmation', a
   expect(screen.getAllByText('—')).toHaveLength(1);
   await userEvent.click(screen.getAllByRole('button', { name: '清除' })[0]);
   expect(rainApi.clearAuthRateLimit).toHaveBeenCalledWith('usernames', 'login:username:alice');
+});
+
+it('renders the unified user management empty state with its controls', async () => {
+  vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'a', username: 'admin', role: 'ADMIN' } });
+  vi.mocked(rainApi.fetchAdminUsers).mockResolvedValueOnce({ items: [], next_cursor: null });
+  render(<MemoryRouter initialEntries={['/admin/users']}><AuthProvider><AdminUsersPage /></AuthProvider></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: '用户管理' })).toBeInTheDocument();
+  expect(screen.getByPlaceholderText('搜索用户名')).toBeInTheDocument();
+  expect(screen.getByText('暂无匹配的普通用户')).toBeInTheDocument();
+  expect(screen.getByText('请尝试调整搜索条件或状态筛选')).toBeInTheDocument();
+});
+
+it('keeps issue and storage usage visible in populated user rows', async () => {
+  vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'a', username: 'admin', role: 'ADMIN' } });
+  vi.mocked(rainApi.fetchAdminUsers).mockResolvedValueOnce({
+    items: [{ id: 'user-12345678', username: 'alice', status: 'ACTIVE', created_at: '2026-08-02 10:00:00 UTC', updated_at: '2026-08-02 10:00:00 UTC', last_login_at: null, active_session_count: 1, issue_count: 7, storage_bytes: 2 * 1024 * 1024 }],
+    next_cursor: null
+  });
+  render(<MemoryRouter initialEntries={['/admin/users']}><AuthProvider><AdminUsersPage /></AuthProvider></MemoryRouter>);
+  const username = await screen.findByText('alice');
+  const row = username.closest('tr');
+  expect(row).not.toBeNull();
+  expect(within(row!).getByText('7')).toBeInTheDocument();
+  expect(within(row!).getByText('2.0 MiB')).toBeInTheDocument();
+});
+
+it('renders the unified audit summary and empty record state', async () => {
+  vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'a', username: 'admin', role: 'ADMIN' } });
+  vi.mocked(rainApi.fetchAuditLogs).mockResolvedValueOnce({ items: [], next_cursor: null });
+  render(<MemoryRouter initialEntries={['/admin/audit-logs']}><AuthProvider><AuditLogsPage /></AuthProvider></MemoryRouter>);
+  expect(await screen.findByRole('heading', { name: '审计日志' })).toBeInTheDocument();
+  expect(screen.getByText('本页事件')).toBeInTheDocument();
+  expect(screen.getByText('操作记录')).toBeInTheDocument();
+  expect(screen.getByText('暂无审计记录')).toBeInTheDocument();
+});
+
+it('keeps audit metrics stacked at 640px and 768px, then expands at 1024px', async () => {
+  vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'a', username: 'admin', role: 'ADMIN' } });
+  vi.mocked(rainApi.fetchAuditLogs).mockResolvedValueOnce({ items: [], next_cursor: null });
+  render(<MemoryRouter initialEntries={['/admin/audit-logs']}><AuthProvider><AuditLogsPage /></AuthProvider></MemoryRouter>);
+  await screen.findByRole('heading', { name: '审计日志' });
+  const header = screen.getByTestId('admin-page-header');
+  const actions = screen.getByTestId('admin-page-actions');
+  const metrics = screen.getByTestId('audit-metrics');
+  expect(header).toHaveClass('flex-col', 'lg:flex-row');
+  expect(header).not.toHaveClass('sm:flex-row');
+  expect(actions).toHaveClass('w-full', 'lg:w-auto', 'lg:shrink-0');
+  expect(metrics).toHaveClass('grid-cols-2', 'lg:grid-cols-4', 'w-full', 'lg:w-auto');
+  expect(metrics).not.toHaveClass('sm:grid-cols-4');
 });
