@@ -193,99 +193,21 @@ impl TempResultExecutor {
         index_output: &mut File,
         max_output_bytes: u64,
     ) -> Result<i64, AppError> {
-        let mut matching_lines = 0_i64;
-        let mut log_offset = 0_u64;
-        let mut meta_offset = 0_u64;
-        let mut total_output_bytes = 0_u64;
-        for source in sources {
-            let file = File::open(&source.path).await.map_err(AppError::Io)?;
-            let mut reader = BufReader::new(file);
-            let mut source_metadata_reader = match source.metadata_path.as_ref() {
-                Some(path) => Some(BufReader::new(
-                    File::open(path).await.map_err(AppError::Io)?,
-                )),
-                None => None,
-            };
-            let mut bytes = Vec::new();
-            let mut source_metadata_line = String::new();
-            let mut source_line = 0_i64;
-            loop {
-                bytes.clear();
-                if reader
-                    .read_until(b'\n', &mut bytes)
-                    .await
-                    .map_err(AppError::Io)?
-                    == 0
-                {
-                    break;
-                }
-                let line = String::from_utf8_lossy(&bytes);
-                let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
-                    source_metadata_line.clear();
-                    if reader
-                        .read_line(&mut source_metadata_line)
-                        .await
-                        .map_err(AppError::Io)?
-                        == 0
-                    {
-                        return Err(invalid_sidecar(
-                            "temporary result metadata ended before its content",
-                        ));
-                    }
-                    Some(decode_json_line::<MatchMetadata>(
-                        source_metadata_line.trim_end(),
-                    )?)
-                } else {
-                    None
-                };
-                if expression.matches(line.trim_end_matches(['\r', '\n'])) {
-                    let metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
-                        bundle_hash: source.bundle_hash.clone(),
-                        file_id: source.file_id.clone(),
-                        path: source.label.clone(),
-                        line_number: source_line,
-                    });
-                    if matching_lines % 1_000 == 0 {
-                        write_json_line(
-                            index_output,
-                            &SparseCheckpoint {
-                                result_line: matching_lines,
-                                log_offset,
-                                meta_offset,
-                            },
-                            max_output_bytes,
-                            &mut total_output_bytes,
-                        )
-                        .await?;
-                    }
-                    let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
-                    let next_output_size =
-                        log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
-                    ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
-                    output.write_all(&bytes).await.map_err(AppError::Io)?;
-                    log_offset = next_output_size;
-                    total_output_bytes = total_output_bytes
-                        .checked_add(line_bytes)
-                        .ok_or_else(too_large)?;
-                    if !bytes.ends_with(b"\n") {
-                        output.write_all(b"\n").await.map_err(AppError::Io)?;
-                    }
-                    meta_offset += write_json_line(
-                        metadata_output,
-                        &metadata,
-                        max_output_bytes,
-                        &mut total_output_bytes,
-                    )
-                    .await?;
-                    matching_lines += 1;
-                }
-                source_line += 1;
-            }
-        }
-        output.flush().await.map_err(AppError::Io)?;
-        metadata_output.flush().await.map_err(AppError::Io)?;
-        index_output.flush().await.map_err(AppError::Io)?;
-        Ok(matching_lines)
+        // Full materialization uses the same scan, metadata, index, newline, and
+        // size-limit pipeline as preview; a zero-sized window suppresses only
+        // collecting preview lines.
+        Ok(Self::materialize_preview(
+            sources,
+            expression,
+            0,
+            0,
+            max_output_bytes,
+            output,
+            metadata_output,
+            index_output,
+        )
+        .await?
+        .total)
     }
 }
 
@@ -423,6 +345,81 @@ mod tests {
         assert_eq!(checkpoints[1].result_line, 1_000);
 
         for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn full_and_preview_write_identical_artifacts() {
+        let source_path = test_path("shared-source.log");
+        tokio::fs::write(&source_path, "ERROR one\nINFO skip\nERROR two\n")
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: Some("bundle".into()),
+            file_id: Some("1".into()),
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let full_paths = [
+            test_path("full.log"),
+            test_path("full.meta"),
+            test_path("full.idx"),
+        ];
+        let preview_paths = [
+            test_path("preview.log"),
+            test_path("preview.meta"),
+            test_path("preview.idx"),
+        ];
+        let mut full = (
+            File::create(&full_paths[0]).await.unwrap(),
+            File::create(&full_paths[1]).await.unwrap(),
+            File::create(&full_paths[2]).await.unwrap(),
+        );
+        let mut preview = (
+            File::create(&preview_paths[0]).await.unwrap(),
+            File::create(&preview_paths[1]).await.unwrap(),
+            File::create(&preview_paths[2]).await.unwrap(),
+        );
+        let total = TempResultExecutor::write_matches(
+            &sources,
+            &expression,
+            &mut full.0,
+            &mut full.1,
+            &mut full.2,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+        let outcome = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            1,
+            1,
+            u64::MAX,
+            &mut preview.0,
+            &mut preview.1,
+            &mut preview.2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, outcome.total);
+        assert_eq!(outcome.lines.len(), 1);
+        drop(full);
+        drop(preview);
+        for (full_path, preview_path) in full_paths.iter().zip(preview_paths.iter()) {
+            assert_eq!(
+                tokio::fs::read(full_path).await.unwrap(),
+                tokio::fs::read(preview_path).await.unwrap()
+            );
+        }
+        for path in full_paths
+            .into_iter()
+            .chain(preview_paths)
+            .chain([source_path])
+        {
             let _ = tokio::fs::remove_file(path).await;
         }
     }
