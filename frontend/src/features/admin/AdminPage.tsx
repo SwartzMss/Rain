@@ -18,11 +18,16 @@ import {
   type CursorHistory,
 } from "./adminFlow";
 
+function parseAdminDate(value: string): Date {
+  const normalized = value.trim().replace(/ UTC$/i, "Z").replace(" ", "T");
+  const iso = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized)
+    ? normalized
+    : `${normalized}Z`;
+  return new Date(iso);
+}
+
 function formatAdminDate(value: string): string {
-  const normalized = /(?:Z|[+-]\d{2}:?\d{2}|UTC)$/i.test(value)
-    ? value
-    : `${value.replace(" ", "T")}Z`;
-  const date = new Date(normalized);
+  const date = parseAdminDate(value);
   if (Number.isNaN(date.getTime())) return value;
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return new Intl.DateTimeFormat("zh-CN", {
@@ -666,7 +671,7 @@ export function AuditLogsPage() {
   }, [load]);
   const today = new Date().toDateString();
   const todayCount = logs.filter(
-    (log) => new Date(log.created_at).toDateString() === today,
+    (log) => parseAdminDate(log.created_at).toDateString() === today,
   ).length;
   const userChangeCount = logs.filter(
     (log) => log.action === "USER_STATUS_CHANGED",
