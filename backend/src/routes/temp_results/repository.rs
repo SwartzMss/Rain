@@ -1,5 +1,22 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TempResultStatus {
+    Staging,
+    Active,
+    Deleting,
+}
+
+impl TempResultStatus {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Staging => "STAGING",
+            Self::Active => "ACTIVE",
+            Self::Deleting => "DELETING",
+        }
+    }
+}
+
 pub(crate) async fn delete_temp_result_record(
     state: &web::Data<AppState>,
     id: &str,
@@ -36,10 +53,11 @@ pub(crate) async fn insert_staging_temp_result(
         r#"
         INSERT INTO temp_results
             (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at)
-        VALUES (?, 'STAGING', ?, ?, ?, ?, 0, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
         "#,
     )
     .bind(id)
+    .bind(TempResultStatus::Staging.as_str())
     .bind(name)
     .bind(expression)
     .bind(source_label)
@@ -67,11 +85,12 @@ pub(crate) async fn publish_temp_result(
     let updated = sqlx::query(
         r#"
         UPDATE temp_results
-        SET status = 'ACTIVE', expression = ?, source_label = ?, storage_path = ?,
+        SET status = ?, expression = ?, source_label = ?, storage_path = ?,
             line_count = ?, size_bytes = ?, expires_at = ?
-        WHERE id = ? AND status = 'STAGING'
+        WHERE id = ? AND status = ?
         "#,
     )
+    .bind(TempResultStatus::Active.as_str())
     .bind(expression)
     .bind(source_label)
     .bind(output_path.to_string_lossy().to_string())
@@ -79,6 +98,7 @@ pub(crate) async fn publish_temp_result(
     .bind(size_bytes)
     .bind(expires_at)
     .bind(id)
+    .bind(TempResultStatus::Staging.as_str())
     .execute(&state.pool)
     .await
     .map_err(AppError::Database)?;
@@ -92,13 +112,13 @@ pub(crate) async fn claim_staging_for_delete(
     state: &web::Data<AppState>,
     id: &str,
 ) -> Result<bool, AppError> {
-    let updated = sqlx::query(
-        "UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'STAGING'",
-    )
-    .bind(id)
-    .execute(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
+    let updated = sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
+        .bind(TempResultStatus::Deleting.as_str())
+        .bind(id)
+        .bind(TempResultStatus::Staging.as_str())
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
     Ok(updated.rows_affected() == 1)
 }
 
@@ -106,8 +126,9 @@ pub(crate) async fn delete_deleting_record(
     state: &web::Data<AppState>,
     id: &str,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = 'DELETING'")
+    sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = ?")
         .bind(id)
+        .bind(TempResultStatus::Deleting.as_str())
         .execute(&state.pool)
         .await
         .map_err(AppError::Database)?;
@@ -187,9 +208,10 @@ pub(crate) async fn renew_active(
     expires_at: &str,
 ) -> Result<bool, AppError> {
     let updated =
-        sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) >= datetime('now')")
+        sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = ? AND datetime(expires_at) >= datetime('now')")
             .bind(expires_at)
             .bind(id)
+            .bind(TempResultStatus::Active.as_str())
             .execute(&state.pool)
             .await
             .map_err(AppError::Database)?;
@@ -199,36 +221,36 @@ pub(crate) async fn renew_active(
 pub(crate) async fn list_deleting(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
-    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = 'DELETING' ORDER BY created_at, id")
-        .fetch_all(&state.pool).await.map_err(AppError::Database)
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? ORDER BY created_at, id")
+        .bind(TempResultStatus::Deleting.as_str()).fetch_all(&state.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn list_expired_active(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
-    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = 'ACTIVE' AND datetime(expires_at) < datetime('now') ORDER BY expires_at, id")
-        .fetch_all(&state.pool).await.map_err(AppError::Database)
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? AND datetime(expires_at) < datetime('now') ORDER BY expires_at, id")
+        .bind(TempResultStatus::Active.as_str()).fetch_all(&state.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn claim_expired_active(
     state: &web::Data<AppState>,
     id: &str,
     expires_at: &str,
 ) -> Result<Option<String>, AppError> {
-    sqlx::query_scalar("UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'ACTIVE' AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
-        .bind(id).bind(expires_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+    sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
+        .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Active.as_str()).bind(expires_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn list_stale_staging(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
-    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = 'STAGING' AND datetime(created_at) < datetime('now', '-600 seconds') ORDER BY created_at, id")
-        .fetch_all(&state.pool).await.map_err(AppError::Database)
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? AND datetime(created_at) < datetime('now', '-600 seconds') ORDER BY created_at, id")
+        .bind(TempResultStatus::Staging.as_str()).fetch_all(&state.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn claim_stale_staging(
     state: &web::Data<AppState>,
     id: &str,
     created_at: &str,
 ) -> Result<Option<String>, AppError> {
-    sqlx::query_scalar("UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'STAGING' AND created_at = ? RETURNING storage_path")
-        .bind(id).bind(created_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+    sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? RETURNING storage_path")
+        .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Staging.as_str()).bind(created_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
 }
 
 #[cfg(test)]
@@ -241,7 +263,14 @@ mod tests {
 
     use crate::{AppState, config::AppLimits, db};
 
-    use super::{claim_expired_active, renew_active};
+    use super::{TempResultStatus, claim_expired_active, renew_active};
+
+    #[test]
+    fn status_mapping_preserves_database_values() {
+        assert_eq!(TempResultStatus::Staging.as_str(), "STAGING");
+        assert_eq!(TempResultStatus::Active.as_str(), "ACTIVE");
+        assert_eq!(TempResultStatus::Deleting.as_str(), "DELETING");
+    }
 
     #[tokio::test]
     async fn expired_active_result_cannot_be_renewed() {
