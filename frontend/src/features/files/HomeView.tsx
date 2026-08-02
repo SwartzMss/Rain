@@ -189,7 +189,7 @@ export function HomeView() {
               <h2 className="text-2xl font-semibold text-slate-950">
                 {issues.currentIssueCode || '请选择 Issue'}
               </h2>
-              {selectedIssue ? <p className="mt-1 text-sm text-slate-500">所有者：{ownerUsername ?? '未知用户'}</p> : null}
+              {selectedIssue && ownerUsername ? <p className="mt-1 text-sm text-slate-500">所有者：{ownerUsername}</p> : null}
             </div>
             {canWrite && issues.currentIssueCode ? (
               <button
