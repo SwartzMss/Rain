@@ -26,6 +26,21 @@ it('keeps the registration switch disabled when settings loading fails', async (
   expect(screen.getByText('settings unavailable')).toBeInTheDocument();
 });
 
+it('saves rate limit thresholds without changing registration state', async () => {
+  vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'a', username: 'admin', role: 'ADMIN' } });
+  vi.mocked(rainApi.fetchAdminSettings).mockResolvedValueOnce({ allow_registration: true, updated_at: '', updated_by_username: 'admin', login_ip_limit_per_minute: 20, login_username_failure_limit_per_5_minutes: 10 });
+  vi.mocked(rainApi.updateAdminSettings).mockResolvedValueOnce({ allow_registration: true, updated_at: '', updated_by_username: 'admin', login_ip_limit_per_minute: 50, login_username_failure_limit_per_5_minutes: 15 });
+  render(<MemoryRouter initialEntries={['/admin/settings']}><AuthProvider><AdminSettingsPage /></AuthProvider></MemoryRouter>);
+  await screen.findByDisplayValue('20');
+  await userEvent.clear(screen.getByLabelText('IP 每分钟阈值'));
+  await userEvent.type(screen.getByLabelText('IP 每分钟阈值'), '50');
+  await userEvent.clear(screen.getByLabelText('用户名失败 5 分钟阈值'));
+  await userEvent.type(screen.getByLabelText('用户名失败 5 分钟阈值'), '15');
+  await userEvent.click(screen.getByRole('button', { name: '保存限流配置' }));
+  await waitFor(() => expect(rainApi.updateAdminSettings).toHaveBeenCalledWith(true, 50, 15));
+  expect(screen.getByText('设置已保存')).toBeInTheDocument();
+});
+
 it('loads rate limit records and clears a selected record after confirmation', async () => {
   vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'a', username: 'admin', role: 'ADMIN' } });
   vi.mocked(rainApi.fetchAuthRateLimits).mockResolvedValue({
