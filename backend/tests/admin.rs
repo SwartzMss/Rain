@@ -12,6 +12,7 @@ use backend::{
 };
 use chrono::{Duration, Utc};
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[tokio::test]
 async fn bootstrap_creates_exactly_one_active_admin_and_audit_record() {
@@ -296,6 +297,84 @@ async fn registration_settings_are_persistent_and_admin_only() {
         &app,
         test::TestRequest::get()
             .uri("/api/admin/settings")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(guest.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
+async fn admin_can_view_and_clear_auth_rate_limits_with_audit() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, true).await.expect("schema");
+    bootstrap_admin::bootstrap_admin(&pool, "admin", "strong-password")
+        .await
+        .expect("bootstrap");
+    let admin_id: String = sqlx::query_scalar("SELECT id FROM users WHERE role='ADMIN'")
+        .fetch_one(&pool)
+        .await
+        .expect("admin");
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &admin_id,
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .expect("session");
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    {
+        let mut limits = state.auth_runtime.rate_limits.lock().expect("limits");
+        let bucket = limits
+            .login_username_failure
+            .entry("login:username:alice".into())
+            .or_insert_with(|| {
+                backend::AuthRateLimitBucket::new(std::time::Duration::from_secs(300))
+            });
+        bucket.push(Instant::now());
+    }
+    let pool = state.db.pool.clone();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(routes::register),
+    )
+    .await;
+    let cookie = Cookie::new(SESSION_COOKIE_NAME, token);
+    let list = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/auth-rate-limits")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(list.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(list).await;
+    assert_eq!(body["username_failures"][0]["username"], "alice");
+    let clear = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/admin/auth-rate-limits/usernames/login%3Ausername%3Aalice")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(clear.status(), StatusCode::NO_CONTENT);
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_audit_logs WHERE action='AUTH_RATE_LIMIT_USERNAME_CLEARED'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("audit");
+    assert_eq!(remaining, 1);
+    let guest = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/auth-rate-limits")
             .to_request(),
     )
     .await;
