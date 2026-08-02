@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-use super::issues::{normalize_issue_code, require_issue_exists};
+use super::issues::{normalize_issue_code, require_issue_owner};
 
 // scoped under /api in routes::register, so use relative path
 #[post("/issues/{issue_code}/uploads")]
@@ -33,7 +33,7 @@ pub async fn upload_logs(
     payload: web::Payload,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
-    require_issue_exists(&state.db.pool, &issue_code).await?;
+    require_issue_owner(&state.db.pool, &issue_code, &user.0.id).await?;
     let request_limit = raw_payload_limit(state.limits.issue_max_content_size.saturating_mul(2));
     if let Some(length) = req.headers().get(CONTENT_LENGTH) {
         let length = length

@@ -1955,6 +1955,11 @@ async fn test_auth_cookie(pool: &sqlx::SqlitePool) -> Cookie<'static> {
         users::CreateUserOutcome::Created(user) => user,
         users::CreateUserOutcome::DuplicateUsername => panic!("unexpected duplicate test user"),
     };
+    sqlx::query("UPDATE issues SET owner_user_id = ? WHERE owner_user_id IS NULL")
+        .bind(&user.id)
+        .execute(pool)
+        .await
+        .expect("assign smoke issue ownership");
     let token = generate_session_token();
     sessions::create_session(
         pool,

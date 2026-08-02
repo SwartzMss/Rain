@@ -18,7 +18,7 @@ const row = {
 
 const issueProps = (canWrite: boolean) => ({
   currentIssueCode: '', filteredIssues: [], issueError: null, issueSearchText: '',
-  issuesError: null, issuesLoading: false, canWrite, onCreateClick: vi.fn(),
+  issuesError: null, issuesLoading: false, canWrite, canCreateIssue: canWrite, onCreateClick: vi.fn(),
   onIssueSearchTextChange: vi.fn(), onRefreshIssues: vi.fn(), onSelectIssue: vi.fn(), onViewIssue: vi.fn()
 });
 

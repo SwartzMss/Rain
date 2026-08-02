@@ -5,6 +5,7 @@ import type { BundleFileState } from '../homeRows';
 
 export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => void) {
   const [bundles, setBundles] = useState<UploadSummary[]>([]);
+  const [canWrite, setCanWrite] = useState(false);
   const [, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
@@ -17,6 +18,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
 
   const clearBundles = useCallback(() => {
     setBundles([]);
+    setCanWrite(false);
     setBundleFiles({});
     setBundlesError(null);
   }, []);
@@ -39,6 +41,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
           return;
         }
         setBundles(data.log_bundles);
+        setCanWrite(data.can_write);
         setBundleFiles((prev) => {
           const validHashes = new Set(data.log_bundles.map((bundle) => bundle.hash));
           return Object.fromEntries(Object.entries(prev).filter(([hash]) => validHashes.has(hash)));
@@ -118,6 +121,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   return {
     bundleFiles,
     bundles,
+    canWrite,
     bundlesError,
     clearBundles,
     loadBundleFiles,

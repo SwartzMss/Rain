@@ -8,11 +8,12 @@ pub struct BundleRow {
     pub hash: String,
     pub name: String,
     pub status: String,
+    pub issue_code: String,
 }
 
 pub async fn load_bundle(pool: &sqlx::SqlitePool, hash: &str) -> Result<BundleRow, AppError> {
     sqlx::query_as::<_, BundleRow>(
-        "SELECT id, hash, name, status FROM bundles WHERE hash = ? AND deleted_at IS NULL LIMIT 1",
+        "SELECT id, hash, name, status, issue_code FROM bundles WHERE hash = ? AND deleted_at IS NULL LIMIT 1",
     )
     .bind(hash)
     .fetch_optional(pool)

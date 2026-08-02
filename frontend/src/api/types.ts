@@ -58,6 +58,7 @@ export interface UploadSummary {
 
 export interface IssueBundlesResponse {
   name: string;
+  can_write: boolean;
   log_bundles: UploadSummary[];
 }
 
@@ -65,6 +66,7 @@ export interface IssueSummary {
   code: string;
   name: string;
   bundle_count: number;
+  can_write: boolean;
 }
 
 export interface CreateIssueRequest {
