@@ -13,6 +13,7 @@ type IssueSelectorProps = {
   onIssueSearchTextChange: (value: string) => void;
   onRefreshIssues: () => void;
   onSelectIssue: (value: string) => void;
+  onViewIssue: (issueCode: string) => void;
 };
 
 export function IssueSelector({
@@ -27,7 +28,8 @@ export function IssueSelector({
   onCreateClick,
   onIssueSearchTextChange,
   onRefreshIssues,
-  onSelectIssue
+  onSelectIssue,
+  onViewIssue
 }: IssueSelectorProps) {
   return (
     <aside className="flex min-h-[680px] flex-col rounded-2xl border border-slate-200/90 bg-white/95 p-4 shadow-[0_18px_48px_rgba(7,21,34,0.08)] backdrop-blur">
@@ -82,11 +84,13 @@ export function IssueSelector({
             <button
               key={issue.code}
               type="button"
+              title="双击查看 Issue 日志"
               className={[
                 'flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left transition',
                 active ? 'border-sky-200 bg-gradient-to-r from-sky-100 to-cyan-50 text-slate-950 shadow-sm' : 'border-transparent text-slate-700 hover:border-slate-200 hover:bg-slate-50'
               ].join(' ')}
               onClick={() => onSelectIssue(issue.code)}
+              onDoubleClick={() => onViewIssue(issue.code)}
             >
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-semibold">{issue.code}</span>

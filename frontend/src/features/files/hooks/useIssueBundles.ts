@@ -37,6 +37,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
 
       setBundlesLoading(true);
       setBundlesError(null);
+      setOwnerUsername(null);
       try {
         const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
         if (requestId !== bundleRequestIdRef.current || selectedIssueRef.current !== trimmed) {

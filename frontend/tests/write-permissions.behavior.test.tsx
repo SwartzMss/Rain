@@ -1,5 +1,5 @@
 import { createRef } from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { IssueSelector } from '../src/features/files/components/IssueSelector';
 import { UploadFileTable } from '../src/features/files/components/UploadFileTable';
@@ -39,6 +39,13 @@ describe('write permission behavior', () => {
     expect(screen.getByText('owner')).toBeInTheDocument();
     expect(screen.getByText('未知用户')).toBeInTheDocument();
     expect(screen.queryByText('双击查看日志')).not.toBeInTheDocument();
+  });
+
+  it('keeps double-click navigation for an Issue', () => {
+    const onViewIssue = vi.fn();
+    render(<IssueSelector {...issueProps(false)} filteredIssues={[{ code: 'ISSUE', name: 'Issue', bundle_count: 0, can_write: false, owner_username: 'owner' }]} onViewIssue={onViewIssue} />);
+    fireEvent.doubleClick(screen.getByRole('button', { name: /ISSUE/ }));
+    expect(onViewIssue).toHaveBeenCalledWith('ISSUE');
   });
 
   it('shows file deletion only for a writable authenticated user', async () => {

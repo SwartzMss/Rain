@@ -179,6 +179,7 @@ export function HomeView() {
         onIssueSearchTextChange={issues.setIssueSearchText}
         onRefreshIssues={() => issues.loadIssues().catch(() => undefined)}
         onSelectIssue={selectIssue}
+        onViewIssue={(issueCode) => navigate(`/issue/${encodeURIComponent(issueCode)}`)}
       />
 
       <section className="min-w-0 space-y-4">
