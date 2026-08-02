@@ -193,99 +193,21 @@ impl TempResultExecutor {
         index_output: &mut File,
         max_output_bytes: u64,
     ) -> Result<i64, AppError> {
-        let mut matching_lines = 0_i64;
-        let mut log_offset = 0_u64;
-        let mut meta_offset = 0_u64;
-        let mut total_output_bytes = 0_u64;
-        for source in sources {
-            let file = File::open(&source.path).await.map_err(AppError::Io)?;
-            let mut reader = BufReader::new(file);
-            let mut source_metadata_reader = match source.metadata_path.as_ref() {
-                Some(path) => Some(BufReader::new(
-                    File::open(path).await.map_err(AppError::Io)?,
-                )),
-                None => None,
-            };
-            let mut bytes = Vec::new();
-            let mut source_metadata_line = String::new();
-            let mut source_line = 0_i64;
-            loop {
-                bytes.clear();
-                if reader
-                    .read_until(b'\n', &mut bytes)
-                    .await
-                    .map_err(AppError::Io)?
-                    == 0
-                {
-                    break;
-                }
-                let line = String::from_utf8_lossy(&bytes);
-                let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
-                    source_metadata_line.clear();
-                    if reader
-                        .read_line(&mut source_metadata_line)
-                        .await
-                        .map_err(AppError::Io)?
-                        == 0
-                    {
-                        return Err(invalid_sidecar(
-                            "temporary result metadata ended before its content",
-                        ));
-                    }
-                    Some(decode_json_line::<MatchMetadata>(
-                        source_metadata_line.trim_end(),
-                    )?)
-                } else {
-                    None
-                };
-                if expression.matches(line.trim_end_matches(['\r', '\n'])) {
-                    let metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
-                        bundle_hash: source.bundle_hash.clone(),
-                        file_id: source.file_id.clone(),
-                        path: source.label.clone(),
-                        line_number: source_line,
-                    });
-                    if matching_lines % 1_000 == 0 {
-                        write_json_line(
-                            index_output,
-                            &SparseCheckpoint {
-                                result_line: matching_lines,
-                                log_offset,
-                                meta_offset,
-                            },
-                            max_output_bytes,
-                            &mut total_output_bytes,
-                        )
-                        .await?;
-                    }
-                    let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
-                    let next_output_size =
-                        log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
-                    ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
-                    output.write_all(&bytes).await.map_err(AppError::Io)?;
-                    log_offset = next_output_size;
-                    total_output_bytes = total_output_bytes
-                        .checked_add(line_bytes)
-                        .ok_or_else(too_large)?;
-                    if !bytes.ends_with(b"\n") {
-                        output.write_all(b"\n").await.map_err(AppError::Io)?;
-                    }
-                    meta_offset += write_json_line(
-                        metadata_output,
-                        &metadata,
-                        max_output_bytes,
-                        &mut total_output_bytes,
-                    )
-                    .await?;
-                    matching_lines += 1;
-                }
-                source_line += 1;
-            }
-        }
-        output.flush().await.map_err(AppError::Io)?;
-        metadata_output.flush().await.map_err(AppError::Io)?;
-        index_output.flush().await.map_err(AppError::Io)?;
-        Ok(matching_lines)
+        // Full materialization uses the same scan, metadata, index, newline, and
+        // size-limit pipeline as preview; a zero-sized window suppresses only
+        // collecting preview lines.
+        Ok(Self::materialize_preview(
+            sources,
+            expression,
+            0,
+            0,
+            max_output_bytes,
+            output,
+            metadata_output,
+            index_output,
+        )
+        .await?
+        .total)
     }
 }
 
