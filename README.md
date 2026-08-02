@@ -162,7 +162,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_AUTH_ARGON2_CONCURRENCY` | `5` | Argon2 哈希与校验并发上限 |
 | `RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE` | `20` | 同一 IP 每分钟登录尝试上限 |
 | `RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES` | `10` | 同一用户名每 5 分钟失败登录上限 |
-| `RAIN_ISSUE_INACTIVE_DAYS` | `0` | Issue 非活跃自动过期天数；0 关闭，范围 0–30 |
+| `RAIN_ISSUE_INACTIVE_DAYS` | `0` | Issue 非活跃自动过期天数；0 关闭，启用范围 7–30 |
 | `RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR` | `10` | 同一 IP 每小时注册尝试上限 |
 
 默认配置会使用：

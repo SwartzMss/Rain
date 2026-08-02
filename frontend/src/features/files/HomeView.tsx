@@ -13,6 +13,7 @@ import { useIssues } from './hooks/useIssues';
 import { useUploadTask } from './hooks/useUploadTask';
 import { shouldResetUploadAfterBundleDeletion } from './uploadDeletion';
 import { isUser } from '../../auth/permissions';
+import { IssueExpirationNotice } from './components/IssueExpirationNotice';
 
 export function HomeView() {
   const navigate = useNavigate();
@@ -190,6 +191,10 @@ export function HomeView() {
                 {issues.currentIssueCode || '请选择 Issue'}
               </h2>
               {selectedIssue && ownerUsername ? <p className="mt-1 text-sm text-slate-500">所有者：{ownerUsername}</p> : null}
+              <IssueExpirationNotice
+                canWrite={canWrite}
+                expiry={bundles.inactivityExpiry}
+              />
             </div>
             {canWrite && issues.currentIssueCode ? (
               <button
