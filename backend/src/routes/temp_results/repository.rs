@@ -7,6 +7,13 @@ pub(crate) enum TempResultStatus {
     Deleting,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TransitionResult<T> {
+    Applied(T),
+    NotFound,
+    StateMismatch,
+}
+
 impl TempResultStatus {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -15,18 +22,6 @@ impl TempResultStatus {
             Self::Deleting => "DELETING",
         }
     }
-}
-
-pub(crate) async fn delete_temp_result_record(
-    state: &web::Data<AppState>,
-    id: &str,
-) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM temp_results WHERE id = ?")
-        .bind(id)
-        .execute(&state.pool)
-        .await
-        .map_err(AppError::Database)?;
-    Ok(())
 }
 
 pub(crate) async fn list_storage_paths(
@@ -78,7 +73,7 @@ pub(crate) async fn publish_temp_result(
     output_path: &Path,
     line_count: i64,
     size_bytes: i64,
-) -> Result<(), AppError> {
+) -> Result<TransitionResult<()>, AppError> {
     let _capacity_guard = state.temp_result_capacity_lock.lock().await;
     ensure_temp_result_capacity(state, size_bytes, Some(id)).await?;
     let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
@@ -103,15 +98,15 @@ pub(crate) async fn publish_temp_result(
     .await
     .map_err(AppError::Database)?;
     if updated.rows_affected() != 1 {
-        return Err(AppError::NotFound(format!("temporary result {id}")));
+        return Ok(TransitionResult::StateMismatch);
     }
-    Ok(())
+    Ok(TransitionResult::Applied(()))
 }
 
 pub(crate) async fn claim_staging_for_delete(
     state: &web::Data<AppState>,
     id: &str,
-) -> Result<bool, AppError> {
+) -> Result<TransitionResult<()>, AppError> {
     let updated = sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
         .bind(TempResultStatus::Deleting.as_str())
         .bind(id)
@@ -119,20 +114,62 @@ pub(crate) async fn claim_staging_for_delete(
         .execute(&state.pool)
         .await
         .map_err(AppError::Database)?;
-    Ok(updated.rows_affected() == 1)
+    if updated.rows_affected() == 1 {
+        return Ok(TransitionResult::Applied(()));
+    }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_results WHERE id = ?)")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(if exists {
+        TransitionResult::StateMismatch
+    } else {
+        TransitionResult::NotFound
+    })
+}
+
+pub(crate) async fn claim_active_for_delete(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<TransitionResult<()>, AppError> {
+    let updated = sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
+        .bind(TempResultStatus::Deleting.as_str())
+        .bind(id)
+        .bind(TempResultStatus::Active.as_str())
+        .execute(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(if updated.rows_affected() == 1 {
+        TransitionResult::Applied(())
+    } else {
+        TransitionResult::StateMismatch
+    })
 }
 
 pub(crate) async fn delete_deleting_record(
     state: &web::Data<AppState>,
     id: &str,
-) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = ?")
+) -> Result<TransitionResult<()>, AppError> {
+    let updated = sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = ?")
         .bind(id)
         .bind(TempResultStatus::Deleting.as_str())
         .execute(&state.pool)
         .await
         .map_err(AppError::Database)?;
-    Ok(())
+    if updated.rows_affected() == 1 {
+        return Ok(TransitionResult::Applied(()));
+    }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_results WHERE id = ?)")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(if exists {
+        TransitionResult::StateMismatch
+    } else {
+        TransitionResult::NotFound
+    })
 }
 
 pub(crate) async fn ensure_temp_result_budget(state: &web::Data<AppState>) -> Result<(), AppError> {
@@ -206,7 +243,7 @@ pub(crate) async fn renew_active(
     state: &web::Data<AppState>,
     id: &str,
     expires_at: &str,
-) -> Result<bool, AppError> {
+) -> Result<TransitionResult<()>, AppError> {
     let updated =
         sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = ? AND datetime(expires_at) >= datetime('now')")
             .bind(expires_at)
@@ -215,7 +252,11 @@ pub(crate) async fn renew_active(
             .execute(&state.pool)
             .await
             .map_err(AppError::Database)?;
-    Ok(updated.rows_affected() == 1)
+    Ok(if updated.rows_affected() == 1 {
+        TransitionResult::Applied(())
+    } else {
+        TransitionResult::StateMismatch
+    })
 }
 
 pub(crate) async fn list_deleting(
@@ -234,9 +275,10 @@ pub(crate) async fn claim_expired_active(
     state: &web::Data<AppState>,
     id: &str,
     expires_at: &str,
-) -> Result<Option<String>, AppError> {
+) -> Result<TransitionResult<String>, AppError> {
     sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
         .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Active.as_str()).bind(expires_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+        .map(|value| value.map_or(TransitionResult::StateMismatch, TransitionResult::Applied))
 }
 pub(crate) async fn list_stale_staging(
     state: &web::Data<AppState>,
@@ -248,9 +290,10 @@ pub(crate) async fn claim_stale_staging(
     state: &web::Data<AppState>,
     id: &str,
     created_at: &str,
-) -> Result<Option<String>, AppError> {
+) -> Result<TransitionResult<String>, AppError> {
     sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? RETURNING storage_path")
         .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Staging.as_str()).bind(created_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+        .map(|value| value.map_or(TransitionResult::StateMismatch, TransitionResult::Applied))
 }
 
 #[cfg(test)]
@@ -263,7 +306,10 @@ mod tests {
 
     use crate::{AppState, config::AppLimits, db};
 
-    use super::{TempResultStatus, claim_expired_active, renew_active};
+    use super::{
+        TempResultStatus, TransitionResult, claim_expired_active, claim_staging_for_delete,
+        delete_deleting_record, renew_active,
+    };
 
     #[test]
     fn status_mapping_preserves_database_values() {
@@ -295,10 +341,52 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            !renew_active(&state, "expired", &Utc::now().to_rfc3339())
+        assert!(matches!(
+            renew_active(&state, "expired", &Utc::now().to_rfc3339())
                 .await
-                .unwrap()
+                .unwrap(),
+            TransitionResult::StateMismatch
+        ));
+    }
+
+    #[tokio::test]
+    async fn staging_claim_and_final_delete_are_single_use() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('staging', 'STAGING', 'staging.log', 'x', 'x', 'data/temp-results/staging.log', 0, 0, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            claim_staging_for_delete(&state, "staging").await.unwrap(),
+            TransitionResult::Applied(())
+        );
+        assert_eq!(
+            claim_staging_for_delete(&state, "staging").await.unwrap(),
+            TransitionResult::StateMismatch
+        );
+        assert_eq!(
+            delete_deleting_record(&state, "staging").await.unwrap(),
+            TransitionResult::Applied(())
+        );
+        assert_eq!(
+            delete_deleting_record(&state, "staging").await.unwrap(),
+            TransitionResult::NotFound
         );
     }
 
@@ -332,7 +420,10 @@ mod tests {
         );
         let renewed = renewed.unwrap();
         let claimed = claimed.unwrap();
-        assert!(!(renewed && claimed.is_some()));
+        assert!(
+            !matches!(renewed, TransitionResult::Applied(()))
+                || !matches!(claimed, TransitionResult::Applied(_))
+        );
         let (status, expires_at): (String, String) =
             sqlx::query_as("SELECT status, expires_at FROM temp_results WHERE id = 'racy'")
                 .fetch_one(&pool)

@@ -4,7 +4,8 @@ use super::lifecycle::load_and_renew;
 use super::lifecycle::load_record;
 use super::lifecycle::{check_temp_result_rate_limit, preview_page_size, to_response};
 use super::repository::{
-    ensure_temp_result_budget, insert_staging_temp_result, publish_temp_result,
+    TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
+    insert_staging_temp_result, publish_temp_result,
 };
 use super::storage::checked_temp_path;
 use super::storage::invalid_sidecar;
@@ -104,7 +105,7 @@ async fn materialize_result(
         tokio::fs::rename(&staging_index_path, &index_path)
             .await
             .map_err(AppError::Io)?;
-        publish_temp_result(
+        let transition = publish_temp_result(
             state,
             &id,
             expression_text,
@@ -114,6 +115,9 @@ async fn materialize_result(
             i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
         )
         .await?;
+        if !matches!(transition, TransitionResult::Applied(())) {
+            return Err(AppError::NotFound(format!("temporary result {id}")));
+        }
         Ok::<MaterializedPreview, AppError>(materialized)
     }
     .await;
@@ -424,8 +428,17 @@ pub(crate) async fn delete_result(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let result = load_record(&state, &id).await?;
+    match claim_active_for_delete(&state, &result.id).await? {
+        TransitionResult::Applied(()) => {}
+        TransitionResult::NotFound | TransitionResult::StateMismatch => {
+            return Err(AppError::NotFound(format!("temporary result {id}")));
+        }
+    }
     let path = checked_temp_path(&state, &result.storage_path)?;
     remove_result_files(&path).await?;
-    repository::delete_temp_result_record(&state, &result.id).await?;
+    match delete_deleting_record(&state, &result.id).await? {
+        TransitionResult::Applied(()) => {}
+        TransitionResult::NotFound | TransitionResult::StateMismatch => {}
+    }
     Ok(HttpResponse::NoContent().finish())
 }

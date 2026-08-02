@@ -1,3 +1,4 @@
+use super::repository::TransitionResult;
 use super::storage::{
     checked_temp_path, cleanup_orphan_temp_files, is_staging_lease_active, remove_result_files,
 };
@@ -10,8 +11,8 @@ pub(crate) async fn abort_staging_result(
     output_path: &Path,
 ) {
     match repository::claim_staging_for_delete(state, id).await {
-        Ok(true) => {}
-        Ok(false) => return,
+        Ok(TransitionResult::Applied(())) => {}
+        Ok(TransitionResult::NotFound | TransitionResult::StateMismatch) => return,
         Err(error) => {
             tracing::warn!(result_id = %id, %error, "failed to claim staging temporary result for cleanup");
             return;
@@ -38,8 +39,11 @@ pub(crate) async fn load_and_renew(
     id: &str,
 ) -> Result<TempResultRecord, AppError> {
     let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
-    if !repository::renew_active(state, id, &expires_at).await? {
-        return Err(AppError::NotFound(format!("temporary result {id}")));
+    match repository::renew_active(state, id, &expires_at).await? {
+        TransitionResult::Applied(()) => {}
+        TransitionResult::NotFound | TransitionResult::StateMismatch => {
+            return Err(AppError::NotFound(format!("temporary result {id}")));
+        }
     }
     repository::find_by_id(state, id).await
 }
@@ -49,7 +53,7 @@ pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), A
         finish_deleting_temp_result(state, &record).await;
     }
     for record in repository::list_expired_active(state).await? {
-        let Some(storage_path) =
+        let TransitionResult::Applied(storage_path) =
             repository::claim_expired_active(state, &record.id, &record.expires_at).await?
         else {
             continue;
@@ -62,7 +66,7 @@ pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), A
         if is_staging_lease_active(state, &record.id) {
             continue;
         }
-        let Some(storage_path) =
+        let TransitionResult::Applied(storage_path) =
             repository::claim_stale_staging(state, &record.id, &record.created_at).await?
         else {
             continue;
@@ -91,8 +95,14 @@ pub(crate) async fn finish_deleting_temp_result(
         tracing::warn!(result_id = %record.id, %error, "temporary result files could not be removed; keeping DELETING record");
         return;
     }
-    if let Err(error) = repository::delete_deleting_record(state, &record.id).await {
-        tracing::warn!(result_id = %record.id, %error, "temporary result database record could not be removed; keeping DELETING record");
+    match repository::delete_deleting_record(state, &record.id).await {
+        Ok(TransitionResult::Applied(())) => {}
+        Ok(TransitionResult::NotFound | TransitionResult::StateMismatch) => {
+            tracing::debug!(result_id = %record.id, "temporary result deletion was already completed")
+        }
+        Err(error) => {
+            tracing::warn!(result_id = %record.id, %error, "temporary result database record could not be removed; keeping DELETING record");
+        }
     }
 }
 
