@@ -311,14 +311,15 @@ pub async fn update_settings(
         ));
     }
     let mut settings_tx = state.db.pool.begin().await.map_err(AppError::Database)?;
+    let allow_registration = body.allow_registration.unwrap_or(old.0 != 0);
     sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
-        .bind(body.allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
+        .bind(allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
     let mut changes = Vec::new();
-    if old.0 != body.allow_registration as i64 {
+    if old.0 != allow_registration as i64 {
         changes.push(format!(
             "registration:{}->{}",
             old.0 != 0,
-            body.allow_registration
+            allow_registration
         ));
     }
     if old.1 != ip_limit as i64 {
@@ -337,7 +338,7 @@ pub async fn update_settings(
     settings_tx.commit().await.map_err(AppError::Database)?;
     state
         .auth_runtime
-        .set_registration_allowed(body.allow_registration);
+        .set_registration_allowed(allow_registration);
     state
         .auth_runtime
         .login_ip_limit_per_minute

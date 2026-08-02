@@ -37,7 +37,7 @@ it('saves rate limit thresholds without changing registration state', async () =
   await userEvent.clear(screen.getByLabelText('用户名失败 5 分钟阈值'));
   await userEvent.type(screen.getByLabelText('用户名失败 5 分钟阈值'), '15');
   await userEvent.click(screen.getByRole('button', { name: '保存限流配置' }));
-  await waitFor(() => expect(rainApi.updateAdminSettings).toHaveBeenCalledWith(true, 50, 15));
+  await waitFor(() => expect(rainApi.updateAdminSettings).toHaveBeenCalledWith(undefined, 50, 15));
   expect(screen.getByText('设置已保存')).toBeInTheDocument();
 });
 

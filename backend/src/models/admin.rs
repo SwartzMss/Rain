@@ -50,7 +50,7 @@ pub struct RegistrationSettings {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateRegistrationSettings {
-    pub allow_registration: bool,
+    pub allow_registration: Option<bool>,
     pub login_ip_limit_per_minute: Option<usize>,
     pub login_username_failure_limit_per_5_minutes: Option<usize>,
 }
