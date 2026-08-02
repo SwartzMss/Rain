@@ -151,7 +151,9 @@ struct MaterializedPreviewResponse {
 }
 
 mod lifecycle;
+mod repository;
 mod routes;
+mod service;
 mod storage;
 
 pub(crate) use lifecycle::*;
