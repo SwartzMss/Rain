@@ -19,10 +19,17 @@ import {
 } from "./adminFlow";
 
 function formatAdminDate(value: string): string {
-  const date = new Date(value);
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2}|UTC)$/i.test(value)
+    ? value
+    : `${value.replace(" ", "T")}Z`;
+  const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) return value;
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  return `${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(date)} (${timeZone})`;
+  return `${new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    timeZone,
+  }).format(date)} (${timeZone})`;
 }
 
 function AdminShell({ children }: { children: ReactNode }) {
