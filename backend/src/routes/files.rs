@@ -21,6 +21,7 @@ use crate::{
 };
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
+use super::issues::require_issue_owner;
 
 #[derive(Deserialize)]
 struct FilePath {
@@ -192,12 +193,13 @@ fn ascii_filename_fallback(name: &str) -> String {
 
 #[delete("/files/v1/{bundle_id}/files/{file_id}")]
 pub async fn delete_file_node(
-    _user: RequireBusinessUser,
+    user: RequireBusinessUser,
     params: web::Path<FilePath>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
+    require_issue_owner(&state.db.pool, &bundle.issue_code, &user.0.id).await?;
     ensure_bundle_ready(&bundle)?;
     let parsed_id = file_id
         .parse::<i64>()

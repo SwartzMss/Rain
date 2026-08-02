@@ -157,26 +157,31 @@ pub async fn get_issue_bundles(
     Ok(HttpResponse::Ok().json(response))
 }
 
-pub async fn require_issue_exists(pool: &sqlx::SqlitePool, code: &str) -> Result<String, AppError> {
+pub async fn require_issue_owner(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+    user_id: &str,
+) -> Result<String, AppError> {
     let code = normalize_issue_code(code)?;
-    let exists: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS(
-            SELECT 1
-            FROM issues
-            WHERE code = ? AND status = 'ACTIVE'
-        )
-        "#,
+    let owner: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT owner_user_id FROM issues WHERE code = ? AND status = 'ACTIVE' LIMIT 1",
     )
     .bind(&code)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .map_err(AppError::Database)?;
-
-    if !exists {
+    let Some(owner) = owner else {
         return Err(AppError::NotFound(format!("issue {code}")));
+    };
+    if let Some(owner) = owner
+        && owner != user_id
+    {
+        return Err(AppError::api(
+            actix_web::http::StatusCode::FORBIDDEN,
+            "ISSUE_WRITE_FORBIDDEN",
+            "无权修改此 Issue",
+        ));
     }
-
     Ok(code)
 }
 
@@ -209,12 +214,12 @@ struct BundleIdRow {
 
 #[delete("/issues/{issue_id}/bundles/{bundle_hash}")]
 pub async fn delete_issue_bundle(
-    _user: RequireBusinessUser,
+    user: RequireBusinessUser,
     path: web::Path<(String, String)>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let (issue_code, bundle_hash) = path.into_inner();
-    let issue_code = normalize_issue_code(&issue_code)?;
+    let issue_code = require_issue_owner(&state.db.pool, &issue_code, &user.0.id).await?;
     let bundle: BundleIdRow = sqlx::query_as(
         r#"
         SELECT id, issue_code, status
@@ -250,11 +255,11 @@ pub async fn delete_issue_bundle(
 
 #[delete("/issues/{issue_id}")]
 pub async fn delete_issue(
-    _user: RequireBusinessUser,
+    user: RequireBusinessUser,
     path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let issue_code = normalize_issue_code(&path.into_inner())?;
+    let issue_code = require_issue_owner(&state.db.pool, &path.into_inner(), &user.0.id).await?;
     let claimed =
         sqlx::query("UPDATE issues SET status = 'DELETING' WHERE code = ? AND status = 'ACTIVE'")
             .bind(&issue_code)
