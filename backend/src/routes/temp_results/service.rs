@@ -277,7 +277,6 @@ pub(crate) async fn create_preview_result(
                 "临时结果生成任务过多，请稍后重试",
             )
         })?;
-    cleanup_expired(&state).await?;
     ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
@@ -326,7 +325,6 @@ pub(crate) async fn create_full_result(
                 "临时结果生成任务过多，请稍后重试",
             )
         })?;
-    cleanup_expired(&state).await?;
     ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
@@ -349,7 +347,6 @@ pub(crate) async fn get_result(
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    cleanup_expired(&state).await?;
     let result = load_and_renew(&state, &id).await?;
     Ok(HttpResponse::Ok().json(to_response(result)))
 }
@@ -359,7 +356,6 @@ pub(crate) async fn get_result_lines(
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    cleanup_expired(&state).await?;
     let result = load_and_renew(&state, &id).await?;
     let start = query.start.unwrap_or(0).max(0);
     let limit = query
@@ -411,7 +407,6 @@ pub(crate) async fn open_result_download(
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<NamedFile, AppError> {
-    cleanup_expired(&state).await?;
     let result = load_and_renew(&state, &id).await?;
     let file = NamedFile::open_async(checked_temp_path(&state, &result.storage_path)?)
         .await
