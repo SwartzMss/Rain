@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'vite';
-import { isAdmin } from '../src/auth/permissions.ts';
-
-assert.equal(isAdmin(null), false);
-assert.equal(isAdmin({ id: 'u', username: 'user', role: 'USER' }), false);
-assert.equal(isAdmin({ id: 'a', username: 'admin', role: 'ADMIN' }), true);
 
 const server = await createServer({ appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
 try {
+  const { isAdmin } = await server.ssrLoadModule('/src/auth/permissions.ts');
+  assert.equal(isAdmin(null), false);
+  assert.equal(isAdmin({ id: 'u', username: 'user', role: 'USER' }), false);
+  assert.equal(isAdmin({ id: 'a', username: 'admin', role: 'ADMIN' }), true);
   const { advanceCursor, currentCursor, retreatCursor, runAdminAction } =
     await server.ssrLoadModule('/src/features/admin/adminFlow.ts');
 
