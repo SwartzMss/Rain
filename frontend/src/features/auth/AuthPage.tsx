@@ -26,9 +26,16 @@ export function AuthPage({ mode }: AuthPageProps) {
   const [registrationState, setRegistrationState] = useState<'LOADING' | 'ALLOWED' | 'DISABLED' | 'ERROR'>('LOADING');
 
   useEffect(() => {
+    let active = true;
+    setRegistrationState('LOADING');
     void rainApi.fetchRegistrationStatus().then((status) => {
-      setRegistrationState(status.allow_registration ? 'ALLOWED' : 'DISABLED');
-    }).catch(() => setRegistrationState('ERROR'));
+      if (active) {
+        setRegistrationState(status.allow_registration ? 'ALLOWED' : 'DISABLED');
+      }
+    }).catch(() => {
+      if (active) setRegistrationState('ERROR');
+    });
+    return () => { active = false; };
   }, [isLogin]);
 
   if (auth.state.status === 'AUTHENTICATED') {

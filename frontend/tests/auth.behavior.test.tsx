@@ -67,4 +67,20 @@ describe('authentication behavior', () => {
     resolveStatus({ allow_registration: true });
     expect(await screen.findByRole('link', { name: '注册' })).toBeInTheDocument();
   });
+
+  it('ignores a stale registration status response after switching routes', async () => {
+    vi.mocked(rainApi.me).mockResolvedValue({ authenticated: false, user: null });
+    let resolveLogin!: (value: { allow_registration: boolean }) => void;
+    let resolveRegister!: (value: { allow_registration: boolean }) => void;
+    vi.mocked(rainApi.fetchRegistrationStatus)
+      .mockReturnValueOnce(new Promise((resolve) => { resolveLogin = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveRegister = resolve; }));
+    const { rerender } = render(<MemoryRouter><AuthProvider><AuthPage mode="login" /></AuthProvider></MemoryRouter>);
+    rerender(<MemoryRouter><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter>);
+    resolveRegister({ allow_registration: false });
+    expect(await screen.findByText('注册已关闭')).toBeInTheDocument();
+    resolveLogin({ allow_registration: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText('注册已关闭')).toBeInTheDocument();
+  });
 });
