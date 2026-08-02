@@ -366,6 +366,13 @@ async fn admin_can_view_and_clear_auth_rate_limits_with_audit() {
                 backend::AuthRateLimitBucket::new(std::time::Duration::from_secs(300))
             });
         bucket.push(Instant::now());
+        let bucket = limits
+            .login_ip
+            .entry("login:ip:127.0.0.1".into())
+            .or_insert_with(|| {
+                backend::AuthRateLimitBucket::new(std::time::Duration::from_secs(60))
+            });
+        bucket.push(Instant::now());
     }
     let pool = state.db.pool.clone();
     let app = test::init_service(
@@ -402,6 +409,33 @@ async fn admin_can_view_and_clear_auth_rate_limits_with_audit() {
     .await
     .expect("audit");
     assert_eq!(remaining, 1);
+    let clear_ips = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/admin/auth-rate-limits/ips")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(clear_ips.status(), StatusCode::NO_CONTENT);
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_audit_logs WHERE action='AUTH_RATE_LIMIT_IPS_CLEARED'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("bulk audit");
+    assert_eq!(audit_count, 1);
+    let body = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/auth-rate-limits")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(body.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(body).await;
+    assert!(body["login_ips"].as_array().unwrap().is_empty());
     let guest = test::call_service(
         &app,
         test::TestRequest::get()
