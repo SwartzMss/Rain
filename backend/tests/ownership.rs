@@ -54,6 +54,10 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status, process_stage) VALUES ('bundle-private', 'PRIVATE', 'hash-private', 'private.log', 'READY', 'READY')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir, size_bytes, line_count, status) VALUES ('bundle-private', 'private.log', 'private.log', 0, 4, 1, 'READY')")
+        .execute(&pool).await.unwrap();
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
@@ -77,15 +81,45 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     let upload_body: Value =
         serde_json::from_slice(&to_bytes(upload.into_body()).await.unwrap()).unwrap();
     assert_eq!(upload_body["code"], "ISSUE_WRITE_FORBIDDEN");
+    let read_file = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/files/v1/hash-private/files/1")
+            .cookie(foreign_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(read_file.status(), actix_web::http::StatusCode::OK);
 
     let delete = test::call_service(
         &app,
         test::TestRequest::delete()
             .uri("/api/issues/PRIVATE")
-            .cookie(foreign_cookie)
+            .cookie(foreign_cookie.clone())
             .to_request(),
     )
     .await;
     assert_eq!(delete.status(), actix_web::http::StatusCode::FORBIDDEN);
+    let delete_bundle = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/issues/PRIVATE/bundles/hash-private")
+            .cookie(foreign_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        delete_bundle.status(),
+        actix_web::http::StatusCode::FORBIDDEN
+    );
+    let delete_file = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/files/v1/hash-private/files/1")
+            .cookie(foreign_cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete_file.status(), actix_web::http::StatusCode::FORBIDDEN);
     let _ = owner_cookie;
 }
