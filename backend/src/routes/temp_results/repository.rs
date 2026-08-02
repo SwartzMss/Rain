@@ -1,4 +1,3 @@
-use super::storage::remove_preview_artifacts;
 use super::*;
 
 pub(crate) async fn delete_temp_result_record(
@@ -79,32 +78,30 @@ pub(crate) async fn publish_temp_result(
     Ok(())
 }
 
-pub(crate) async fn abort_staging_result(
+pub(crate) async fn claim_staging_for_delete(
     state: &web::Data<AppState>,
     id: &str,
-    output_path: &Path,
-) {
-    if let Err(error) = sqlx::query(
+) -> Result<bool, AppError> {
+    let updated = sqlx::query(
         "UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'STAGING'",
     )
     .bind(id)
     .execute(&state.pool)
     .await
-    {
-        tracing::warn!(result_id = %id, %error, "failed to claim staging temporary result for cleanup");
-        return;
-    }
-    if let Err(error) = remove_preview_artifacts(output_path).await {
-        tracing::warn!(result_id = %id, %error, "staging temporary result files could not be removed; keeping DELETING record");
-        return;
-    }
-    if let Err(error) = sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = 'DELETING'")
+    .map_err(AppError::Database)?;
+    Ok(updated.rows_affected() == 1)
+}
+
+pub(crate) async fn delete_deleting_record(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = 'DELETING'")
         .bind(id)
         .execute(&state.pool)
         .await
-    {
-        tracing::warn!(result_id = %id, %error, "staging temporary result record could not be removed; keeping DELETING record");
-    }
+        .map_err(AppError::Database)?;
+    Ok(())
 }
 
 pub(crate) async fn ensure_temp_result_budget(state: &web::Data<AppState>) -> Result<(), AppError> {

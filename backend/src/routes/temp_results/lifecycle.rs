@@ -2,6 +2,29 @@ use super::storage::{
     checked_temp_path, cleanup_orphan_temp_files, is_staging_lease_active, remove_result_files,
 };
 use super::*;
+use super::{repository, storage};
+
+pub(crate) async fn abort_staging_result(
+    state: &web::Data<AppState>,
+    id: &str,
+    output_path: &Path,
+) {
+    match repository::claim_staging_for_delete(state, id).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(result_id = %id, %error, "failed to claim staging temporary result for cleanup");
+            return;
+        }
+    }
+    if let Err(error) = storage::remove_preview_artifacts(output_path).await {
+        tracing::warn!(result_id = %id, %error, "staging temporary result files could not be removed; keeping DELETING record");
+        return;
+    }
+    if let Err(error) = repository::delete_deleting_record(state, id).await {
+        tracing::warn!(result_id = %id, %error, "staging temporary result record could not be removed; keeping DELETING record");
+    }
+}
 
 pub(crate) async fn load_record(
     state: &web::Data<AppState>,
