@@ -94,7 +94,7 @@ export function IssueSelector({
             >
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-semibold">{issue.code}</span>
-                <span className="block text-sm font-normal text-slate-500">{issue.owner_username ?? '未知用户'}</span>
+                <span className="block text-[10px] font-normal text-slate-500">双击查看日志</span>
               </span>
             </button>
           );

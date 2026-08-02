@@ -30,15 +30,13 @@ describe('write permission behavior', () => {
     expect(screen.getByRole('button', { name: /新建 Issue/ })).toBeInTheDocument();
   });
 
-  it('shows the owner username and a stable fallback in the Issue list', () => {
+  it('keeps the double-click hint in the Issue list', () => {
     const props = { ...issueProps(false), filteredIssues: [
       { code: 'OWNED', name: 'Owned', bundle_count: 0, can_write: false, owner_username: 'owner' },
       { code: 'UNKNOWN', name: 'Unknown', bundle_count: 0, can_write: false, owner_username: null }
     ] };
     render(<IssueSelector {...props} />);
-    expect(screen.getByText('owner')).toBeInTheDocument();
-    expect(screen.getByText('未知用户')).toBeInTheDocument();
-    expect(screen.queryByText('双击查看日志')).not.toBeInTheDocument();
+    expect(screen.getAllByText('双击查看日志')).toHaveLength(2);
   });
 
   it('keeps double-click navigation for an Issue', () => {
