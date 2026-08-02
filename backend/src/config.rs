@@ -214,12 +214,12 @@ impl AuthConfig {
                 "RAIN_AUTH_ARGON2_CONCURRENCY must be positive".into(),
             ));
         }
-        if self.login_ip_limit_per_minute == 0 {
+        if !(1..=1000).contains(&self.login_ip_limit_per_minute) {
             return Err(AppError::Config(
                 "RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE must be positive".into(),
             ));
         }
-        if self.login_username_failure_limit_per_5_minutes == 0 {
+        if !(1..=100).contains(&self.login_username_failure_limit_per_5_minutes) {
             return Err(AppError::Config(
                 "RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES must be positive".into(),
             ));

@@ -69,7 +69,15 @@ pub async fn auth_rate_limits(
         !bucket.events.is_empty()
     });
     for (key, bucket) in &mut limits.login_username_failure {
-        let oldest = bucket.events.front().copied().unwrap_or(now);
+        let limit = state
+            .auth_runtime
+            .login_username_failure_limit_per_5_minutes
+            .load(std::sync::atomic::Ordering::Acquire);
+        let retry_from = if bucket.events.len() >= limit {
+            bucket.events.get(bucket.events.len() - limit).copied()
+        } else {
+            None
+        };
         usernames.push(AuthRateLimitEntry {
             key: key.clone(),
             username: Some(
@@ -85,7 +93,9 @@ pub async fn auth_rate_limits(
                 .load(std::sync::atomic::Ordering::Acquire),
             window_seconds: 300,
             last_event_at: bucket.event_times.back().map(ToString::to_string),
-            retry_after_seconds: 300u64.saturating_sub(now.duration_since(oldest).as_secs()),
+            retry_after_seconds: retry_from
+                .map(|event| 300u64.saturating_sub(now.duration_since(event).as_secs()))
+                .unwrap_or(0),
             limited: bucket.events.len()
                 >= state
                     .auth_runtime
@@ -99,7 +109,15 @@ pub async fn auth_rate_limits(
         !bucket.events.is_empty()
     });
     for (key, bucket) in &mut limits.login_ip {
-        let oldest = bucket.events.front().copied().unwrap_or(now);
+        let limit = state
+            .auth_runtime
+            .login_ip_limit_per_minute
+            .load(std::sync::atomic::Ordering::Acquire);
+        let retry_from = if bucket.events.len() >= limit {
+            bucket.events.get(bucket.events.len() - limit).copied()
+        } else {
+            None
+        };
         ips.push(AuthRateLimitEntry {
             key: key.clone(),
             username: None,
@@ -111,7 +129,9 @@ pub async fn auth_rate_limits(
                 .load(std::sync::atomic::Ordering::Acquire),
             window_seconds: 60,
             last_event_at: bucket.event_times.back().map(ToString::to_string),
-            retry_after_seconds: 60u64.saturating_sub(now.duration_since(oldest).as_secs()),
+            retry_after_seconds: retry_from
+                .map(|event| 60u64.saturating_sub(now.duration_since(event).as_secs()))
+                .unwrap_or(0),
             limited: bucket.events.len()
                 >= state
                     .auth_runtime
