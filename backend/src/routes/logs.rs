@@ -8,7 +8,7 @@ use crate::{
     models::logs::{LogSearchHit, LogSearchResponse},
 };
 
-use super::issues::{normalize_issue_code, touch_issue_activity};
+use super::issues::{normalize_issue_code, touch_issue_activity_best_effort};
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
 
@@ -246,7 +246,7 @@ pub async fn search_logs(
         })
         .collect();
 
-    touch_issue_activity(&state.db.pool, &bundle.issue_code).await?;
+    touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "bundle log search").await;
 
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,
@@ -296,7 +296,8 @@ pub async fn search_issue_logs(
             term.size,
         )
         .await?;
-        touch_issue_activity(&state.db.pool, &issue_code).await?;
+        touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue filename search")
+            .await;
         return Ok(response);
     }
 
@@ -476,7 +477,7 @@ pub async fn search_issue_logs(
         })
         .collect();
 
-    touch_issue_activity(&state.db.pool, &issue_code).await?;
+    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue log search").await;
 
     Ok(HttpResponse::Ok().json(LogSearchResponse {
         total: total.max(0) as u64,

@@ -370,7 +370,10 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             status TEXT NOT NULL DEFAULT 'ACTIVE',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_activity_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            deletion_reason TEXT CHECK (deletion_reason IS NULL OR deletion_reason IN ('MANUAL', 'INACTIVE'))
+            deletion_reason TEXT CHECK (deletion_reason IS NULL OR deletion_reason IN ('MANUAL', 'INACTIVE')),
+            inactive_claim_days INTEGER CHECK (inactive_claim_days BETWEEN 1 AND 30),
+            deletion_lease_token TEXT,
+            deletion_lease_until TEXT
         )
         "#,
         r#"

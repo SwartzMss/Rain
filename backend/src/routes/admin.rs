@@ -320,54 +320,69 @@ pub async fn update_settings(
             "IP 限流阈值必须为 1 到 1000，用户名限流阈值必须为 1 到 100",
         ));
     }
-    let issue_inactive_days = body.issue_inactive_days.unwrap_or(old.3 as usize);
-    if issue_inactive_days > 30 {
-        return Err(AppError::api(
-            StatusCode::BAD_REQUEST,
-            "INVALID_ISSUE_INACTIVE_DAYS",
-            "Issue 非活跃天数必须为 0 到 30",
-        ));
-    }
+    let issue_inactive_days = match body.issue_inactive_days.as_ref() {
+        None => old.3 as usize,
+        Some(value) => value
+            .as_i64()
+            .filter(|days| (0..=30).contains(days))
+            .map(|days| days as usize)
+            .ok_or_else(|| {
+                AppError::api(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ISSUE_INACTIVE_DAYS",
+                    "Issue 非活跃天数必须为 0 到 30 的整数",
+                )
+            })?,
+    };
     let mut settings_tx = state.db.pool.begin().await.map_err(AppError::Database)?;
     let allow_registration = body.allow_registration.unwrap_or(old.0 != 0);
     sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, issue_inactive_days=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
         .bind(allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(issue_inactive_days as i64).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
-    let mut changes = Vec::new();
+    let mut auth_changes = Vec::new();
     if old.0 != allow_registration as i64 {
-        changes.push(format!(
+        auth_changes.push(format!(
             "registration:{}->{}",
             old.0 != 0,
             allow_registration
         ));
     }
     if old.1 != ip_limit as i64 {
-        changes.push(format!("ip_limit:{}->{ip_limit}", old.1));
+        auth_changes.push(format!("ip_limit:{}->{ip_limit}", old.1));
     }
     if old.2 != username_limit as i64 {
-        changes.push(format!("username_limit:{}->{username_limit}", old.2));
+        auth_changes.push(format!("username_limit:{}->{username_limit}", old.2));
     }
-    if old.3 != issue_inactive_days as i64 {
-        changes.push(format!(
-            "issue_inactive_days:{}->{issue_inactive_days}",
-            old.3
-        ));
+    let issue_changed = old.3 != issue_inactive_days as i64;
+    let client_ip = req.peer_addr().map(|address| address.ip().to_string());
+    let user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if !auth_changes.is_empty() {
+        sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?,'AUTH_SETTINGS_UPDATED',?,?,?,?)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&admin.0.id)
+            .bind(format!("registration={};ip_limit={};username_limit={}", old.0 != 0, old.1, old.2))
+            .bind(auth_changes.join(";"))
+            .bind(client_ip.as_deref())
+            .bind(user_agent.as_deref())
+            .execute(&mut *settings_tx)
+            .await
+            .map_err(AppError::Database)?;
     }
-    let action = if body.issue_inactive_days.is_some()
-        && body.allow_registration.is_none()
-        && body.login_ip_limit_per_minute.is_none()
-        && body.login_username_failure_limit_per_5_minutes.is_none()
-    {
-        "ISSUE_INACTIVE_SETTINGS_UPDATED"
-    } else {
-        "AUTH_SETTINGS_UPDATED"
-    };
-    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?, ?, ?, ?, ?, ?)")
-        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(action)
-        .bind(format!("registration={};ip_limit={};username_limit={};issue_inactive_days={}", old.0 != 0, old.1, old.2, old.3))
-        .bind(changes.join(";"))
-        .bind(req.peer_addr().map(|a| a.ip().to_string()))
-        .bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok()))
-        .execute(&mut *settings_tx).await.map_err(AppError::Database)?;
+    if issue_changed {
+        sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?,'ISSUE_INACTIVE_SETTINGS_UPDATED',?,?,?,?)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&admin.0.id)
+            .bind(format!("issue_inactive_days={}", old.3))
+            .bind(format!("issue_inactive_days={issue_inactive_days}"))
+            .bind(client_ip.as_deref())
+            .bind(user_agent.as_deref())
+            .execute(&mut *settings_tx)
+            .await
+            .map_err(AppError::Database)?;
+    }
     settings_tx.commit().await.map_err(AppError::Database)?;
     state
         .auth_runtime
