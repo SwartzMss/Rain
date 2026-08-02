@@ -252,6 +252,25 @@ async fn registration_settings_are_persistent_and_admin_only() {
     )
     .await
     .expect("session");
+    let user_hash = backend::auth::password::hash_password("password123").expect("hash");
+    let user = match backend::repositories::users::create_user(&pool, "ordinary", &user_hash)
+        .await
+        .expect("user")
+    {
+        backend::repositories::users::CreateUserOutcome::Created(user) => user,
+        _ => panic!("ordinary user creation"),
+    };
+    let user_token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &user.id,
+        &hash_session_token(&user_token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .expect("user session");
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
@@ -304,6 +323,15 @@ async fn registration_settings_are_persistent_and_admin_only() {
     )
     .await;
     assert_eq!(guest.status(), StatusCode::UNAUTHORIZED);
+    let ordinary = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/settings")
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, user_token))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(ordinary.status(), StatusCode::FORBIDDEN);
 }
 
 #[actix_web::test]
