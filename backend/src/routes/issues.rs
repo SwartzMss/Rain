@@ -4,7 +4,7 @@ use sqlx::FromRow;
 
 use crate::{
     AppState,
-    auth::extractor::RequireBusinessUser,
+    auth::extractor::{OptionalUser, RequireBusinessUser},
     db::finish_bundle_deletion,
     error::AppError,
     models::issues::{
@@ -35,18 +35,23 @@ pub fn normalize_issue_code(value: &str) -> Result<String, AppError> {
 
 // scoped under /api in routes::register, so keep relative paths here
 #[get("/issues")]
-pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
+pub async fn list_issues(
+    user: OptionalUser,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
     let rows = sqlx::query_as::<_, IssueSummary>(
         r#"
         SELECT
             code,
             name,
-            (SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code AND b.deleted_at IS NULL) AS bundle_count
+            (SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code AND b.deleted_at IS NULL) AS bundle_count,
+            CASE WHEN owner_user_id = ? THEN 1 ELSE 0 END AS can_write
         FROM issues
         WHERE status = 'ACTIVE'
         ORDER BY code DESC
         "#,
     )
+    .bind(user.0.as_ref().map(|user| user.id.as_str()).unwrap_or(""))
     .fetch_all(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
@@ -103,17 +108,19 @@ pub async fn create_issue(
         code,
         name,
         bundle_count: 0,
+        can_write: true,
     }))
 }
 
 #[get("/issues/{issue_id}")]
 pub async fn get_issue_bundles(
+    user: OptionalUser,
     path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     let issue = sqlx::query_as::<_, IssueRow>(
-        "SELECT code, name FROM issues WHERE code = ? AND status = 'ACTIVE' LIMIT 1",
+        "SELECT code, name, owner_user_id FROM issues WHERE code = ? AND status = 'ACTIVE' LIMIT 1",
     )
     .bind(&issue_code)
     .fetch_optional(&state.db.pool)
@@ -131,6 +138,10 @@ pub async fn get_issue_bundles(
 
     let response = IssueBundlesResponse {
         name: issue.name,
+        can_write: user
+            .0
+            .as_ref()
+            .is_some_and(|user| issue.owner_user_id.as_deref() == Some(user.id.as_str())),
         log_bundles: rows
             .into_iter()
             .map(|bundle| {
@@ -163,7 +174,7 @@ pub async fn require_issue_owner(
     user_id: &str,
 ) -> Result<String, AppError> {
     let code = normalize_issue_code(code)?;
-    let owner: Option<Option<String>> = sqlx::query_scalar(
+    let owner = sqlx::query_as::<_, OwnerRow>(
         "SELECT owner_user_id FROM issues WHERE code = ? AND status = 'ACTIVE' LIMIT 1",
     )
     .bind(&code)
@@ -173,9 +184,7 @@ pub async fn require_issue_owner(
     let Some(owner) = owner else {
         return Err(AppError::NotFound(format!("issue {code}")));
     };
-    if let Some(owner) = owner
-        && owner != user_id
-    {
+    if owner.owner_user_id.as_deref() != Some(user_id) {
         return Err(AppError::api(
             actix_web::http::StatusCode::FORBIDDEN,
             "ISSUE_WRITE_FORBIDDEN",
@@ -185,10 +194,49 @@ pub async fn require_issue_owner(
     Ok(code)
 }
 
+pub async fn require_issue_owner_for_delete(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+    user_id: &str,
+) -> Result<String, AppError> {
+    let code = normalize_issue_code(code)?;
+    let row = sqlx::query_as::<_, DeleteOwnerRow>(
+        "SELECT owner_user_id, status FROM issues WHERE code = ? LIMIT 1",
+    )
+    .bind(&code)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::NotFound(format!("issue {code}")))?;
+    if !matches!(row.status.as_str(), "ACTIVE" | "DELETING") {
+        return Err(AppError::NotFound(format!("issue {code}")));
+    }
+    if row.owner_user_id.as_deref() != Some(user_id) {
+        return Err(AppError::api(
+            actix_web::http::StatusCode::FORBIDDEN,
+            "ISSUE_WRITE_FORBIDDEN",
+            "无权修改此 Issue",
+        ));
+    }
+    Ok(code)
+}
+
+#[derive(FromRow)]
+struct OwnerRow {
+    owner_user_id: Option<String>,
+}
+
+#[derive(FromRow)]
+struct DeleteOwnerRow {
+    owner_user_id: Option<String>,
+    status: String,
+}
+
 #[derive(FromRow, Deserialize)]
 struct IssueRow {
     code: String,
     name: String,
+    owner_user_id: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -259,7 +307,8 @@ pub async fn delete_issue(
     path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let issue_code = require_issue_owner(&state.db.pool, &path.into_inner(), &user.0.id).await?;
+    let issue_code =
+        require_issue_owner_for_delete(&state.db.pool, &path.into_inner(), &user.0.id).await?;
     let claimed =
         sqlx::query("UPDATE issues SET status = 'DELETING' WHERE code = ? AND status = 'ACTIVE'")
             .bind(&issue_code)

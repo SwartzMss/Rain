@@ -8,6 +8,7 @@ type IssueSelectorProps = {
   issuesError: string | null;
   issuesLoading: boolean;
   canWrite: boolean;
+  canCreateIssue: boolean;
   onCreateClick: () => void;
   onIssueSearchTextChange: (value: string) => void;
   onRefreshIssues: () => void;
@@ -23,6 +24,7 @@ export function IssueSelector({
   issuesError,
   issuesLoading,
   canWrite,
+  canCreateIssue,
   onCreateClick,
   onIssueSearchTextChange,
   onRefreshIssues,
@@ -33,7 +35,7 @@ export function IssueSelector({
     <aside className="flex min-h-[680px] flex-col rounded-2xl border border-slate-200/90 bg-white/95 p-4 shadow-[0_18px_48px_rgba(7,21,34,0.08)] backdrop-blur">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-slate-950">Issues</h2>
-        {canWrite ? (
+        {canCreateIssue ? (
           <button
             type="button"
             className="rounded-lg bg-slate-950 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
