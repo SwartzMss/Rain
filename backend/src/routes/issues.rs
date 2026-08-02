@@ -47,7 +47,7 @@ pub async fn list_issues(state: web::Data<AppState>) -> Result<HttpResponse, App
         ORDER BY code DESC
         "#,
     )
-    .fetch_all(&state.pool)
+    .fetch_all(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -91,7 +91,7 @@ pub async fn create_issue(
     .bind(&code)
     .bind(&name)
     .bind(&user.0.id)
-    .execute(&state.pool)
+    .execute(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -116,7 +116,7 @@ pub async fn get_issue_bundles(
         "SELECT code, name FROM issues WHERE code = ? AND status = 'ACTIVE' LIMIT 1",
     )
     .bind(&issue_code)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&state.db.pool)
     .await
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("issue {issue_code}")))?;
@@ -125,7 +125,7 @@ pub async fn get_issue_bundles(
         "SELECT hash, name, status, process_stage, failure_stage, failure_code, failure_reason, retryable, size_bytes FROM bundles WHERE issue_code = ? AND deleted_at IS NULL ORDER BY created_at DESC",
     )
     .bind(&issue.code)
-    .fetch_all(&state.pool)
+    .fetch_all(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -225,7 +225,7 @@ pub async fn delete_issue_bundle(
     )
     .bind(&issue_code)
     .bind(&bundle_hash)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&state.db.pool)
     .await
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("bundle {bundle_hash}")))?;
@@ -234,10 +234,10 @@ pub async fn delete_issue_bundle(
         "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
     )
     .bind(&bundle.id)
-    .execute(&state.pool)
+    .execute(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
-    let pool = state.pool.clone();
+    let pool = state.db.pool.clone();
     let bundle_id = bundle.id.clone();
     tokio::spawn(async move {
         if let Err(error) = crate::db::finish_bundle_deletion(&pool, &bundle_id).await {
@@ -258,7 +258,7 @@ pub async fn delete_issue(
     let claimed =
         sqlx::query("UPDATE issues SET status = 'DELETING' WHERE code = ? AND status = 'ACTIVE'")
             .bind(&issue_code)
-            .execute(&state.pool)
+            .execute(&state.db.pool)
             .await
             .map_err(AppError::Database)?
             .rows_affected();
@@ -266,7 +266,7 @@ pub async fn delete_issue(
     if claimed == 0 {
         let status: Option<String> = sqlx::query_scalar("SELECT status FROM issues WHERE code = ?")
             .bind(&issue_code)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&state.db.pool)
             .await
             .map_err(AppError::Database)?;
         match status.as_deref() {
@@ -287,14 +287,14 @@ pub async fn delete_issue(
         "#,
     )
     .bind(&issue_code)
-    .fetch_all(&state.pool)
+    .fetch_all(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
 
     if bundles.is_empty() {
         sqlx::query("DELETE FROM issues WHERE code = ?")
             .bind(&issue_code)
-            .execute(&state.pool)
+            .execute(&state.db.pool)
             .await
             .map_err(AppError::Database)?;
         return Ok(HttpResponse::NoContent().finish());
@@ -306,7 +306,7 @@ pub async fn delete_issue(
                 "UPDATE issues SET status = 'ACTIVE' WHERE code = ? AND status = 'DELETING'",
             )
             .bind(&issue_code)
-            .execute(&state.pool)
+            .execute(&state.db.pool)
             .await
             .map_err(AppError::Database)?;
         }
@@ -322,16 +322,16 @@ pub async fn delete_issue(
                 "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
             )
             .bind(&bundle.id)
-            .execute(&state.pool)
+            .execute(&state.db.pool)
             .await
             .map_err(AppError::Database)?;
         }
-        finish_bundle_deletion(&state.pool, &bundle.id).await?;
+        finish_bundle_deletion(&state.db.pool, &bundle.id).await?;
     }
 
     sqlx::query("DELETE FROM issues WHERE code = ?")
         .bind(&issue_code)
-        .execute(&state.pool)
+        .execute(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
 

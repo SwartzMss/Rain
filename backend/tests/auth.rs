@@ -176,7 +176,8 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
     }
 
     let username_failures_before_success = state
-        .auth_rate_limits
+        .auth_runtime
+        .rate_limits
         .lock()
         .expect("rate limits")
         .login_username_failure
@@ -203,7 +204,8 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
     assert!(!set_cookie.contains("Secure"));
     assert_eq!(
         state
-            .auth_rate_limits
+            .auth_runtime
+            .rate_limits
             .lock()
             .expect("rate limits")
             .login_username_failure
@@ -678,7 +680,8 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     assert_eq!(wrong_body["code"], "CURRENT_PASSWORD_INVALID");
     assert_eq!(
         state
-            .auth_rate_limits
+            .auth_runtime
+            .rate_limits
             .lock()
             .expect("rate limits")
             .change_password_user_attempt
@@ -699,7 +702,8 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     assert_eq!(changed.status(), StatusCode::NO_CONTENT);
     assert_eq!(
         state
-            .auth_rate_limits
+            .auth_runtime
+            .rate_limits
             .lock()
             .expect("rate limits")
             .change_password_user_attempt
@@ -787,7 +791,8 @@ async fn password_change_in_flight_and_attempt_limit_reject_before_password_veri
         .expect("session cookie")
         .into_owned();
     state
-        .auth_rate_limits
+        .auth_runtime
+        .rate_limits
         .lock()
         .expect("rate limits")
         .change_password_in_flight
@@ -806,7 +811,8 @@ async fn password_change_in_flight_and_attempt_limit_reject_before_password_veri
     .await;
     assert_eq!(concurrent.status(), StatusCode::TOO_MANY_REQUESTS);
     state
-        .auth_rate_limits
+        .auth_runtime
+        .rate_limits
         .lock()
         .expect("rate limits")
         .change_password_in_flight
@@ -817,7 +823,8 @@ async fn password_change_in_flight_and_attempt_limit_reject_before_password_veri
         bucket.push(std::time::Instant::now());
     }
     state
-        .auth_rate_limits
+        .auth_runtime
+        .rate_limits
         .lock()
         .expect("rate limits")
         .change_password_user_attempt
@@ -885,9 +892,10 @@ async fn password_change_preserves_argon2_capacity_errors() {
     .into_owned();
 
     let _permit = state
-        .auth_hash_permits
+        .auth_runtime
+        .hash_permits
         .clone()
-        .acquire_many_owned(state.auth.argon2_concurrency as u32)
+        .acquire_many_owned(state.auth_runtime.config.argon2_concurrency as u32)
         .await
         .expect("argon2 permits");
     let invalid_current = test::call_service(
@@ -933,7 +941,7 @@ async fn registration_switch_does_not_block_existing_user_login() {
         .await
         .expect("user");
     let mut state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
-    state.auth.allow_registration = false;
+    state.auth_runtime.config.allow_registration = false;
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(state))
@@ -1002,9 +1010,10 @@ async fn saturated_argon2_capacity_returns_rate_limit_instead_of_bad_credentials
     db::prepare_schema(&pool, true).await.expect("schema");
     let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
     let _permit = state
-        .auth_hash_permits
+        .auth_runtime
+        .hash_permits
         .clone()
-        .acquire_many_owned(state.auth.argon2_concurrency as u32)
+        .acquire_many_owned(state.auth_runtime.config.argon2_concurrency as u32)
         .await
         .expect("argon2 permit");
     let app = test::init_service(

@@ -31,8 +31,8 @@ pub async fn readiness(state: web::Data<AppState>) -> HttpResponse {
     } else {
         let snapshot = ReadinessSnapshot {
             checked_at: Instant::now(),
-            database_ok: check_database(&state.pool).await,
-            storage_ok: check_storage(&state.data_root).await,
+            database_ok: check_database(&state.db.pool).await,
+            storage_ok: check_storage(&state.storage.data_root).await,
         };
         if let Ok(mut cache) = READINESS_CACHE.get_or_init(|| Mutex::new(None)).lock() {
             *cache = Some(snapshot);

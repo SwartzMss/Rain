@@ -118,7 +118,7 @@ pub(crate) fn check_temp_result_rate_limit(
         .peer_addr()
         .map(|address| address.ip().to_string())
         .unwrap_or_else(|| "unknown".into());
-    let mut limits = state.auth_rate_limits.lock().map_err(|_| {
+    let mut limits = state.temp_results.ip_limits.lock().map_err(|_| {
         AppError::api(
             StatusCode::SERVICE_UNAVAILABLE,
             "RATE_LIMIT_UNAVAILABLE",
@@ -126,7 +126,6 @@ pub(crate) fn check_temp_result_rate_limit(
         )
     })?;
     let bucket = limits
-        .temp_result_ip
         .entry(key)
         .or_insert_with(|| AuthRateLimitBucket::new(TEMP_RESULT_RATE_WINDOW));
     let now = std::time::Instant::now();

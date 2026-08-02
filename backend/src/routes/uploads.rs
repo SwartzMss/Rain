@@ -33,7 +33,7 @@ pub async fn upload_logs(
     payload: web::Payload,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
-    require_issue_exists(&state.pool, &issue_code).await?;
+    require_issue_exists(&state.db.pool, &issue_code).await?;
     let request_limit = raw_payload_limit(state.limits.issue_max_content_size.saturating_mul(2));
     if let Some(length) = req.headers().get(CONTENT_LENGTH) {
         let length = length
@@ -49,6 +49,7 @@ pub async fn upload_logs(
         }
     }
     let receive_permit = state
+        .upload
         .receive_permits
         .clone()
         .try_acquire_owned()
@@ -61,11 +62,13 @@ pub async fn upload_logs(
         })?;
 
     let upload_id = Uuid::new_v4().simple().to_string();
-    let temp_dir = state.data_root.join(".tmp").join(&upload_id);
+    let temp_dir = state.storage.data_root.join(".tmp").join(&upload_id);
     fs::create_dir_all(&temp_dir).await.map_err(AppError::Io)?;
 
-    let reservation =
-        ReceiveReservation::new(state.tmp_bytes.clone(), state.limits.upload.max_tmp_bytes);
+    let reservation = ReceiveReservation::new(
+        state.upload.tmp_bytes.clone(),
+        state.limits.upload.max_tmp_bytes,
+    );
     let upload = match collect_multipart_upload(
         limited_multipart(&req, payload, request_limit),
         &temp_dir,
@@ -83,6 +86,7 @@ pub async fn upload_logs(
                     "failed to remove temporary upload directory after receive failure; queueing retry"
                 );
                 state
+                    .upload
                     .temp_cleanup_queue
                     .enqueue(temp_dir.clone(), error.receive_reservation);
             }
@@ -104,7 +108,7 @@ pub async fn upload_logs(
     let bundle_id = Uuid::new_v4().simple().to_string();
 
     if let Err(error) = create_processing_bundle(
-        &state.pool,
+        &state.db.pool,
         &bundle_id,
         &issue_code,
         &bundle_hash,
@@ -121,6 +125,7 @@ pub async fn upload_logs(
                 "failed to remove temporary upload directory; retaining budget reservation"
             );
             state
+                .upload
                 .temp_cleanup_queue
                 .enqueue(temp_dir.clone(), upload.receive_reservation);
         }
@@ -130,12 +135,12 @@ pub async fn upload_logs(
     let file_count = upload.files.len() as u64;
     let staging_root = temp_dir.join("staging");
     spawn_upload_job(UploadJob {
-        pool: state.pool.clone(),
-        data_root: state.data_root.clone(),
-        blob_store: state.blob_store.clone(),
+        pool: state.db.pool.clone(),
+        data_root: state.storage.data_root.clone(),
+        blob_store: state.storage.blob_store.clone(),
         temp_dir,
         staging_root,
-        processing_permits: state.processing_permits.clone(),
+        processing_permits: state.upload.processing_permits.clone(),
         archive_config: crate::config::ArchiveConfig::for_content_limit(
             state.limits.issue_max_content_size,
         ),
@@ -146,7 +151,7 @@ pub async fn upload_logs(
         bundle_hash: bundle_hash.clone(),
         files: upload.files,
         receive_reservation: upload.receive_reservation,
-        temp_cleanup_queue: state.temp_cleanup_queue.clone(),
+        temp_cleanup_queue: state.upload.temp_cleanup_queue.clone(),
     });
 
     drop(receive_permit);
@@ -191,7 +196,7 @@ pub async fn get_upload_task(
         "#,
     )
     .bind(&task_id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&state.db.pool)
     .await
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("upload task {task_id}")))?;

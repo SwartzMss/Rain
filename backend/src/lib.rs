@@ -13,6 +13,7 @@ pub mod upload;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    future::Future,
     path::PathBuf,
     sync::{Arc, Mutex, atomic::AtomicU64},
     time::{Duration, Instant},
@@ -71,24 +72,75 @@ pub struct AuthRateLimits {
     pub register_ip: HashMap<String, AuthRateLimitBucket>,
     pub change_password_user_attempt: HashMap<String, AuthRateLimitBucket>,
     pub change_password_in_flight: HashSet<String>,
-    pub temp_result_ip: HashMap<String, AuthRateLimitBucket>,
 }
 
-pub struct AppState {
+pub struct DatabaseContext {
     pub pool: SqlitePool,
+}
+
+pub struct StorageContext {
     pub data_root: PathBuf,
-    pub limits: AppLimits,
-    pub auth: AuthConfig,
+    pub blob_store: Arc<dyn BlobStore>,
+}
+
+pub struct UploadRuntime {
     pub processing_permits: Arc<Semaphore>,
     pub receive_permits: Arc<Semaphore>,
     pub tmp_bytes: Arc<AtomicU64>,
     pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
-    pub temp_result_permits: Arc<Semaphore>,
-    pub temp_result_capacity_lock: Arc<AsyncMutex<()>>,
-    pub temp_result_staging: Arc<Mutex<HashSet<String>>>,
-    pub auth_hash_permits: Arc<Semaphore>,
-    pub auth_rate_limits: Arc<Mutex<AuthRateLimits>>,
-    pub blob_store: Arc<dyn BlobStore>,
+}
+
+pub struct TempResultRuntime {
+    pub permits: Arc<Semaphore>,
+    pub capacity_lock: Arc<AsyncMutex<()>>,
+    pub staging: Arc<Mutex<HashSet<String>>>,
+    pub ip_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
+}
+
+pub struct AuthRuntime {
+    pub config: AuthConfig,
+    pub hash_permits: Arc<Semaphore>,
+    pub rate_limits: Arc<Mutex<AuthRateLimits>>,
+}
+
+pub struct AppState {
+    pub db: DatabaseContext,
+    pub storage: StorageContext,
+    pub upload: UploadRuntime,
+    pub temp_results: TempResultRuntime,
+    pub auth_runtime: AuthRuntime,
+    pub limits: AppLimits,
+}
+
+/// Start a resilient Tokio periodic job. A failed iteration is logged and does
+/// not terminate the worker, so unrelated maintenance jobs keep running.
+pub fn spawn_periodic_job<F, Fut>(
+    name: &'static str,
+    initial_delay: Duration,
+    interval_duration: Duration,
+    mut job: F,
+) where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::time::sleep(initial_delay).await;
+        let mut interval = tokio::time::interval(interval_duration);
+        loop {
+            interval.tick().await;
+            let started = Instant::now();
+            match job().await {
+                Ok(()) => tracing::debug!(
+                    job = name,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "periodic job completed"
+                ),
+                Err(error) => {
+                    tracing::warn!(job = name, elapsed_ms = started.elapsed().as_millis(), %error, "periodic job failed; will retry")
+                }
+            }
+        }
+    });
 }
 
 impl AppState {
@@ -121,20 +173,29 @@ impl AppState {
         ));
         let auth_hash_permits = Arc::new(Semaphore::new(auth.argon2_concurrency));
         Self {
-            pool,
-            data_root,
+            db: DatabaseContext { pool },
+            storage: StorageContext {
+                data_root,
+                blob_store,
+            },
+            upload: UploadRuntime {
+                processing_permits,
+                receive_permits,
+                tmp_bytes: Arc::new(AtomicU64::new(0)),
+                temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
+            },
+            temp_results: TempResultRuntime {
+                permits: temp_result_permits,
+                capacity_lock: Arc::new(AsyncMutex::new(())),
+                staging: Arc::new(Mutex::new(HashSet::new())),
+                ip_limits: Arc::new(Mutex::new(HashMap::new())),
+            },
+            auth_runtime: AuthRuntime {
+                config: auth,
+                hash_permits: auth_hash_permits,
+                rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
+            },
             limits,
-            auth,
-            processing_permits,
-            receive_permits,
-            tmp_bytes: Arc::new(AtomicU64::new(0)),
-            temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
-            temp_result_permits,
-            temp_result_capacity_lock: Arc::new(AsyncMutex::new(())),
-            temp_result_staging: Arc::new(Mutex::new(HashSet::new())),
-            auth_hash_permits,
-            auth_rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
-            blob_store,
         }
     }
 }
@@ -159,7 +220,7 @@ mod tests {
 
         let state = AppState::new(pool, PathBuf::from("data"), limits);
 
-        assert_eq!(state.processing_permits.available_permits(), 7);
+        assert_eq!(state.upload.processing_permits.available_permits(), 7);
     }
 }
 pub mod blob_store;

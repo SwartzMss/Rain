@@ -20,7 +20,7 @@ async fn classify_transition_failure(
 ) -> Result<TransitionResult<()>, AppError> {
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_results WHERE id = ?)")
         .bind(id)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     Ok(if exists {
@@ -44,7 +44,7 @@ pub(crate) async fn list_storage_paths(
     state: &web::Data<AppState>,
 ) -> Result<HashSet<String>, AppError> {
     sqlx::query_scalar("SELECT storage_path FROM temp_results")
-        .fetch_all(&state.pool)
+        .fetch_all(&state.db.pool)
         .await
         .map(|paths| paths.into_iter().collect())
         .map_err(AppError::Database)
@@ -75,7 +75,7 @@ pub(crate) async fn insert_staging_temp_result(
     .bind(output_path.to_string_lossy().to_string())
     .bind(created_at.to_rfc3339())
     .bind(expires_at.to_rfc3339())
-    .execute(&state.pool)
+    .execute(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
     Ok(())
@@ -90,7 +90,7 @@ pub(crate) async fn publish_temp_result(
     line_count: i64,
     size_bytes: i64,
 ) -> Result<TransitionResult<()>, AppError> {
-    let _capacity_guard = state.temp_result_capacity_lock.lock().await;
+    let _capacity_guard = state.temp_results.capacity_lock.lock().await;
     ensure_temp_result_capacity(state, size_bytes, Some(id)).await?;
     let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
     let updated = sqlx::query(
@@ -110,7 +110,7 @@ pub(crate) async fn publish_temp_result(
     .bind(expires_at)
     .bind(id)
     .bind(TempResultStatus::Staging.as_str())
-    .execute(&state.pool)
+    .execute(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
     if updated.rows_affected() != 1 {
@@ -127,7 +127,7 @@ pub(crate) async fn claim_staging_for_delete(
         .bind(TempResultStatus::Deleting.as_str())
         .bind(id)
         .bind(TempResultStatus::Staging.as_str())
-        .execute(&state.pool)
+        .execute(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     if updated.rows_affected() == 1 {
@@ -135,7 +135,7 @@ pub(crate) async fn claim_staging_for_delete(
     }
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_results WHERE id = ?)")
         .bind(id)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     Ok(if exists {
@@ -153,7 +153,7 @@ pub(crate) async fn claim_active_for_delete(
         .bind(TempResultStatus::Deleting.as_str())
         .bind(id)
         .bind(TempResultStatus::Active.as_str())
-        .execute(&state.pool)
+        .execute(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     if updated.rows_affected() == 1 {
@@ -170,7 +170,7 @@ pub(crate) async fn delete_deleting_record(
     let updated = sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = ?")
         .bind(id)
         .bind(TempResultStatus::Deleting.as_str())
-        .execute(&state.pool)
+        .execute(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     if updated.rows_affected() == 1 {
@@ -178,7 +178,7 @@ pub(crate) async fn delete_deleting_record(
     }
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_results WHERE id = ?)")
         .bind(id)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
     Ok(if exists {
@@ -191,7 +191,7 @@ pub(crate) async fn delete_deleting_record(
 pub(crate) async fn ensure_temp_result_budget(state: &web::Data<AppState>) -> Result<(), AppError> {
     let (count, total): (i64, i64) =
         sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results")
-            .fetch_one(&state.pool)
+            .fetch_one(&state.db.pool)
             .await
             .map_err(AppError::Database)?;
     if count >= state.limits.temp_results.max_records
@@ -216,12 +216,12 @@ pub(crate) async fn ensure_temp_result_capacity(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results WHERE id != ?",
         )
         .bind(current_id)
-        .fetch_one(&state.pool)
+        .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?
     } else {
         sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results")
-            .fetch_one(&state.pool)
+            .fetch_one(&state.db.pool)
             .await
             .map_err(AppError::Database)?
     };
@@ -251,7 +251,7 @@ pub(crate) async fn find_by_id(
     sqlx::query_as::<_, TempResultRecord>(
         "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE id = ? LIMIT 1",
     )
-    .bind(id).fetch_optional(&state.pool).await.map_err(AppError::Database)?
+    .bind(id).fetch_optional(&state.db.pool).await.map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("temporary result {id}")))
 }
 
@@ -265,7 +265,7 @@ pub(crate) async fn renew_active(
             .bind(expires_at)
             .bind(id)
             .bind(TempResultStatus::Active.as_str())
-            .execute(&state.pool)
+            .execute(&state.db.pool)
             .await
             .map_err(AppError::Database)?;
     if updated.rows_affected() == 1 {
@@ -279,13 +279,13 @@ pub(crate) async fn list_deleting(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
     sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? ORDER BY created_at, id")
-        .bind(TempResultStatus::Deleting.as_str()).fetch_all(&state.pool).await.map_err(AppError::Database)
+        .bind(TempResultStatus::Deleting.as_str()).fetch_all(&state.db.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn list_expired_active(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
     sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? AND datetime(expires_at) < datetime('now') ORDER BY expires_at, id")
-        .bind(TempResultStatus::Active.as_str()).fetch_all(&state.pool).await.map_err(AppError::Database)
+        .bind(TempResultStatus::Active.as_str()).fetch_all(&state.db.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn claim_expired_active(
     state: &web::Data<AppState>,
@@ -293,7 +293,7 @@ pub(crate) async fn claim_expired_active(
     expires_at: &str,
 ) -> Result<TransitionResult<String>, AppError> {
     let value: Option<String> = sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
-        .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Active.as_str()).bind(expires_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+        .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Active.as_str()).bind(expires_at).fetch_optional(&state.db.pool).await.map_err(AppError::Database)
         ?;
     match value {
         Some(path) => Ok(TransitionResult::Applied(path)),
@@ -308,7 +308,7 @@ pub(crate) async fn list_stale_staging(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
     sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? AND datetime(created_at) < datetime('now', '-600 seconds') ORDER BY created_at, id")
-        .bind(TempResultStatus::Staging.as_str()).fetch_all(&state.pool).await.map_err(AppError::Database)
+        .bind(TempResultStatus::Staging.as_str()).fetch_all(&state.db.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn claim_stale_staging(
     state: &web::Data<AppState>,
@@ -316,7 +316,7 @@ pub(crate) async fn claim_stale_staging(
     created_at: &str,
 ) -> Result<TransitionResult<String>, AppError> {
     let value: Option<String> = sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? RETURNING storage_path")
-        .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Staging.as_str()).bind(created_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+        .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Staging.as_str()).bind(created_at).fetch_optional(&state.db.pool).await.map_err(AppError::Database)
         ?;
     match value {
         Some(path) => Ok(TransitionResult::Applied(path)),

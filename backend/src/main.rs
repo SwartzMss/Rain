@@ -135,7 +135,7 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         blob_store,
     ));
-    backend::upload::job::spawn_temp_cleanup_worker(shared_state.temp_cleanup_queue.clone());
+    backend::upload::job::spawn_temp_cleanup_worker(shared_state.upload.temp_cleanup_queue.clone());
     backend::routes::spawn_temp_result_cleanup(shared_state.clone());
 
     HttpServer::new(move || {
@@ -152,36 +152,37 @@ async fn main() -> std::io::Result<()> {
 }
 
 fn spawn_deleting_bundle_cleanup(pool: sqlx::SqlitePool) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + Duration::from_secs(30),
-            Duration::from_secs(300),
-        );
-        loop {
-            interval.tick().await;
-            match resume_deleting_bundles(&pool).await {
-                Ok(retried) if retried > 0 => {
-                    tracing::info!(retried, "deleting bundle cleanup completed")
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "deleting bundle cleanup failed; will retry"),
+    backend::spawn_periodic_job(
+        "deleting-bundle-cleanup",
+        Duration::from_secs(30),
+        Duration::from_secs(300),
+        move || {
+            let pool = pool.clone();
+            async move {
+                resume_deleting_bundles(&pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             }
-        }
-    });
+        },
+    );
 }
 
 fn spawn_session_cleanup(pool: sqlx::SqlitePool) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
-        loop {
-            interval.tick().await;
-            match backend::repositories::sessions::cleanup_expired_or_revoked(&pool).await {
-                Ok(removed) if removed > 0 => info!(removed, "expired sessions cleaned"),
-                Ok(_) => {}
-                Err(error) => warn!(%error, "expired session cleanup failed"),
+    backend::spawn_periodic_job(
+        "session-cleanup",
+        Duration::ZERO,
+        Duration::from_secs(60 * 60),
+        move || {
+            let pool = pool.clone();
+            async move {
+                backend::repositories::sessions::cleanup_expired_or_revoked(&pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             }
-        }
-    });
+        },
+    );
 }
 
 async fn cleanup_temp_uploads(data_root: &std::path::Path) -> std::io::Result<u64> {

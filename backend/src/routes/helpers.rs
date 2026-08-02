@@ -42,5 +42,5 @@ pub fn ensure_bundle_ready(bundle: &BundleRow) -> Result<(), AppError> {
 }
 
 pub fn data_root(state: &actix_web::web::Data<AppState>) -> std::path::PathBuf {
-    state.data_root.clone()
+    state.storage.data_root.clone()
 }
