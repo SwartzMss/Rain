@@ -1,7 +1,9 @@
+import { createRef } from 'react';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { IssueSelector } from '../src/features/files/components/IssueSelector';
 import { UploadFileTable } from '../src/features/files/components/UploadFileTable';
+import { UploadPanel } from '../src/features/files/components/UploadPanel';
 import { AuthProvider } from '../src/auth/AuthContext';
 import { rainApi } from '../src/api/client';
 
@@ -35,5 +37,17 @@ describe('write permission behavior', () => {
     expect(screen.queryByRole('button', { name: '删除' })).not.toBeInTheDocument();
     rerender(<AuthProvider><UploadFileTable bundlesError={null} currentIssueCode="ISSUE" deletingKey={null} fileRows={[row]} canWrite onDeleteRow={vi.fn()} /></AuthProvider>);
     expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument();
+  });
+
+  it('disables upload selection for guests and enables it for writable users', () => {
+    const props = {
+      activeTask: null, currentIssueCode: 'ISSUE', fileInputRef: createRef<HTMLInputElement>(),
+      onFilesSelected: vi.fn(), uploadDisabled: false, uploadError: null, uploading: false,
+      uploadingRef: createRef<boolean>()
+    };
+    const { rerender } = render(<UploadPanel {...props} canWrite={false} />);
+    expect(screen.getByRole('button', { name: '选择文件' })).toBeDisabled();
+    rerender(<UploadPanel {...props} canWrite />);
+    expect(screen.getByRole('button', { name: '选择文件' })).toBeEnabled();
   });
 });
