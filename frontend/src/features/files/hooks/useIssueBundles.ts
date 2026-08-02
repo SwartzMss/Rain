@@ -20,6 +20,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   }, [currentIssueCode]);
 
   const clearBundles = useCallback(() => {
+    bundleRequestIdRef.current += 1;
     setBundles([]);
     setCanWrite(false);
     setOwnerUsername(null);
@@ -56,7 +57,9 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
           return Object.fromEntries(Object.entries(prev).filter(([hash]) => validHashes.has(hash)));
         });
       } catch (error) {
-        if (requestId !== bundleRequestIdRef.current) return;
+        if (requestId !== bundleRequestIdRef.current || selectedIssueRef.current !== trimmed) {
+          return;
+        }
         const message = normalizeApiError(error);
         if (error instanceof ApiError && error.code === 'RESOURCE_NOT_FOUND') {
           clearBundles();

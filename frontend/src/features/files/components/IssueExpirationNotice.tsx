@@ -32,11 +32,15 @@ export function IssueExpirationNotice({
   const expiresAt = parseServerDate(expiry.expires_at);
   const remainingMs = expiresAt.getTime() - Date.now();
   const validDate = Number.isFinite(expiresAt.getTime());
-  if (validDate && remainingMs > NOTICE_WINDOW_MS) return null;
+  if (validDate && remainingMs > NOTICE_WINDOW_MS && !expiry.renewed_from_expiring) return null;
 
   let title = '该 Issue 已启用自动过期';
   let urgent = false;
-  if (validDate && remainingMs <= 0) {
+  let renewed = false;
+  if (expiry.renewed_from_expiring) {
+    title = '本次访问已将自动过期时间顺延';
+    renewed = true;
+  } else if (validDate && remainingMs <= 0) {
     title = '该 Issue 已进入自动清理条件';
     urgent = true;
   } else if (validDate && remainingMs <= ONE_DAY_MS) {
@@ -49,7 +53,9 @@ export function IssueExpirationNotice({
   return (
     <div
       className={`mt-3 rounded-lg border px-3 py-2 text-sm ${
-        urgent
+        renewed
+          ? 'border-cyan-200 bg-cyan-50 text-cyan-800'
+          : urgent
           ? 'border-rose-200 bg-rose-50 text-rose-800'
           : 'border-amber-200 bg-amber-50 text-amber-800'
       }`}

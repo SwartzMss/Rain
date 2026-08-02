@@ -7,6 +7,7 @@ export function visibleInactivityExpiry(
   now = Date.now()
 ): IssueInactivityExpiry | null {
   if (!expiry) return null;
+  if (expiry.renewed_from_expiring) return expiry;
   const expiresAt = new Date(expiry.expires_at).getTime();
   if (!Number.isFinite(expiresAt)) return expiry;
   return expiresAt - now > NOTICE_WINDOW_MS ? null : expiry;

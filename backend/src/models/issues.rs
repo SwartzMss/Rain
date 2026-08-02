@@ -44,6 +44,7 @@ pub struct UploadStatusWrapper {
 pub struct IssueInactivityExpiry {
     pub inactive_days: usize,
     pub expires_at: String,
+    pub renewed_from_expiring: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

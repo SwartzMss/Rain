@@ -251,6 +251,10 @@ async fn inactivity_expiry_is_an_owner_only_persisted_activity_snapshot() {
     );
     let owner_body: Value = test::read_body_json(owner_response).await;
     assert_eq!(owner_body["inactivity_expiry"]["inactive_days"], 7);
+    assert_eq!(
+        owner_body["inactivity_expiry"]["renewed_from_expiring"],
+        false
+    );
     let expires_at = owner_body["inactivity_expiry"]["expires_at"]
         .as_str()
         .unwrap();
@@ -294,6 +298,31 @@ async fn inactivity_expiry_is_an_owner_only_persisted_activity_snapshot() {
     .await;
     let unowned: Value = test::read_body_json(unowned).await;
     assert!(unowned["inactivity_expiry"].is_null());
+
+    sqlx::query(
+        "UPDATE issues SET last_activity_at=datetime('now','-6 days','-12 hours') WHERE code='EXPIRY'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let renewed = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/EXPIRY")
+            .cookie(owner_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let renewed: Value = test::read_body_json(renewed).await;
+    assert_eq!(renewed["inactivity_expiry"]["renewed_from_expiring"], true);
+    let renewed_expires_at = renewed["inactivity_expiry"]["expires_at"].as_str().unwrap();
+    let renewed_beyond_warning_window: i64 =
+        sqlx::query_scalar("SELECT datetime(?) > datetime('now', '+72 hours')")
+            .bind(renewed_expires_at)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(renewed_beyond_warning_window, 1);
 
     state
         .issue_inactive_days
@@ -356,7 +385,7 @@ async fn committed_bundle_deletion_is_not_reported_as_failed_when_activity_touch
             .fetch_one(&pool)
             .await
             .unwrap();
-    sqlx::query("INSERT INTO issues(code,name,owner_user_id,last_activity_at) VALUES('ACTIVITY','Activity',?,datetime('now','-2 hours'))")
+    sqlx::query("INSERT INTO issues(code,name,owner_user_id,last_activity_at) VALUES('ACTIVITY','Activity',?,datetime('now','-6 days','-12 hours'))")
         .bind(owner_id)
         .execute(&pool)
         .await
@@ -392,6 +421,14 @@ async fn committed_bundle_deletion_is_not_reported_as_failed_when_activity_touch
     assert_eq!(detail.status(), actix_web::http::StatusCode::OK);
     let detail: Value = test::read_body_json(detail).await;
     assert_eq!(detail["inactivity_expiry"]["inactive_days"], 7);
+    assert_eq!(detail["inactivity_expiry"]["renewed_from_expiring"], false);
+    let expires_within_warning_window: i64 =
+        sqlx::query_scalar("SELECT datetime(?) <= datetime('now', '+72 hours')")
+            .bind(detail["inactivity_expiry"]["expires_at"].as_str().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(expires_within_warning_window, 1);
 
     let response = test::call_service(
         &app,

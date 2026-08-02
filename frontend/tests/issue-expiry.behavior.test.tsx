@@ -4,12 +4,13 @@ import type { IssueBundlesResponse } from '../src/api/types';
 import { IssueExpirationNotice } from '../src/features/files/components/IssueExpirationNotice';
 import { useIssueBundles } from '../src/features/files/hooks/useIssueBundles';
 import { visibleInactivityExpiry } from '../src/features/files/issueExpiration';
-import { rainApi } from '../src/api/client';
+import { ApiError, rainApi } from '../src/api/client';
 
 vi.mock('../src/api/client', () => ({
   ApiError: class ApiError extends Error {
-    code = 'TEST_ERROR';
-    status = 500;
+    constructor(message: string, readonly status?: number, readonly code?: string) {
+      super(message);
+    }
   },
   normalizeApiError: (error: unknown) => String(error),
   rainApi: {
@@ -20,10 +21,11 @@ vi.mock('../src/api/client', () => ({
 
 const NOW = new Date('2026-08-02T12:00:00Z');
 
-function expiry(hours: number) {
+function expiry(hours: number, renewedFromExpiring = false) {
   return {
     inactive_days: 7,
-    expires_at: new Date(NOW.getTime() + hours * 60 * 60 * 1000).toISOString()
+    expires_at: new Date(NOW.getTime() + hours * 60 * 60 * 1000).toISOString(),
+    renewed_from_expiring: renewedFromExpiring
   };
 }
 
@@ -39,10 +41,12 @@ function response(inactivityExpiry: ReturnType<typeof expiry> | null): IssueBund
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 describe('Issue inactivity expiry notice', () => {
@@ -76,7 +80,7 @@ describe('Issue inactivity expiry notice', () => {
   });
 
   it('is owner-only, explains whole-Issue deletion, and degrades safely for invalid dates', () => {
-    const invalid = { inactive_days: 7, expires_at: 'not-a-date' };
+    const invalid = { inactive_days: 7, expires_at: 'not-a-date', renewed_from_expiring: false };
     const { rerender } = render(
       <IssueExpirationNotice canWrite={false} expiry={expiry(12)} />
     );
@@ -98,6 +102,13 @@ describe('Issue inactivity expiry notice', () => {
     expect(visibleInactivityExpiry(null, NOW.getTime())).toBeNull();
     expect(visibleInactivityExpiry(expiry(73), NOW.getTime())).toBeNull();
     expect(visibleInactivityExpiry(expiry(72), NOW.getTime())).toEqual(expiry(72));
+    expect(visibleInactivityExpiry(expiry(168, true), NOW.getTime())).toEqual(expiry(168, true));
+  });
+
+  it('shows when this visit renewed an Issue that was already in the warning window', () => {
+    render(<IssueExpirationNotice canWrite expiry={expiry(168, true)} />);
+    expect(screen.getByText('本次访问已将自动过期时间顺延')).toBeInTheDocument();
+    expect(screen.getByText(/预计时间/)).toBeInTheDocument();
   });
 
   it('clears stale state and ignores an older Issue response that arrives last', async () => {
@@ -138,5 +149,44 @@ describe('Issue inactivity expiry notice', () => {
     await act(async () => result.current.loadBundles('SECOND'));
     act(() => result.current.clearBundles());
     expect(result.current.inactivityExpiry).toBeNull();
+  });
+
+  it('invalidates pending success and failure responses when the page is cleared', async () => {
+    const pendingSuccess = deferred<IssueBundlesResponse>();
+    vi.mocked(rainApi.fetchIssueBundles).mockReturnValueOnce(pendingSuccess.promise);
+    const successMissing = vi.fn();
+    const { result, unmount } = renderHook(() => useIssueBundles('FIRST', successMissing));
+    act(() => result.current.clearBundles());
+    await act(async () => pendingSuccess.resolve(response(expiry(12))));
+    expect(result.current.inactivityExpiry).toBeNull();
+    expect(result.current.bundles).toEqual([]);
+    unmount();
+
+    const pendingFailure = deferred<IssueBundlesResponse>();
+    vi.mocked(rainApi.fetchIssueBundles).mockReturnValueOnce(pendingFailure.promise);
+    const failureMissing = vi.fn();
+    const failureHook = renderHook(() => useIssueBundles('FIRST', failureMissing));
+    act(() => failureHook.result.current.clearBundles());
+    await act(async () => pendingFailure.reject(new Error('old request failed')));
+    expect(failureHook.result.current.bundlesError).toBeNull();
+    expect(failureHook.result.current.inactivityExpiry).toBeNull();
+  });
+
+  it('does not let an old 404 clear a newly selected Issue', async () => {
+    const oldRequest = deferred<IssueBundlesResponse>();
+    const newRequest = deferred<IssueBundlesResponse>();
+    vi.mocked(rainApi.fetchIssueBundles)
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockReturnValueOnce(newRequest.promise);
+    const missing = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ code }) => useIssueBundles(code, missing),
+      { initialProps: { code: 'FIRST' } }
+    );
+    rerender({ code: 'SECOND' });
+    await act(async () => newRequest.resolve(response(expiry(12))));
+    await act(async () => oldRequest.reject(new ApiError('missing', 404, 'RESOURCE_NOT_FOUND')));
+    expect(missing).not.toHaveBeenCalled();
+    expect(result.current.inactivityExpiry).toEqual(expiry(12));
   });
 });

@@ -71,6 +71,7 @@ export interface IssueBundlesResponse {
 export interface IssueInactivityExpiry {
   inactive_days: number;
   expires_at: string;
+  renewed_from_expiring: boolean;
 }
 
 export interface IssueSummary {
