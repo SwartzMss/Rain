@@ -419,3 +419,60 @@ fn is_processing_bundle_status(status: &str) -> bool {
         "PENDING" | "PROCESSING"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use crate::{
+        db,
+        repositories::users::{self, CreateUserOutcome},
+    };
+
+    use super::{require_issue_owner, require_issue_owner_for_delete};
+
+    #[tokio::test]
+    async fn issue_owner_checks_reject_null_and_foreign_users_and_allow_delete_retry() {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let owner = match users::create_user(&pool, "owner", "hash").await.unwrap() {
+            CreateUserOutcome::Created(user) => user,
+            CreateUserOutcome::DuplicateUsername => unreachable!(),
+        };
+        let other = match users::create_user(&pool, "other", "hash").await.unwrap() {
+            CreateUserOutcome::Created(user) => user,
+            CreateUserOutcome::DuplicateUsername => unreachable!(),
+        };
+        sqlx::query("INSERT INTO issues (code, name, owner_user_id) VALUES ('OWNED', 'Owned', ?), ('EMPTY', 'Empty', NULL)")
+            .bind(&owner.id).execute(&pool).await.unwrap();
+
+        assert!(require_issue_owner(&pool, "OWNED", &owner.id).await.is_ok());
+        assert!(
+            require_issue_owner(&pool, "OWNED", &other.id)
+                .await
+                .is_err()
+        );
+        assert!(
+            require_issue_owner(&pool, "EMPTY", &owner.id)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE issues SET status = 'DELETING' WHERE code = 'OWNED'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            require_issue_owner_for_delete(&pool, "OWNED", &owner.id)
+                .await
+                .is_ok()
+        );
+        assert!(
+            require_issue_owner_for_delete(&pool, "OWNED", &other.id)
+                .await
+                .is_err()
+        );
+    }
+}

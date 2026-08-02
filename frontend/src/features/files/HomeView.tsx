@@ -29,7 +29,6 @@ export function HomeView() {
 
   const issues = useIssues();
   const selectedIssue = issues.issues.find((issue) => issue.code === issues.currentIssueCode);
-  const canWrite = Boolean(selectedIssue?.can_write);
   const selectedIssueRef = useRef(issues.currentIssueCode);
   selectedIssueRef.current = issues.currentIssueCode;
 
@@ -39,6 +38,7 @@ export function HomeView() {
   }, [issues.clearSelectedIssue, navigate]);
 
   const bundles = useIssueBundles(issues.currentIssueCode, handleIssueMissing);
+  const canWrite = Boolean(selectedIssue?.can_write && bundles.canWrite);
   const upload = useUploadTask({
     currentIssueCode: issues.currentIssueCode,
     getSelectedIssueCode: () => selectedIssueRef.current,
