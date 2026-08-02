@@ -57,4 +57,14 @@ describe('authentication behavior', () => {
     expect(await screen.findByText('注册已关闭')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '注册' })).not.toBeInTheDocument();
   });
+
+  it('shows registration only after an allowed status is confirmed', async () => {
+    vi.mocked(rainApi.me).mockResolvedValue({ authenticated: false, user: null });
+    let resolveStatus!: (value: { allow_registration: boolean }) => void;
+    vi.mocked(rainApi.fetchRegistrationStatus).mockReturnValueOnce(new Promise((resolve) => { resolveStatus = resolve; }));
+    render(<MemoryRouter><AuthProvider><AuthPage mode="login" /></AuthProvider></MemoryRouter>);
+    expect(screen.queryByRole('link', { name: '注册' })).not.toBeInTheDocument();
+    resolveStatus({ allow_registration: true });
+    expect(await screen.findByRole('link', { name: '注册' })).toBeInTheDocument();
+  });
 });
