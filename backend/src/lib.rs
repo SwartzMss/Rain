@@ -15,7 +15,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
     path::PathBuf,
-    sync::{Arc, Mutex, atomic::AtomicU64},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -121,17 +124,29 @@ impl TempResultRuntime {
 
 pub struct AuthRuntime {
     pub config: AuthConfig,
+    pub allow_registration: AtomicBool,
+    pub registration_settings_lock: Arc<AsyncMutex<()>>,
     pub hash_permits: Arc<Semaphore>,
     pub rate_limits: Arc<Mutex<AuthRateLimits>>,
 }
 
 impl AuthRuntime {
     pub fn new(config: AuthConfig) -> Self {
+        let allow_registration = config.allow_registration;
         Self {
             hash_permits: Arc::new(Semaphore::new(config.argon2_concurrency)),
             config,
+            allow_registration: AtomicBool::new(allow_registration),
+            registration_settings_lock: Arc::new(AsyncMutex::new(())),
             rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
         }
+    }
+
+    pub fn registration_allowed(&self) -> bool {
+        self.allow_registration.load(Ordering::Acquire)
+    }
+    pub fn set_registration_allowed(&self, value: bool) {
+        self.allow_registration.store(value, Ordering::Release);
     }
 }
 

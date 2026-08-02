@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { normalizeApiError } from '../../api/client';
+import { normalizeApiError, rainApi } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { postLoginPath, safeReturnPath } from '../../auth/authState';
 
@@ -23,9 +23,28 @@ export function AuthPage({ mode }: AuthPageProps) {
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const isLogin = mode === 'login';
+  const [registrationState, setRegistrationState] = useState<'LOADING' | 'ALLOWED' | 'DISABLED' | 'ERROR'>('LOADING');
+
+  useEffect(() => {
+    let active = true;
+    setRegistrationState('LOADING');
+    void rainApi.fetchRegistrationStatus().then((status) => {
+      if (active) {
+        setRegistrationState(status.allow_registration ? 'ALLOWED' : 'DISABLED');
+      }
+    }).catch(() => {
+      if (active) setRegistrationState('ERROR');
+    });
+    return () => { active = false; };
+  }, [isLogin]);
 
   if (auth.state.status === 'AUTHENTICATED') {
     return <Navigate to={postLoginPath(auth.state.user, state.from)} replace />;
+  }
+
+  if (!isLogin && registrationState !== 'ALLOWED') {
+    const message = registrationState === 'LOADING' ? '正在确认注册状态…' : registrationState === 'DISABLED' ? '当前系统未开放用户注册，请联系管理员。' : '暂时无法确认注册状态，请稍后重试。';
+    return <section className="mx-auto mt-10 max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-xl"><h2 className="text-2xl font-semibold text-slate-950">{registrationState === 'LOADING' ? '正在确认注册状态' : registrationState === 'DISABLED' ? '注册已关闭' : '注册状态不可用'}</h2><p className="mt-3 text-sm text-slate-500">{message}</p>{registrationState !== 'LOADING' ? <Link className="mt-6 inline-block font-semibold text-cyan-700" to="/login">返回登录</Link> : null}</section>;
   }
 
   const submit = async (event: FormEvent) => {
@@ -116,14 +135,7 @@ export function AuthPage({ mode }: AuthPageProps) {
       </form>
 
       <p className="mt-6 text-center text-sm text-slate-500">
-        {isLogin ? '还没有账户？' : '已经有账户？'}{' '}
-        <Link
-          className="font-semibold text-cyan-700 hover:text-cyan-900"
-          state={{ from: safeReturnPath(state.from) }}
-          to={isLogin ? '/register' : '/login'}
-        >
-          {isLogin ? '注册' : '登录'}
-        </Link>
+        {isLogin ? (registrationState === 'ALLOWED' ? <><span>还没有账户？ </span><Link className="font-semibold text-cyan-700 hover:text-cyan-900" state={{ from: safeReturnPath(state.from) }} to="/register">注册</Link></> : null) : <><span>已经有账户？ </span><Link className="font-semibold text-cyan-700 hover:text-cyan-900" state={{ from: safeReturnPath(state.from) }} to="/login">登录</Link></>}
       </p>
     </section>
   );

@@ -12,8 +12,8 @@ use backend::{
     },
     config::AppConfig,
     db::{
-        cleanup_expired_bundles, fail_stale_processing_bundles, init_pool, prepare_schema,
-        resume_deleting_bundles,
+        cleanup_expired_bundles, fail_stale_processing_bundles, init_pool,
+        load_or_initialize_registration_setting, prepare_schema, resume_deleting_bundles,
     },
     routes::register,
 };
@@ -67,6 +67,10 @@ async fn main() -> std::io::Result<()> {
     )
     .await
     .expect("failed to bootstrap administrator");
+    let registration_allowed =
+        load_or_initialize_registration_setting(&pool, config.auth.allow_registration)
+            .await
+            .expect("failed to initialize registration setting");
     log_sqlite_file_sizes(&config.database_url).await;
 
     if config.reset_db {
@@ -130,13 +134,17 @@ async fn main() -> std::io::Result<()> {
     ];
     background_tasks.push(spawn_deleting_bundle_cleanup(pool.clone()));
     background_tasks.push(spawn_session_cleanup(pool.clone()));
-    let shared_state = web::Data::new(AppState::with_blob_store_and_auth(
+    let app_state = AppState::with_blob_store_and_auth(
         pool,
         config.data_root.clone(),
         config.limits.clone(),
         config.auth.clone(),
         blob_store,
-    ));
+    );
+    app_state
+        .auth_runtime
+        .set_registration_allowed(registration_allowed);
+    let shared_state = web::Data::new(app_state);
     background_tasks.push(backend::upload::job::spawn_temp_cleanup_worker(
         shared_state.upload.temp_cleanup_queue.clone(),
     ));

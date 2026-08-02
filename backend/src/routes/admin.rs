@@ -51,6 +51,53 @@ fn parse_status(value: &str) -> Result<UserStatus, AppError> {
     })
 }
 
+#[get("/admin/settings")]
+pub async fn get_settings(
+    _admin: RequireAdmin,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    crate::db::load_or_initialize_registration_setting(
+        &state.db.pool,
+        state.auth_runtime.registration_allowed(),
+    )
+    .await?;
+    let settings = sqlx::query_as::<_, RegistrationSettings>(
+        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
+    ).fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "allow_registration": settings.allow_registration != 0,
+        "updated_at": settings.updated_at,
+        "updated_by_username": settings.updated_by_username,
+    })))
+}
+
+#[patch("/admin/settings")]
+pub async fn update_settings(
+    admin: RequireAdmin,
+    state: web::Data<AppState>,
+    body: web::Json<UpdateRegistrationSettings>,
+) -> Result<HttpResponse, AppError> {
+    let _settings_guard = state.auth_runtime.registration_settings_lock.lock().await;
+    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
+        .bind(state.auth_runtime.registration_allowed() as i64)
+        .execute(&state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+    sqlx::query("UPDATE system_settings SET allow_registration=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
+        .bind(body.allow_registration as i64).bind(&admin.0.id).execute(&state.db.pool).await.map_err(AppError::Database)?;
+    state
+        .auth_runtime
+        .set_registration_allowed(body.allow_registration);
+    let settings = sqlx::query_as::<_, RegistrationSettings>(
+        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
+    ).fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "allow_registration": settings.allow_registration != 0,
+        "updated_at": settings.updated_at,
+        "updated_by_username": settings.updated_by_username,
+    })))
+}
+
 #[get("/admin/users")]
 pub async fn list_users(
     _admin: RequireAdmin,

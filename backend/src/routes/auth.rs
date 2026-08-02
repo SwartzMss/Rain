@@ -250,7 +250,7 @@ pub async fn register_user(
     state: web::Data<AppState>,
     payload: web::Json<CredentialsRequest>,
 ) -> Result<HttpResponse, AppError> {
-    if !state.auth_runtime.config.allow_registration {
+    if !state.auth_runtime.registration_allowed() {
         return Err(AppError::api(
             StatusCode::FORBIDDEN,
             "REGISTRATION_DISABLED",
@@ -282,6 +282,13 @@ pub async fn register_user(
             "用户名已存在",
         )),
     }
+}
+
+#[get("/auth/registration-status")]
+pub async fn registration_status(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "allow_registration": state.auth_runtime.registration_allowed()
+    })))
 }
 
 #[post("/auth/login")]
