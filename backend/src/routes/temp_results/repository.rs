@@ -169,3 +169,29 @@ pub(crate) async fn ensure_temp_result_capacity(
     }
     Ok(())
 }
+
+pub(crate) async fn find_by_id(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<TempResultRecord, AppError> {
+    sqlx::query_as::<_, TempResultRecord>(
+        "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE id = ? LIMIT 1",
+    )
+    .bind(id).fetch_optional(&state.pool).await.map_err(AppError::Database)?
+    .ok_or_else(|| AppError::NotFound(format!("temporary result {id}")))
+}
+
+pub(crate) async fn renew_active(
+    state: &web::Data<AppState>,
+    id: &str,
+    expires_at: &str,
+) -> Result<bool, AppError> {
+    let updated =
+        sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = 'ACTIVE'")
+            .bind(expires_at)
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .map_err(AppError::Database)?;
+    Ok(updated.rows_affected() == 1)
+}

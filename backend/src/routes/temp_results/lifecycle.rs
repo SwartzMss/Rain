@@ -30,18 +30,7 @@ pub(crate) async fn load_record(
     state: &web::Data<AppState>,
     id: &str,
 ) -> Result<TempResultRecord, AppError> {
-    sqlx::query_as::<_, TempResultRecord>(
-        r#"
-        SELECT id, name, expression, source_label, storage_path, line_count,
-               size_bytes, created_at, expires_at
-        FROM temp_results WHERE id = ? LIMIT 1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(AppError::Database)?
-    .ok_or_else(|| AppError::NotFound(format!("temporary result {id}")))
+    repository::find_by_id(state, id).await
 }
 
 pub(crate) async fn load_and_renew(
@@ -49,17 +38,10 @@ pub(crate) async fn load_and_renew(
     id: &str,
 ) -> Result<TempResultRecord, AppError> {
     let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
-    let updated =
-        sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = 'ACTIVE'")
-            .bind(&expires_at)
-            .bind(id)
-            .execute(&state.pool)
-            .await
-            .map_err(AppError::Database)?;
-    if updated.rows_affected() != 1 {
+    if !repository::renew_active(state, id, &expires_at).await? {
         return Err(AppError::NotFound(format!("temporary result {id}")));
     }
-    load_record(state, id).await
+    repository::find_by_id(state, id).await
 }
 
 pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
@@ -138,7 +120,8 @@ pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), A
         finish_deleting_temp_result(state, &claimed_record).await;
     }
 
-    cleanup_orphan_temp_files(state).await?;
+    let storage_paths = repository::list_storage_paths(state).await?;
+    cleanup_orphan_temp_files(state, &storage_paths).await?;
     Ok(())
 }
 

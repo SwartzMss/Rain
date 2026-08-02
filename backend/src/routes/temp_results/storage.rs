@@ -1,5 +1,4 @@
 use super::lifecycle::checked_page_end;
-use super::repository::list_storage_paths;
 use super::*;
 
 pub(crate) async fn result_storage_size(
@@ -161,14 +160,16 @@ pub(crate) async fn remove_preview_artifacts(log_path: &Path) -> Result<(), AppE
     Ok(())
 }
 
-pub(crate) async fn cleanup_orphan_temp_files(state: &web::Data<AppState>) -> Result<(), AppError> {
+pub(crate) async fn cleanup_orphan_temp_files(
+    state: &web::Data<AppState>,
+    storage_paths: &HashSet<String>,
+) -> Result<(), AppError> {
     let root = data_root(state).join("temp-results");
     let mut directory = match tokio::fs::read_dir(&root).await {
         Ok(directory) => directory,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(AppError::Io(error)),
     };
-    let storage_paths = list_storage_paths(state).await?;
     let cutoff = SystemTime::now()
         .checked_sub(ORPHAN_GRACE_PERIOD)
         .unwrap_or(SystemTime::UNIX_EPOCH);
