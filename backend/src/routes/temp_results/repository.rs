@@ -187,7 +187,7 @@ pub(crate) async fn renew_active(
     expires_at: &str,
 ) -> Result<bool, AppError> {
     let updated =
-        sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = 'ACTIVE'")
+        sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) >= datetime('now')")
             .bind(expires_at)
             .bind(id)
             .execute(&state.pool)
@@ -229,4 +229,47 @@ pub(crate) async fn claim_stale_staging(
 ) -> Result<Option<String>, AppError> {
     sqlx::query_scalar("UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'STAGING' AND created_at = ? RETURNING storage_path")
         .bind(id).bind(created_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use actix_web::web;
+    use chrono::{Duration, Utc};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use crate::{AppState, config::AppLimits, db};
+
+    use super::renew_active;
+
+    #[tokio::test]
+    async fn expired_active_result_cannot_be_renewed() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let expired = (Utc::now() - Duration::minutes(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('expired', 'ACTIVE', 'expired.log', 'x', 'x', 'data/temp-results/expired.log', 0, 0, ?, ?)",
+        )
+        .bind(&expired)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            !renew_active(&state, "expired", &Utc::now().to_rfc3339())
+                .await
+                .unwrap()
+        );
+    }
 }
