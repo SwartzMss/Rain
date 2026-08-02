@@ -17,7 +17,7 @@ mod saved_searches;
 mod temp_results;
 mod uploads;
 
-pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) {
+pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
         "temporary-result-cleanup",
         std::time::Duration::from_secs(60),
@@ -30,7 +30,7 @@ pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) {
                     .map_err(|error| error.to_string())
             }
         },
-    );
+    )
 }
 
 async fn prevent_session_response_caching(

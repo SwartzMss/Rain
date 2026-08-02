@@ -414,24 +414,31 @@ pub struct BlobRecoveryStats {
     pub failed: u64,
 }
 
-pub fn spawn_blob_recovery(pool: SqlitePool, store: Arc<dyn BlobStore>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-            std::time::Duration::from_secs(300),
-        );
-        loop {
-            interval.tick().await;
-            match recover_pending_blobs(&pool, store.as_ref()).await {
-                Ok(stats) => tracing::info!(
-                    recovered = stats.recovered,
-                    failed = stats.failed,
-                    "staging blob recovery completed"
-                ),
-                Err(error) => tracing::warn!(%error, "staging blob recovery failed; will retry"),
+pub fn spawn_blob_recovery(
+    pool: SqlitePool,
+    store: Arc<dyn BlobStore>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "blob-recovery",
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(300),
+        move || {
+            let pool = pool.clone();
+            let store = store.clone();
+            async move {
+                recover_pending_blobs(&pool, store.as_ref())
+                    .await
+                    .map(|stats| {
+                        tracing::info!(
+                            recovered = stats.recovered,
+                            failed = stats.failed,
+                            "staging blob recovery completed"
+                        );
+                    })
+                    .map_err(|error| error.to_string())
             }
-        }
-    });
+        },
+    )
 }
 
 pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Result<u64, AppError> {
@@ -488,20 +495,27 @@ pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Resu
     Ok(unhealthy)
 }
 
-pub fn spawn_blob_audit(pool: SqlitePool, store: Arc<dyn BlobStore>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-            std::time::Duration::from_secs(3600),
-        );
-        loop {
-            interval.tick().await;
-            match audit_local_blobs(&pool, store.as_ref()).await {
-                Ok(unhealthy) => tracing::info!(unhealthy, "blob integrity audit batch completed"),
-                Err(error) => tracing::warn!(%error, "blob integrity audit batch failed"),
+pub fn spawn_blob_audit(
+    pool: SqlitePool,
+    store: Arc<dyn BlobStore>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "blob-audit",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3600),
+        move || {
+            let pool = pool.clone();
+            let store = store.clone();
+            async move {
+                audit_local_blobs(&pool, store.as_ref())
+                    .await
+                    .map(|unhealthy| {
+                        tracing::info!(unhealthy, "blob integrity audit batch completed");
+                    })
+                    .map_err(|error| error.to_string())
             }
-        }
-    });
+        },
+    )
 }
 
 fn local_blob_path(data_root: &Path, storage_key: &str) -> Result<PathBuf, AppError> {
@@ -674,21 +688,29 @@ pub async fn garbage_collect_unreferenced_blobs_with_grace(
     Ok(removed)
 }
 
-pub fn spawn_blob_gc(pool: SqlitePool, store: std::sync::Arc<dyn BlobStore>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(3600),
-            std::time::Duration::from_secs(3600),
-        );
-        loop {
-            interval.tick().await;
-            match garbage_collect_unreferenced_blobs(&pool, store.as_ref()).await {
-                Ok(removed) if removed > 0 => tracing::info!(removed, "blob GC completed"),
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "blob GC scan failed"),
+pub fn spawn_blob_gc(
+    pool: SqlitePool,
+    store: std::sync::Arc<dyn BlobStore>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "blob-gc",
+        std::time::Duration::from_secs(3600),
+        std::time::Duration::from_secs(3600),
+        move || {
+            let pool = pool.clone();
+            let store = store.clone();
+            async move {
+                garbage_collect_unreferenced_blobs(&pool, store.as_ref())
+                    .await
+                    .map(|removed| {
+                        if removed > 0 {
+                            tracing::info!(removed, "blob GC completed");
+                        }
+                    })
+                    .map_err(|error| error.to_string())
             }
-        }
-    });
+        },
+    )
 }
 
 #[cfg(test)]

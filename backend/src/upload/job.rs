@@ -37,32 +37,33 @@ impl TempCleanupQueue {
     }
 }
 
-pub fn spawn_temp_cleanup_worker(queue: TempCleanupQueue) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let pending = queue
-                .0
-                .lock()
-                .map(|mut items| items.drain(..).collect::<Vec<_>>())
-                .unwrap_or_default();
-            for item in pending {
-                match fs::remove_dir_all(&item.path).await {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        error!(
-                            path = %item.path.display(),
-                            error = %error,
-                            "temporary upload cleanup retry failed"
-                        );
-                        queue.enqueue(item.path, item.reservation);
+pub fn spawn_temp_cleanup_worker(queue: TempCleanupQueue) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "temporary-upload-cleanup",
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(30),
+        move || {
+            let queue = queue.clone();
+            async move {
+                let pending = queue
+                    .0
+                    .lock()
+                    .map(|mut items| items.drain(..).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for item in pending {
+                    match fs::remove_dir_all(&item.path).await {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            tracing::warn!(path = %item.path.display(), error = %error, "temporary upload cleanup retry failed");
+                            queue.enqueue(item.path, item.reservation);
+                        }
                     }
                 }
+                Ok(())
             }
-        }
-    });
+        },
+    )
 }
 
 pub struct UploadJob {

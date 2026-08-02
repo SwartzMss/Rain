@@ -123,11 +123,13 @@ async fn main() -> std::io::Result<()> {
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     info!(limits = ?config.limits, "effective application limits");
-    spawn_blob_gc(pool.clone(), blob_store.clone());
-    spawn_blob_audit(pool.clone(), blob_store.clone());
-    spawn_blob_recovery(pool.clone(), blob_store.clone());
-    spawn_deleting_bundle_cleanup(pool.clone());
-    spawn_session_cleanup(pool.clone());
+    let mut background_tasks = vec![
+        spawn_blob_gc(pool.clone(), blob_store.clone()),
+        spawn_blob_audit(pool.clone(), blob_store.clone()),
+        spawn_blob_recovery(pool.clone(), blob_store.clone()),
+    ];
+    background_tasks.push(spawn_deleting_bundle_cleanup(pool.clone()));
+    background_tasks.push(spawn_session_cleanup(pool.clone()));
     let shared_state = web::Data::new(AppState::with_blob_store_and_auth(
         pool,
         config.data_root.clone(),
@@ -135,10 +137,14 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         blob_store,
     ));
-    backend::upload::job::spawn_temp_cleanup_worker(shared_state.upload.temp_cleanup_queue.clone());
-    backend::routes::spawn_temp_result_cleanup(shared_state.clone());
+    background_tasks.push(backend::upload::job::spawn_temp_cleanup_worker(
+        shared_state.upload.temp_cleanup_queue.clone(),
+    ));
+    background_tasks.push(backend::routes::spawn_temp_result_cleanup(
+        shared_state.clone(),
+    ));
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .wrap(from_fn(http_access_log::log_useful_requests))
             .wrap(from_fn(backend::auth::same_origin::enforce_same_origin))
@@ -147,11 +153,15 @@ async fn main() -> std::io::Result<()> {
             .default_service(web::get().to(embedded_frontend::serve_frontend))
     })
     .bind(bind_addr)?
-    .run()
-    .await
+    .run();
+    let result = server.await;
+    for task in background_tasks {
+        task.abort();
+    }
+    result
 }
 
-fn spawn_deleting_bundle_cleanup(pool: sqlx::SqlitePool) {
+fn spawn_deleting_bundle_cleanup(pool: sqlx::SqlitePool) -> tokio::task::JoinHandle<()> {
     backend::spawn_periodic_job(
         "deleting-bundle-cleanup",
         Duration::from_secs(30),
@@ -165,10 +175,10 @@ fn spawn_deleting_bundle_cleanup(pool: sqlx::SqlitePool) {
                     .map_err(|error| error.to_string())
             }
         },
-    );
+    )
 }
 
-fn spawn_session_cleanup(pool: sqlx::SqlitePool) {
+fn spawn_session_cleanup(pool: sqlx::SqlitePool) -> tokio::task::JoinHandle<()> {
     backend::spawn_periodic_job(
         "session-cleanup",
         Duration::ZERO,
@@ -182,7 +192,7 @@ fn spawn_session_cleanup(pool: sqlx::SqlitePool) {
                     .map_err(|error| error.to_string())
             }
         },
-    );
+    )
 }
 
 async fn cleanup_temp_uploads(data_root: &std::path::Path) -> std::io::Result<u64> {

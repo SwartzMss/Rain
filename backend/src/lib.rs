@@ -240,5 +240,22 @@ mod tests {
 
         assert_eq!(state.upload.processing_permits.available_permits(), 7);
     }
+
+    #[test]
+    fn domain_runtimes_can_be_constructed_independently() {
+        let upload = super::UploadRuntime::new(3, 2);
+        assert_eq!(upload.processing_permits.available_permits(), 3);
+        assert_eq!(upload.receive_permits.available_permits(), 2);
+
+        let temp_results = super::TempResultRuntime::new(4);
+        assert_eq!(temp_results.permits.available_permits(), 4);
+        assert!(temp_results.ip_limits.lock().unwrap().is_empty());
+
+        let auth = super::AuthRuntime::new(crate::config::AuthConfig::default());
+        assert_eq!(
+            auth.hash_permits.available_permits(),
+            crate::config::AuthConfig::default().argon2_concurrency
+        );
+    }
 }
 pub mod blob_store;
