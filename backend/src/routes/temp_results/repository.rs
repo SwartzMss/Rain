@@ -385,8 +385,8 @@ mod tests {
     #[tokio::test]
     async fn staging_claim_and_final_delete_are_single_use() {
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
+            .max_connections(2)
+            .connect("sqlite:file:temp_result_claim_race?mode=memory&cache=shared")
             .await
             .unwrap();
         db::prepare_schema(&pool, false).await.unwrap();
@@ -413,16 +413,52 @@ mod tests {
             claim_staging_for_delete(&state, "staging").await.unwrap(),
             TransitionResult::StateMismatch
         );
+
+        assert_eq!(
+            claim_active_for_delete(&state, "staging").await.unwrap(),
+            TransitionResult::StateMismatch
+        );
+
+        sqlx::query("UPDATE temp_results SET status = 'ACTIVE' WHERE id = 'staging'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(
+            claim_active_for_delete(&state, "staging"),
+            claim_active_for_delete(&state, "staging"),
+        );
+        let results = [first.unwrap(), second.unwrap()];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, TransitionResult::Applied(())))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, TransitionResult::StateMismatch))
+                .count(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM temp_results WHERE id = 'staging'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            "DELETING"
+        );
+
         assert_eq!(
             delete_deleting_record(&state, "staging").await.unwrap(),
             TransitionResult::Applied(())
         );
         assert_eq!(
             delete_deleting_record(&state, "staging").await.unwrap(),
-            TransitionResult::NotFound
-        );
-        assert_eq!(
-            claim_active_for_delete(&state, "staging").await.unwrap(),
             TransitionResult::NotFound
         );
         assert_eq!(
