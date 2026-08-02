@@ -241,7 +241,7 @@ mod tests {
 
     use crate::{AppState, config::AppLimits, db};
 
-    use super::renew_active;
+    use super::{claim_expired_active, renew_active};
 
     #[tokio::test]
     async fn expired_active_result_cannot_be_renewed() {
@@ -271,5 +271,47 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn renewal_and_expiry_claim_are_mutually_exclusive() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:?cache=shared")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let expired = (Utc::now() - Duration::minutes(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('racy', 'ACTIVE', 'racy.log', 'x', 'x', 'data/temp-results/racy.log', 0, 0, ?, ?)",
+        )
+        .bind(&expired)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let renewal_expiry = Utc::now().to_rfc3339();
+        let (renewed, claimed) = tokio::join!(
+            renew_active(&state, "racy", &renewal_expiry),
+            claim_expired_active(&state, "racy", &expired),
+        );
+        let renewed = renewed.unwrap();
+        let claimed = claimed.unwrap();
+        assert!(!(renewed && claimed.is_some()));
+        let (status, expires_at): (String, String) =
+            sqlx::query_as("SELECT status, expires_at FROM temp_results WHERE id = 'racy'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(status == "ACTIVE" || status == "DELETING");
+        if status == "DELETING" {
+            assert_eq!(expires_at, expired);
+        }
     }
 }

@@ -149,11 +149,43 @@ pub(crate) fn to_response(record: TempResultRecord) -> TempResult {
 mod tests {
     use super::preview_page_size;
     use crate::routes::temp_results::common::checked_page_end;
+    use crate::{AppState, config::AppLimits, db, error::AppError};
+    use actix_web::web;
+    use chrono::{Duration, Utc};
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::path::PathBuf;
 
     #[test]
     fn lifecycle_pagination_helpers_reject_overflow() {
         assert_eq!(checked_page_end(10, 5).unwrap(), 15);
         assert!(checked_page_end(i64::MAX, 1).is_err());
         assert_eq!(preview_page_size(Some(20_000)), 10_000);
+    }
+
+    #[tokio::test]
+    async fn expired_load_and_renew_returns_not_found() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:?cache=shared")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let expired = (Utc::now() - Duration::minutes(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('expired-load', 'ACTIVE', 'expired.log', 'x', 'x', 'data/temp-results/expired.log', 0, 0, ?, ?)",
+        )
+        .bind(&expired)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = super::load_and_renew(&state, "expired-load").await;
+        assert!(matches!(result, Err(AppError::NotFound(_))));
     }
 }
