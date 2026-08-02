@@ -101,6 +101,24 @@ async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
     )
     .await;
     assert_eq!(registered.status(), StatusCode::CREATED);
+    let first_failure = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "ordinary-user", "password": "wrong-password"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(first_failure.status(), StatusCode::UNAUTHORIZED);
+    let successful_login = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "ordinary-user", "password": "strong-password"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(successful_login.status(), StatusCode::OK);
     for attempt in 0..3 {
         let response = test::call_service(
             &app,
