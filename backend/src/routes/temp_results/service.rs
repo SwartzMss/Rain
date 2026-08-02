@@ -1,7 +1,8 @@
 use super::lifecycle::abort_staging_result;
 use super::lifecycle::load_and_renew;
 use super::lifecycle::{check_temp_result_rate_limit, preview_page_size, to_response};
-use super::lifecycle::{checked_page_end, load_record};
+use super::common::checked_page_end;
+use super::lifecycle::load_record;
 use super::repository::{
     ensure_temp_result_budget, insert_staging_temp_result, publish_temp_result,
 };

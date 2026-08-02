@@ -1,4 +1,4 @@
-use super::lifecycle::checked_page_end;
+use super::common::checked_page_end;
 use super::*;
 
 pub(crate) async fn result_storage_size(

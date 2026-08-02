@@ -132,12 +132,6 @@ pub(crate) fn check_temp_result_rate_limit(
     Ok(())
 }
 
-pub(crate) fn checked_page_end(start: i64, limit: i64) -> Result<i64, AppError> {
-    start
-        .checked_add(limit)
-        .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))
-}
-
 pub(crate) fn to_response(record: TempResultRecord) -> TempResult {
     TempResult {
         id: record.id,
@@ -153,7 +147,8 @@ pub(crate) fn to_response(record: TempResultRecord) -> TempResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{checked_page_end, preview_page_size};
+    use super::preview_page_size;
+    use crate::routes::temp_results::common::checked_page_end;
 
     #[test]
     fn lifecycle_pagination_helpers_reject_overflow() {
