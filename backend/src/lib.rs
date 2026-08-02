@@ -17,7 +17,7 @@ use std::{
     future::Future,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -135,6 +135,7 @@ pub struct AuthRuntime {
     pub registration_settings_lock: Arc<AsyncMutex<()>>,
     pub hash_permits: Arc<Semaphore>,
     pub rate_limits: Arc<Mutex<AuthRateLimits>>,
+    pub admin_username_normalized: Arc<OnceLock<String>>,
 }
 
 impl AuthRuntime {
@@ -150,6 +151,7 @@ impl AuthRuntime {
             login_username_failure_limit_per_5_minutes: AtomicUsize::new(username_limit),
             registration_settings_lock: Arc::new(AsyncMutex::new(())),
             rate_limits: Arc::new(Mutex::new(AuthRateLimits::default())),
+            admin_username_normalized: Arc::new(OnceLock::new()),
         }
     }
 

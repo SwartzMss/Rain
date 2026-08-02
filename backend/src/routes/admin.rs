@@ -64,11 +64,11 @@ pub async fn auth_rate_limits(
         .lock()
         .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
     let mut usernames = Vec::new();
-    for (key, bucket) in &mut limits.login_username_failure {
+    limits.login_username_failure.retain(|_, bucket| {
         bucket.prune(now);
-        if bucket.events.is_empty() {
-            continue;
-        }
+        !bucket.events.is_empty()
+    });
+    for (key, bucket) in &mut limits.login_username_failure {
         let oldest = bucket.events.front().copied().unwrap_or(now);
         usernames.push(AuthRateLimitEntry {
             key: key.clone(),
@@ -94,11 +94,11 @@ pub async fn auth_rate_limits(
         });
     }
     let mut ips = Vec::new();
-    for (key, bucket) in &mut limits.login_ip {
+    limits.login_ip.retain(|_, bucket| {
         bucket.prune(now);
-        if bucket.events.is_empty() {
-            continue;
-        }
+        !bucket.events.is_empty()
+    });
+    for (key, bucket) in &mut limits.login_ip {
         let oldest = bucket.events.front().copied().unwrap_or(now);
         ips.push(AuthRateLimitEntry {
             key: key.clone(),
@@ -276,11 +276,14 @@ pub async fn get_settings(
 
 #[patch("/admin/settings")]
 pub async fn update_settings(
+    req: HttpRequest,
     admin: RequireAdmin,
     state: web::Data<AppState>,
     body: web::Json<UpdateRegistrationSettings>,
 ) -> Result<HttpResponse, AppError> {
     let _settings_guard = state.auth_runtime.registration_settings_lock.lock().await;
+    let old: (i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes FROM system_settings WHERE id=1")
+        .fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
         .bind(state.auth_runtime.registration_allowed() as i64)
         .execute(&state.db.pool)
@@ -310,8 +313,27 @@ pub async fn update_settings(
     let mut settings_tx = state.db.pool.begin().await.map_err(AppError::Database)?;
     sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
         .bind(body.allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
-    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,new_value) VALUES(?,'USER',?, 'AUTH_SETTINGS_UPDATED', ?)")
-        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(format!("registration={};ip_limit={ip_limit};username_limit={username_limit}", body.allow_registration)).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
+    let mut changes = Vec::new();
+    if old.0 != body.allow_registration as i64 {
+        changes.push(format!(
+            "registration:{}->{}",
+            old.0 != 0,
+            body.allow_registration
+        ));
+    }
+    if old.1 != ip_limit as i64 {
+        changes.push(format!("ip_limit:{}->{ip_limit}", old.1));
+    }
+    if old.2 != username_limit as i64 {
+        changes.push(format!("username_limit:{}->{username_limit}", old.2));
+    }
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?, 'AUTH_SETTINGS_UPDATED', ?, ?, ?, ?)")
+        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id)
+        .bind(format!("registration={};ip_limit={};username_limit={}", old.0 != 0, old.1, old.2))
+        .bind(changes.join(";"))
+        .bind(req.peer_addr().map(|a| a.ip().to_string()))
+        .bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok()))
+        .execute(&mut *settings_tx).await.map_err(AppError::Database)?;
     settings_tx.commit().await.map_err(AppError::Database)?;
     state
         .auth_runtime

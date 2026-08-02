@@ -67,6 +67,12 @@ async fn main() -> std::io::Result<()> {
     )
     .await
     .expect("failed to bootstrap administrator");
+    let admin_username_normalized: String = sqlx::query_scalar(
+        "SELECT username_normalized FROM users WHERE role='ADMIN' AND status='ACTIVE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("failed to load administrator identity");
     let (registration_value, ip_limit, username_limit) = load_or_initialize_auth_settings(
         &pool,
         config.auth.allow_registration,
@@ -149,6 +155,11 @@ async fn main() -> std::io::Result<()> {
     app_state
         .auth_runtime
         .set_registration_allowed(registration_allowed);
+    app_state
+        .auth_runtime
+        .admin_username_normalized
+        .set(admin_username_normalized)
+        .expect("administrator identity initialized once");
     app_state
         .auth_runtime
         .login_ip_limit_per_minute

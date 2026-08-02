@@ -314,9 +314,11 @@ pub async fn login(
     payload: web::Json<CredentialsRequest>,
 ) -> Result<HttpResponse, AppError> {
     let normalized_username = normalize_username(&payload.username);
-    let is_admin = users::find_by_normalized_username(&state.db.pool, &normalized_username)
-        .await?
-        .is_some_and(|user| user.role == "ADMIN");
+    let is_admin = state
+        .auth_runtime
+        .admin_username_normalized
+        .get()
+        .is_some_and(|admin| admin == &normalized_username);
     let username_key = username_failure_key(&payload.username);
     check_login_rate_limit(
         &state,
