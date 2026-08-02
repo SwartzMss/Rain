@@ -30,7 +30,7 @@ async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
     state
         .auth_runtime
         .login_ip_limit_per_minute
-        .store(2, std::sync::atomic::Ordering::Release);
+        .store(100, std::sync::atomic::Ordering::Release);
     state
         .auth_runtime
         .login_username_failure_limit_per_5_minutes
@@ -68,7 +68,7 @@ async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
         assert!(limits.login_username_failure.is_empty());
     }
 
-    for _ in 0..3 {
+    for attempt in 0..3 {
         let response = test::call_service(
             &app,
             test::TestRequest::post()
@@ -77,18 +77,45 @@ async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
                 .to_request(),
         )
         .await;
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            break;
+        if attempt < 2 {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        } else {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         }
     }
-    let count: usize = state
-        .auth_runtime
-        .rate_limits
-        .lock()
-        .expect("limits")
-        .login_username_failure
-        .len();
-    assert_eq!(count, 1);
+    {
+        let limits = state.auth_runtime.rate_limits.lock().expect("limits");
+        let bucket = limits
+            .login_username_failure
+            .get("login:username:missing-user")
+            .expect("unknown user bucket");
+        assert_eq!(bucket.events.len(), 2);
+    }
+
+    let registered = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username": "ordinary-user", "password": "strong-password"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(registered.status(), StatusCode::CREATED);
+    for attempt in 0..3 {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(json!({"username": "ordinary-user", "password": "wrong-password"}))
+                .to_request(),
+        )
+        .await;
+        if attempt < 2 {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        } else {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
 }
 
 #[actix_web::test]

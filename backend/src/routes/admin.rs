@@ -63,18 +63,25 @@ pub async fn auth_rate_limits(
         .rate_limits
         .lock()
         .map_err(|_| AppError::Config("认证限流状态不可用".into()))?;
+    let username_limit = state
+        .auth_runtime
+        .login_username_failure_limit_per_5_minutes
+        .load(std::sync::atomic::Ordering::Acquire);
+    let ip_limit = state
+        .auth_runtime
+        .login_ip_limit_per_minute
+        .load(std::sync::atomic::Ordering::Acquire);
     let mut usernames = Vec::new();
     limits.login_username_failure.retain(|_, bucket| {
         bucket.prune(now);
         !bucket.events.is_empty()
     });
     for (key, bucket) in &mut limits.login_username_failure {
-        let limit = state
-            .auth_runtime
-            .login_username_failure_limit_per_5_minutes
-            .load(std::sync::atomic::Ordering::Acquire);
-        let retry_from = if bucket.events.len() >= limit {
-            bucket.events.get(bucket.events.len() - limit).copied()
+        let retry_from = if bucket.events.len() >= username_limit {
+            bucket
+                .events
+                .get(bucket.events.len() - username_limit)
+                .copied()
         } else {
             None
         };
@@ -87,20 +94,13 @@ pub async fn auth_rate_limits(
             ),
             ip: None,
             current_count: bucket.events.len(),
-            limit: state
-                .auth_runtime
-                .login_username_failure_limit_per_5_minutes
-                .load(std::sync::atomic::Ordering::Acquire),
+            limit: username_limit,
             window_seconds: 300,
             last_event_at: bucket.event_times.back().map(ToString::to_string),
             retry_after_seconds: retry_from
                 .map(|event| 300u64.saturating_sub(now.duration_since(event).as_secs()))
                 .unwrap_or(0),
-            limited: bucket.events.len()
-                >= state
-                    .auth_runtime
-                    .login_username_failure_limit_per_5_minutes
-                    .load(std::sync::atomic::Ordering::Acquire),
+            limited: bucket.events.len() >= username_limit,
         });
     }
     let mut ips = Vec::new();
@@ -109,12 +109,8 @@ pub async fn auth_rate_limits(
         !bucket.events.is_empty()
     });
     for (key, bucket) in &mut limits.login_ip {
-        let limit = state
-            .auth_runtime
-            .login_ip_limit_per_minute
-            .load(std::sync::atomic::Ordering::Acquire);
-        let retry_from = if bucket.events.len() >= limit {
-            bucket.events.get(bucket.events.len() - limit).copied()
+        let retry_from = if bucket.events.len() >= ip_limit {
+            bucket.events.get(bucket.events.len() - ip_limit).copied()
         } else {
             None
         };
@@ -123,20 +119,13 @@ pub async fn auth_rate_limits(
             username: None,
             ip: Some(key.strip_prefix("login:ip:").unwrap_or(key).to_owned()),
             current_count: bucket.events.len(),
-            limit: state
-                .auth_runtime
-                .login_ip_limit_per_minute
-                .load(std::sync::atomic::Ordering::Acquire),
+            limit: ip_limit,
             window_seconds: 60,
             last_event_at: bucket.event_times.back().map(ToString::to_string),
             retry_after_seconds: retry_from
                 .map(|event| 60u64.saturating_sub(now.duration_since(event).as_secs()))
                 .unwrap_or(0),
-            limited: bucket.events.len()
-                >= state
-                    .auth_runtime
-                    .login_ip_limit_per_minute
-                    .load(std::sync::atomic::Ordering::Acquire),
+            limited: bucket.events.len() >= ip_limit,
         });
     }
     Ok(HttpResponse::Ok()
