@@ -27,6 +27,7 @@ describe('authentication behavior', () => {
     vi.mocked(rainApi.logout).mockResolvedValueOnce(undefined);
     const user = userEvent.setup();
     render(<AuthProvider><AuthProbe /></AuthProvider>);
+    expect(screen.getByTestId('status')).toHaveTextContent('LOADING');
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('GUEST'));
     await user.click(screen.getByRole('button', { name: 'login' }));
     expect(await screen.findByText('alice')).toBeInTheDocument();
