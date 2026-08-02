@@ -156,9 +156,11 @@ mod routes;
 mod service;
 mod storage;
 
-pub(crate) use lifecycle::*;
-pub(crate) use routes::*;
-pub(crate) use storage::*;
+pub(crate) use lifecycle::cleanup_expired;
+pub(crate) use routes::{
+    create_temp_result, delete_temp_result, download_temp_result, get_temp_result,
+    get_temp_result_lines, preview_temp_result,
+};
 
 #[cfg(test)]
 mod tests {
@@ -171,7 +173,10 @@ mod tests {
 
     use crate::{AppState, config::AppLimits, db};
 
-    use super::{checked_page_end, preview_page_size, read_indexed_lines, staging_path};
+    use super::{
+        lifecycle::{checked_page_end, preview_page_size, staging_path},
+        storage::{ensure_temp_result_capacity, read_indexed_lines},
+    };
 
     #[test]
     fn pagination_end_rejects_i64_overflow() {
@@ -219,7 +224,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            super::ensure_temp_result_capacity(&state, 10, Some("current"))
+            ensure_temp_result_capacity(&state, 10, Some("current"))
                 .await
                 .is_ok()
         );
@@ -233,7 +238,7 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            super::ensure_temp_result_capacity(&state, 10, Some("current"))
+            ensure_temp_result_capacity(&state, 10, Some("current"))
                 .await
                 .is_err()
         );
