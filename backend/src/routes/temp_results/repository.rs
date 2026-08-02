@@ -12,6 +12,16 @@ pub(crate) async fn delete_temp_result_record(
     Ok(())
 }
 
+pub(crate) async fn list_storage_paths(
+    state: &web::Data<AppState>,
+) -> Result<HashSet<String>, AppError> {
+    sqlx::query_scalar("SELECT storage_path FROM temp_results")
+        .fetch_all(&state.pool)
+        .await
+        .map(|paths| paths.into_iter().collect())
+        .map_err(AppError::Database)
+}
+
 pub(crate) async fn insert_staging_temp_result(
     state: &web::Data<AppState>,
     id: &str,

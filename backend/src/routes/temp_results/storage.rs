@@ -1,4 +1,5 @@
 use super::lifecycle::checked_page_end;
+use super::repository::list_storage_paths;
 use super::*;
 
 pub(crate) async fn result_storage_size(
@@ -167,13 +168,7 @@ pub(crate) async fn cleanup_orphan_temp_files(state: &web::Data<AppState>) -> Re
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(AppError::Io(error)),
     };
-    let storage_paths: HashSet<String> =
-        sqlx::query_scalar("SELECT storage_path FROM temp_results")
-            .fetch_all(&state.pool)
-            .await
-            .map_err(AppError::Database)?
-            .into_iter()
-            .collect();
+    let storage_paths = list_storage_paths(state).await?;
     let cutoff = SystemTime::now()
         .checked_sub(ORPHAN_GRACE_PERIOD)
         .unwrap_or(SystemTime::UNIX_EPOCH);
