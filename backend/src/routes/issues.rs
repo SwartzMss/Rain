@@ -962,11 +962,30 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-        require_inactive_lease(&pool, "LEASE", &active_token, 3)
+        let original_lease_until: String =
+            sqlx::query_scalar("SELECT deletion_lease_until FROM issues WHERE code='LEASE'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        require_inactive_lease(&pool, "LEASE", &active_token, 10)
             .await
             .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        let mut original_lease_expired = false;
+        for _ in 0..50 {
+            original_lease_expired = sqlx::query_scalar("SELECT datetime('now') >= datetime(?)")
+                .bind(&original_lease_until)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if original_lease_expired {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            original_lease_expired,
+            "original lease did not expire during the test"
+        );
         assert!(
             !claim_inactive_recovery(&pool, "LEASE", "takeover", 3)
                 .await
