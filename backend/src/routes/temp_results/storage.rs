@@ -263,3 +263,17 @@ pub(crate) fn checked_temp_path(
     }
     Ok(path.to_path_buf())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::staging_path;
+
+    #[test]
+    fn staging_artifact_uses_part_suffix() {
+        let path = std::path::Path::new("temp-results/result.log");
+        assert_eq!(
+            staging_path(path),
+            std::path::PathBuf::from("temp-results/result.log.part")
+        );
+    }
+}

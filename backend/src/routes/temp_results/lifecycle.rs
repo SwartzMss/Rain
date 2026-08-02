@@ -45,81 +45,32 @@ pub(crate) async fn load_and_renew(
 }
 
 pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
-    let deleting_records = sqlx::query_as::<_, TempResultRecord>(
-        r#"
-        SELECT id, name, expression, source_label, storage_path, line_count,
-               size_bytes, created_at, expires_at
-        FROM temp_results WHERE status = 'DELETING' ORDER BY created_at, id
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
-    for record in deleting_records {
+    for record in repository::list_deleting(state).await? {
         finish_deleting_temp_result(state, &record).await;
     }
-
-    let expired_records = sqlx::query_as::<_, TempResultRecord>(
-        r#"
-        SELECT id, name, expression, source_label, storage_path, line_count,
-               size_bytes, created_at, expires_at
-        FROM temp_results
-        WHERE status = 'ACTIVE' AND datetime(expires_at) < datetime('now')
-        ORDER BY expires_at, id
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
-    for record in expired_records {
-        let storage_path: Option<String> = sqlx::query_scalar(
-            "UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'ACTIVE' AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path",
-        )
-        .bind(&record.id)
-        .bind(&record.expires_at)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(AppError::Database)?;
-        let Some(storage_path) = storage_path else {
+    for record in repository::list_expired_active(state).await? {
+        let Some(storage_path) =
+            repository::claim_expired_active(state, &record.id, &record.expires_at).await?
+        else {
             continue;
         };
         let mut claimed = record;
         claimed.storage_path = storage_path;
         finish_deleting_temp_result(state, &claimed).await;
     }
-
-    let staging_records = sqlx::query_as::<_, TempResultRecord>(
-        r#"
-        SELECT id, name, expression, source_label, storage_path, line_count,
-               size_bytes, created_at, expires_at
-        FROM temp_results
-        WHERE status = 'STAGING' AND datetime(created_at) < datetime('now', '-600 seconds')
-        ORDER BY created_at, id
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    .map_err(AppError::Database)?;
-    for record in staging_records {
+    for record in repository::list_stale_staging(state).await? {
         if is_staging_lease_active(state, &record.id) {
             continue;
         }
-        let claimed: Option<String> = sqlx::query_scalar(
-            "UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'STAGING' AND created_at = ? RETURNING storage_path",
-        )
-        .bind(&record.id)
-        .bind(&record.created_at)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(AppError::Database)?;
-        let Some(storage_path) = claimed else {
+        let Some(storage_path) =
+            repository::claim_stale_staging(state, &record.id, &record.created_at).await?
+        else {
             continue;
         };
-        let mut claimed_record = record;
-        claimed_record.storage_path = storage_path;
-        finish_deleting_temp_result(state, &claimed_record).await;
+        let mut claimed = record;
+        claimed.storage_path = storage_path;
+        finish_deleting_temp_result(state, &claimed).await;
     }
-
     let storage_paths = repository::list_storage_paths(state).await?;
     cleanup_orphan_temp_files(state, &storage_paths).await?;
     Ok(())
@@ -140,11 +91,7 @@ pub(crate) async fn finish_deleting_temp_result(
         tracing::warn!(result_id = %record.id, %error, "temporary result files could not be removed; keeping DELETING record");
         return;
     }
-    if let Err(error) = sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = 'DELETING'")
-        .bind(&record.id)
-        .execute(&state.pool)
-        .await
-    {
+    if let Err(error) = repository::delete_deleting_record(state, &record.id).await {
         tracing::warn!(result_id = %record.id, %error, "temporary result database record could not be removed; keeping DELETING record");
     }
 }
@@ -201,5 +148,17 @@ pub(crate) fn to_response(record: TempResultRecord) -> TempResult {
         size_bytes: record.size_bytes,
         created_at: record.created_at,
         expires_at: record.expires_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checked_page_end, preview_page_size};
+
+    #[test]
+    fn lifecycle_pagination_helpers_reject_overflow() {
+        assert_eq!(checked_page_end(10, 5).unwrap(), 15);
+        assert!(checked_page_end(i64::MAX, 1).is_err());
+        assert_eq!(preview_page_size(Some(20_000)), 10_000);
     }
 }

@@ -195,3 +195,38 @@ pub(crate) async fn renew_active(
             .map_err(AppError::Database)?;
     Ok(updated.rows_affected() == 1)
 }
+
+pub(crate) async fn list_deleting(
+    state: &web::Data<AppState>,
+) -> Result<Vec<TempResultRecord>, AppError> {
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = 'DELETING' ORDER BY created_at, id")
+        .fetch_all(&state.pool).await.map_err(AppError::Database)
+}
+pub(crate) async fn list_expired_active(
+    state: &web::Data<AppState>,
+) -> Result<Vec<TempResultRecord>, AppError> {
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = 'ACTIVE' AND datetime(expires_at) < datetime('now') ORDER BY expires_at, id")
+        .fetch_all(&state.pool).await.map_err(AppError::Database)
+}
+pub(crate) async fn claim_expired_active(
+    state: &web::Data<AppState>,
+    id: &str,
+    expires_at: &str,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar("UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'ACTIVE' AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
+        .bind(id).bind(expires_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+}
+pub(crate) async fn list_stale_staging(
+    state: &web::Data<AppState>,
+) -> Result<Vec<TempResultRecord>, AppError> {
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = 'STAGING' AND datetime(created_at) < datetime('now', '-600 seconds') ORDER BY created_at, id")
+        .fetch_all(&state.pool).await.map_err(AppError::Database)
+}
+pub(crate) async fn claim_stale_staging(
+    state: &web::Data<AppState>,
+    id: &str,
+    created_at: &str,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar("UPDATE temp_results SET status = 'DELETING' WHERE id = ? AND status = 'STAGING' AND created_at = ? RETURNING storage_path")
+        .bind(id).bind(created_at).fetch_optional(&state.pool).await.map_err(AppError::Database)
+}
