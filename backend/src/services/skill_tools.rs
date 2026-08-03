@@ -21,13 +21,23 @@ pub struct SkillRunContext {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "tool", content = "arguments", rename_all = "snake_case")]
 pub enum SkillToolCall {
-    ListFiles,
-    SearchLogs { query: String },
-    ReadFileLines { file_id: i64, start: i64, end: i64 },
+    ListFiles {
+        cursor: Option<i64>,
+        prefix: Option<String>,
+    },
+    SearchLogs {
+        query: String,
+    },
+    ReadFileLines {
+        file_id: i64,
+        start: i64,
+        end: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvidenceRange {
+    pub bundle_hash: String,
     pub file_id: i64,
     pub path: String,
     pub start_line: i64,
@@ -54,6 +64,7 @@ impl EvidenceLedger {
 
     pub fn supports_evidence(
         &self,
+        bundle_hash: &str,
         file_id: i64,
         path: &str,
         start: i64,
@@ -64,7 +75,8 @@ impl EvidenceLedger {
             return false;
         }
         let range_matches = self.ranges.iter().any(|range| {
-            range.file_id == file_id
+            range.bundle_hash == bundle_hash
+                && range.file_id == file_id
                 && range.path == path
                 && start >= range.start_line
                 && end <= range.end_line
@@ -107,6 +119,7 @@ impl EvidenceLedger {
         let mut next_ranges = self.ranges.clone();
         next_ranges.retain(|item| item.file_id != range.file_id);
         next_ranges.extend(intervals.iter().map(|(start, end)| EvidenceRange {
+            bundle_hash: range.bundle_hash.clone(),
             file_id: range.file_id,
             path: range.path.clone(),
             start_line: *start,
@@ -166,7 +179,9 @@ impl<'a> SkillToolExecutor<'a> {
 
     pub async fn execute(&mut self, call: SkillToolCall) -> Result<Value, AppError> {
         match call {
-            SkillToolCall::ListFiles => self.list_files().await,
+            SkillToolCall::ListFiles { cursor, prefix } => {
+                self.list_files(cursor, prefix.as_deref()).await
+            }
             SkillToolCall::SearchLogs { query } => self.search_logs(&query).await,
             SkillToolCall::ReadFileLines {
                 file_id,
@@ -176,34 +191,67 @@ impl<'a> SkillToolExecutor<'a> {
         }
     }
 
-    pub async fn list_files(&mut self) -> Result<Value, AppError> {
+    pub async fn list_files(
+        &mut self,
+        cursor: Option<i64>,
+        prefix: Option<&str>,
+    ) -> Result<Value, AppError> {
         #[derive(Serialize, FromRow)]
         struct Row {
             file_id: i64,
+            bundle_hash: String,
             path: String,
+            path_truncated: bool,
             size_bytes: Option<i64>,
             line_count: Option<i64>,
             mime_type: Option<String>,
         }
+        let cursor = cursor.unwrap_or(0);
+        if cursor < 0 {
+            return Err(AppError::BadRequest("invalid file cursor".into()));
+        }
+        let prefix = prefix.map(str::trim).filter(|value| !value.is_empty());
+        if prefix.is_some_and(|value| value.chars().count() > 512) {
+            return Err(AppError::BadRequest("file prefix is too long".into()));
+        }
+        let prefix_pattern = prefix.map(|value| {
+            format!(
+                "{}%",
+                value
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
+        });
         let mut rows: Vec<Row> = sqlx::query_as(
-            "SELECT f.id AS file_id,f.path,f.size_bytes,f.line_count,f.mime_type FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' ORDER BY f.path LIMIT 2000",
+            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,length(f.path)>4096 AS path_truncated,f.size_bytes,f.line_count,f.mime_type FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.id>? AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') ORDER BY f.id LIMIT 501",
         )
         .bind(&self.context.issue_code)
+        .bind(cursor)
+        .bind(prefix_pattern.as_deref())
+        .bind(prefix_pattern.as_deref())
         .fetch_all(&self.state.db.pool)
         .await
         .map_err(AppError::Database)?;
-        let mut truncated = false;
-        while serde_json::to_vec(&json!({ "files": &rows, "truncated": truncated }))
-            .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
-            .len()
-            > MAX_TOOL_OUTPUT_BYTES
-        {
-            if rows.pop().is_none() {
-                break;
-            }
-            truncated = true;
+        let mut has_more = rows.len() > 500;
+        if has_more {
+            rows.pop();
         }
-        let value = json!({ "files": rows, "truncated": truncated });
+        let value = loop {
+            let next_cursor = has_more
+                .then(|| rows.last().map(|row| row.file_id))
+                .flatten();
+            let candidate =
+                json!({ "files": &rows, "next_cursor": next_cursor, "truncated": has_more });
+            let size = serde_json::to_vec(&candidate)
+                .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
+                .len();
+            if size <= MAX_TOOL_OUTPUT_BYTES || rows.len() <= 1 {
+                break candidate;
+            }
+            rows.pop();
+            has_more = true;
+        };
         self.record_output(&value)?;
         Ok(value)
     }
@@ -222,6 +270,7 @@ impl<'a> SkillToolExecutor<'a> {
         #[derive(Serialize, FromRow)]
         struct Hit {
             file_id: i64,
+            bundle_hash: String,
             path: String,
             start_line: i64,
             end_line: i64,
@@ -229,7 +278,7 @@ impl<'a> SkillToolExecutor<'a> {
         }
         let fts = format!("\"{}\"", query.replace('"', "\"\""));
         let hits: Vec<Hit> = sqlx::query_as(
-            "SELECT f.id AS file_id,f.path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,1,400) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' ORDER BY rank LIMIT ?",
+            "SELECT f.id AS file_id,b.hash AS bundle_hash,f.path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,1,400) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' ORDER BY rank LIMIT ?",
         )
         .bind(fts)
         .bind(&self.context.issue_code)
@@ -264,6 +313,14 @@ impl<'a> SkillToolExecutor<'a> {
         .await
         .map_err(AppError::Database)?
         .ok_or_else(|| AppError::NotFound("file is outside the run Issue".into()))?;
+        let bundle_hash: String = sqlx::query_scalar(
+            "SELECT b.hash FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE f.id=? AND b.issue_code=? AND b.status='READY' LIMIT 1",
+        )
+        .bind(file_id)
+        .bind(&self.context.issue_code)
+        .fetch_one(&self.state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
         let mut api = self.state.limits.api.clone();
         api.max_preview_line_size = api.max_preview_line_size.min(128);
         let mut lines = Vec::new();
@@ -285,7 +342,7 @@ impl<'a> SkillToolExecutor<'a> {
         }
         let mut truncated = false;
         while serde_json::to_vec(
-            &json!({ "path": &record.path, "lines": &lines, "truncated": truncated }),
+            &json!({ "bundle_hash": &bundle_hash, "path": &record.path, "lines": &lines, "truncated": truncated }),
         )
         .map_err(|_| AppError::Config("failed to serialize file evidence".into()))?
         .len()
@@ -296,7 +353,7 @@ impl<'a> SkillToolExecutor<'a> {
             }
             truncated = true;
         }
-        let value = json!({ "path": record.path, "lines": lines, "truncated": truncated });
+        let value = json!({ "bundle_hash": bundle_hash, "path": record.path, "lines": lines, "truncated": truncated });
         self.record_output(&value)?;
         if let Some(returned_lines) = value.get("lines").and_then(Value::as_array)
             && let (Some(actual_start), Some(actual_end)) = (
@@ -322,6 +379,7 @@ impl<'a> SkillToolExecutor<'a> {
             }
             self.ledger.record_range(
                 EvidenceRange {
+                    bundle_hash: value["bundle_hash"].as_str().unwrap_or_default().to_owned(),
                     file_id,
                     path: record.path,
                     start_line: actual_start,
@@ -355,6 +413,7 @@ mod tests {
         ledger
             .record_range(
                 EvidenceRange {
+                    bundle_hash: "bundle-a".into(),
                     file_id: 7,
                     path: "/app.log".into(),
                     start_line: 10,
@@ -373,6 +432,7 @@ mod tests {
         ledger
             .record_range(
                 EvidenceRange {
+                    bundle_hash: "bundle-a".into(),
                     file_id: 7,
                     path: "/app.log".into(),
                     start_line: 10,
@@ -384,8 +444,16 @@ mod tests {
         ledger
             .line_content
             .insert((7, 10), "database timeout after 30s".into());
-        assert!(ledger.supports_evidence(7, "/app.log", 10, 10, "timeout after 30s"));
-        assert!(!ledger.supports_evidence(7, "/forged.log", 10, 10, "timeout after 30s"));
-        assert!(!ledger.supports_evidence(7, "/app.log", 10, 10, "root password"));
+        assert!(ledger.supports_evidence("bundle-a", 7, "/app.log", 10, 10, "timeout after 30s"));
+        assert!(!ledger.supports_evidence("bundle-b", 7, "/app.log", 10, 10, "timeout after 30s"));
+        assert!(!ledger.supports_evidence(
+            "bundle-a",
+            7,
+            "/forged.log",
+            10,
+            10,
+            "timeout after 30s"
+        ));
+        assert!(!ledger.supports_evidence("bundle-a", 7, "/app.log", 10, 10, "root password"));
     }
 }

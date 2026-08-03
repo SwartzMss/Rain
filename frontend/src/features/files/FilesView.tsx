@@ -1241,14 +1241,7 @@ export function BundleView() {
 
   const revealSkillEvidence = async (evidence: SkillEvidence) => {
     try {
-      const response = await rainApi.searchIssueLogs(issueCode, evidence.path, {
-        mode: 'filename',
-        size: 50
-      });
-      const hit = response.hits.find((item) => String(item.file_id) === String(evidence.file_id))
-        ?? response.hits.find((item) => item.path === evidence.path);
-      if (!hit?.bundle_hash) throw new Error('无法定位证据所属的日志包');
-      await handleNodeClick(`${hit.bundle_hash}:${hit.file_id}`, evidence.start_line, { preserveSearch: true });
+      await handleNodeClick(`${evidence.bundle_hash}:${evidence.file_id}`, evidence.start_line, { preserveSearch: true });
       setSourceActionMessage(`已跳转到 ${evidence.path}:${evidence.start_line}`);
     } catch (reason) {
       setSourceActionMessage(`证据跳转失败：${normalizeApiError(reason)}`);

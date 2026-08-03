@@ -1,6 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { normalizeApiError, rainApi } from '../../api/client';
 
+interface SavedProviderForm {
+  baseUrl: string;
+  model: string;
+  timeout: number;
+}
+
 export function AiProviderSettingsPanel() {
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -11,6 +17,7 @@ export function AiProviderSettingsPanel() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [saved, setSaved] = useState<SavedProviderForm | null>(null);
 
   const load = async () => {
     try {
@@ -20,6 +27,11 @@ export function AiProviderSettingsPanel() {
       setTimeoutValue(value.request_timeout_seconds);
       setSource(value.source ?? null);
       setMask(value.api_key_mask ?? null);
+      setSaved(value.configured && value.base_url && value.model ? {
+        baseUrl: value.base_url,
+        model: value.model,
+        timeout: value.request_timeout_seconds
+      } : null);
     } catch (reason) {
       setError(normalizeApiError(reason));
     }
@@ -33,12 +45,30 @@ export function AiProviderSettingsPanel() {
       const payload: { base_url: string; model: string; request_timeout_seconds: number; api_key?: string } = { base_url: baseUrl, model, request_timeout_seconds: timeout };
       if (apiKey) payload.api_key = apiKey;
       const value = await rainApi.updateAiProvider(payload);
-      setApiKey(''); setSource(value.source ?? null); setMask(value.api_key_mask ?? null); setMessage('AI 配置已保存');
+      setApiKey(''); setSource(value.source ?? null); setMask(value.api_key_mask ?? null);
+      setBaseUrl(value.base_url ?? baseUrl); setModel(value.model ?? model); setTimeoutValue(value.request_timeout_seconds);
+      setSaved({ baseUrl: value.base_url ?? baseUrl, model: value.model ?? model, timeout: value.request_timeout_seconds });
+      setMessage('AI 配置已保存');
     } catch (reason) { setError(normalizeApiError(reason)); } finally { setBusy(false); }
   };
   const test = async () => {
-    setBusy(true); setError(''); setMessage('');
-    try { const value = await rainApi.testAiProvider({ base_url: baseUrl, model, request_timeout_seconds: timeout, ...(apiKey ? { api_key: apiKey } : {}) }); setMessage(`连接成功，模型：${value.model}`); }
+    setError(''); setMessage('');
+    const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, '');
+    const changed = !saved
+      || normalizedBaseUrl !== saved.baseUrl.trim().replace(/\/+$/, '')
+      || model.trim() !== saved.model.trim()
+      || timeout !== saved.timeout;
+    if (!apiKey.trim() && changed) {
+      setError('测试修改后的配置需要重新输入 API Key');
+      return;
+    }
+    setBusy(true);
+    try {
+      const value = apiKey.trim()
+        ? await rainApi.testAiProvider({ base_url: normalizedBaseUrl, api_key: apiKey.trim(), model: model.trim(), request_timeout_seconds: timeout })
+        : await rainApi.testAiProvider();
+      setMessage(`连接成功，模型：${value.model}`);
+    }
     catch (reason) { setError(normalizeApiError(reason)); } finally { setBusy(false); }
   };
 

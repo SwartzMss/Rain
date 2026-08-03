@@ -125,9 +125,11 @@
 - `user_skills` 保存用户私有的名称、描述、`SKILL.md`、内容哈希、版本和启用状态；`UNIQUE(owner_user_id, name)` 配合仓储层的大小写归一化检查隔离命名空间。系统没有内置 Skill 记录。
 - `skill_reviews` 以 `skill_id` 为主键，只保存当前版本的一次质量评估。重新评估使用 upsert 覆盖；正文变更会在同一事务中删除旧评估。
 - `ai_provider_settings` 是单例管理员配置。Base URL、模型和超时为普通字段，API Key 是带版本与随机 nonce 的 AES-256-GCM 密文；主密钥只来自 `RAIN_AI_MASTER_KEY`，不进入数据库。有效数据库配置优先于环境变量配置。
+- 修改数据库 Provider 的 Base URL 时必须同时替换 API Key；候选配置测试也必须提交完整配置，空请求才会测试当前生效配置。
 - `skill_runs` 保存发起用户、Issue、Skill 身份、版本和临时正文快照，以及状态、计数器、取消标记、最终 JSON 和净化后的错误。`skill_id` 不设外键，因此删除源 Skill 不会破坏已开始的任务；用户和 Issue 删除会级联删除任务。
 - 部分唯一索引 `idx_skill_runs_one_active_per_user` 保证每个用户最多一个 `QUEUED/RUNNING` 任务。终态更新带状态和取消条件，迟到的模型响应不能覆盖 `CANCELLED`。
 - `skill_run_steps` 只保存工具名、去敏参数摘要、命中数、证据引用元数据、耗时和状态，不保存完整日志输出。
+- 最终观察和推断使用类型化结构并引用已验证证据 ID；证据包含 Bundle hash、文件 ID、路径和行区间，避免同路径 Bundle 的跳转歧义。
 - 启动时遗留的活动任务会转为 `FAILED/SERVICE_RESTARTED`。`SUCCEEDED/FAILED/CANCELLED` 记录及其步骤、快照和结果在 24 小时后级联清理，不存在历史列表接口。
 
 ## 关系与典型上传

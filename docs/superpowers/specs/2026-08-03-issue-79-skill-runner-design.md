@@ -84,12 +84,15 @@ Database API keys are encrypted with authenticated encryption under a 32-byte
 server master key supplied by `RAIN_AI_MASTER_KEY`. The configuration API never
 returns ciphertext or plaintext. It returns whether a key is configured and a
 mask suitable for display. An update without a new key preserves the current
+key only while the Base URL is unchanged; changing the endpoint requires a new
 key. Without a valid master key, environment configuration can still run, but
 the server rejects attempts to persist a database API key.
 
-The administrator connection test performs a small bounded request using the
-candidate configuration. It returns capability or connection diagnostics
-without echoing credentials, authorization headers, or full model responses.
+The administrator connection test performs a small bounded request. An empty
+request tests the current effective configuration. Testing unsaved values
+requires a complete Base URL, API key, model, and timeout, so a stored secret is
+never combined with a candidate endpoint. It returns diagnostics without
+echoing credentials, authorization headers, or full model responses.
 
 ### Skill service
 
@@ -125,7 +128,7 @@ Skill deletes it, leaving the UI in a `not evaluated` state.
 
 The `skill_tools` boundary exposes exactly three internal functions:
 
-- `list_files`: lists files from `READY` Bundles in the bound Issue;
+- `list_files`: lists files from `READY` Bundles in the bound Issue, with a stable cursor and optional path-prefix filter;
 - `search_logs`: searches indexed text in that Issue and returns at most 20
   bounded matches; and
 - `read_file_lines`: reads a bounded line range from a file in a `READY` Bundle
@@ -185,16 +188,17 @@ When the model stops requesting tools, the runner validates this result:
 ```json
 {
   "summary": "...",
-  "observations": [],
-  "inferences": [],
+  "observations": [{"text": "...", "evidence_ids": ["e1"]}],
+  "inferences": [{"text": "...", "confidence": "MEDIUM", "evidence_ids": ["e1"]}],
   "missing_context": [],
   "evidence": []
 }
 ```
 
-Evidence entries have a stable file ID, display path, start line, end line,
-bounded excerpt, and explanation. Each cited range must occur in the evidence
-ledger. Invalid output receives one bounded repair attempt. A second invalid
+Evidence entries have a unique evidence ID, Bundle hash, stable file ID, display
+path, start line, end line, bounded excerpt, and explanation. Every observation
+and inference cites at least one evidence ID, and each cited range must occur in
+the evidence ledger. Invalid output receives one bounded repair attempt. A second invalid
 response fails the run with a stable error code.
 
 At any iteration, call, byte, range, or time limit, the runner disables further

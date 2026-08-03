@@ -138,7 +138,7 @@ export const rainApi = {
   reviewSkill(id: string) { return request<SkillReview>(`/api/me/skills/${encodePathSegment(id)}/review`, { method: 'POST' }); },
   fetchAiProvider() { return request<AiProviderSettings>('/api/admin/ai-provider'); },
   updateAiProvider(payload: { base_url: string; api_key?: string; model: string; request_timeout_seconds: number }) { return request<AiProviderSettings>('/api/admin/ai-provider', { method: 'PUT', body: JSON.stringify(payload) }); },
-  testAiProvider(payload?: { base_url?: string; api_key?: string; model?: string; request_timeout_seconds?: number }) { return request<{ ok: boolean; model: string }>('/api/admin/ai-provider/test', { method: 'POST', body: payload ? JSON.stringify(payload) : undefined }); },
+  testAiProvider(payload?: { base_url: string; api_key: string; model: string; request_timeout_seconds: number }) { return request<{ ok: boolean; model: string }>('/api/admin/ai-provider/test', { method: 'POST', body: payload ? JSON.stringify(payload) : undefined }); },
   fetchAiProviderStatus() { return request<{ configured: boolean }>('/api/me/ai-provider-status'); },
   createSkillRun(issueCode: string, skillId: string) { return request<SkillRun>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/skill-runs`, { method: 'POST', body: JSON.stringify({ skill_id: skillId }) }); },
   fetchActiveSkillRun() { return request<SkillRun | null>('/api/me/skill-runs/active'); },

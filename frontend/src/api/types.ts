@@ -276,6 +276,8 @@ export interface SkillRun {
 }
 
 export interface SkillEvidence {
+  id: string;
+  bundle_hash: string;
   file_id: number;
   path: string;
   start_line: number;
@@ -284,10 +286,21 @@ export interface SkillEvidence {
   explanation: string;
 }
 
+export interface SkillObservation {
+  text: string;
+  evidence_ids: string[];
+}
+
+export interface SkillInference {
+  text: string;
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  evidence_ids: string[];
+}
+
 export interface SkillRunResult {
   summary: string;
-  observations: unknown[];
-  inferences: unknown[];
-  missing_context: unknown[];
+  observations: SkillObservation[];
+  inferences: SkillInference[];
+  missing_context: string[];
   evidence: SkillEvidence[];
 }

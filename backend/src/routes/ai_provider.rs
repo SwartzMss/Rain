@@ -21,13 +21,13 @@ pub struct UpdateAiProvider {
     request_timeout_seconds: u64,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TestAiProvider {
-    base_url: Option<String>,
-    api_key: Option<String>,
-    model: Option<String>,
-    request_timeout_seconds: Option<u64>,
+    base_url: String,
+    api_key: String,
+    model: String,
+    request_timeout_seconds: u64,
 }
 
 async fn provider_snapshot(state: &AppState) -> Result<serde_json::Value, AppError> {
@@ -116,6 +116,17 @@ pub async fn update_ai_provider(
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty());
+    if replacement_key.is_none()
+        && existing
+            .as_ref()
+            .is_some_and(|row| row.0.trim_end_matches('/') != base_url)
+    {
+        return Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "AI_API_KEY_REQUIRED_FOR_BASE_URL_CHANGE",
+            "修改 Base URL 时必须重新输入 API Key",
+        ));
+    }
     let encrypted_api_key = if let Some(api_key) = replacement_key {
         let master_key = state.ai_provider.master_key.ok_or_else(|| {
             AppError::api(
@@ -194,97 +205,98 @@ pub async fn test_ai_provider(
     state: web::Data<AppState>,
     body: web::Bytes,
 ) -> Result<HttpResponse, AppError> {
-    let current = resolve_effective_config(&state.db.pool, &state.ai_provider).await?;
-    let candidate = if body.is_empty() {
-        TestAiProvider::default()
+    let provider = if body.is_empty() {
+        resolve_effective_config(&state.db.pool, &state.ai_provider)
+            .await?
+            .ok_or_else(|| {
+                AppError::api(
+                    StatusCode::CONFLICT,
+                    "AI_PROVIDER_NOT_CONFIGURED",
+                    "模型服务尚未配置",
+                )
+            })?
     } else {
-        serde_json::from_slice(&body).map_err(|_| {
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
             AppError::api(
                 StatusCode::BAD_REQUEST,
                 "INVALID_AI_PROVIDER_TEST",
                 "模型服务测试配置无效",
             )
-        })?
+        })?;
+        let object = value.as_object().ok_or_else(|| {
+            AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVALID_AI_PROVIDER_TEST",
+                "模型服务测试配置无效",
+            )
+        })?;
+        const FIELDS: [&str; 4] = ["base_url", "api_key", "model", "request_timeout_seconds"];
+        if object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+            return Err(AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVALID_AI_PROVIDER_TEST",
+                "模型服务测试配置无效",
+            ));
+        }
+        if FIELDS.iter().any(|field| !object.contains_key(*field)) {
+            return Err(AppError::api(
+                StatusCode::BAD_REQUEST,
+                "AI_PROVIDER_TEST_REQUIRES_COMPLETE_CONFIG",
+                "测试新配置必须完整提供 Base URL、API Key、模型和超时",
+            ));
+        }
+        let candidate: TestAiProvider = serde_json::from_value(value).map_err(|_| {
+            AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVALID_AI_PROVIDER_TEST",
+                "模型服务测试配置无效",
+            )
+        })?;
+        let base_url = candidate.base_url.trim().trim_end_matches('/').to_owned();
+        let parsed = reqwest::Url::parse(&base_url).map_err(|_| invalid_base_url())?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(invalid_base_url());
+        }
+        let api_key = candidate.api_key.trim();
+        if api_key.is_empty() {
+            return Err(AppError::api(
+                StatusCode::BAD_REQUEST,
+                "AI_API_KEY_REQUIRED",
+                "测试新配置必须提供 API Key",
+            ));
+        }
+        let model = candidate.model.trim();
+        if model.is_empty() || model.len() > 200 {
+            return Err(AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVALID_AI_MODEL",
+                "模型名称不能为空且不能超过 200 个字符",
+            ));
+        }
+        if !(1..=300).contains(&candidate.request_timeout_seconds) {
+            return Err(AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVALID_AI_TIMEOUT",
+                "请求超时必须为 1 到 300 秒",
+            ));
+        }
+        ResolvedAiProvider::candidate(
+            ProviderSource::Database,
+            base_url,
+            api_key.to_owned(),
+            model.to_owned(),
+            candidate.request_timeout_seconds,
+        )
     };
-    let base_url = candidate
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| current.as_ref().map(|value| value.base_url.clone()))
-        .ok_or_else(|| {
-            AppError::api(
-                StatusCode::CONFLICT,
-                "AI_PROVIDER_NOT_CONFIGURED",
-                "模型服务尚未配置",
-            )
-        })?;
-    let parsed = reqwest::Url::parse(&base_url).map_err(|_| invalid_base_url())?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err(invalid_base_url());
-    }
-    let api_key = candidate
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| current.as_ref().map(|value| value.api_key().to_owned()))
-        .ok_or_else(|| {
-            AppError::api(
-                StatusCode::CONFLICT,
-                "AI_PROVIDER_NOT_CONFIGURED",
-                "模型服务尚未配置",
-            )
-        })?;
-    let model = candidate
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| current.as_ref().map(|value| value.model.clone()))
-        .ok_or_else(|| {
-            AppError::api(
-                StatusCode::CONFLICT,
-                "AI_PROVIDER_NOT_CONFIGURED",
-                "模型服务尚未配置",
-            )
-        })?;
-    if model.len() > 200 {
-        return Err(AppError::api(
-            StatusCode::BAD_REQUEST,
-            "INVALID_AI_MODEL",
-            "模型名称不能为空且不能超过 200 个字符",
-        ));
-    }
-    let timeout_seconds = candidate
-        .request_timeout_seconds
-        .or_else(|| current.as_ref().map(|value| value.timeout_seconds))
-        .unwrap_or(state.ai_provider.timeout_seconds);
-    if !(1..=300).contains(&timeout_seconds) {
-        return Err(AppError::api(
-            StatusCode::BAD_REQUEST,
-            "INVALID_AI_TIMEOUT",
-            "请求超时必须为 1 到 300 秒",
-        ));
-    }
-    let provider = ResolvedAiProvider::candidate(
-        current
-            .as_ref()
-            .map_or(ProviderSource::Database, |value| value.source),
-        base_url.clone(),
-        api_key,
-        model.clone(),
-        timeout_seconds,
-    );
+    let base_url = provider.base_url.clone();
+    let model = provider.model.clone();
+    let timeout_seconds = provider.timeout_seconds;
     let client = OpenAiChatClient::new(&provider).map_err(provider_error)?;
     let outcome = client
         .complete(ChatRequest {

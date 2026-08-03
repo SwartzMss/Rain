@@ -251,6 +251,40 @@ async fn administrator_can_save_masked_provider_without_exposing_the_secret() {
         &app,
         actix_test::TestRequest::post()
             .uri("/api/admin/ai-provider/test")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({
+                "base_url": "https://attacker.example/v1",
+                "model": "replacement-model",
+                "request_timeout_seconds": 80
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = actix_test::read_body_json(response).await;
+    assert_eq!(body["code"], "AI_PROVIDER_TEST_REQUIRES_COMPLETE_CONFIG");
+
+    let response = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::put()
+            .uri("/api/admin/ai-provider")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({
+                "base_url": "https://other.example/v1",
+                "model": "replacement-model",
+                "request_timeout_seconds": 80
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = actix_test::read_body_json(response).await;
+    assert_eq!(body["code"], "AI_API_KEY_REQUIRED_FOR_BASE_URL_CHANGE");
+
+    let response = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/api/admin/ai-provider/test")
             .cookie(cookie)
             .set_json(serde_json::json!({"modle":"typo"}))
             .to_request(),

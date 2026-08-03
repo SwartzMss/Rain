@@ -28,5 +28,20 @@ describe('AI provider settings', () => {
     expect(rainApi.updateAiProvider).toHaveBeenCalledWith({ base_url: 'https://ai.example/v1', model: 'model-a', request_timeout_seconds: 30 });
     await user.click(screen.getByRole('button', { name: '测试连接' }));
     await waitFor(() => expect(screen.getByText('连接成功，模型：model-a')).toBeInTheDocument());
+    expect(rainApi.testAiProvider).toHaveBeenCalledWith();
+  });
+
+  it('never combines a changed endpoint with the stored secret', async () => {
+    vi.mocked(rainApi.fetchAiProvider).mockResolvedValue({ configured: true, source: 'DATABASE', base_url: 'https://ai.example/v1', model: 'model-a', request_timeout_seconds: 30, api_key_mask: 'sk-…1234' });
+    const user = userEvent.setup();
+    render(<AiProviderSettingsPanel />);
+
+    const baseUrl = await screen.findByDisplayValue('https://ai.example/v1');
+    await user.clear(baseUrl);
+    await user.type(baseUrl, 'https://other.example/v1');
+    await user.click(screen.getByRole('button', { name: '测试连接' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('测试修改后的配置需要重新输入 API Key');
+    expect(rainApi.testAiProvider).not.toHaveBeenCalled();
   });
 });
