@@ -717,6 +717,7 @@ async fn finish_manual_issue_deletion(
             .fetch_all(pool)
             .await
             .map_err(AppError::Database)?;
+    reject_processing_bundles(&bundles)?;
 
     for bundle in &bundles {
         if !crate::db::renew_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds)
