@@ -1277,6 +1277,7 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    wait_for_issue_deleted(&pool, "SMOKE").await;
     let missing_response = test::call_service(
         &app,
         test::TestRequest::get()
@@ -1907,6 +1908,22 @@ async fn wait_for_issue_status(pool: &sqlx::SqlitePool, issue_code: &str, status
             .await
             .expect("inspect timed out issue status");
     panic!("issue {issue_code} did not become {status}; observed {states:?}");
+}
+
+async fn wait_for_issue_deleted(pool: &sqlx::SqlitePool, issue_code: &str) {
+    for _ in 0..100 {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM issues WHERE code = ?)")
+                .bind(issue_code)
+                .fetch_one(pool)
+                .await
+                .expect("poll issue deletion");
+        if !exists {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("issue {issue_code} was not deleted");
 }
 
 async fn wait_for_bundle_status(pool: &sqlx::SqlitePool, bundle_hash: &str, status: &str) {
