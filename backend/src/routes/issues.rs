@@ -627,20 +627,6 @@ pub async fn delete_issue(
     .await
     .map_err(AppError::Database)?;
 
-    if bundles.is_empty() {
-        sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
-            .bind(&issue_code)
-            .execute(&state.db.pool)
-            .await
-            .map_err(AppError::Database)?;
-        sqlx::query("DELETE FROM issues WHERE code = ?")
-            .bind(&issue_code)
-            .execute(&state.db.pool)
-            .await
-            .map_err(AppError::Database)?;
-        return Ok(HttpResponse::NoContent().finish());
-    }
-
     if let Err(error) = reject_processing_bundles(&bundles) {
         if newly_claimed {
             sqlx::query(
@@ -654,6 +640,28 @@ pub async fn delete_issue(
         return Err(error);
     }
 
+    let pool = state.db.pool.clone();
+    let cleanup_issue_code = issue_code.clone();
+    tokio::spawn(async move {
+        if let Err(error) = finish_manual_issue_deletion(&pool, &cleanup_issue_code).await {
+            tracing::error!(issue_code = cleanup_issue_code, %error, "background issue deletion failed; it can be retried");
+        }
+    });
+
+    Ok(HttpResponse::NoContent().finish())
+}
+
+async fn finish_manual_issue_deletion(
+    pool: &sqlx::SqlitePool,
+    issue_code: &str,
+) -> Result<(), AppError> {
+    let bundles: Vec<BundleIdRow> =
+        sqlx::query_as("SELECT id, issue_code, status FROM bundles WHERE issue_code = ?")
+            .bind(issue_code)
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Database)?;
+
     for bundle in &bundles {
         if bundle.status == "DELETED" {
             continue;
@@ -663,25 +671,26 @@ pub async fn delete_issue(
                 "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
             )
             .bind(&bundle.id)
-            .execute(&state.db.pool)
+            .execute(pool)
             .await
             .map_err(AppError::Database)?;
         }
-        finish_bundle_deletion(&state.db.pool, &bundle.id).await?;
+        finish_bundle_deletion(pool, &bundle.id).await?;
     }
 
     sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
-        .bind(&issue_code)
-        .execute(&state.db.pool)
+        .bind(issue_code)
+        .execute(pool)
         .await
         .map_err(AppError::Database)?;
-    sqlx::query("DELETE FROM issues WHERE code = ?")
-        .bind(&issue_code)
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-
-    Ok(HttpResponse::NoContent().finish())
+    sqlx::query(
+        "DELETE FROM issues WHERE code = ? AND status = 'DELETING' AND deletion_reason = 'MANUAL'",
+    )
+    .bind(issue_code)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(())
 }
 
 fn reject_processing_bundle(bundle: &BundleIdRow) -> Result<(), AppError> {
