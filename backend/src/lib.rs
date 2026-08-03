@@ -28,7 +28,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
-use crate::config::{AppLimits, AuthConfig};
+use crate::config::{AiProviderEnv, AppLimits, AuthConfig};
 
 pub struct AuthRateLimitBucket {
     window: Duration,
@@ -170,6 +170,7 @@ pub struct AppState {
     pub upload: UploadRuntime,
     pub temp_results: TempResultRuntime,
     pub auth_runtime: AuthRuntime,
+    pub ai_provider: AiProviderEnv,
     pub issue_inactive_days: AtomicUsize,
     pub limits: AppLimits,
 }
@@ -212,6 +213,23 @@ impl AppState {
         Self::with_blob_store_and_auth(pool, data_root, limits, AuthConfig::default(), blob_store)
     }
 
+    pub fn new_with_ai(
+        pool: SqlitePool,
+        data_root: PathBuf,
+        limits: AppLimits,
+        ai_provider: AiProviderEnv,
+    ) -> Self {
+        let blob_store = Arc::new(LocalCasBlobStore::new(data_root.clone()));
+        Self::with_blob_store_auth_and_ai(
+            pool,
+            data_root,
+            limits,
+            AuthConfig::default(),
+            ai_provider,
+            blob_store,
+        )
+    }
+
     pub fn with_blob_store(
         pool: SqlitePool,
         data_root: PathBuf,
@@ -226,6 +244,24 @@ impl AppState {
         data_root: PathBuf,
         limits: AppLimits,
         auth: AuthConfig,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Self {
+        Self::with_blob_store_auth_and_ai(
+            pool,
+            data_root,
+            limits,
+            auth,
+            AiProviderEnv::default(),
+            blob_store,
+        )
+    }
+
+    pub fn with_blob_store_auth_and_ai(
+        pool: SqlitePool,
+        data_root: PathBuf,
+        limits: AppLimits,
+        auth: AuthConfig,
+        ai_provider: AiProviderEnv,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         let upload = UploadRuntime::new(
@@ -243,6 +279,7 @@ impl AppState {
             upload,
             temp_results,
             auth_runtime,
+            ai_provider,
             issue_inactive_days: AtomicUsize::new(0),
             limits,
         }

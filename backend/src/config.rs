@@ -12,13 +12,25 @@ const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AiProviderEnv {
     pub base_url: Option<String>,
     api_key: Option<String>,
     pub model: Option<String>,
     pub timeout_seconds: u64,
     pub master_key: Option<[u8; 32]>,
+}
+
+impl Default for AiProviderEnv {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            api_key: None,
+            model: None,
+            timeout_seconds: 120,
+            master_key: None,
+        }
+    }
 }
 
 impl std::fmt::Debug for AiProviderEnv {

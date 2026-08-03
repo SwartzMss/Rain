@@ -7,6 +7,7 @@ use actix_web::{
     web,
 };
 
+mod ai_provider;
 mod auth;
 mod files;
 mod health;
@@ -78,6 +79,9 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(auth::register_user)
                 .service(auth::registration_status)
                 .service(admin::list_users)
+                .service(ai_provider::get_ai_provider)
+                .service(ai_provider::update_ai_provider)
+                .service(ai_provider::test_ai_provider)
                 .service(admin::get_settings)
                 .service(admin::update_settings)
                 .service(admin::auth_rate_limits)

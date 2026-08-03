@@ -147,11 +147,12 @@ async fn main() -> std::io::Result<()> {
     ];
     background_tasks.push(spawn_deleting_bundle_cleanup(pool.clone()));
     background_tasks.push(spawn_session_cleanup(pool.clone()));
-    let app_state = AppState::with_blob_store_and_auth(
+    let app_state = AppState::with_blob_store_auth_and_ai(
         pool,
         config.data_root.clone(),
         config.limits.clone(),
         config.auth.clone(),
+        config.ai_provider.clone(),
         blob_store,
     );
     app_state
