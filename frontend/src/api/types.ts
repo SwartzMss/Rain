@@ -241,6 +241,8 @@ export interface UserSkill {
   review?: SkillReview | null;
 }
 
+export type UserSkillSummary = Omit<UserSkill, 'skill_markdown'>;
+
 export interface SkillPayload {
   name: string;
   description?: string | null;
@@ -298,7 +300,11 @@ export interface SkillInference {
 }
 
 export interface SkillRunResult {
-  summary: string;
+  summary: {
+    status: 'SUPPORTED' | 'INSUFFICIENT_EVIDENCE';
+    text: string;
+    evidence_ids: string[];
+  };
   observations: SkillObservation[];
   inferences: SkillInference[];
   missing_context: string[];

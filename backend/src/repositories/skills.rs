@@ -1,27 +1,64 @@
-use sqlx::SqlitePool;
+use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
 
 use crate::{
     error::AppError,
-    models::skills::{SkillPayload, SkillReview, UserSkillRecord, UserSkillResponse},
+    models::skills::{
+        SkillPayload, SkillReview, UserSkillRecord, UserSkillResponse, UserSkillSummaryResponse,
+    },
 };
 
 const COLUMNS: &str = "id,owner_user_id,name,description,skill_markdown,content_hash,version,enabled,created_at,updated_at";
+pub const MAX_SKILLS_PER_USER: i64 = 50;
 
-pub async fn list(pool: &SqlitePool, user_id: &str) -> Result<Vec<UserSkillResponse>, AppError> {
-    let sql = format!(
-        "SELECT {COLUMNS} FROM user_skills WHERE owner_user_id=? ORDER BY updated_at DESC,id DESC"
-    );
-    let records: Vec<UserSkillRecord> = sqlx::query_as(&sql)
+#[derive(FromRow)]
+struct SkillListRow {
+    id: String,
+    name: String,
+    description: Option<String>,
+    content_hash: String,
+    version: i64,
+    enabled: bool,
+    created_at: String,
+    updated_at: String,
+    review_overall_score: Option<i64>,
+    review_grade: Option<String>,
+    review_dimensions: Option<String>,
+    review_findings: Option<String>,
+    review_evaluated_at: Option<String>,
+}
+
+pub async fn list(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> Result<Vec<UserSkillSummaryResponse>, AppError> {
+    let rows: Vec<SkillListRow> = sqlx::query_as(
+        "SELECT s.id,s.name,s.description,s.content_hash,s.version,s.enabled,s.created_at,s.updated_at,r.overall_score AS review_overall_score,r.grade AS review_grade,r.dimension_scores_json AS review_dimensions,r.findings_json AS review_findings,r.evaluated_at AS review_evaluated_at FROM user_skills s LEFT JOIN skill_reviews r ON r.skill_id=s.id AND r.skill_version=s.version AND r.skill_content_hash=s.content_hash WHERE s.owner_user_id=? ORDER BY s.updated_at DESC,s.id DESC LIMIT 50",
+    )
         .bind(user_id)
         .fetch_all(pool)
         .await
         .map_err(AppError::Database)?;
-    let mut result = Vec::with_capacity(records.len());
-    for record in records {
-        result.push(with_review(pool, record).await?);
-    }
-    Ok(result)
+    Ok(rows
+        .into_iter()
+        .map(|row| UserSkillSummaryResponse {
+            id: row.id,
+            name: row.name,
+            description: row.description,
+            content_hash: row.content_hash,
+            version: row.version,
+            enabled: row.enabled,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            review: parse_review_row(
+                row.review_overall_score,
+                row.review_grade,
+                row.review_dimensions,
+                row.review_findings,
+                row.review_evaluated_at,
+            ),
+        })
+        .collect())
 }
 
 pub async fn find_owned(
@@ -56,7 +93,7 @@ pub async fn create(
     content_hash: &str,
 ) -> Result<UserSkillResponse, AppError> {
     let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO user_skills(id,owner_user_id,name,description,skill_markdown,content_hash,enabled) VALUES(?,?,?,?,?,?,?)")
+    let inserted = sqlx::query("INSERT INTO user_skills(id,owner_user_id,name,description,skill_markdown,content_hash,enabled) SELECT ?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM user_skills WHERE owner_user_id=?) < ?")
         .bind(&id)
         .bind(user_id)
         .bind(payload.name.trim())
@@ -64,9 +101,19 @@ pub async fn create(
         .bind(&payload.skill_markdown)
         .bind(content_hash)
         .bind(payload.enabled)
+        .bind(user_id)
+        .bind(MAX_SKILLS_PER_USER)
         .execute(pool)
         .await
-        .map_err(AppError::Database)?;
+        .map_err(AppError::Database)?
+        .rows_affected();
+    if inserted != 1 {
+        return Err(AppError::api(
+            actix_web::http::StatusCode::CONFLICT,
+            "SKILL_LIMIT_REACHED",
+            "每个用户最多可以创建 50 个 Skill",
+        ));
+    }
     find_response(pool, user_id, &id)
         .await?
         .ok_or_else(|| AppError::Config("created Skill is missing".into()))
@@ -146,19 +193,15 @@ async fn with_review(
     let row: Option<(i64, String, String, String, String)> = sqlx::query_as("SELECT overall_score,grade,dimension_scores_json,findings_json,evaluated_at FROM skill_reviews WHERE skill_id=? AND skill_version=? AND skill_content_hash=?")
         .bind(&record.id).bind(record.version).bind(&record.content_hash)
         .fetch_optional(pool).await.map_err(AppError::Database)?;
-    let review = row.and_then(
-        |(overall_score, grade, dimensions, findings, evaluated_at)| {
-            let findings: serde_json::Value = serde_json::from_str(&findings).ok()?;
-            Some(SkillReview {
-                overall_score,
-                grade,
-                dimensions: serde_json::from_str(&dimensions).ok()?,
-                warnings: serde_json::from_value(findings.get("warnings")?.clone()).ok()?,
-                suggestions: serde_json::from_value(findings.get("suggestions")?.clone()).ok()?,
-                evaluated_at: Some(evaluated_at),
-            })
-        },
-    );
+    let review = row.and_then(|(score, grade, dimensions, findings, evaluated_at)| {
+        parse_review_row(
+            Some(score),
+            Some(grade),
+            Some(dimensions),
+            Some(findings),
+            Some(evaluated_at),
+        )
+    });
     Ok(UserSkillResponse {
         id: record.id,
         name: record.name,
@@ -170,5 +213,23 @@ async fn with_review(
         created_at: record.created_at,
         updated_at: record.updated_at,
         review,
+    })
+}
+
+fn parse_review_row(
+    overall_score: Option<i64>,
+    grade: Option<String>,
+    dimensions: Option<String>,
+    findings: Option<String>,
+    evaluated_at: Option<String>,
+) -> Option<SkillReview> {
+    let findings: serde_json::Value = serde_json::from_str(&findings?).ok()?;
+    Some(SkillReview {
+        overall_score: overall_score?,
+        grade: grade?,
+        dimensions: serde_json::from_str(&dimensions?).ok()?,
+        warnings: serde_json::from_value(findings.get("warnings")?.clone()).ok()?,
+        suggestions: serde_json::from_value(findings.get("suggestions")?.clone()).ok()?,
+        evaluated_at,
     })
 }

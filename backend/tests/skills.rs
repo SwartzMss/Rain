@@ -100,7 +100,7 @@ async fn skills_are_private_versioned_and_validated() {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
-                pool,
+                pool.clone(),
                 PathBuf::from("data"),
                 AppLimits::default(),
             )))
@@ -127,6 +127,19 @@ async fn skills_are_private_versioned_and_validated() {
     let id = created["id"].as_str().unwrap();
     assert_eq!(created["version"], 1);
     assert!(created["review"].is_null());
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/me/skills")
+            .cookie(owner.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert!(listed[0].get("skill_markdown").is_none());
 
     let response = test::call_service(
         &app,
@@ -170,6 +183,33 @@ async fn skills_are_private_versioned_and_validated() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    for index in 1..50 {
+        sqlx::query("INSERT INTO user_skills(id,owner_user_id,name,skill_markdown,content_hash) VALUES(?,?,?,?,?)")
+            .bind(format!("limit-{index}"))
+            .bind("owner")
+            .bind(format!("Skill {index}"))
+            .bind("# Skill")
+            .bind(format!("hash-{index}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/me/skills")
+            .cookie(owner.clone())
+            .set_json(serde_json::json!({
+                "name": "Skill over limit",
+                "skill_markdown": "# Too many"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "SKILL_LIMIT_REACHED");
 
     let response = test::call_service(
         &app,

@@ -1,8 +1,10 @@
+use std::{future::Future, time::Duration};
+
 use actix_web::{HttpResponse, delete, get, http::StatusCode, post, put, web};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AppState,
+    AppState, SkillReviewAdmissionError, SkillReviewRuntime,
     ai_provider::{
         client::{ChatCompletionClient, ChatMessage, ChatRequest, OpenAiChatClient},
         config::resolve_effective_config,
@@ -14,6 +16,7 @@ use crate::{
 };
 
 const MAX_SKILL_MARKDOWN_BYTES: usize = 64 * 1024;
+const SKILL_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn validate(payload: &SkillPayload) -> Result<String, AppError> {
     let name = payload.name.trim();
@@ -124,7 +127,9 @@ pub async fn review(
     state: web::Data<AppState>,
     id: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    let skill = skills::find_owned(&state.db.pool, &user.0.id, &id)
+    let user_id = user.0.id.clone();
+    let skill_id = id.into_inner();
+    let skill = skills::find_owned(&state.db.pool, &user_id, &skill_id)
         .await?
         .ok_or_else(not_found)?;
     let provider = resolve_effective_config(&state.db.pool, &state.ai_provider)
@@ -155,43 +160,55 @@ pub async fn review(
         tool_choice: None,
         response_format: Some(serde_json::json!({"type":"json_object"})),
     };
-    let first = client
-        .complete(request.clone())
-        .await
-        .map_err(|_| review_failed())?;
-    let review = match parse_review(first.message.content.as_deref()) {
-        Ok(review) => review,
-        Err(_) => {
-            let mut repair = request;
-            repair.messages.push(first.message);
-            repair.messages.push(ChatMessage {
-                role: "user".into(),
-                content: Some(
-                    "Return only valid JSON matching the requested review schema.".into(),
-                ),
-                tool_calls: Vec::new(),
-                tool_call_id: None,
-                name: None,
-            });
-            let repaired = client.complete(repair).await.map_err(|_| review_failed())?;
-            parse_review(repaired.message.content.as_deref()).map_err(|_| review_failed())?
-        }
-    };
-    if !skills::save_review(&state.db.pool, &skill, &provider.model, &review).await? {
-        return Err(AppError::api(
-            StatusCode::CONFLICT,
-            "SKILL_CHANGED_DURING_REVIEW",
-            "Skill 在评估期间发生变化，请重新评估",
-        ));
-    }
-    let item = skills::find_response(&state.db.pool, &user.0.id, &id)
-        .await?
-        .ok_or_else(not_found)?;
-    Ok(HttpResponse::Ok().json(item.review))
+    let pool = state.db.pool.clone();
+    let reviewer_model = provider.model.clone();
+    let operation_user_id = user_id.clone();
+    let review = with_review_budget(
+        &state.skill_reviews,
+        &user_id,
+        SKILL_REVIEW_TIMEOUT,
+        async move {
+            let first = client
+                .complete(request.clone())
+                .await
+                .map_err(|_| review_failed())?;
+            let review = match parse_review(first.message.content.as_deref()) {
+                Ok(review) => Ok(review),
+                Err(_) => {
+                    let mut repair = request;
+                    repair.messages.push(first.message);
+                    repair.messages.push(ChatMessage {
+                        role: "user".into(),
+                        content: Some(
+                            "Return only valid JSON matching the requested review schema.".into(),
+                        ),
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    let repaired = client.complete(repair).await.map_err(|_| review_failed())?;
+                    parse_review(repaired.message.content.as_deref()).map_err(|_| review_failed())
+                }
+            }?;
+            if !skills::save_review(&pool, &skill, &reviewer_model, &review).await? {
+                return Err(AppError::api(
+                    StatusCode::CONFLICT,
+                    "SKILL_CHANGED_DURING_REVIEW",
+                    "Skill 在评估期间发生变化，请重新评估",
+                ));
+            }
+            let item = skills::find_response(&pool, &operation_user_id, &skill_id)
+                .await?
+                .ok_or_else(not_found)?;
+            Ok(item.review)
+        },
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(review))
 }
 
 fn parse_review(content: Option<&str>) -> Result<SkillReview, ()> {
-    let parsed: SkillReview = serde_json::from_str(content.ok_or(())?).map_err(|_| ())?;
+    let mut parsed: SkillReview = serde_json::from_str(content.ok_or(())?).map_err(|_| ())?;
     let dimensions = parsed.dimensions.as_object().ok_or(())?;
     let expected = [
         ("task_scope", 20_i64),
@@ -202,10 +219,6 @@ fn parse_review(content: Option<&str>) -> Result<SkillReview, ()> {
         ("clarity", 10),
     ];
     if dimensions.len() != expected.len()
-        || !matches!(
-            parsed.grade.as_str(),
-            "EXCELLENT" | "GOOD" | "NEEDS_IMPROVEMENT" | "POOR"
-        )
         || parsed.warnings.len() > 50
         || parsed.suggestions.len() > 50
         || parsed
@@ -230,7 +243,56 @@ fn parse_review(content: Option<&str>) -> Result<SkillReview, ()> {
     if parsed.overall_score != (weighted + 50) / 100 {
         return Err(());
     }
+    parsed.grade = grade_for_score(parsed.overall_score).into();
     Ok(parsed)
+}
+
+fn grade_for_score(score: i64) -> &'static str {
+    match score {
+        90..=100 => "EXCELLENT",
+        75..=89 => "GOOD",
+        60..=74 => "NEEDS_IMPROVEMENT",
+        _ => "POOR",
+    }
+}
+
+async fn with_review_budget<T, F>(
+    runtime: &SkillReviewRuntime,
+    user_id: &str,
+    timeout: Duration,
+    operation: F,
+) -> Result<T, AppError>
+where
+    F: Future<Output = Result<T, AppError>>,
+{
+    let _user_guard =
+        runtime
+            .admit(user_id, std::time::Instant::now())
+            .map_err(|error| match error {
+                SkillReviewAdmissionError::AlreadyRunning => AppError::api(
+                    StatusCode::CONFLICT,
+                    "SKILL_REVIEW_ALREADY_RUNNING",
+                    "该用户已有 Skill 质量评估正在运行",
+                ),
+                SkillReviewAdmissionError::RateLimited => AppError::api(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "SKILL_REVIEW_RATE_LIMITED",
+                    "Skill 质量评估请求过于频繁，请稍后重试",
+                ),
+            })?;
+    let permits = runtime.permits.clone();
+    tokio::time::timeout(timeout, async move {
+        let _permit = permits.acquire_owned().await.map_err(|_| review_failed())?;
+        operation.await
+    })
+    .await
+    .map_err(|_| {
+        AppError::api(
+            StatusCode::GATEWAY_TIMEOUT,
+            "SKILL_REVIEW_TIMEOUT",
+            "Skill 质量评估超时",
+        )
+    })?
 }
 
 fn review_failed() -> AppError {
@@ -239,4 +301,83 @@ fn review_failed() -> AppError {
         "SKILL_REVIEW_FAILED",
         "Skill 质量评估失败",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
+
+    use super::{grade_for_score, parse_review, with_review_budget};
+    use crate::{SkillReviewRuntime, error::AppError};
+
+    #[test]
+    fn grade_is_derived_from_the_score() {
+        assert_eq!(grade_for_score(95), "EXCELLENT");
+        assert_eq!(grade_for_score(89), "GOOD");
+        assert_eq!(grade_for_score(74), "NEEDS_IMPROVEMENT");
+        assert_eq!(grade_for_score(59), "POOR");
+
+        let review = parse_review(Some(
+            r#"{"overall_score":95,"grade":"POOR","dimensions":{"task_scope":95,"retrieval_strategy":95,"evidence_constraints":95,"incomplete_logs":95,"stopping_conditions":95,"clarity":95},"warnings":[],"suggestions":[]}"#,
+        ))
+        .unwrap();
+        assert_eq!(review.overall_score, 95);
+        assert_eq!(review.grade, "EXCELLENT");
+    }
+
+    #[tokio::test]
+    async fn review_budget_applies_an_overall_timeout() {
+        let runtime = SkillReviewRuntime::new(1, 5, Duration::from_secs(60));
+        let error = with_review_budget(
+            &runtime,
+            "user",
+            Duration::from_millis(5),
+            std::future::pending::<Result<(), AppError>>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Api {
+                code: "SKILL_REVIEW_TIMEOUT",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn review_budget_serializes_global_model_work() {
+        let runtime = SkillReviewRuntime::new(1, 5, Duration::from_secs(60));
+        let second_polled = Arc::new(AtomicBool::new(false));
+        let second_marker = second_polled.clone();
+        let first = with_review_budget(
+            &runtime,
+            "first",
+            Duration::from_millis(50),
+            std::future::pending::<Result<(), AppError>>(),
+        );
+        let second = async {
+            tokio::task::yield_now().await;
+            with_review_budget(&runtime, "second", Duration::from_millis(5), async move {
+                second_marker.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        };
+        let (_, second_result) = tokio::join!(first, second);
+        assert!(matches!(
+            second_result,
+            Err(AppError::Api {
+                code: "SKILL_REVIEW_TIMEOUT",
+                ..
+            })
+        ));
+        assert!(!second_polled.load(Ordering::SeqCst));
+    }
 }

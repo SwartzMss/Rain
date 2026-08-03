@@ -41,6 +41,19 @@ pub struct UserSkillResponse {
     pub review: Option<SkillReview>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct UserSkillSummaryResponse {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub content_hash: String,
+    pub version: i64,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub review: Option<SkillReview>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SkillPayload {
     pub name: String,

@@ -18,7 +18,7 @@ function MissingContextList({ items }: { items: string[] }) {
 export function SkillRunResultView({ result, onRevealEvidence }: { result: SkillRunResult; onRevealEvidence: (evidence: SkillEvidence) => void }) {
   return (
     <div className="space-y-4 rounded-xl border border-cyan-100 bg-cyan-50/40 p-4">
-      <div><h3 className="text-sm font-semibold text-slate-900">诊断结论</h3><p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{result.summary}</p></div>
+      <div><h3 className="text-sm font-semibold text-slate-900">诊断结论</h3><p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{result.summary.text}</p>{result.summary.evidence_ids.length ? <span className="text-xs text-slate-400">[{result.summary.evidence_ids.join(', ')}]</span> : null}</div>
       <ObservationList items={result.observations} />
       <InferenceList items={result.inferences} />
       <MissingContextList items={result.missing_context} />

@@ -17,7 +17,7 @@ async fn list_files_is_bound_to_ready_bundles_in_the_run_issue() {
         .unwrap();
     sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('a-ready','A','ha','a','READY','PUBLISHING'),('a-pending','A','hap','ap','PENDING','RECEIVING'),('b-ready','B','hb','b','READY','PUBLISHING')")
         .execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a-ready','visible.log','/visible.log',0),('a-pending','pending.log','/pending.log',0),('b-ready','foreign.log','/foreign.log',0)")
+    sqlx::query("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a-ready','visible.log','/visible.log',0),('a-ready','logs','/logs',1),('a-pending','pending.log','/pending.log',0),('b-ready','foreign.log','/foreign.log',0)")
         .execute(&pool).await.unwrap();
     let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
     let mut executor = SkillToolExecutor::new(
@@ -33,8 +33,22 @@ async fn list_files_is_bound_to_ready_bundles_in_the_run_issue() {
     let text = files.to_string();
     assert!(text.contains("visible.log"));
     assert!(text.contains("\"bundle_hash\":\"ha\""));
+    let directory = files["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == "/logs")
+        .unwrap();
+    assert_eq!(directory["is_dir"], true);
     assert!(!text.contains("pending.log"));
     assert!(!text.contains("foreign.log"));
+
+    let directory_read = executor
+        .read_file_lines(directory["file_id"].as_i64().unwrap(), 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(directory_read["error"], "FILE_IS_DIRECTORY");
+    assert_eq!(directory_read["lines"], serde_json::json!([]));
 }
 
 #[tokio::test]

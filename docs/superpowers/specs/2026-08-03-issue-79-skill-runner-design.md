@@ -104,6 +104,10 @@ versioning, and quality evaluation. Validation rejects:
 - duplicate names for the same user; and
 - malformed text payloads.
 
+Each user may store at most 50 Skills. The list endpoint returns metadata and
+the current review in one joined query, never the full Markdown; the detail
+endpoint loads Markdown only for the selected Skill.
+
 Requests inside `SKILL.md` for unsupported tools do not grant permissions. They
 are allowed to save, but the quality review reports them as conflicts.
 
@@ -120,6 +124,12 @@ returns a fixed result containing:
 }
 ```
 
+The server derives `grade` deterministically from the validated weighted score:
+90–100 `EXCELLENT`, 75–89 `GOOD`, 60–74 `NEEDS_IMPROVEMENT`, otherwise `POOR`.
+Review execution allows one in-flight review per user, five attempts per user
+per hour, two globally concurrent model tasks, and a 90-second overall timeout
+covering the optional repair request.
+
 The six dimensions retain the weights defined in issue #79. Low scores warn but
 never prevent execution. Re-evaluation replaces the current row. Editing the
 Skill deletes it, leaving the UI in a `not evaluated` state.
@@ -128,7 +138,7 @@ Skill deletes it, leaving the UI in a `not evaluated` state.
 
 The `skill_tools` boundary exposes exactly three internal functions:
 
-- `list_files`: lists files from `READY` Bundles in the bound Issue, with a stable cursor and optional path-prefix filter;
+- `list_files`: lists files and directories from `READY` Bundles in the bound Issue, with `is_dir`, a stable cursor, and optional path-prefix filter;
 - `search_logs`: searches indexed text in that Issue and returns at most 20
   bounded matches; and
 - `read_file_lines`: reads a bounded line range from a file in a `READY` Bundle
@@ -139,6 +149,9 @@ context resolved from the database. File reads accept only a file ID and line
 range, verify membership in the bound Issue, cap lines and bytes, and use the
 existing blob-backed line reader. Search reuses the existing FTS index without
 allowing arbitrary SQL.
+
+An attempted line read of a listed directory returns a bounded non-fatal
+`FILE_IS_DIRECTORY` tool result so the model can recover without failing the run.
 
 All tool arguments are schema-validated. Identical searches are executed once.
 Previously read ranges are subtracted from later requests; overlapping evidence
@@ -187,7 +200,7 @@ When the model stops requesting tools, the runner validates this result:
 
 ```json
 {
-  "summary": "...",
+  "summary": {"status": "SUPPORTED", "text": "...", "evidence_ids": ["e1"]},
   "observations": [{"text": "...", "evidence_ids": ["e1"]}],
   "inferences": [{"text": "...", "confidence": "MEDIUM", "evidence_ids": ["e1"]}],
   "missing_context": [],
@@ -197,9 +210,13 @@ When the model stops requesting tools, the runner validates this result:
 
 Evidence entries have a unique evidence ID, Bundle hash, stable file ID, display
 path, start line, end line, bounded excerpt, and explanation. Every observation
-and inference cites at least one evidence ID, and each cited range must occur in
+and inference and every `SUPPORTED` summary cites at least one evidence ID, and each cited range must occur in
 the evidence ledger. Invalid output receives one bounded repair attempt. A second invalid
 response fails the run with a stable error code.
+
+An `INSUFFICIENT_EVIDENCE` summary must have no evidence IDs and must include
+missing context. Its model-authored text is discarded and replaced with a fixed
+non-diagnostic platform message before persistence.
 
 At any iteration, call, byte, range, or time limit, the runner disables further
 tools and asks for a final result based on current evidence. The final instruction

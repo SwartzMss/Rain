@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { normalizeApiError, rainApi } from '../../api/client';
-import type { SkillEvidence, UserSkill } from '../../api/types';
+import type { SkillEvidence, UserSkillSummary } from '../../api/types';
 import { SkillRunResultView } from './SkillRunResultView';
 import { useSkillRun } from './useSkillRun';
 
 export function IssueSkillRunner({ issueCode, onRevealEvidence }: { issueCode: string; onRevealEvidence: (evidence: SkillEvidence) => void }) {
-  const [skills, setSkills] = useState<UserSkill[]>([]);
+  const [skills, setSkills] = useState<UserSkillSummary[]>([]);
   const [selected, setSelected] = useState('');
   const [providerReady, setProviderReady] = useState(false);
   const [loaded, setLoaded] = useState(false);

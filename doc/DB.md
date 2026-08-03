@@ -122,7 +122,7 @@
 
 ## Skills、模型配置与临时诊断
 
-- `user_skills` 保存用户私有的名称、描述、`SKILL.md`、内容哈希、版本和启用状态；`UNIQUE(owner_user_id, name)` 配合仓储层的大小写归一化检查隔离命名空间。系统没有内置 Skill 记录。
+- `user_skills` 保存用户私有的名称、描述、`SKILL.md`、内容哈希、版本和启用状态；`UNIQUE(owner_user_id, name)` 配合仓储层的大小写归一化检查隔离命名空间。创建语句原子限制每用户最多 50 条，系统没有内置 Skill 记录。
 - `skill_reviews` 以 `skill_id` 为主键，只保存当前版本的一次质量评估。重新评估使用 upsert 覆盖；正文变更会在同一事务中删除旧评估。
 - `ai_provider_settings` 是单例管理员配置。Base URL、模型和超时为普通字段，API Key 是带版本与随机 nonce 的 AES-256-GCM 密文；主密钥只来自 `RAIN_AI_MASTER_KEY`，不进入数据库。有效数据库配置优先于环境变量配置。
 - 修改数据库 Provider 的 Base URL 时必须同时替换 API Key；候选配置测试也必须提交完整配置，空请求才会测试当前生效配置。

@@ -202,6 +202,7 @@ impl<'a> SkillToolExecutor<'a> {
             bundle_hash: String,
             path: String,
             path_truncated: bool,
+            is_dir: bool,
             size_bytes: Option<i64>,
             line_count: Option<i64>,
             mime_type: Option<String>,
@@ -224,7 +225,7 @@ impl<'a> SkillToolExecutor<'a> {
             )
         });
         let mut rows: Vec<Row> = sqlx::query_as(
-            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,length(f.path)>4096 AS path_truncated,f.size_bytes,f.line_count,f.mime_type FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.id>? AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') ORDER BY f.id LIMIT 501",
+            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,length(f.path)>4096 AS path_truncated,f.is_dir,f.size_bytes,f.line_count,f.mime_type FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.id>? AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') ORDER BY f.id LIMIT 501",
         )
         .bind(&self.context.issue_code)
         .bind(cursor)
@@ -321,6 +322,17 @@ impl<'a> SkillToolExecutor<'a> {
         .fetch_one(&self.state.db.pool)
         .await
         .map_err(AppError::Database)?;
+        if record.is_dir {
+            let value = json!({
+                "bundle_hash": bundle_hash,
+                "path": record.path,
+                "is_dir": true,
+                "error": "FILE_IS_DIRECTORY",
+                "lines": []
+            });
+            self.record_output(&value)?;
+            return Ok(value);
+        }
         let mut api = self.state.limits.api.clone();
         api.max_preview_line_size = api.max_preview_line_size.min(128);
         let mut lines = Vec::new();
@@ -342,7 +354,7 @@ impl<'a> SkillToolExecutor<'a> {
         }
         let mut truncated = false;
         while serde_json::to_vec(
-            &json!({ "bundle_hash": &bundle_hash, "path": &record.path, "lines": &lines, "truncated": truncated }),
+            &json!({ "bundle_hash": &bundle_hash, "path": &record.path, "is_dir": false, "lines": &lines, "truncated": truncated }),
         )
         .map_err(|_| AppError::Config("failed to serialize file evidence".into()))?
         .len()
@@ -353,7 +365,7 @@ impl<'a> SkillToolExecutor<'a> {
             }
             truncated = true;
         }
-        let value = json!({ "bundle_hash": bundle_hash, "path": record.path, "lines": lines, "truncated": truncated });
+        let value = json!({ "bundle_hash": bundle_hash, "path": record.path, "is_dir": false, "lines": lines, "truncated": truncated });
         self.record_output(&value)?;
         if let Some(returned_lines) = value.get("lines").and_then(Value::as_array)
             && let (Some(actual_start), Some(actual_end)) = (

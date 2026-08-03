@@ -18,7 +18,7 @@ import type {
   SavedSearch,
   SavedSearchPayload
   , AdminUserPage, AuditLogPage, UserStatus, RegistrationStatus, RegistrationSettings, AuthRateLimitsResponse,
-  UserSkill, SkillPayload, SkillReview, AiProviderSettings, SkillRun, SkillRunResult
+  UserSkill, UserSkillSummary, SkillPayload, SkillReview, AiProviderSettings, SkillRun, SkillRunResult
 } from './types';
 
 const API_BASE_URL = '';
@@ -130,7 +130,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const rainApi = {
-  fetchSkills() { return request<UserSkill[]>('/api/me/skills'); },
+  fetchSkills() { return request<UserSkillSummary[]>('/api/me/skills'); },
   fetchSkill(id: string) { return request<UserSkill>(`/api/me/skills/${encodePathSegment(id)}`); },
   createSkill(payload: SkillPayload) { return request<UserSkill>('/api/me/skills', { method: 'POST', body: JSON.stringify(payload) }); },
   updateSkill(id: string, payload: SkillPayload) { return request<UserSkill>(`/api/me/skills/${encodePathSegment(id)}`, { method: 'PUT', body: JSON.stringify(payload) }); },
