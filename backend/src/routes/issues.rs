@@ -678,13 +678,16 @@ pub async fn delete_issue(
     let pool = state.db.pool.clone();
     let cleanup_issue_code = issue_code.clone();
     let lease_token = Uuid::new_v4().to_string();
-    claim_manual_recovery(
+    let claimed = claim_manual_recovery(
         &pool,
         &cleanup_issue_code,
         &lease_token,
         MANUAL_CLEANUP_LEASE_SECONDS,
     )
     .await?;
+    if !claimed {
+        return Ok(HttpResponse::Accepted().finish());
+    }
     tokio::spawn(async move {
         if let Err(error) = finish_manual_issue_deletion(
             &pool,
@@ -745,17 +748,26 @@ async fn finish_manual_issue_deletion(
         .await?;
     }
 
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
     sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
         .bind(issue_code)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(AppError::Database)?;
-    sqlx::query("DELETE FROM issues WHERE code = ? AND status = 'DELETING' AND deletion_reason = 'MANUAL' AND deletion_lease_token = ?")
+    let deleted = sqlx::query("DELETE FROM issues WHERE code = ? AND status = 'DELETING' AND deletion_reason = 'MANUAL' AND deletion_lease_token = ?")
         .bind(issue_code)
         .bind(lease_token)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?
+        .rows_affected();
+    if deleted != 1 {
+        tx.rollback().await.map_err(AppError::Database)?;
+        return Err(AppError::Conflict(
+            "manual issue deletion lease was lost".into(),
+        ));
+    }
+    tx.commit().await.map_err(AppError::Database)?;
     Ok(())
 }
 
