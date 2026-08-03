@@ -1,3 +1,4 @@
+pub mod ai_provider;
 pub mod auth;
 pub mod config;
 pub mod db;
@@ -24,10 +25,11 @@ use std::{
 };
 
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast};
+use tokio_util::sync::CancellationToken;
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
-use crate::config::{AppLimits, AuthConfig};
+use crate::config::{AiProviderEnv, AppLimits, AuthConfig};
 
 pub struct AuthRateLimitBucket {
     window: Duration,
@@ -138,6 +140,148 @@ pub struct AuthRuntime {
     pub admin_username_normalized: Arc<OnceLock<String>>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillRunEvent {
+    pub event: String,
+    pub data: serde_json::Value,
+}
+
+#[derive(Clone)]
+struct SkillRunHandle {
+    cancellation: CancellationToken,
+    events: broadcast::Sender<SkillRunEvent>,
+}
+
+#[derive(Default)]
+pub struct SkillRunRuntime {
+    runs: Mutex<HashMap<String, SkillRunHandle>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillReviewAdmissionError {
+    AlreadyRunning,
+    RateLimited,
+}
+
+#[derive(Debug, Default)]
+struct SkillReviewUserState {
+    in_flight: HashSet<String>,
+    attempts: HashMap<String, VecDeque<Instant>>,
+}
+
+pub struct SkillReviewRuntime {
+    pub permits: Arc<Semaphore>,
+    users: Arc<Mutex<SkillReviewUserState>>,
+    per_user_limit: usize,
+    window: Duration,
+}
+
+#[derive(Debug)]
+pub struct SkillReviewGuard {
+    user_id: String,
+    users: Arc<Mutex<SkillReviewUserState>>,
+}
+
+impl Drop for SkillReviewGuard {
+    fn drop(&mut self) {
+        if let Ok(mut users) = self.users.lock() {
+            users.in_flight.remove(&self.user_id);
+        }
+    }
+}
+
+impl SkillReviewRuntime {
+    pub fn new(global_concurrency: usize, per_user_limit: usize, window: Duration) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(global_concurrency)),
+            users: Arc::new(Mutex::new(SkillReviewUserState::default())),
+            per_user_limit,
+            window,
+        }
+    }
+
+    pub fn admit(
+        &self,
+        user_id: &str,
+        now: Instant,
+    ) -> Result<SkillReviewGuard, SkillReviewAdmissionError> {
+        let mut users = self
+            .users
+            .lock()
+            .map_err(|_| SkillReviewAdmissionError::RateLimited)?;
+        if users.in_flight.contains(user_id) {
+            return Err(SkillReviewAdmissionError::AlreadyRunning);
+        }
+        for attempts in users.attempts.values_mut() {
+            while attempts
+                .front()
+                .is_some_and(|timestamp| now.duration_since(*timestamp) >= self.window)
+            {
+                attempts.pop_front();
+            }
+        }
+        users.attempts.retain(|_, attempts| !attempts.is_empty());
+        let attempts = users.attempts.entry(user_id.to_owned()).or_default();
+        if attempts.len() >= self.per_user_limit {
+            return Err(SkillReviewAdmissionError::RateLimited);
+        }
+        attempts.push_back(now);
+        users.in_flight.insert(user_id.to_owned());
+        Ok(SkillReviewGuard {
+            user_id: user_id.to_owned(),
+            users: self.users.clone(),
+        })
+    }
+}
+
+impl SkillRunRuntime {
+    pub fn register(
+        &self,
+        run_id: &str,
+    ) -> (CancellationToken, broadcast::Receiver<SkillRunEvent>) {
+        let (events, receiver) = broadcast::channel(64);
+        let cancellation = CancellationToken::new();
+        self.runs.lock().expect("Skill run runtime lock").insert(
+            run_id.to_owned(),
+            SkillRunHandle {
+                cancellation: cancellation.clone(),
+                events,
+            },
+        );
+        (cancellation, receiver)
+    }
+
+    pub fn subscribe(&self, run_id: &str) -> Option<broadcast::Receiver<SkillRunEvent>> {
+        self.runs
+            .lock()
+            .ok()?
+            .get(run_id)
+            .map(|handle| handle.events.subscribe())
+    }
+
+    pub fn cancel(&self, run_id: &str) {
+        if let Ok(runs) = self.runs.lock()
+            && let Some(handle) = runs.get(run_id)
+        {
+            handle.cancellation.cancel();
+        }
+    }
+
+    pub fn emit(&self, run_id: &str, event: SkillRunEvent) {
+        if let Ok(runs) = self.runs.lock()
+            && let Some(handle) = runs.get(run_id)
+        {
+            let _ = handle.events.send(event);
+        }
+    }
+
+    pub fn remove(&self, run_id: &str) {
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(run_id);
+        }
+    }
+}
+
 impl AuthRuntime {
     pub fn new(config: AuthConfig) -> Self {
         let allow_registration = config.allow_registration;
@@ -169,6 +313,9 @@ pub struct AppState {
     pub upload: UploadRuntime,
     pub temp_results: TempResultRuntime,
     pub auth_runtime: AuthRuntime,
+    pub ai_provider: AiProviderEnv,
+    pub skill_runs: SkillRunRuntime,
+    pub skill_reviews: SkillReviewRuntime,
     pub issue_inactive_days: AtomicUsize,
     pub limits: AppLimits,
 }
@@ -211,6 +358,23 @@ impl AppState {
         Self::with_blob_store_and_auth(pool, data_root, limits, AuthConfig::default(), blob_store)
     }
 
+    pub fn new_with_ai(
+        pool: SqlitePool,
+        data_root: PathBuf,
+        limits: AppLimits,
+        ai_provider: AiProviderEnv,
+    ) -> Self {
+        let blob_store = Arc::new(LocalCasBlobStore::new(data_root.clone()));
+        Self::with_blob_store_auth_and_ai(
+            pool,
+            data_root,
+            limits,
+            AuthConfig::default(),
+            ai_provider,
+            blob_store,
+        )
+    }
+
     pub fn with_blob_store(
         pool: SqlitePool,
         data_root: PathBuf,
@@ -225,6 +389,24 @@ impl AppState {
         data_root: PathBuf,
         limits: AppLimits,
         auth: AuthConfig,
+        blob_store: Arc<dyn BlobStore>,
+    ) -> Self {
+        Self::with_blob_store_auth_and_ai(
+            pool,
+            data_root,
+            limits,
+            auth,
+            AiProviderEnv::default(),
+            blob_store,
+        )
+    }
+
+    pub fn with_blob_store_auth_and_ai(
+        pool: SqlitePool,
+        data_root: PathBuf,
+        limits: AppLimits,
+        auth: AuthConfig,
+        ai_provider: AiProviderEnv,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
         let upload = UploadRuntime::new(
@@ -242,6 +424,9 @@ impl AppState {
             upload,
             temp_results,
             auth_runtime,
+            ai_provider,
+            skill_runs: SkillRunRuntime::default(),
+            skill_reviews: SkillReviewRuntime::new(2, 5, Duration::from_secs(60 * 60)),
             issue_inactive_days: AtomicUsize::new(0),
             limits,
         }
@@ -285,6 +470,23 @@ mod tests {
         assert_eq!(
             auth.hash_permits.available_permits(),
             crate::config::AuthConfig::default().argon2_concurrency
+        );
+
+        let reviews = super::SkillReviewRuntime::new(2, 2, std::time::Duration::from_secs(60));
+        let first = reviews.admit("user", std::time::Instant::now()).unwrap();
+        assert_eq!(
+            reviews
+                .admit("user", std::time::Instant::now())
+                .unwrap_err(),
+            super::SkillReviewAdmissionError::AlreadyRunning
+        );
+        drop(first);
+        drop(reviews.admit("user", std::time::Instant::now()).unwrap());
+        assert_eq!(
+            reviews
+                .admit("user", std::time::Instant::now())
+                .unwrap_err(),
+            super::SkillReviewAdmissionError::RateLimited
         );
     }
 }

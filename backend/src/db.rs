@@ -353,6 +353,11 @@ struct ExpiredBundle {
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
         "DROP TABLE IF EXISTS log_segments_fts",
+        "DROP TABLE IF EXISTS skill_run_steps",
+        "DROP TABLE IF EXISTS skill_runs",
+        "DROP TABLE IF EXISTS skill_reviews",
+        "DROP TABLE IF EXISTS user_skills",
+        "DROP TABLE IF EXISTS ai_provider_settings",
         "DROP TABLE IF EXISTS admin_audit_logs",
         "DROP TABLE IF EXISTS system_settings",
         "DROP TABLE IF EXISTS saved_searches",
@@ -555,6 +560,92 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             size_bytes INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS user_skills (
+            id TEXT PRIMARY KEY,
+            owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name TEXT COLLATE NOCASE NOT NULL,
+            description TEXT,
+            skill_markdown TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(owner_user_id, name)
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS skill_reviews (
+            skill_id TEXT PRIMARY KEY REFERENCES user_skills(id) ON DELETE CASCADE,
+            skill_version INTEGER NOT NULL CHECK (skill_version > 0),
+            skill_content_hash TEXT NOT NULL,
+            reviewer_model TEXT NOT NULL,
+            rubric_version TEXT NOT NULL,
+            overall_score INTEGER NOT NULL CHECK (overall_score BETWEEN 0 AND 100),
+            grade TEXT NOT NULL,
+            dimension_scores_json TEXT NOT NULL,
+            findings_json TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS ai_provider_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            base_url TEXT NOT NULL,
+            encrypted_api_key TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_timeout_seconds INTEGER NOT NULL CHECK (request_timeout_seconds BETWEEN 1 AND 300),
+            updated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS skill_runs (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            issue_code TEXT NOT NULL REFERENCES issues(code) ON DELETE CASCADE,
+            skill_id TEXT NOT NULL,
+            skill_version INTEGER NOT NULL CHECK (skill_version > 0),
+            skill_name TEXT NOT NULL,
+            skill_snapshot_markdown TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+            iteration_count INTEGER NOT NULL DEFAULT 0 CHECK (iteration_count >= 0),
+            tool_call_count INTEGER NOT NULL DEFAULT 0 CHECK (tool_call_count >= 0),
+            cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+            result_json TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_runs_one_active_per_user
+        ON skill_runs(user_id)
+        WHERE status IN ('QUEUED', 'RUNNING')
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_skill_runs_terminal_cleanup
+        ON skill_runs(status, completed_at)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS skill_run_steps (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES skill_runs(id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            iteration INTEGER NOT NULL CHECK (iteration >= 0),
+            tool_name TEXT,
+            arguments_summary TEXT,
+            hit_count INTEGER,
+            evidence_json TEXT,
+            elapsed_ms INTEGER NOT NULL DEFAULT 0 CHECK (elapsed_ms >= 0),
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, sequence)
         )
         "#,
         r#"

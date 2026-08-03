@@ -101,6 +101,12 @@ async fn main() -> std::io::Result<()> {
         fail_stale_processing_bundles(&pool),
     )
     .await;
+    run_optional_recovery_stage(
+        "stale-skill-runs",
+        STARTUP_RECOVERY_TIMEOUT,
+        backend::repositories::skill_runs::recover_active(&pool),
+    )
+    .await;
 
     run_optional_recovery_stage(
         "temporary-upload-cleanup",
@@ -147,11 +153,12 @@ async fn main() -> std::io::Result<()> {
     ];
     background_tasks.push(spawn_deleting_bundle_cleanup(pool.clone()));
     background_tasks.push(spawn_session_cleanup(pool.clone()));
-    let app_state = AppState::with_blob_store_and_auth(
+    let app_state = AppState::with_blob_store_auth_and_ai(
         pool,
         config.data_root.clone(),
         config.limits.clone(),
         config.auth.clone(),
+        config.ai_provider.clone(),
         blob_store,
     );
     app_state
@@ -181,6 +188,9 @@ async fn main() -> std::io::Result<()> {
         shared_state.clone(),
     ));
     background_tasks.push(backend::routes::spawn_inactive_issue_cleanup(
+        shared_state.clone(),
+    ));
+    background_tasks.push(backend::routes::spawn_skill_run_cleanup(
         shared_state.clone(),
     ));
 
