@@ -9,7 +9,7 @@ use crate::{
         config::resolve_effective_config,
         crypto::SecretCipher,
     },
-    auth::extractor::RequireAdmin,
+    auth::extractor::{RequireAdmin, RequireBusinessUser},
     error::AppError,
 };
 
@@ -49,6 +49,17 @@ pub async fn get_ai_provider(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     Ok(HttpResponse::Ok().json(provider_snapshot(&state).await?))
+}
+
+#[get("/me/ai-provider-status")]
+pub async fn get_ai_provider_status(
+    _user: RequireBusinessUser,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let configured = resolve_effective_config(&state.db.pool, &state.ai_provider)
+        .await?
+        .is_some();
+    Ok(HttpResponse::Ok().json(serde_json::json!({"configured": configured})))
 }
 
 #[put("/admin/ai-provider")]

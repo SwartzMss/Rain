@@ -17,7 +17,8 @@ import type {
   User,
   SavedSearch,
   SavedSearchPayload
-  , AdminUserPage, AuditLogPage, UserStatus, RegistrationStatus, RegistrationSettings, AuthRateLimitsResponse
+  , AdminUserPage, AuditLogPage, UserStatus, RegistrationStatus, RegistrationSettings, AuthRateLimitsResponse,
+  UserSkill, SkillPayload, SkillReview, AiProviderSettings, SkillRun, SkillRunResult
 } from './types';
 
 const API_BASE_URL = '';
@@ -129,6 +130,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const rainApi = {
+  fetchSkills() { return request<UserSkill[]>('/api/me/skills'); },
+  fetchSkill(id: string) { return request<UserSkill>(`/api/me/skills/${encodePathSegment(id)}`); },
+  createSkill(payload: SkillPayload) { return request<UserSkill>('/api/me/skills', { method: 'POST', body: JSON.stringify(payload) }); },
+  updateSkill(id: string, payload: SkillPayload) { return request<UserSkill>(`/api/me/skills/${encodePathSegment(id)}`, { method: 'PUT', body: JSON.stringify(payload) }); },
+  deleteSkill(id: string) { return request<void>(`/api/me/skills/${encodePathSegment(id)}`, { method: 'DELETE' }); },
+  reviewSkill(id: string) { return request<SkillReview>(`/api/me/skills/${encodePathSegment(id)}/review`, { method: 'POST' }); },
+  fetchAiProvider() { return request<AiProviderSettings>('/api/admin/ai-provider'); },
+  updateAiProvider(payload: { base_url: string; api_key?: string; model: string; request_timeout_seconds: number }) { return request<AiProviderSettings>('/api/admin/ai-provider', { method: 'PUT', body: JSON.stringify(payload) }); },
+  testAiProvider() { return request<{ ok: boolean; model: string }>('/api/admin/ai-provider/test', { method: 'POST' }); },
+  fetchAiProviderStatus() { return request<{ configured: boolean }>('/api/me/ai-provider-status'); },
+  createSkillRun(issueCode: string, skillId: string) { return request<SkillRun>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/skill-runs`, { method: 'POST', body: JSON.stringify({ skill_id: skillId }) }); },
+  fetchSkillRun(id: string) { return request<SkillRun>(`/api/skill-runs/${encodePathSegment(id)}`); },
+  cancelSkillRun(id: string) { return request<SkillRun>(`/api/skill-runs/${encodePathSegment(id)}/cancel`, { method: 'POST' }); },
+  fetchSkillRunResult(id: string) { return request<SkillRunResult>(`/api/skill-runs/${encodePathSegment(id)}/result`); },
+  skillRunEventsUrl(id: string) { return `/api/skill-runs/${encodePathSegment(id)}/events`; },
   fetchAdminUsers(params: { query?: string; status?: UserStatus; cursor?: string } = {}) {
     const query = new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => Boolean(entry[1])));
     return request<AdminUserPage>(`/api/admin/users?${query}`);
