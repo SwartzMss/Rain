@@ -101,6 +101,12 @@ async fn main() -> std::io::Result<()> {
         fail_stale_processing_bundles(&pool),
     )
     .await;
+    run_optional_recovery_stage(
+        "stale-skill-runs",
+        STARTUP_RECOVERY_TIMEOUT,
+        backend::repositories::skill_runs::recover_active(&pool),
+    )
+    .await;
 
     run_optional_recovery_stage(
         "temporary-upload-cleanup",
@@ -182,6 +188,9 @@ async fn main() -> std::io::Result<()> {
         shared_state.clone(),
     ));
     background_tasks.push(backend::routes::spawn_inactive_issue_cleanup(
+        shared_state.clone(),
+    ));
+    background_tasks.push(backend::routes::spawn_skill_run_cleanup(
         shared_state.clone(),
     ));
 

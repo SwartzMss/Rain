@@ -37,6 +37,23 @@ pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) -> tokio::ta
     )
 }
 
+pub fn spawn_skill_run_cleanup(state: web::Data<crate::AppState>) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "skill-run-cleanup",
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(300),
+        move || {
+            let state = state.clone();
+            async move {
+                crate::repositories::skill_runs::cleanup_expired(&state.db.pool, 24 * 60 * 60)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        },
+    )
+}
+
 pub fn spawn_inactive_issue_cleanup(
     state: web::Data<crate::AppState>,
 ) -> tokio::task::JoinHandle<()> {

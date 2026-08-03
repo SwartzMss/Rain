@@ -25,7 +25,8 @@ use std::{
 };
 
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast};
+use tokio_util::sync::CancellationToken;
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AiProviderEnv, AppLimits, AuthConfig};
@@ -139,6 +140,71 @@ pub struct AuthRuntime {
     pub admin_username_normalized: Arc<OnceLock<String>>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillRunEvent {
+    pub event: String,
+    pub data: serde_json::Value,
+}
+
+#[derive(Clone)]
+struct SkillRunHandle {
+    cancellation: CancellationToken,
+    events: broadcast::Sender<SkillRunEvent>,
+}
+
+#[derive(Default)]
+pub struct SkillRunRuntime {
+    runs: Mutex<HashMap<String, SkillRunHandle>>,
+}
+
+impl SkillRunRuntime {
+    pub fn register(
+        &self,
+        run_id: &str,
+    ) -> (CancellationToken, broadcast::Receiver<SkillRunEvent>) {
+        let (events, receiver) = broadcast::channel(64);
+        let cancellation = CancellationToken::new();
+        self.runs.lock().expect("Skill run runtime lock").insert(
+            run_id.to_owned(),
+            SkillRunHandle {
+                cancellation: cancellation.clone(),
+                events,
+            },
+        );
+        (cancellation, receiver)
+    }
+
+    pub fn subscribe(&self, run_id: &str) -> Option<broadcast::Receiver<SkillRunEvent>> {
+        self.runs
+            .lock()
+            .ok()?
+            .get(run_id)
+            .map(|handle| handle.events.subscribe())
+    }
+
+    pub fn cancel(&self, run_id: &str) {
+        if let Ok(runs) = self.runs.lock()
+            && let Some(handle) = runs.get(run_id)
+        {
+            handle.cancellation.cancel();
+        }
+    }
+
+    pub fn emit(&self, run_id: &str, event: SkillRunEvent) {
+        if let Ok(runs) = self.runs.lock()
+            && let Some(handle) = runs.get(run_id)
+        {
+            let _ = handle.events.send(event);
+        }
+    }
+
+    pub fn remove(&self, run_id: &str) {
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(run_id);
+        }
+    }
+}
+
 impl AuthRuntime {
     pub fn new(config: AuthConfig) -> Self {
         let allow_registration = config.allow_registration;
@@ -171,6 +237,7 @@ pub struct AppState {
     pub temp_results: TempResultRuntime,
     pub auth_runtime: AuthRuntime,
     pub ai_provider: AiProviderEnv,
+    pub skill_runs: SkillRunRuntime,
     pub issue_inactive_days: AtomicUsize,
     pub limits: AppLimits,
 }
@@ -280,6 +347,7 @@ impl AppState {
             temp_results,
             auth_runtime,
             ai_provider,
+            skill_runs: SkillRunRuntime::default(),
             issue_inactive_days: AtomicUsize::new(0),
             limits,
         }
