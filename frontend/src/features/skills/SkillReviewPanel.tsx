@@ -14,4 +14,3 @@ export function SkillReviewPanel({ review }: { review?: SkillReview | null }) {
     </div>
   );
 }
-
