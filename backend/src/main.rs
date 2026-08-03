@@ -115,13 +115,6 @@ async fn main() -> std::io::Result<()> {
         resume_deleting_bundles(&pool),
     )
     .await;
-    run_optional_recovery_stage(
-        "manual-issue-deletion-recovery",
-        STARTUP_RECOVERY_TIMEOUT,
-        backend::routes::resume_manual_issue_deletions(&pool),
-    )
-    .await;
-
     run_optional_recovery_stage("pending-blob-recovery", STARTUP_RECOVERY_TIMEOUT, async {
         recover_pending_blobs(&pool, blob_store.as_ref())
             .await

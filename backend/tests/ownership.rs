@@ -236,12 +236,23 @@ async fn committed_bundle_deletion_is_not_reported_as_failed_when_activity_touch
             .to_request(),
     )
     .await;
-    assert_eq!(response.status(), actix_web::http::StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), actix_web::http::StatusCode::ACCEPTED);
+    for _ in 0..100 {
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM bundles WHERE id='activity-bundle'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if status == "DELETED" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let status: String =
         sqlx::query_scalar("SELECT status FROM bundles WHERE id='activity-bundle'")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(matches!(status.as_str(), "DELETING" | "DELETED"));
+    assert_eq!(status, "DELETED");
     let _ = tokio::fs::remove_dir_all(data_root).await;
 }
