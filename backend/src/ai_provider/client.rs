@@ -90,6 +90,7 @@ pub struct OpenAiChatClient {
     endpoint: String,
     api_key: String,
     timeout: Duration,
+    model: String,
 }
 
 impl OpenAiChatClient {
@@ -102,13 +103,17 @@ impl OpenAiChatClient {
             endpoint: format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
             api_key: config.api_key().to_owned(),
             timeout: Duration::from_secs(config.timeout_seconds),
+            model: config.model.clone(),
         })
     }
 }
 
 #[async_trait]
 impl ChatCompletionClient for OpenAiChatClient {
-    async fn complete(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+    async fn complete(&self, mut request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        if request.model.is_empty() {
+            request.model.clone_from(&self.model);
+        }
         let response = self
             .http
             .post(&self.endpoint)
