@@ -1276,7 +1276,7 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(delete_response.status(), StatusCode::ACCEPTED);
     wait_for_issue_deleted(&pool, "SMOKE").await;
     let missing_response = test::call_service(
         &app,

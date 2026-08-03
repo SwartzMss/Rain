@@ -214,7 +214,7 @@ pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usiz
 }
 
 pub async fn resume_manual_issue_deletions(pool: &sqlx::SqlitePool) -> Result<u64, AppError> {
-    let issues: Vec<String> = sqlx::query_scalar("SELECT code FROM issues WHERE status='DELETING' AND deletion_reason='MANUAL' AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now')) ORDER BY code LIMIT 20")
+    let issues: Vec<String> = sqlx::query_scalar("SELECT code FROM issues WHERE status='DELETING' AND deletion_reason='MANUAL' AND (deletion_retry_at IS NULL OR datetime(deletion_retry_at) <= datetime('now')) AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now')) ORDER BY COALESCE(deletion_retry_at, ''), code LIMIT 20")
         .fetch_all(pool).await.map_err(AppError::Database)?;
     let mut resumed = 0u64;
     for code in issues {
@@ -240,7 +240,7 @@ async fn claim_manual_recovery(
     token: &str,
     seconds: u64,
 ) -> Result<bool, AppError> {
-    let changed = sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now', '+' || ? || ' seconds'), deletion_retry_at=NULL WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
+    let changed = sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now', '+' || ? || ' seconds'), deletion_retry_at=NULL WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND (deletion_retry_at IS NULL OR datetime(deletion_retry_at) <= datetime('now')) AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
         .bind(token).bind(seconds as i64).bind(code).execute(pool).await.map_err(AppError::Database)?.rows_affected();
     Ok(changed == 1)
 }
@@ -606,7 +606,7 @@ pub async fn delete_issue_bundle(
 
     touch_issue_activity_best_effort(&state.db.pool, &issue_code, "bundle deletion").await;
 
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::Accepted().finish())
 }
 
 #[delete("/issues/{issue_id}")]
@@ -699,7 +699,7 @@ pub async fn delete_issue(
         }
     });
 
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::Accepted().finish())
 }
 
 async fn finish_manual_issue_deletion(

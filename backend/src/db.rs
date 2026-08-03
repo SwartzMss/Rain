@@ -313,7 +313,7 @@ async fn require_inactive_issue_lease(
 
 pub async fn resume_deleting_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
     let bundle_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT bundles.id FROM bundles JOIN issues ON issues.code=bundles.issue_code WHERE bundles.status='DELETING' AND NOT (issues.status='DELETING' AND issues.deletion_reason='INACTIVE')",
+        "SELECT bundles.id FROM bundles JOIN issues ON issues.code=bundles.issue_code WHERE bundles.status='DELETING' AND NOT (issues.status='DELETING' AND issues.deletion_reason IN ('INACTIVE', 'MANUAL'))",
     )
             .fetch_all(pool)
             .await
