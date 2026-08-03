@@ -1,5 +1,7 @@
 use std::{env, path::PathBuf};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 use crate::error::AppError;
 use crate::ingest::limits::{
     MAX_ARCHIVE_COMPRESSION_RATIO, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_OUTPUT_PATH_CHARS,
@@ -9,6 +11,118 @@ use crate::ingest::limits::{
 const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
+
+#[derive(Clone, Default)]
+pub struct AiProviderEnv {
+    pub base_url: Option<String>,
+    api_key: Option<String>,
+    pub model: Option<String>,
+    pub timeout_seconds: u64,
+    pub master_key: Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for AiProviderEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiProviderEnv")
+            .field("base_url", &self.base_url)
+            .field("api_key_configured", &self.api_key.is_some())
+            .field("model", &self.model)
+            .field("timeout_seconds", &self.timeout_seconds)
+            .field("master_key_configured", &self.master_key.is_some())
+            .finish()
+    }
+}
+
+impl AiProviderEnv {
+    fn from_env() -> Result<Self, AppError> {
+        let timeout_seconds = env_value("RAIN_AI_TIMEOUT_SECONDS", 120_u64)?;
+        let master_key = env::var("RAIN_AI_MASTER_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| decode_ai_master_key(&value))
+            .transpose()?;
+        let config = Self {
+            base_url: optional_env("RAIN_AI_BASE_URL")?,
+            api_key: optional_env("RAIN_AI_API_KEY")?,
+            model: optional_env("RAIN_AI_MODEL")?,
+            timeout_seconds,
+            master_key,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), AppError> {
+        if !(1..=300).contains(&self.timeout_seconds) {
+            return Err(AppError::Config(
+                "RAIN_AI_TIMEOUT_SECONDS must be between 1 and 300".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
+    pub fn environment_provider_is_complete(&self) -> bool {
+        self.base_url
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && self
+                .api_key
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && self.model.as_deref().is_some_and(|value| !value.is_empty())
+    }
+}
+
+pub fn decode_ai_master_key(value: &str) -> Result<[u8; 32], AppError> {
+    let decoded = STANDARD.decode(value.trim()).map_err(|_| {
+        AppError::Config("RAIN_AI_MASTER_KEY must be valid base64 for exactly 32 bytes".into())
+    })?;
+    decoded
+        .try_into()
+        .map_err(|_| AppError::Config("RAIN_AI_MASTER_KEY must decode to exactly 32 bytes".into()))
+}
+
+fn optional_env(name: &str) -> Result<Option<String>, AppError> {
+    match env::var(name) {
+        Ok(value) => {
+            let value = value.trim().to_owned();
+            Ok((!value.is_empty()).then_some(value))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(AppError::Config(format!("invalid {name}: {error}"))),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillRunLimits {
+    pub max_iterations: usize,
+    pub max_tool_calls: usize,
+    pub search_results_per_call: usize,
+    pub max_evidence_ranges: usize,
+    pub max_tool_output_bytes: usize,
+    pub max_total_evidence_bytes: usize,
+    pub timeout_seconds: u64,
+    pub terminal_retention_seconds: u64,
+}
+
+impl Default for SkillRunLimits {
+    fn default() -> Self {
+        Self {
+            max_iterations: 8,
+            max_tool_calls: 24,
+            search_results_per_call: 20,
+            max_evidence_ranges: 30,
+            max_tool_output_bytes: 32 * 1024,
+            max_total_evidence_bytes: 128 * 1024,
+            timeout_seconds: 120,
+            terminal_retention_seconds: 24 * 60 * 60,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct BootstrapAdminConfig {
@@ -502,6 +616,8 @@ pub struct AppConfig {
     pub issue_inactive_days: usize,
     pub limits: AppLimits,
     pub auth: AuthConfig,
+    pub ai_provider: AiProviderEnv,
+    pub skill_run_limits: SkillRunLimits,
     pub bootstrap_admin: BootstrapAdminConfig,
 }
 
@@ -547,6 +663,7 @@ impl AppConfig {
 
         let limits = AppLimits::from_env()?;
         let auth = AuthConfig::from_env()?;
+        let ai_provider = AiProviderEnv::from_env()?;
         let bootstrap_admin = BootstrapAdminConfig {
             username: env::var("RAIN_BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".into()),
             password: env::var("RAIN_BOOTSTRAP_ADMIN_PASSWORD").unwrap_or_default(),
@@ -568,6 +685,8 @@ impl AppConfig {
             issue_inactive_days,
             limits,
             auth,
+            ai_provider,
+            skill_run_limits: SkillRunLimits::default(),
             bootstrap_admin,
         })
     }
@@ -590,9 +709,67 @@ mod tests {
     use std::{path::Path, sync::Mutex};
 
     use super::{
-        AppLimits, ArchiveConfig, AuthConfig, dotenv_path_for_executable, parse_byte_size,
-        parse_issue_inactive_days,
+        AiProviderEnv, AppLimits, ArchiveConfig, AuthConfig, SkillRunLimits, decode_ai_master_key,
+        dotenv_path_for_executable, parse_byte_size, parse_issue_inactive_days,
     };
+
+    #[test]
+    fn ai_provider_configuration_accepts_a_complete_provider() {
+        let config = AiProviderEnv {
+            base_url: Some("http://127.0.0.1:8000/v1".into()),
+            api_key: Some("test-secret".into()),
+            model: Some("test-model".into()),
+            timeout_seconds: 120,
+            master_key: Some([7; 32]),
+        };
+
+        assert!(config.validate().is_ok());
+        assert!(config.environment_provider_is_complete());
+    }
+
+    #[test]
+    fn ai_provider_configuration_rejects_invalid_timeouts() {
+        for timeout_seconds in [0, 301] {
+            let config = AiProviderEnv {
+                timeout_seconds,
+                ..AiProviderEnv::default()
+            };
+
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("RAIN_AI_TIMEOUT_SECONDS")
+            );
+        }
+    }
+
+    #[test]
+    fn ai_master_key_requires_exactly_thirty_two_bytes() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        assert_eq!(
+            decode_ai_master_key(&STANDARD.encode([9_u8; 32])).unwrap(),
+            [9_u8; 32]
+        );
+        assert!(decode_ai_master_key(&STANDARD.encode([9_u8; 31])).is_err());
+        assert!(decode_ai_master_key("not-base64").is_err());
+    }
+
+    #[test]
+    fn skill_run_limits_match_the_platform_contract() {
+        let limits = SkillRunLimits::default();
+
+        assert_eq!(limits.max_iterations, 8);
+        assert_eq!(limits.max_tool_calls, 24);
+        assert_eq!(limits.search_results_per_call, 20);
+        assert_eq!(limits.max_evidence_ranges, 30);
+        assert_eq!(limits.max_tool_output_bytes, 32 * 1024);
+        assert_eq!(limits.max_total_evidence_bytes, 128 * 1024);
+        assert_eq!(limits.timeout_seconds, 120);
+        assert_eq!(limits.terminal_retention_seconds, 24 * 60 * 60);
+    }
 
     #[test]
     fn issue_inactive_days_accepts_zero_or_seven_through_thirty() {
