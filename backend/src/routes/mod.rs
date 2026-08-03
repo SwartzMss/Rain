@@ -17,6 +17,7 @@ mod issues;
 pub(crate) use issues::cleanup_inactive_issues;
 mod logs;
 mod saved_searches;
+mod skill_runs;
 mod skills;
 mod temp_results;
 mod uploads;
@@ -125,6 +126,11 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(skills::update)
                 .service(skills::delete_skill)
                 .service(skills::review)
+                .service(skill_runs::create)
+                .service(skill_runs::get_run)
+                .service(skill_runs::cancel)
+                .service(skill_runs::result)
+                .service(skill_runs::events)
                 .service(issues::list_issues)
                 .service(issues::create_issue)
                 .service(issues::get_issue_bundles)

@@ -207,7 +207,18 @@ impl SkillRunner {
         validate_evidence(&result, executor.ledger.evidence())?;
         let json =
             serde_json::to_string(&result).map_err(|_| ("SKILL_RESULT_INVALID", "模型结果无效"))?;
-        let _ = skill_runs::complete(&state.db.pool, run_id, &json).await;
+        if skill_runs::complete(&state.db.pool, run_id, &json)
+            .await
+            .unwrap_or(false)
+        {
+            state.skill_runs.emit(
+                run_id,
+                SkillRunEvent {
+                    event: "run.completed".into(),
+                    data: json!({"result": result}),
+                },
+            );
+        }
         Ok(())
     }
 }
