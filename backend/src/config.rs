@@ -34,6 +34,33 @@ impl std::fmt::Debug for AiProviderEnv {
 }
 
 impl AiProviderEnv {
+    pub fn from_values(
+        base_url: Option<&str>,
+        api_key: Option<&str>,
+        model: Option<&str>,
+        timeout_seconds: u64,
+        master_key: Option<[u8; 32]>,
+    ) -> Result<Self, AppError> {
+        let config = Self {
+            base_url: base_url
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            api_key: api_key
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            model: model
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            timeout_seconds,
+            master_key,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
     fn from_env() -> Result<Self, AppError> {
         let timeout_seconds = env_value("RAIN_AI_TIMEOUT_SECONDS", 120_u64)?;
         let master_key = env::var("RAIN_AI_MASTER_KEY")
