@@ -6,10 +6,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::extractor::{OptionalUser, RequireBusinessUser},
-    db::{
-        finish_bundle_deletion, finish_bundle_deletion_with_inactive_lease,
-        renew_inactive_issue_lease,
-    },
+    db::{finish_bundle_deletion_with_inactive_lease, renew_inactive_issue_lease},
     error::AppError,
     models::issues::{
         IssueBundlesResponse, IssueSummary, UploadStage, UploadStatus, UploadStatusWrapper,
@@ -19,6 +16,7 @@ use crate::{
 const ISSUE_CODE_MAX_LEN: usize = 64;
 const ISSUE_NAME_MAX_LEN: usize = 128;
 const INACTIVE_CLEANUP_LEASE_SECONDS: u64 = 10 * 60;
+const MANUAL_CLEANUP_LEASE_SECONDS: u64 = 10 * 60;
 
 pub(crate) async fn touch_issue_activity(
     pool: &sqlx::SqlitePool,
@@ -213,6 +211,43 @@ pub async fn get_issue_bundles(
 
 pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usize, AppError> {
     cleanup_inactive_issues_with_lease(state, INACTIVE_CLEANUP_LEASE_SECONDS).await
+}
+
+pub async fn resume_manual_issue_deletions(pool: &sqlx::SqlitePool) -> Result<u64, AppError> {
+    let issues: Vec<String> = sqlx::query_scalar("SELECT code FROM issues WHERE status='DELETING' AND deletion_reason='MANUAL' AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now')) ORDER BY code LIMIT 20")
+        .fetch_all(pool).await.map_err(AppError::Database)?;
+    let mut resumed = 0u64;
+    for code in issues {
+        let token = Uuid::new_v4().to_string();
+        if claim_manual_recovery(pool, &code, &token, MANUAL_CLEANUP_LEASE_SECONDS).await? {
+            match finish_manual_issue_deletion(pool, &code, &token, MANUAL_CLEANUP_LEASE_SECONDS)
+                .await
+            {
+                Ok(()) => resumed += 1,
+                Err(error) => {
+                    schedule_manual_retry(pool, &code, &token).await;
+                    tracing::error!(issue_code = code, %error, "manual issue deletion recovery failed");
+                }
+            }
+        }
+    }
+    Ok(resumed)
+}
+
+async fn claim_manual_recovery(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+    token: &str,
+    seconds: u64,
+) -> Result<bool, AppError> {
+    let changed = sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now', '+' || ? || ' seconds'), deletion_retry_at=NULL WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
+        .bind(token).bind(seconds as i64).bind(code).execute(pool).await.map_err(AppError::Database)?.rows_affected();
+    Ok(changed == 1)
+}
+
+async fn schedule_manual_retry(pool: &sqlx::SqlitePool, code: &str, token: &str) {
+    let _ = sqlx::query("UPDATE issues SET deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_attempts=deletion_attempts+1, deletion_retry_at=datetime('now', '+' || MIN((deletion_attempts + 1) * 60, 3600) || ' seconds') WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND deletion_lease_token=?")
+        .bind(code).bind(token).execute(pool).await;
 }
 
 async fn cleanup_inactive_issues_with_lease(
@@ -642,8 +677,24 @@ pub async fn delete_issue(
 
     let pool = state.db.pool.clone();
     let cleanup_issue_code = issue_code.clone();
+    let lease_token = Uuid::new_v4().to_string();
+    claim_manual_recovery(
+        &pool,
+        &cleanup_issue_code,
+        &lease_token,
+        MANUAL_CLEANUP_LEASE_SECONDS,
+    )
+    .await?;
     tokio::spawn(async move {
-        if let Err(error) = finish_manual_issue_deletion(&pool, &cleanup_issue_code).await {
+        if let Err(error) = finish_manual_issue_deletion(
+            &pool,
+            &cleanup_issue_code,
+            &lease_token,
+            MANUAL_CLEANUP_LEASE_SECONDS,
+        )
+        .await
+        {
+            schedule_manual_retry(&pool, &cleanup_issue_code, &lease_token).await;
             tracing::error!(issue_code = cleanup_issue_code, %error, "background issue deletion failed; it can be retried");
         }
     });
@@ -654,6 +705,8 @@ pub async fn delete_issue(
 async fn finish_manual_issue_deletion(
     pool: &sqlx::SqlitePool,
     issue_code: &str,
+    lease_token: &str,
+    lease_seconds: u64,
 ) -> Result<(), AppError> {
     let bundles: Vec<BundleIdRow> =
         sqlx::query_as("SELECT id, issue_code, status FROM bundles WHERE issue_code = ?")
@@ -663,6 +716,13 @@ async fn finish_manual_issue_deletion(
             .map_err(AppError::Database)?;
 
     for bundle in &bundles {
+        if !crate::db::renew_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds)
+            .await?
+        {
+            return Err(AppError::Conflict(
+                "manual issue deletion lease was lost".into(),
+            ));
+        }
         if bundle.status == "DELETED" {
             continue;
         }
@@ -675,7 +735,14 @@ async fn finish_manual_issue_deletion(
             .await
             .map_err(AppError::Database)?;
         }
-        finish_bundle_deletion(pool, &bundle.id).await?;
+        crate::db::finish_bundle_deletion_with_inactive_lease(
+            pool,
+            &bundle.id,
+            issue_code,
+            lease_token,
+            lease_seconds,
+        )
+        .await?;
     }
 
     sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
@@ -683,10 +750,9 @@ async fn finish_manual_issue_deletion(
         .execute(pool)
         .await
         .map_err(AppError::Database)?;
-    sqlx::query(
-        "DELETE FROM issues WHERE code = ? AND status = 'DELETING' AND deletion_reason = 'MANUAL'",
-    )
-    .bind(issue_code)
+    sqlx::query("DELETE FROM issues WHERE code = ? AND status = 'DELETING' AND deletion_reason = 'MANUAL' AND deletion_lease_token = ?")
+        .bind(issue_code)
+        .bind(lease_token)
     .execute(pool)
     .await
     .map_err(AppError::Database)?;

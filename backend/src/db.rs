@@ -285,7 +285,7 @@ pub async fn renew_inactive_issue_lease(
         ));
     }
     let modifier = format!("+{lease_seconds} seconds");
-    let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
+    let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason IN ('INACTIVE', 'MANUAL') AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
         .bind(modifier)
         .bind(issue_code)
         .bind(lease_token)

@@ -14,6 +14,7 @@ mod helpers;
 mod issues;
 #[cfg(test)]
 pub(crate) use issues::cleanup_inactive_issues;
+pub use issues::resume_manual_issue_deletions;
 mod logs;
 mod saved_searches;
 mod temp_results;
@@ -46,6 +47,25 @@ pub fn spawn_inactive_issue_cleanup(
             let state = state.clone();
             async move {
                 issues::cleanup_inactive_issues(&state)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        },
+    )
+}
+
+pub fn spawn_manual_issue_cleanup(
+    state: web::Data<crate::AppState>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "manual-issue-cleanup",
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(60),
+        move || {
+            let pool = state.db.pool.clone();
+            async move {
+                issues::resume_manual_issue_deletions(&pool)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.to_string())
