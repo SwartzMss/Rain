@@ -1405,7 +1405,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
             .to_request(),
     )
     .await;
-    assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    assert_eq!(delete.status(), StatusCode::ACCEPTED);
     wait_for_bundle_status(&pool, exact_hash, "DELETED").await;
     let deleted_bundle: (String, Option<String>) =
         sqlx::query_as("SELECT status, deleted_at FROM bundles WHERE hash = ?")
@@ -1650,7 +1650,8 @@ async fn issue_creation_and_upload_require_existing_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(delete_empty.status(), StatusCode::NO_CONTENT);
+    assert_eq!(delete_empty.status(), StatusCode::ACCEPTED);
+    wait_for_issue_deleted(&pool, "NEW001").await;
 }
 
 #[actix_web::test]
