@@ -32,8 +32,22 @@ async fn run_state_is_atomic_concurrent_and_temporary() {
     };
     let first = skill_runs::create(&pool, &new_run).await.unwrap();
     assert!(skill_runs::create(&pool, &new_run).await.is_err());
+    assert_eq!(
+        skill_runs::find_active_owned(&pool, "u")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        first.id
+    );
     assert!(skill_runs::mark_running(&pool, &first.id).await.unwrap());
     assert!(skill_runs::cancel(&pool, &first.id, "u").await.unwrap());
+    assert!(
+        skill_runs::find_active_owned(&pool, "u")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         !skill_runs::complete(&pool, &first.id, "{\"summary\":\"late\"}")
             .await

@@ -37,6 +37,22 @@ impl ResolvedAiProvider {
     pub fn api_key(&self) -> &str {
         &self.api_key
     }
+
+    pub(crate) fn candidate(
+        source: ProviderSource,
+        base_url: String,
+        api_key: String,
+        model: String,
+        timeout_seconds: u64,
+    ) -> Self {
+        Self {
+            source,
+            base_url,
+            api_key,
+            model,
+            timeout_seconds,
+        }
+    }
 }
 
 #[derive(FromRow)]

@@ -78,8 +78,10 @@ async fn prevent_session_response_caching(
     request: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
-    let no_store =
-        request.path().starts_with("/api/auth/") || request.path().starts_with("/api/me/");
+    let no_store = request.path().starts_with("/api/auth/")
+        || request.path().starts_with("/api/me/")
+        || request.path().starts_with("/api/skill-runs/")
+        || request.path().starts_with("/api/admin/ai-provider");
     let mut response = next.call(request).await?;
     if no_store {
         response
@@ -128,6 +130,7 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(skills::delete_skill)
                 .service(skills::review)
                 .service(skill_runs::create)
+                .service(skill_runs::get_active_run)
                 .service(skill_runs::get_run)
                 .service(skill_runs::cancel)
                 .service(skill_runs::result)

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { normalizeApiError, rainApi } from '../../api/client';
+import { ApiError, normalizeApiError, rainApi } from '../../api/client';
 import type { SkillRun, SkillRunResult } from '../../api/types';
 
 const isActive = (run: SkillRun | null) => run?.status === 'QUEUED' || run?.status === 'RUNNING';
@@ -12,14 +12,19 @@ export function useSkillRun(issueCode: string) {
   const refresh = useCallback(async (id: string) => {
     const value = await rainApi.fetchSkillRun(id);
     setRun(value);
-    if (value.status === 'SUCCEEDED') setResult(await rainApi.fetchSkillRunResult(id));
+    if (value.status === 'SUCCEEDED' && value.issue_code === issueCode) setResult(await rainApi.fetchSkillRunResult(id));
+    if (!isActive(value) && value.issue_code !== issueCode) setRun(null);
     return value;
-  }, []);
+  }, [issueCode]);
 
   useEffect(() => {
     setRun(null); setResult(null); setError('');
     const id = sessionStorage.getItem(storageKey);
-    if (id) void refresh(id).catch(() => sessionStorage.removeItem(storageKey));
+    if (id) {
+      void refresh(id).catch(() => sessionStorage.removeItem(storageKey));
+    } else {
+      void rainApi.fetchActiveSkillRun().then((value) => { if (value) setRun(value); }).catch(() => undefined);
+    }
   }, [refresh, storageKey]);
 
   useEffect(() => {
@@ -43,7 +48,13 @@ export function useSkillRun(issueCode: string) {
       sessionStorage.setItem(storageKey, value.id);
       setRun(value);
       if (value.status === 'SUCCEEDED') setResult(await rainApi.fetchSkillRunResult(value.id));
-    } catch (reason) { setError(normalizeApiError(reason)); }
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.code === 'SKILL_RUN_ALREADY_ACTIVE') {
+        const active = await rainApi.fetchActiveSkillRun().catch(() => null);
+        if (active) setRun(active);
+      }
+      setError(normalizeApiError(reason));
+    }
   };
   const cancel = async () => {
     if (!run) return;

@@ -6,7 +6,8 @@ use backend::{
     auth::session::{SESSION_COOKIE_NAME, generate_session_token, hash_session_token},
     config::AppLimits,
     db,
-    repositories::sessions,
+    models::skills::{SkillPayload, SkillReview},
+    repositories::{sessions, skills},
     routes,
 };
 use chrono::{Duration, Utc};
@@ -33,6 +34,61 @@ async fn user_cookie(pool: &sqlx::SqlitePool, id: &str, username: &str) -> Cooki
     .await
     .unwrap();
     Cookie::new(SESSION_COOKIE_NAME, token)
+}
+
+#[tokio::test]
+async fn review_save_is_conditioned_on_the_current_skill_version_and_hash() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool).await.unwrap();
+    let payload = SkillPayload {
+        name: "diagnose".into(),
+        description: None,
+        skill_markdown: "# v1".into(),
+        enabled: true,
+    };
+    let created = skills::create(&pool, "u", &payload, "hash-v1")
+        .await
+        .unwrap();
+    let snapshot = skills::find_owned(&pool, "u", &created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let review = SkillReview {
+        overall_score: 80,
+        grade: "GOOD".into(),
+        dimensions: serde_json::json!({"scope": 80}),
+        warnings: vec![],
+        suggestions: vec![],
+        evaluated_at: None,
+    };
+    assert!(
+        skills::save_review(&pool, &snapshot, "model", &review)
+            .await
+            .unwrap()
+    );
+
+    let changed = SkillPayload {
+        skill_markdown: "# v2".into(),
+        ..payload
+    };
+    skills::update(&pool, "u", &created.id, &changed, "hash-v2")
+        .await
+        .unwrap();
+    assert!(
+        !skills::save_review(&pool, &snapshot, "model", &review)
+            .await
+            .unwrap()
+    );
+    assert!(
+        skills::find_response(&pool, "u", &created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .review
+            .is_none()
+    );
 }
 
 #[actix_web::test]

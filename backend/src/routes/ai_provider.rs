@@ -6,7 +6,7 @@ use crate::{
     AppState,
     ai_provider::{
         client::{ChatCompletionClient, ChatMessage, ChatRequest, OpenAiChatClient, ProviderError},
-        config::resolve_effective_config,
+        config::{ProviderSource, ResolvedAiProvider, resolve_effective_config},
         crypto::SecretCipher,
     },
     auth::extractor::{RequireAdmin, RequireBusinessUser},
@@ -19,6 +19,15 @@ pub struct UpdateAiProvider {
     api_key: Option<String>,
     model: String,
     request_timeout_seconds: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestAiProvider {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    request_timeout_seconds: Option<u64>,
 }
 
 async fn provider_snapshot(state: &AppState) -> Result<serde_json::Value, AppError> {
@@ -71,7 +80,13 @@ pub async fn update_ai_provider(
 ) -> Result<HttpResponse, AppError> {
     let base_url = body.base_url.trim().trim_end_matches('/').to_owned();
     let parsed = reqwest::Url::parse(&base_url).map_err(|_| invalid_base_url())?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
         return Err(invalid_base_url());
     }
     let model = body.model.trim();
@@ -174,11 +189,30 @@ fn invalid_base_url() -> AppError {
 
 #[post("/admin/ai-provider/test")]
 pub async fn test_ai_provider(
-    _admin: RequireAdmin,
+    req: HttpRequest,
+    admin: RequireAdmin,
     state: web::Data<AppState>,
+    body: web::Bytes,
 ) -> Result<HttpResponse, AppError> {
-    let provider = resolve_effective_config(&state.db.pool, &state.ai_provider)
-        .await?
+    let current = resolve_effective_config(&state.db.pool, &state.ai_provider).await?;
+    let candidate = if body.is_empty() {
+        TestAiProvider::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|_| {
+            AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVALID_AI_PROVIDER_TEST",
+                "模型服务测试配置无效",
+            )
+        })?
+    };
+    let base_url = candidate
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| current.as_ref().map(|value| value.base_url.clone()))
         .ok_or_else(|| {
             AppError::api(
                 StatusCode::CONFLICT,
@@ -186,9 +220,73 @@ pub async fn test_ai_provider(
                 "模型服务尚未配置",
             )
         })?;
-    let model = provider.model.clone();
+    let parsed = reqwest::Url::parse(&base_url).map_err(|_| invalid_base_url())?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(invalid_base_url());
+    }
+    let api_key = candidate
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| current.as_ref().map(|value| value.api_key().to_owned()))
+        .ok_or_else(|| {
+            AppError::api(
+                StatusCode::CONFLICT,
+                "AI_PROVIDER_NOT_CONFIGURED",
+                "模型服务尚未配置",
+            )
+        })?;
+    let model = candidate
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| current.as_ref().map(|value| value.model.clone()))
+        .ok_or_else(|| {
+            AppError::api(
+                StatusCode::CONFLICT,
+                "AI_PROVIDER_NOT_CONFIGURED",
+                "模型服务尚未配置",
+            )
+        })?;
+    if model.len() > 200 {
+        return Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "INVALID_AI_MODEL",
+            "模型名称不能为空且不能超过 200 个字符",
+        ));
+    }
+    let timeout_seconds = candidate
+        .request_timeout_seconds
+        .or_else(|| current.as_ref().map(|value| value.timeout_seconds))
+        .unwrap_or(state.ai_provider.timeout_seconds);
+    if !(1..=300).contains(&timeout_seconds) {
+        return Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "INVALID_AI_TIMEOUT",
+            "请求超时必须为 1 到 300 秒",
+        ));
+    }
+    let provider = ResolvedAiProvider::candidate(
+        current
+            .as_ref()
+            .map_or(ProviderSource::Database, |value| value.source),
+        base_url.clone(),
+        api_key,
+        model.clone(),
+        timeout_seconds,
+    );
     let client = OpenAiChatClient::new(&provider).map_err(provider_error)?;
-    client
+    let outcome = client
         .complete(ChatRequest {
             model: model.clone(),
             messages: vec![ChatMessage {
@@ -202,8 +300,20 @@ pub async fn test_ai_provider(
             tool_choice: None,
             response_format: None,
         })
-        .await
-        .map_err(provider_error)?;
+        .await;
+    let audit_value = serde_json::json!({
+        "base_url": base_url,
+        "model": model,
+        "request_timeout_seconds": timeout_seconds,
+        "ok": outcome.is_ok(),
+    })
+    .to_string();
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,new_value,client_ip,user_agent) VALUES(?,'USER',?,'AI_PROVIDER_TESTED',?,?,?)")
+        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(audit_value)
+        .bind(req.peer_addr().map(|address| address.ip().to_string()))
+        .bind(req.headers().get("user-agent").and_then(|value| value.to_str().ok()))
+        .execute(&state.db.pool).await.map_err(AppError::Database)?;
+    outcome.map_err(provider_error)?;
     Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true, "model": model })))
 }
 

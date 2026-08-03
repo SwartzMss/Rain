@@ -230,7 +230,7 @@ async fn administrator_can_save_masked_provider_without_exposing_the_secret() {
         &app,
         actix_test::TestRequest::put()
             .uri("/api/admin/ai-provider")
-            .cookie(cookie)
+            .cookie(cookie.clone())
             .set_json(serde_json::json!({
                 "base_url": "https://model.example/v1",
                 "model": "replacement-model",
@@ -246,6 +246,19 @@ async fn administrator_can_save_masked_provider_without_exposing_the_secret() {
             .await
             .unwrap();
     assert_eq!(encrypted, preserved);
+
+    let response = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/api/admin/ai-provider/test")
+            .cookie(cookie)
+            .set_json(serde_json::json!({"modle":"typo"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = actix_test::read_body_json(response).await;
+    assert_eq!(body["code"], "INVALID_AI_PROVIDER_TEST");
 
     let audit_values: Vec<Option<String>> = sqlx::query_scalar(
         "SELECT new_value FROM admin_audit_logs WHERE action='AI_PROVIDER_UPDATED'",

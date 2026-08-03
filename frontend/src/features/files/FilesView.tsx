@@ -1259,6 +1259,8 @@ export function BundleView() {
     <div className="space-y-5">
       {issueCode && auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER' ? (
         <IssueSkillRunner issueCode={issueCode} onRevealEvidence={(evidence) => void revealSkillEvidence(evidence)} />
+      ) : issueCode && auth.state.status === 'GUEST' ? (
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">登录后可使用自己的私有 Skill 诊断当前 Issue。</section>
       ) : null}
       <section className="panel overflow-hidden !p-0 lg:h-[calc(100vh-104px)]">
         {treeError ? (

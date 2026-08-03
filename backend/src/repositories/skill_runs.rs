@@ -42,6 +42,20 @@ pub async fn find_owned(
         .map_err(AppError::Database)
 }
 
+pub async fn find_active_owned(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> Result<Option<SkillRunRecord>, AppError> {
+    let sql = format!(
+        "SELECT {COLUMNS} FROM skill_runs WHERE user_id=? AND status IN ('QUEUED','RUNNING') LIMIT 1"
+    );
+    sqlx::query_as(&sql)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(AppError::Database)
+}
+
 pub async fn mark_running(pool: &SqlitePool, id: &str) -> Result<bool, AppError> {
     Ok(sqlx::query("UPDATE skill_runs SET status='RUNNING',started_at=CURRENT_TIMESTAMP WHERE id=? AND status='QUEUED' AND cancel_requested=0")
         .bind(id).execute(pool).await.map_err(AppError::Database)?.rows_affected() == 1)
@@ -56,6 +70,38 @@ pub async fn update_progress(
     Ok(sqlx::query("UPDATE skill_runs SET iteration_count=?,tool_call_count=? WHERE id=? AND status='RUNNING' AND cancel_requested=0")
         .bind(iterations as i64).bind(calls as i64).bind(id)
         .execute(pool).await.map_err(AppError::Database)?.rows_affected() == 1)
+}
+
+pub struct NewSkillRunStep<'a> {
+    pub run_id: &'a str,
+    pub sequence: usize,
+    pub iteration: usize,
+    pub tool_name: &'a str,
+    pub arguments_summary: &'a str,
+    pub hit_count: usize,
+    pub evidence_json: &'a str,
+    pub elapsed_ms: u64,
+    pub status: &'a str,
+}
+
+pub async fn record_step(pool: &SqlitePool, step: &NewSkillRunStep<'_>) -> Result<bool, AppError> {
+    let affected = sqlx::query("INSERT INTO skill_run_steps(id,run_id,sequence,iteration,tool_name,arguments_summary,hit_count,evidence_json,elapsed_ms,status) SELECT ?,?,?,?,?,?,?,?,?,? FROM skill_runs WHERE id=? AND status='RUNNING' AND cancel_requested=0")
+        .bind(Uuid::new_v4().to_string())
+        .bind(step.run_id)
+        .bind(step.sequence as i64)
+        .bind(step.iteration as i64)
+        .bind(step.tool_name)
+        .bind(step.arguments_summary)
+        .bind(step.hit_count as i64)
+        .bind(step.evidence_json)
+        .bind(step.elapsed_ms.min(i64::MAX as u64) as i64)
+        .bind(step.status)
+        .bind(step.run_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?
+        .rows_affected();
+    Ok(affected == 1)
 }
 
 pub async fn cancel(pool: &SqlitePool, id: &str, user_id: &str) -> Result<bool, AppError> {

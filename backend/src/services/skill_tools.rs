@@ -9,6 +9,7 @@ use crate::{
 };
 
 const MAX_READ_LINES: i64 = 200;
+const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct SkillRunContext {
@@ -39,6 +40,7 @@ pub struct EvidenceLedger {
     ranges: Vec<EvidenceRange>,
     total_bytes: usize,
     reads: HashMap<i64, Vec<(i64, i64)>>,
+    line_content: HashMap<(i64, i64), String>,
 }
 
 impl EvidenceLedger {
@@ -50,6 +52,34 @@ impl EvidenceLedger {
         self.total_bytes
     }
 
+    pub fn supports_evidence(
+        &self,
+        file_id: i64,
+        path: &str,
+        start: i64,
+        end: i64,
+        excerpt: &str,
+    ) -> bool {
+        if start < 0 || end < start || excerpt.trim().is_empty() {
+            return false;
+        }
+        let range_matches = self.ranges.iter().any(|range| {
+            range.file_id == file_id
+                && range.path == path
+                && start >= range.start_line
+                && end <= range.end_line
+        });
+        if !range_matches {
+            return false;
+        }
+        let content = (start..=end)
+            .filter_map(|line| self.line_content.get(&(file_id, line)))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        content.contains(excerpt.trim())
+    }
+
     fn record_bytes(&mut self, count: usize, limit: usize) -> Result<(), AppError> {
         if self.total_bytes.saturating_add(count) > limit {
             return Err(AppError::BadRequest("evidence byte limit reached".into()));
@@ -59,7 +89,8 @@ impl EvidenceLedger {
     }
 
     fn record_range(&mut self, range: EvidenceRange, max_ranges: usize) -> Result<(), AppError> {
-        let intervals = self.reads.entry(range.file_id).or_default();
+        let mut next_reads = self.reads.clone();
+        let intervals = next_reads.entry(range.file_id).or_default();
         intervals.push((range.start_line, range.end_line));
         intervals.sort_unstable();
         let mut merged: Vec<(i64, i64)> = Vec::new();
@@ -73,26 +104,48 @@ impl EvidenceLedger {
             merged.push((start, end));
         }
         *intervals = merged;
-        self.ranges.retain(|item| item.file_id != range.file_id);
-        self.ranges
-            .extend(intervals.iter().map(|(start, end)| EvidenceRange {
-                file_id: range.file_id,
-                path: range.path.clone(),
-                start_line: *start,
-                end_line: *end,
-            }));
-        if self.ranges.len() > max_ranges {
+        let mut next_ranges = self.ranges.clone();
+        next_ranges.retain(|item| item.file_id != range.file_id);
+        next_ranges.extend(intervals.iter().map(|(start, end)| EvidenceRange {
+            file_id: range.file_id,
+            path: range.path.clone(),
+            start_line: *start,
+            end_line: *end,
+        }));
+        if next_ranges.len() > max_ranges {
             return Err(AppError::BadRequest("evidence range limit reached".into()));
         }
+        self.reads = next_reads;
+        self.ranges = next_ranges;
         Ok(())
     }
 
     fn already_read(&self, file_id: i64, start: i64, end: i64) -> bool {
-        self.reads.get(&file_id).is_some_and(|ranges| {
-            ranges
-                .iter()
-                .any(|range| start >= range.0 && end <= range.1)
-        })
+        self.unseen_ranges(file_id, start, end).is_empty()
+    }
+
+    fn unseen_ranges(&self, file_id: i64, start: i64, end: i64) -> Vec<(i64, i64)> {
+        let mut unseen = Vec::new();
+        let mut cursor = start;
+        for &(seen_start, seen_end) in self.reads.get(&file_id).into_iter().flatten() {
+            if seen_end < cursor {
+                continue;
+            }
+            if seen_start > end {
+                break;
+            }
+            if seen_start > cursor {
+                unseen.push((cursor, end.min(seen_start - 1)));
+            }
+            cursor = cursor.max(seen_end.saturating_add(1));
+            if cursor > end {
+                break;
+            }
+        }
+        if cursor <= end {
+            unseen.push((cursor, end));
+        }
+        unseen
     }
 }
 
@@ -132,14 +185,25 @@ impl<'a> SkillToolExecutor<'a> {
             line_count: Option<i64>,
             mime_type: Option<String>,
         }
-        let rows: Vec<Row> = sqlx::query_as(
+        let mut rows: Vec<Row> = sqlx::query_as(
             "SELECT f.id AS file_id,f.path,f.size_bytes,f.line_count,f.mime_type FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' ORDER BY f.path LIMIT 2000",
         )
         .bind(&self.context.issue_code)
         .fetch_all(&self.state.db.pool)
         .await
         .map_err(AppError::Database)?;
-        let value = json!({ "files": rows });
+        let mut truncated = false;
+        while serde_json::to_vec(&json!({ "files": &rows, "truncated": truncated }))
+            .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
+            .len()
+            > MAX_TOOL_OUTPUT_BYTES
+        {
+            if rows.pop().is_none() {
+                break;
+            }
+            truncated = true;
+        }
+        let value = json!({ "files": rows, "truncated": truncated });
         self.record_output(&value)?;
         Ok(value)
     }
@@ -187,6 +251,7 @@ impl<'a> SkillToolExecutor<'a> {
         if start < 0 || end < start || end.saturating_sub(start) >= MAX_READ_LINES {
             return Err(AppError::BadRequest("invalid file line range".into()));
         }
+        let unseen = self.ledger.unseen_ranges(file_id, start, end);
         if self.ledger.already_read(file_id, start, end) {
             return Ok(json!({ "duplicate": true, "lines": [] }));
         }
@@ -201,38 +266,126 @@ impl<'a> SkillToolExecutor<'a> {
         .ok_or_else(|| AppError::NotFound("file is outside the run Issue".into()))?;
         let mut api = self.state.limits.api.clone();
         api.max_preview_line_size = api.max_preview_line_size.min(128);
-        let response = read_file_lines(
-            &self.state.db.pool,
-            &record,
-            self.state.storage.blob_store.as_ref(),
-            &api,
-            start,
-            end - start + 1,
+        let mut lines = Vec::new();
+        for (unseen_start, unseen_end) in unseen {
+            let response = read_file_lines(
+                &self.state.db.pool,
+                &record,
+                self.state.storage.blob_store.as_ref(),
+                &api,
+                unseen_start,
+                unseen_end - unseen_start + 1,
+            )
+            .await?;
+            let response_value = serde_json::to_value(response)
+                .map_err(|_| AppError::Config("failed to serialize file evidence".into()))?;
+            if let Some(response_lines) = response_value.get("lines").and_then(Value::as_array) {
+                lines.extend(response_lines.iter().cloned());
+            }
+        }
+        let mut truncated = false;
+        while serde_json::to_vec(
+            &json!({ "path": &record.path, "lines": &lines, "truncated": truncated }),
         )
-        .await?;
-        let value = serde_json::to_value(response)
-            .map_err(|_| AppError::Config("failed to serialize file evidence".into()))?;
+        .map_err(|_| AppError::Config("failed to serialize file evidence".into()))?
+        .len()
+            > MAX_TOOL_OUTPUT_BYTES
+        {
+            if lines.pop().is_none() {
+                break;
+            }
+            truncated = true;
+        }
+        let value = json!({ "path": record.path, "lines": lines, "truncated": truncated });
         self.record_output(&value)?;
-        self.ledger.record_range(
-            EvidenceRange {
-                file_id,
-                path: record.path,
-                start_line: start,
-                end_line: end,
-            },
-            30,
-        )?;
+        if let Some(returned_lines) = value.get("lines").and_then(Value::as_array)
+            && let (Some(actual_start), Some(actual_end)) = (
+                returned_lines
+                    .first()
+                    .and_then(|line| line.get("line_number"))
+                    .and_then(Value::as_i64),
+                returned_lines
+                    .last()
+                    .and_then(|line| line.get("line_number"))
+                    .and_then(Value::as_i64),
+            )
+        {
+            for line in returned_lines {
+                if let (Some(line_number), Some(content)) = (
+                    line.get("line_number").and_then(Value::as_i64),
+                    line.get("content").and_then(Value::as_str),
+                ) {
+                    self.ledger
+                        .line_content
+                        .insert((file_id, line_number), content.to_owned());
+                }
+            }
+            self.ledger.record_range(
+                EvidenceRange {
+                    file_id,
+                    path: record.path,
+                    start_line: actual_start,
+                    end_line: actual_end,
+                },
+                30,
+            )?;
+        }
         Ok(value)
     }
 
     fn record_output(&mut self, value: &Value) -> Result<(), AppError> {
         let bytes = serde_json::to_vec(value)
             .map_err(|_| AppError::Config("failed to serialize tool output".into()))?;
-        if bytes.len() > 32 * 1024 {
+        if bytes.len() > MAX_TOOL_OUTPUT_BYTES {
             return Err(AppError::BadRequest(
                 "tool output byte limit reached".into(),
             ));
         }
         self.ledger.record_bytes(bytes.len(), 128 * 1024)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EvidenceLedger, EvidenceRange};
+
+    #[test]
+    fn overlapping_reads_return_only_unseen_intervals() {
+        let mut ledger = EvidenceLedger::default();
+        ledger
+            .record_range(
+                EvidenceRange {
+                    file_id: 7,
+                    path: "/app.log".into(),
+                    start_line: 10,
+                    end_line: 20,
+                },
+                30,
+            )
+            .unwrap();
+        assert_eq!(ledger.unseen_ranges(7, 5, 25), vec![(5, 9), (21, 25)]);
+        assert!(ledger.unseen_ranges(7, 12, 18).is_empty());
+    }
+
+    #[test]
+    fn evidence_requires_the_recorded_path_and_excerpt() {
+        let mut ledger = EvidenceLedger::default();
+        ledger
+            .record_range(
+                EvidenceRange {
+                    file_id: 7,
+                    path: "/app.log".into(),
+                    start_line: 10,
+                    end_line: 10,
+                },
+                30,
+            )
+            .unwrap();
+        ledger
+            .line_content
+            .insert((7, 10), "database timeout after 30s".into());
+        assert!(ledger.supports_evidence(7, "/app.log", 10, 10, "timeout after 30s"));
+        assert!(!ledger.supports_evidence(7, "/forged.log", 10, 10, "timeout after 30s"));
+        assert!(!ledger.supports_evidence(7, "/app.log", 10, 10, "root password"));
     }
 }

@@ -38,7 +38,7 @@ export function AiProviderSettingsPanel() {
   };
   const test = async () => {
     setBusy(true); setError(''); setMessage('');
-    try { const value = await rainApi.testAiProvider(); setMessage(`连接成功，模型：${value.model}`); }
+    try { const value = await rainApi.testAiProvider({ base_url: baseUrl, model, request_timeout_seconds: timeout, ...(apiKey ? { api_key: apiKey } : {}) }); setMessage(`连接成功，模型：${value.model}`); }
     catch (reason) { setError(normalizeApiError(reason)); } finally { setBusy(false); }
   };
 
@@ -50,7 +50,7 @@ export function AiProviderSettingsPanel() {
         <label className="text-sm font-medium text-slate-700">Base URL<input className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" type="url" required value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} /></label>
         <label className="text-sm font-medium text-slate-700">模型<input className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" required value={model} onChange={(event) => setModel(event.target.value)} /></label>
         <label className="text-sm font-medium text-slate-700">API Key<input className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" type="password" placeholder={mask ? `保留现有密钥（${mask}）` : '输入 API Key'} value={apiKey} onChange={(event) => setApiKey(event.target.value)} /></label>
-        <label className="text-sm font-medium text-slate-700">请求超时（秒）<input className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" type="number" min="5" max="300" required value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /></label>
+        <label className="text-sm font-medium text-slate-700">请求超时（秒）<input className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5" type="number" min="1" max="300" required value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /></label>
         <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
           <span className="text-xs text-slate-500">当前来源：{source === 'DATABASE' ? '数据库' : source === 'ENVIRONMENT' ? '环境变量' : '未配置'}</span>
           <div className="flex gap-2"><button className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold disabled:opacity-50" type="button" disabled={busy} onClick={() => void test()}>测试连接</button><button className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" type="submit" disabled={busy}>保存 AI 配置</button></div>

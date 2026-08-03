@@ -126,26 +126,17 @@ pub async fn save_review(
     reviewer_model: &str,
     review: &SkillReview,
 ) -> Result<bool, AppError> {
-    let current_hash: Option<String> =
-        sqlx::query_scalar("SELECT content_hash FROM user_skills WHERE id=? AND owner_user_id=?")
-            .bind(&skill.id)
-            .bind(&skill.owner_user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(AppError::Database)?;
-    if current_hash.as_deref() != Some(skill.content_hash.as_str()) {
-        return Ok(false);
-    }
     let findings = serde_json::json!({
         "warnings": review.warnings,
         "suggestions": review.suggestions
     });
-    sqlx::query("INSERT INTO skill_reviews(skill_id,skill_version,skill_content_hash,reviewer_model,rubric_version,overall_score,grade,dimension_scores_json,findings_json,evaluated_at) VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(skill_id) DO UPDATE SET skill_version=excluded.skill_version,skill_content_hash=excluded.skill_content_hash,reviewer_model=excluded.reviewer_model,rubric_version=excluded.rubric_version,overall_score=excluded.overall_score,grade=excluded.grade,dimension_scores_json=excluded.dimension_scores_json,findings_json=excluded.findings_json,evaluated_at=CURRENT_TIMESTAMP")
-        .bind(&skill.id).bind(skill.version).bind(&skill.content_hash).bind(reviewer_model)
+    let affected = sqlx::query("INSERT INTO skill_reviews(skill_id,skill_version,skill_content_hash,reviewer_model,rubric_version,overall_score,grade,dimension_scores_json,findings_json,evaluated_at) SELECT id,version,content_hash,?,?,?,?,?,?,CURRENT_TIMESTAMP FROM user_skills WHERE id=? AND owner_user_id=? AND version=? AND content_hash=? ON CONFLICT(skill_id) DO UPDATE SET skill_version=excluded.skill_version,skill_content_hash=excluded.skill_content_hash,reviewer_model=excluded.reviewer_model,rubric_version=excluded.rubric_version,overall_score=excluded.overall_score,grade=excluded.grade,dimension_scores_json=excluded.dimension_scores_json,findings_json=excluded.findings_json,evaluated_at=CURRENT_TIMESTAMP")
+        .bind(reviewer_model)
         .bind("skill-quality-v1").bind(review.overall_score).bind(&review.grade)
         .bind(review.dimensions.to_string()).bind(findings.to_string())
-        .execute(pool).await.map_err(AppError::Database)?;
-    Ok(true)
+        .bind(&skill.id).bind(&skill.owner_user_id).bind(skill.version).bind(&skill.content_hash)
+        .execute(pool).await.map_err(AppError::Database)?.rows_affected();
+    Ok(affected == 1)
 }
 
 async fn with_review(

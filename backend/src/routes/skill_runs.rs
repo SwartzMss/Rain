@@ -119,6 +119,14 @@ pub async fn get_run(
     Ok(HttpResponse::Ok().json(run))
 }
 
+#[get("/me/skill-runs/active")]
+pub async fn get_active_run(
+    user: RequireBusinessUser,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    Ok(HttpResponse::Ok().json(skill_runs::find_active_owned(&state.db.pool, &user.0.id).await?))
+}
+
 #[post("/skill-runs/{id}/cancel")]
 pub async fn cancel(
     user: RequireBusinessUser,
@@ -183,15 +191,22 @@ pub async fn events(
     let body = stream! {
         yield Ok::<_, actix_web::Error>(web::Bytes::from(format!("event: snapshot\ndata: {initial}\n\n")));
         if let Some(ref mut receiver) = receiver {
+            let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+            heartbeat.tick().await;
             loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        let data = serde_json::to_string(&event.data).unwrap_or_else(|_| "{}".into());
-                        yield Ok(web::Bytes::from(format!("event: {}\ndata: {data}\n\n", event.event)));
-                        if matches!(event.event.as_str(), "run.completed" | "run.failed" | "run.cancelled") { break; }
+                tokio::select! {
+                    _ = heartbeat.tick() => {
+                        yield Ok(web::Bytes::from_static(b": heartbeat\n\n"));
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    received = receiver.recv() => match received {
+                        Ok(event) => {
+                            let data = serde_json::to_string(&event.data).unwrap_or_else(|_| "{}".into());
+                            yield Ok(web::Bytes::from(format!("event: {}\ndata: {data}\n\n", event.event)));
+                            if matches!(event.event.as_str(), "run.completed" | "run.failed" | "run.cancelled") { break; }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             }
         }
