@@ -67,11 +67,23 @@ fn is_rain_browser_extension_request(request: &ServiceRequest) -> bool {
         return false;
     }
 
-    request
+    let fetch_site = request
+        .headers()
+        .get("Sec-Fetch-Site")
+        .and_then(|value| value.to_str().ok());
+    let origin = request
         .headers()
         .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_valid_chrome_extension_origin)
+        .and_then(|value| value.to_str().ok());
+
+    match origin {
+        Some(value) if is_valid_chrome_extension_origin(value) => true,
+        Some(value) if value.eq_ignore_ascii_case("null") => {
+            fetch_site.is_some_and(|value| value.eq_ignore_ascii_case("none"))
+        }
+        None => fetch_site.is_some_and(|value| value.eq_ignore_ascii_case("none")),
+        _ => false,
+    }
 }
 
 fn is_valid_chrome_extension_origin(origin: &str) -> bool {
@@ -105,6 +117,27 @@ mod tests {
     }
 
     #[test]
+    fn accepts_marked_extension_fetch_with_null_origin_and_none_fetch_site() {
+        let request = TestRequest::post()
+            .insert_header((header::ORIGIN, "null"))
+            .insert_header(("Sec-Fetch-Site", "none"))
+            .insert_header((RAIN_BROWSER_HEADER, "1"))
+            .to_srv_request();
+
+        assert!(is_rain_browser_extension_request(&request));
+    }
+
+    #[test]
+    fn accepts_marked_extension_fetch_without_origin_and_none_fetch_site() {
+        let request = TestRequest::post()
+            .insert_header(("Sec-Fetch-Site", "none"))
+            .insert_header((RAIN_BROWSER_HEADER, "1"))
+            .to_srv_request();
+
+        assert!(is_rain_browser_extension_request(&request));
+    }
+
+    #[test]
     fn rejects_unmarked_extension_origin() {
         let request = TestRequest::post()
             .insert_header((
@@ -117,9 +150,30 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unmarked_none_fetch_site_request() {
+        let request = TestRequest::post()
+            .insert_header(("Sec-Fetch-Site", "none"))
+            .to_srv_request();
+
+        assert!(!is_rain_browser_extension_request(&request));
+    }
+
+    #[test]
     fn rejects_web_origin_even_with_extension_marker() {
         let request = TestRequest::post()
             .insert_header((header::ORIGIN, "https://example.com"))
+            .insert_header(("Sec-Fetch-Site", "cross-site"))
+            .insert_header((RAIN_BROWSER_HEADER, "1"))
+            .to_srv_request();
+
+        assert!(!is_rain_browser_extension_request(&request));
+    }
+
+    #[test]
+    fn rejects_null_origin_when_fetch_site_is_cross_site() {
+        let request = TestRequest::post()
+            .insert_header((header::ORIGIN, "null"))
+            .insert_header(("Sec-Fetch-Site", "cross-site"))
             .insert_header((RAIN_BROWSER_HEADER, "1"))
             .to_srv_request();
 
