@@ -9,8 +9,6 @@ use actix_web::{
 const RAIN_BROWSER_HEADER: &str = "x-rain-browser";
 const RAIN_BROWSER_HEADER_VALUE: &str = "1";
 const RAIN_BROWSER_EXTENSION_ID: &str = "adfphmgiamoclnhibdebknkemmihpakg";
-const RAIN_BROWSER_EXTENSION_ORIGIN: &str =
-    "chrome-extension://adfphmgiamoclnhibdebknkemmihpakg";
 
 pub async fn enforce_same_origin(
     request: ServiceRequest,
@@ -70,38 +68,38 @@ fn is_rain_browser_extension_request(request: &ServiceRequest) -> bool {
         return false;
     }
 
-    request
+    let Some(origin) = request
         .headers()
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|origin| origin.eq_ignore_ascii_case(RAIN_BROWSER_EXTENSION_ORIGIN))
+    else {
+        return false;
+    };
+    let Some(extension_id) = origin.strip_prefix("chrome-extension://") else {
+        return false;
+    };
+
+    extension_id.eq_ignore_ascii_case(RAIN_BROWSER_EXTENSION_ID)
 }
 
 #[cfg(test)]
 mod tests {
     use actix_web::{http::header, test::TestRequest};
 
-    use super::{
-        RAIN_BROWSER_EXTENSION_ID, RAIN_BROWSER_EXTENSION_ORIGIN, RAIN_BROWSER_HEADER,
-        is_rain_browser_extension_request,
-    };
+    use super::{RAIN_BROWSER_EXTENSION_ID, RAIN_BROWSER_HEADER, is_rain_browser_extension_request};
+
+    fn rain_browser_origin() -> String {
+        format!("chrome-extension://{RAIN_BROWSER_EXTENSION_ID}")
+    }
 
     #[test]
     fn accepts_marked_rain_browser_origin() {
         let request = TestRequest::post()
-            .insert_header((header::ORIGIN, RAIN_BROWSER_EXTENSION_ORIGIN))
+            .insert_header((header::ORIGIN, rain_browser_origin()))
             .insert_header((RAIN_BROWSER_HEADER, "1"))
             .to_srv_request();
 
         assert!(is_rain_browser_extension_request(&request));
-    }
-
-    #[test]
-    fn extension_origin_matches_configured_id() {
-        assert_eq!(
-            RAIN_BROWSER_EXTENSION_ORIGIN,
-            format!("chrome-extension://{RAIN_BROWSER_EXTENSION_ID}")
-        );
     }
 
     #[test]
@@ -120,7 +118,7 @@ mod tests {
     #[test]
     fn rejects_unmarked_rain_browser_origin() {
         let request = TestRequest::post()
-            .insert_header((header::ORIGIN, RAIN_BROWSER_EXTENSION_ORIGIN))
+            .insert_header((header::ORIGIN, rain_browser_origin()))
             .to_srv_request();
 
         assert!(!is_rain_browser_extension_request(&request));
