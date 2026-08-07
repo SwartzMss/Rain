@@ -86,7 +86,9 @@ fn is_rain_browser_extension_request(request: &ServiceRequest) -> bool {
 mod tests {
     use actix_web::{http::header, test::TestRequest};
 
-    use super::{RAIN_BROWSER_EXTENSION_ID, RAIN_BROWSER_HEADER, is_rain_browser_extension_request};
+    use super::{
+        RAIN_BROWSER_EXTENSION_ID, RAIN_BROWSER_HEADER, is_rain_browser_extension_request,
+    };
 
     fn rain_browser_origin() -> String {
         format!("chrome-extension://{RAIN_BROWSER_EXTENSION_ID}")
