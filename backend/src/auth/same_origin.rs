@@ -20,6 +20,31 @@ pub async fn enforce_same_origin(
         return Ok(next.call(request).await?.map_into_left_body());
     }
 
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<none>");
+    let fetch_site = request
+        .headers()
+        .get("Sec-Fetch-Site")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<none>");
+    let rain_browser_marked = request
+        .headers()
+        .get(RAIN_BROWSER_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == RAIN_BROWSER_HEADER_VALUE);
+
+    tracing::warn!(
+        method = %request.method(),
+        path = request.path(),
+        origin,
+        fetch_site,
+        rain_browser_marked,
+        "rejected cross-origin request"
+    );
+
     Ok(request.into_response(
         HttpResponse::Forbidden()
             .json(serde_json::json!({
