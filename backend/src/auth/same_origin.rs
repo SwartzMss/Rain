@@ -121,10 +121,7 @@ fn is_valid_chrome_extension_origin(origin: &str) -> bool {
         return false;
     };
 
-    extension_id.len() == 32
-        && extension_id
-            .bytes()
-            .all(|byte| matches!(byte, b'a'..=b'p'))
+    extension_id.len() == 32 && extension_id.bytes().all(|byte| matches!(byte, b'a'..=b'p'))
 }
 
 #[cfg(test)]
