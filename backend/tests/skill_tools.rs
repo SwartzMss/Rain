@@ -7,6 +7,7 @@ use backend::{
     error::AppError,
     services::skill_tools::{SkillRunContext, SkillToolExecutor},
 };
+use uuid::Uuid;
 
 #[tokio::test]
 async fn list_files_is_bound_to_ready_bundles_in_the_run_issue() {
@@ -544,4 +545,127 @@ async fn search_logs_duplicate_key_includes_normalized_filters() {
         .await
         .unwrap();
     assert_ne!(separator_in_bundle["duplicate"], true);
+}
+
+#[tokio::test]
+async fn read_file_lines_exposes_bounded_long_lines_and_records_only_returned_evidence() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('A','A')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('a','A','hash-a','a','READY','PUBLISHING')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let first_line = format!(
+        "{}KEY_AFTER_128{}TAIL_SECRET",
+        "a".repeat(200),
+        "b".repeat(4_300)
+    );
+    let utf8_line = "界".repeat(2_000);
+    let mut source_lines = vec![first_line.clone(), utf8_line.clone()];
+    for line in 2..16 {
+        source_lines.push(format!(
+            "line-{line}-{}-DROPPED_MARKER_{line}",
+            "z".repeat(5_000)
+        ));
+    }
+    source_lines.push("short complete".into());
+    let source = source_lines.join("\r\n");
+    let data_root =
+        std::env::temp_dir().join(format!("rain-skill-lines-{}", Uuid::new_v4().simple()));
+    let storage_key = "blobs/te/test-long-lines";
+    let blob_path = data_root.join(storage_key);
+    tokio::fs::create_dir_all(blob_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&blob_path, source.as_bytes())
+        .await
+        .unwrap();
+    let blob_id: i64 = sqlx::query_scalar("INSERT INTO blobs(content_hash,size_bytes,storage_backend,storage_key,state) VALUES('test-long-lines',?,'local',?,'READY') RETURNING id")
+        .bind(source.len() as i64)
+        .bind(storage_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let file_id: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir,size_bytes,line_count,mime_type,blob_id) VALUES('a','long.log','/long.log',0,?,17,'text/plain',?) RETURNING id")
+        .bind(source.len() as i64)
+        .bind(blob_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let state = AppState::new(pool, data_root.clone(), AppLimits::default());
+    let mut executor = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "run".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+        },
+    );
+    assert!(executor.read_file_lines(file_id, 0, 200).await.is_err());
+    assert!(executor.read_file_lines(file_id, 5, 4).await.is_err());
+
+    let result = executor.read_file_lines(file_id, 0, 15).await.unwrap();
+    let result_bytes = serde_json::to_vec(&result).unwrap();
+    let lines = result["lines"].as_array().unwrap();
+    assert!(result_bytes.len() <= 32 * 1024);
+    assert_eq!(result["truncated"], true);
+    assert!(!lines.is_empty());
+    assert!(lines.len() < source_lines.len());
+    assert_eq!(lines[0]["truncated"], true);
+    assert_eq!(lines[0]["original_length"], first_line.len());
+    let first_content = lines[0]["content"].as_str().unwrap();
+    assert!(first_content.contains("KEY_AFTER_128"));
+    assert!(!first_content.contains("TAIL_SECRET"));
+    assert!(first_content.len() <= 4 * 1024 + " ... [line truncated]".len());
+    assert_eq!(lines[1]["truncated"], true);
+    assert_eq!(lines[1]["original_length"], utf8_line.len());
+    assert!(!lines[1]["content"].as_str().unwrap().contains('\u{fffd}'));
+
+    assert!(executor.ledger.supports_evidence(
+        "hash-a",
+        file_id,
+        "/long.log",
+        0,
+        0,
+        "KEY_AFTER_128"
+    ));
+    assert!(!executor.ledger.supports_evidence(
+        "hash-a",
+        file_id,
+        "/long.log",
+        0,
+        0,
+        "TAIL_SECRET"
+    ));
+    let last_returned = lines.last().unwrap()["line_number"].as_i64().unwrap();
+    let first_dropped = last_returned + 1;
+    assert!(!executor.ledger.supports_evidence(
+        "hash-a",
+        file_id,
+        "/long.log",
+        first_dropped,
+        first_dropped,
+        &format!("DROPPED_MARKER_{first_dropped}")
+    ));
+
+    let max_range = executor.read_file_lines(file_id, 16, 215).await.unwrap();
+    assert_eq!(max_range["lines"][0]["content"], "short complete");
+    assert_eq!(max_range["lines"][0]["truncated"], false);
+    assert!(max_range["lines"][0].get("original_length").is_none());
+
+    let duplicate = executor
+        .read_file_lines(file_id, 0, last_returned)
+        .await
+        .unwrap();
+    assert_eq!(duplicate["duplicate"], true);
+    let continuation = executor.read_file_lines(file_id, 0, 15).await.unwrap();
+    assert_eq!(continuation["lines"][0]["line_number"], first_dropped);
+
+    tokio::fs::remove_dir_all(data_root).await.unwrap();
 }
