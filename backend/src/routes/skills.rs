@@ -249,9 +249,9 @@ fn parse_review(content: Option<&str>) -> Result<SkillReview, ()> {
 
 fn grade_for_score(score: i64) -> &'static str {
     match score {
-        90..=100 => "EXCELLENT",
-        75..=89 => "GOOD",
-        60..=74 => "NEEDS_IMPROVEMENT",
+        85..=100 => "EXCELLENT",
+        70..=84 => "GOOD",
+        50..=69 => "NEEDS_IMPROVEMENT",
         _ => "POOR",
     }
 }
@@ -319,9 +319,12 @@ mod tests {
     #[test]
     fn grade_is_derived_from_the_score() {
         assert_eq!(grade_for_score(95), "EXCELLENT");
-        assert_eq!(grade_for_score(89), "GOOD");
-        assert_eq!(grade_for_score(74), "NEEDS_IMPROVEMENT");
-        assert_eq!(grade_for_score(59), "POOR");
+        assert_eq!(grade_for_score(85), "EXCELLENT");
+        assert_eq!(grade_for_score(84), "GOOD");
+        assert_eq!(grade_for_score(70), "GOOD");
+        assert_eq!(grade_for_score(69), "NEEDS_IMPROVEMENT");
+        assert_eq!(grade_for_score(50), "NEEDS_IMPROVEMENT");
+        assert_eq!(grade_for_score(49), "POOR");
 
         let review = parse_review(Some(
             r#"{"overall_score":95,"grade":"POOR","dimensions":{"task_scope":95,"retrieval_strategy":95,"evidence_constraints":95,"incomplete_logs":95,"stopping_conditions":95,"clarity":95},"warnings":[],"suggestions":[]}"#,

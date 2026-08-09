@@ -247,6 +247,46 @@ async fn administrator_can_save_masked_provider_without_exposing_the_secret() {
             .unwrap();
     assert_eq!(encrypted, preserved);
 
+    for (master_key, expected_code) in [
+        (None, "AI_MASTER_KEY_REQUIRED"),
+        (Some([6; 32]), "AI_MASTER_KEY_INVALID"),
+    ] {
+        let env = AiProviderEnv::from_values(None, None, None, 120, master_key).unwrap();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState::new_with_ai(
+                    pool.clone(),
+                    PathBuf::from("data"),
+                    AppLimits::default(),
+                    env,
+                )))
+                .configure(routes::register),
+        )
+        .await;
+        let response = actix_test::call_service(
+            &app,
+            actix_test::TestRequest::put()
+                .uri("/api/admin/ai-provider")
+                .cookie(cookie.clone())
+                .set_json(serde_json::json!({
+                    "base_url": "https://model.example/v1",
+                    "model": "replacement-model",
+                    "request_timeout_seconds": 80
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["code"], expected_code);
+        let after_failure: String =
+            sqlx::query_scalar("SELECT encrypted_api_key FROM ai_provider_settings WHERE id=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after_failure, preserved);
+    }
+
     let response = actix_test::call_service(
         &app,
         actix_test::TestRequest::post()
