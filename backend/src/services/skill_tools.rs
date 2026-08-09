@@ -466,7 +466,7 @@ impl<'a> SkillToolExecutor<'a> {
             path: String,
             start_line: i64,
             end_line: i64,
-            content: String,
+            snippet: String,
         }
         #[derive(Serialize)]
         struct Hit {
@@ -485,8 +485,9 @@ impl<'a> SkillToolExecutor<'a> {
         let rows: Vec<HitRow> = if search_mode == "short_literal" {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
             sqlx::query_as(
-                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,ls.content FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
             )
+            .bind(query)
             .bind(&self.context.issue_code)
             .bind(file_id.expect("short search file_id was validated"))
             .bind(bundle_hash.as_deref())
@@ -501,7 +502,7 @@ impl<'a> SkillToolExecutor<'a> {
         } else {
             let fts = format!("\"{}\"", query.replace('"', "\"\""));
             sqlx::query_as(
-                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,ls.content FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) ORDER BY rank LIMIT ?",
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,snippet(log_segments_fts,0,'','','',64) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) ORDER BY rank LIMIT ?",
             )
             .bind(fts)
             .bind(&self.context.issue_code)
@@ -526,7 +527,7 @@ impl<'a> SkillToolExecutor<'a> {
                 path: row.path,
                 start_line: row.start_line,
                 end_line: row.end_line,
-                snippet: bounded_match_snippet(&row.content, query),
+                snippet: bounded_snippet_bytes(&row.snippet),
             })
             .collect();
         let value = loop {
@@ -739,49 +740,18 @@ fn escape_like_pattern(value: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn bounded_match_snippet(content: &str, query: &str) -> String {
+fn bounded_snippet_bytes(snippet: &str) -> String {
     const MAX_BYTES: usize = 400;
-    const CONTEXT_BEFORE_BYTES: usize = 120;
-
-    if content.len() <= MAX_BYTES {
-        return content.to_owned();
-    }
-    let content_chars: Vec<(usize, char)> = content.char_indices().collect();
-    let query_chars: Vec<char> = query.chars().collect();
-    let match_char = content_chars
-        .windows(query_chars.len())
-        .position(|window| {
-            window
-                .iter()
-                .zip(&query_chars)
-                .all(|((_, left), right)| left == right || left.eq_ignore_ascii_case(right))
-        })
-        .unwrap_or(0);
-    let match_start = content_chars[match_char].0;
-    let match_end_char = (match_char + query_chars.len()).min(content_chars.len());
-    let match_end = content_chars
-        .get(match_end_char)
-        .map_or(content.len(), |(offset, _)| *offset);
-    let mut start = match_start.saturating_sub(CONTEXT_BEFORE_BYTES);
-    while !content.is_char_boundary(start) {
-        start += 1;
-    }
-    if match_end.saturating_sub(start) > MAX_BYTES {
-        start = match_end.saturating_sub(MAX_BYTES);
-        while !content.is_char_boundary(start) {
-            start += 1;
-        }
-    }
-    let mut end = start.saturating_add(MAX_BYTES).min(content.len());
-    while !content.is_char_boundary(end) {
+    let mut end = snippet.len().min(MAX_BYTES);
+    while !snippet.is_char_boundary(end) {
         end -= 1;
     }
-    content[start..end].to_owned()
+    snippet[..end].to_owned()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EvidenceLedger, EvidenceRange, bounded_match_snippet};
+    use super::{EvidenceLedger, EvidenceRange, bounded_snippet_bytes};
 
     #[test]
     fn overlapping_reads_return_only_unseen_intervals() {
@@ -834,10 +804,8 @@ mod tests {
     }
 
     #[test]
-    fn match_snippet_is_bounded_and_contains_a_middle_match() {
-        let content = format!("{}CoFactor failure{}", "前".repeat(200), "后".repeat(200));
-        let snippet = bounded_match_snippet(&content, "cofactor");
-        assert!(snippet.to_ascii_lowercase().contains("cofactor"));
+    fn snippet_byte_limit_preserves_valid_utf8() {
+        let snippet = bounded_snippet_bytes(&"前".repeat(200));
         assert!(snippet.len() <= 400);
         assert!(snippet.is_char_boundary(snippet.len()));
     }

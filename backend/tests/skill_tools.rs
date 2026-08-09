@@ -305,8 +305,8 @@ async fn search_logs_supports_scoped_filters_short_terms_and_bounded_snippets() 
         .fetch_one(&pool).await.unwrap();
 
     let middle_content = format!(
-        "{} COFACTOR failed rv {}",
-        "before ".repeat(100),
+        "{} COFACTOR failed rv ÄBC failure {}",
+        "0123456789abcdef\n".repeat(30_000),
         "after ".repeat(100)
     );
     for (bundle, file_id, content, line) in [
@@ -359,6 +359,14 @@ async fn search_logs_supports_scoped_filters_short_terms_and_bounded_snippets() 
         serde_json::to_vec(&fts).unwrap().len()
     );
 
+    let unicode_fts = executor
+        .search_logs("äbc", None, None, Some(file_a))
+        .await
+        .unwrap();
+    let unicode_snippet = unicode_fts["hits"][0]["snippet"].as_str().unwrap();
+    assert!(unicode_snippet.contains("ÄBC"));
+    assert!(unicode_snippet.len() <= 400);
+
     let short = executor
         .search_logs("rv", None, None, Some(file_a))
         .await
@@ -368,7 +376,9 @@ async fn search_logs_supports_scoped_filters_short_terms_and_bounded_snippets() 
     assert!(short["hits"][0]["snippet"].as_str().unwrap().contains("rv"));
     assert_eq!(
         executor.ledger.total_bytes(),
-        serde_json::to_vec(&fts).unwrap().len() + serde_json::to_vec(&short).unwrap().len()
+        serde_json::to_vec(&fts).unwrap().len()
+            + serde_json::to_vec(&unicode_fts).unwrap().len()
+            + serde_json::to_vec(&short).unwrap().len()
     );
     assert!(executor.search_logs("rv", None, None, None).await.is_err());
     assert!(
