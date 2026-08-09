@@ -5,7 +5,11 @@ use serde_json::{Value, json};
 use sqlx::FromRow;
 
 use crate::{
-    AppState, error::AppError, repositories::files::FileRow, services::file_reader::read_file_lines,
+    AppState,
+    error::AppError,
+    file_classification::PreviewKind,
+    repositories::files::{FileRow, preview_kind_for_record},
+    services::file_reader::read_file_lines,
 };
 
 const MAX_READ_LINES: i64 = 200;
@@ -206,6 +210,7 @@ impl<'a> SkillToolExecutor<'a> {
             size_bytes: Option<i64>,
             line_count: Option<i64>,
             mime_type: Option<String>,
+            meta: Option<String>,
         }
         let cursor = cursor.unwrap_or(0);
         if cursor < 0 {
@@ -225,7 +230,7 @@ impl<'a> SkillToolExecutor<'a> {
             )
         });
         let mut rows: Vec<Row> = sqlx::query_as(
-            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,length(f.path)>4096 AS path_truncated,f.is_dir,f.size_bytes,f.line_count,f.mime_type FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.id>? AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') ORDER BY f.id LIMIT 501",
+            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,length(f.path)>4096 AS path_truncated,f.is_dir,f.size_bytes,f.line_count,f.mime_type,f.meta FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.id>? AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') ORDER BY f.id LIMIT 501",
         )
         .bind(&self.context.issue_code)
         .bind(cursor)
@@ -242,8 +247,15 @@ impl<'a> SkillToolExecutor<'a> {
             let next_cursor = has_more
                 .then(|| rows.last().map(|row| row.file_id))
                 .flatten();
-            let candidate =
-                json!({ "files": &rows, "next_cursor": next_cursor, "truncated": has_more });
+            let candidate = {
+                let files = rows.iter().map(|row| {
+                let preview_kind = preview_kind_for_record(&FileRow {
+                    id: row.file_id, parent_id: None, name: row.path.rsplit('/').next().unwrap_or(&row.path).to_owned(), path: row.path.clone(), is_dir: row.is_dir, size_bytes: row.size_bytes, line_count: row.line_count, mime_type: row.mime_type.clone(), status: None, meta: row.meta.clone(), blob_id: None, storage_backend: None, storage_key: None, blob_state: None,
+                });
+                json!({ "file_id": row.file_id, "bundle_hash": row.bundle_hash, "path": row.path, "path_truncated": row.path_truncated, "is_dir": row.is_dir, "size_bytes": row.size_bytes, "line_count": row.line_count, "mime_type": row.mime_type, "preview_kind": preview_kind, "text_readable": preview_kind == PreviewKind::Text })
+                }).collect::<Vec<_>>();
+                json!({ "files": files, "next_cursor": next_cursor, "truncated": has_more })
+            };
             let size = serde_json::to_vec(&candidate)
                 .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
                 .len();
@@ -328,6 +340,17 @@ impl<'a> SkillToolExecutor<'a> {
                 "path": record.path,
                 "is_dir": true,
                 "error": "FILE_IS_DIRECTORY",
+                "lines": []
+            });
+            self.record_output(&value)?;
+            return Ok(value);
+        }
+        if preview_kind_for_record(&record) != PreviewKind::Text {
+            let value = json!({
+                "bundle_hash": bundle_hash,
+                "path": record.path,
+                "is_dir": false,
+                "error": "FILE_NOT_TEXT",
                 "lines": []
             });
             self.record_output(&value)?;

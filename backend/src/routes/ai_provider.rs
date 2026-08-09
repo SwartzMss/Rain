@@ -137,13 +137,30 @@ pub async fn update_ai_provider(
         })?;
         SecretCipher::new(master_key).encrypt(api_key)?
     } else {
-        existing.as_ref().map(|row| row.1.clone()).ok_or_else(|| {
+        let existing = existing.as_ref().ok_or_else(|| {
             AppError::api(
                 StatusCode::BAD_REQUEST,
                 "AI_API_KEY_REQUIRED",
                 "首次保存模型服务时必须提供 API Key",
             )
-        })?
+        })?;
+        let master_key = state.ai_provider.master_key.ok_or_else(|| {
+            AppError::api(
+                StatusCode::CONFLICT,
+                "AI_MASTER_KEY_REQUIRED",
+                "复用已保存的 API Key 前必须配置 RAIN_AI_MASTER_KEY",
+            )
+        })?;
+        SecretCipher::new(master_key)
+            .decrypt(&existing.1)
+            .map_err(|_| {
+                AppError::api(
+                    StatusCode::CONFLICT,
+                    "AI_MASTER_KEY_INVALID",
+                    "无法解密已保存的 API Key，请配置正确的 RAIN_AI_MASTER_KEY 或重新输入 API Key",
+                )
+            })?;
+        existing.1.clone()
     };
 
     let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
