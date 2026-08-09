@@ -4,6 +4,7 @@ use backend::{
     AppState,
     config::AppLimits,
     db,
+    error::AppError,
     services::skill_tools::{SkillRunContext, SkillToolExecutor},
 };
 
@@ -146,8 +147,57 @@ async fn issue_manifest_is_bounded_to_ready_bundles_and_does_not_record_evidence
     assert!(!manifest.to_string().contains("pending"));
     assert!(!manifest.to_string().contains("foreign"));
     assert!(executor.ledger.evidence().is_empty());
-    assert_eq!(executor.ledger.total_bytes(), 0);
-    assert!(serde_json::to_vec(&manifest).unwrap().len() <= 32 * 1024);
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap().len();
+    assert_eq!(executor.ledger.total_bytes(), manifest_bytes);
+    assert!(manifest_bytes <= 32 * 1024);
+}
+
+#[tokio::test]
+async fn issue_manifest_groups_last_extensions_and_root_level_paths() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('A','A')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('bundle','A','hash','logs','READY','PUBLISHING')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('bundle','boot.log','/boot.log',0),('bundle','system.log','/system.log',0),('bundle','qsee.log','/qsee.log',0),('bundle','app.1.log','/logs/app.1.log',0),('bundle','app.2.log','/logs/app.2.log',0),('bundle','archive.tar.gz','/logs/archive.tar.gz',0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    let mut executor = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "run".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+        },
+    );
+
+    let manifest = executor.get_issue_manifest().await.unwrap();
+    let extensions = manifest["extensions"].as_array().unwrap();
+    assert_eq!(extensions[0]["extension"], ".log");
+    assert_eq!(extensions[0]["file_count"], 5);
+    assert!(
+        extensions
+            .iter()
+            .any(|item| { item["extension"] == ".gz" && item["file_count"] == 1 })
+    );
+    let prefixes = manifest["top_path_prefixes"].as_array().unwrap();
+    assert!(
+        prefixes
+            .iter()
+            .any(|item| { item["prefix"] == "/" && item["file_count"] == 3 })
+    );
+    assert!(
+        prefixes
+            .iter()
+            .any(|item| { item["prefix"] == "/logs" && item["file_count"] == 3 })
+    );
 }
 
 #[tokio::test]
@@ -163,7 +213,7 @@ async fn issue_manifest_limits_large_result_sets() {
             .bind(format!("bundle-{index}"))
             .bind("A")
             .bind(format!("hash-{index:03}"))
-            .bind(format!("bundle-{index}.zip"))
+            .bind(format!("{}-{index}.zip", "x".repeat(500)))
             .bind("READY")
             .bind("PUBLISHING")
             .bind(1_i64)
@@ -181,8 +231,36 @@ async fn issue_manifest_limits_large_result_sets() {
         },
     );
     let manifest = executor.get_issue_manifest().await.unwrap();
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap().len();
     assert_eq!(manifest["issue"]["ready_bundle_count"], 60);
     assert_eq!(manifest["truncated"], true);
     assert!(manifest["bundles"].as_array().unwrap().len() <= 50);
-    assert!(serde_json::to_vec(&manifest).unwrap().len() <= 32 * 1024);
+    assert!(manifest_bytes <= 32 * 1024);
+    assert!(manifest_bytes > 128 * 1024 / 24);
+
+    let mut successful_calls = 1;
+    let mut limited = false;
+    for _ in 1..24 {
+        match executor.get_issue_manifest().await {
+            Ok(_) => successful_calls += 1,
+            Err(AppError::BadRequest(message))
+                if message.contains("retrieval byte limit reached") =>
+            {
+                limited = true;
+                break;
+            }
+            Err(error) => panic!("unexpected manifest error: {error}"),
+        }
+    }
+    assert!(
+        limited,
+        "24 manifest calls must not bypass the shared budget"
+    );
+    assert!(successful_calls < 24);
+    assert_eq!(
+        executor.ledger.total_bytes(),
+        manifest_bytes * successful_calls
+    );
+    assert!(executor.ledger.total_bytes() <= 128 * 1024);
+    assert!(executor.ledger.evidence().is_empty());
 }

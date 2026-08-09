@@ -14,6 +14,7 @@ use crate::{
 
 const MAX_READ_LINES: i64 = 200;
 const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
+const MAX_TOTAL_TOOL_OUTPUT_BYTES: usize = 128 * 1024;
 const MAX_MANIFEST_BUNDLES: usize = 50;
 const MAX_MANIFEST_EXTENSIONS: usize = 30;
 const MAX_MANIFEST_PREFIXES: usize = 30;
@@ -57,7 +58,7 @@ pub struct EvidenceRange {
 pub struct EvidenceLedger {
     searches: HashSet<String>,
     ranges: Vec<EvidenceRange>,
-    total_bytes: usize,
+    retrieval_bytes: usize,
     reads: HashMap<i64, Vec<(i64, i64)>>,
     line_content: HashMap<(i64, i64), String>,
 }
@@ -68,7 +69,7 @@ impl EvidenceLedger {
     }
 
     pub fn total_bytes(&self) -> usize {
-        self.total_bytes
+        self.retrieval_bytes
     }
 
     pub fn supports_evidence(
@@ -102,10 +103,10 @@ impl EvidenceLedger {
     }
 
     fn record_bytes(&mut self, count: usize, limit: usize) -> Result<(), AppError> {
-        if self.total_bytes.saturating_add(count) > limit {
-            return Err(AppError::BadRequest("evidence byte limit reached".into()));
+        if self.retrieval_bytes.saturating_add(count) > limit {
+            return Err(AppError::BadRequest("retrieval byte limit reached".into()));
         }
-        self.total_bytes += count;
+        self.retrieval_bytes += count;
         Ok(())
     }
 
@@ -268,7 +269,7 @@ impl<'a> SkillToolExecutor<'a> {
         let mut truncated = bundles.len() > MAX_MANIFEST_BUNDLES;
         bundles.truncate(MAX_MANIFEST_BUNDLES);
         let mut extensions: Vec<CountRow> = sqlx::query_as(
-            "SELECT lower('.' || substr(f.name,instr(f.name,'.')+1)) AS extension,COUNT(*) AS file_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 AND instr(f.name,'.')>0 GROUP BY extension ORDER BY file_count DESC,extension ASC LIMIT ?",
+            "SELECT lower('.' || json_extract('[' || replace(json_quote(f.name),'.','\",\"') || ']','$[#-1]')) AS extension,COUNT(*) AS file_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 AND instr(f.name,'.')>1 AND substr(f.name,-1)<>'.' GROUP BY extension ORDER BY file_count DESC,extension ASC LIMIT ?",
         )
         .bind(issue_code)
         .bind((MAX_MANIFEST_EXTENSIONS + 1) as i64)
@@ -278,7 +279,7 @@ impl<'a> SkillToolExecutor<'a> {
         truncated |= extensions.len() > MAX_MANIFEST_EXTENSIONS;
         extensions.truncate(MAX_MANIFEST_EXTENSIONS);
         let mut prefixes: Vec<PrefixRow> = sqlx::query_as(
-            "SELECT CASE WHEN instr(substr(f.path,2),'/')>0 THEN rtrim(substr(f.path,1,instr(substr(f.path,2),'/')+1),'/') ELSE f.path END AS prefix,COUNT(*) AS file_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 GROUP BY prefix ORDER BY file_count DESC,prefix ASC LIMIT ?",
+            "SELECT CASE WHEN f.path LIKE '/%' AND instr(substr(f.path,2),'/')>0 THEN rtrim(substr(f.path,1,instr(substr(f.path,2),'/')+1),'/') WHEN f.path LIKE '/%' THEN '/' WHEN instr(f.path,'/')>0 THEN '/' || substr(f.path,1,instr(f.path,'/')-1) ELSE '/' END AS prefix,COUNT(*) AS file_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 GROUP BY prefix ORDER BY file_count DESC,prefix ASC LIMIT ?",
         )
         .bind(issue_code)
         .bind((MAX_MANIFEST_PREFIXES + 1) as i64)
@@ -315,6 +316,7 @@ impl<'a> SkillToolExecutor<'a> {
             "truncated": truncated
         });
         trim_manifest(&mut value)?;
+        self.record_output(&value)?;
         Ok(value)
     }
 
@@ -557,7 +559,8 @@ impl<'a> SkillToolExecutor<'a> {
                 "tool output byte limit reached".into(),
             ));
         }
-        self.ledger.record_bytes(bytes.len(), 128 * 1024)
+        self.ledger
+            .record_bytes(bytes.len(), MAX_TOTAL_TOOL_OUTPUT_BYTES)
     }
 }
 
