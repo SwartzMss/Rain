@@ -57,9 +57,33 @@ pub struct EvidenceRange {
     pub end_line: i64,
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum SearchMode {
+    Fts,
+    ShortLiteral,
+}
+
+impl SearchMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fts => "fts",
+            Self::ShortLiteral => "short_literal",
+        }
+    }
+}
+
+#[derive(Debug, Hash, PartialEq, Eq)]
+struct SearchKey {
+    query: String,
+    path_prefix: Option<String>,
+    bundle_hash: Option<String>,
+    file_id: Option<i64>,
+    mode: SearchMode,
+}
+
 #[derive(Default)]
 pub struct EvidenceLedger {
-    searches: HashSet<String>,
+    searches: HashSet<SearchKey>,
     ranges: Vec<EvidenceRange>,
     retrieval_bytes: usize,
     reads: HashMap<i64, Vec<(i64, i64)>>,
@@ -443,20 +467,23 @@ impl<'a> SkillToolExecutor<'a> {
         let path_prefix = normalize_search_filter(path_prefix, 512, "path_prefix")?;
         let bundle_hash = normalize_search_filter(bundle_hash, 128, "bundle_hash")?;
         let search_mode = if query_chars == 2 {
-            "short_literal"
+            SearchMode::ShortLiteral
         } else {
-            "fts"
+            SearchMode::Fts
         };
-        let key = format!(
-            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{search_mode}",
-            query.to_lowercase(),
-            path_prefix.as_deref().unwrap_or("").to_lowercase(),
-            bundle_hash.as_deref().unwrap_or("").to_lowercase(),
-            file_id.map_or_else(String::new, |value| value.to_string()),
-        );
+        let key = SearchKey {
+            query: match search_mode {
+                SearchMode::Fts => query.to_lowercase(),
+                SearchMode::ShortLiteral => query.to_ascii_lowercase(),
+            },
+            path_prefix: path_prefix.as_deref().map(str::to_ascii_lowercase),
+            bundle_hash: bundle_hash.as_deref().map(str::to_ascii_lowercase),
+            file_id,
+            mode: search_mode,
+        };
         if !self.ledger.searches.insert(key) {
             return Ok(
-                json!({ "search_mode": search_mode, "duplicate": true, "hits": [], "truncated": false }),
+                json!({ "search_mode": search_mode.as_str(), "duplicate": true, "hits": [], "truncated": false }),
             );
         }
         #[derive(FromRow)]
@@ -482,7 +509,7 @@ impl<'a> SkillToolExecutor<'a> {
             .map(|value| format!("{}%", escape_like_pattern(value)));
         let max_hits = self.state.limits.api.max_search_results.clamp(1, 20);
         let fetch_limit = max_hits.saturating_add(1);
-        let rows: Vec<HitRow> = if search_mode == "short_literal" {
+        let rows: Vec<HitRow> = if search_mode == SearchMode::ShortLiteral {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
             sqlx::query_as(
                 "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
@@ -531,8 +558,7 @@ impl<'a> SkillToolExecutor<'a> {
             })
             .collect();
         let value = loop {
-            let candidate =
-                json!({ "search_mode": search_mode, "hits": hits, "truncated": truncated });
+            let candidate = json!({ "search_mode": search_mode.as_str(), "hits": hits, "truncated": truncated });
             let size = serde_json::to_vec(&candidate)
                 .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
                 .len();

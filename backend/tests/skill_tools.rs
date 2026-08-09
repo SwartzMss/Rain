@@ -485,7 +485,7 @@ async fn search_logs_duplicate_key_includes_normalized_filters() {
         .execute(&pool).await.unwrap();
     let file_id: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a','app.log','/qnx/app.log',0) RETURNING id")
         .fetch_one(&pool).await.unwrap();
-    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index) VALUES('a',?,'timeout happened',1,1,0)")
+    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index) VALUES('a',?,'timeout happened ÄB failure',1,1,0)")
         .bind(file_id).execute(&pool).await.unwrap();
     let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
     let mut executor = SkillToolExecutor::new(
@@ -521,4 +521,27 @@ async fn search_logs_duplicate_key_includes_normalized_filters() {
         .await
         .unwrap();
     assert_ne!(different_file["duplicate"], true);
+
+    let unicode_lower = executor
+        .search_logs("äb", None, None, Some(file_id))
+        .await
+        .unwrap();
+    assert!(unicode_lower["hits"].as_array().unwrap().is_empty());
+    let unicode_exact = executor
+        .search_logs("ÄB", None, None, Some(file_id))
+        .await
+        .unwrap();
+    assert_ne!(unicode_exact["duplicate"], true);
+    assert_eq!(unicode_exact["hits"].as_array().unwrap().len(), 1);
+
+    let separator_in_path = executor
+        .search_logs("timeout", Some("/qnx\u{1f}hash-a"), None, Some(file_id))
+        .await
+        .unwrap();
+    assert_ne!(separator_in_path["duplicate"], true);
+    let separator_in_bundle = executor
+        .search_logs("timeout", Some("/qnx"), Some("hash-a\u{1f}"), Some(file_id))
+        .await
+        .unwrap();
+    assert_ne!(separator_in_bundle["duplicate"], true);
 }
