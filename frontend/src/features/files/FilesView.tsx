@@ -39,6 +39,8 @@ import { CodeLinesPane } from './components/CodeLinesPane';
 import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
 import { PENDING_SAVED_SEARCH_KEY, takePendingSavedSearch } from './pendingSavedSearch';
+import { IssueSkillRunner } from '../skill-runs/IssueSkillRunner';
+import type { SkillEvidence } from '../../api/types';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
@@ -1237,8 +1239,22 @@ export function BundleView() {
   const canRunFileSearch = canFinalizeSearch(fileSearchTokens, fileSearchDraft);
   const canRunResultFilter = canFinalizeSearch(resultFilterTokens, resultFilterDraft);
 
+  const revealSkillEvidence = async (evidence: SkillEvidence) => {
+    try {
+      await handleNodeClick(`${evidence.bundle_hash}:${evidence.file_id}`, evidence.start_line, { preserveSearch: true });
+      setSourceActionMessage(`已跳转到 ${evidence.path}:${evidence.start_line}`);
+    } catch (reason) {
+      setSourceActionMessage(`证据跳转失败：${normalizeApiError(reason)}`);
+    }
+  };
+
   return (
     <div className="space-y-5">
+      {issueCode && auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER' ? (
+        <IssueSkillRunner issueCode={issueCode} onRevealEvidence={(evidence) => void revealSkillEvidence(evidence)} />
+      ) : issueCode && auth.state.status === 'GUEST' ? (
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm">登录后可使用自己的私有 Skill 诊断当前 Issue。</section>
+      ) : null}
       <section className="panel overflow-hidden !p-0 lg:h-[calc(100vh-104px)]">
         {treeError ? (
           <p className="m-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-600">

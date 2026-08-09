@@ -218,3 +218,95 @@ export interface TempResultPreviewResponse {
     path: string;
   }>;
 }
+
+export interface SkillReview {
+  overall_score: number;
+  grade: string;
+  dimensions: Record<string, number | string>;
+  warnings: string[];
+  suggestions: string[];
+  evaluated_at?: string | null;
+}
+
+export interface UserSkill {
+  id: string;
+  name: string;
+  description?: string | null;
+  skill_markdown: string;
+  content_hash: string;
+  version: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  review?: SkillReview | null;
+}
+
+export type UserSkillSummary = Omit<UserSkill, 'skill_markdown'>;
+
+export interface SkillPayload {
+  name: string;
+  description?: string | null;
+  skill_markdown: string;
+  enabled: boolean;
+}
+
+export interface AiProviderSettings {
+  configured: boolean;
+  source?: 'DATABASE' | 'ENVIRONMENT' | null;
+  base_url?: string | null;
+  model?: string | null;
+  request_timeout_seconds: number;
+  api_key_mask?: string | null;
+}
+
+export interface SkillRun {
+  id: string;
+  user_id: string;
+  issue_code: string;
+  skill_id: string;
+  skill_version: number;
+  skill_name: string;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+  iteration_count: number;
+  tool_call_count: number;
+  cancel_requested: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+}
+
+export interface SkillEvidence {
+  id: string;
+  bundle_hash: string;
+  file_id: number;
+  path: string;
+  start_line: number;
+  end_line: number;
+  excerpt: string;
+  explanation: string;
+}
+
+export interface SkillObservation {
+  text: string;
+  evidence_ids: string[];
+}
+
+export interface SkillInference {
+  text: string;
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  evidence_ids: string[];
+}
+
+export interface SkillRunResult {
+  summary: {
+    status: 'SUPPORTED' | 'INSUFFICIENT_EVIDENCE';
+    text: string;
+    evidence_ids: string[];
+  };
+  observations: SkillObservation[];
+  inferences: SkillInference[];
+  missing_context: string[];
+  evidence: SkillEvidence[];
+}

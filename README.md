@@ -164,6 +164,11 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES` | `10` | 同一用户名每 5 分钟失败登录上限 |
 | `RAIN_ISSUE_INACTIVE_DAYS` | `0` | Issue 非活跃自动过期天数；0 关闭，启用范围 7–30 |
 | `RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR` | `10` | 同一 IP 每小时注册尝试上限 |
+| `RAIN_AI_BASE_URL` | — | OpenAI-compatible API 的 `/v1` Base URL；作为数据库配置的兜底 |
+| `RAIN_AI_API_KEY` | — | 环境变量 Provider 的 API Key |
+| `RAIN_AI_MODEL` | — | 环境变量 Provider 使用的模型 |
+| `RAIN_AI_TIMEOUT_SECONDS` | `120` | 单次模型请求超时，范围 1–300 秒 |
+| `RAIN_AI_MASTER_KEY` | — | 32 字节随机主密钥的 Base64，用于加密管理员保存到数据库的 API Key |
 
 默认配置会使用：
 
@@ -182,6 +187,16 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 5. 点击 Issue 的“查看”打开文件浏览页。
 6. 在左侧文件树选择文件，右侧会显示文本预览。
 7. 在搜索框输入关键词，可搜索当前 Issue 下已索引的文本日志。
+
+### 私有 Skills 与 Issue 诊断
+
+登录用户可以在“账户 → 我的 Skills”创建自己的 `SKILL.md`、启停 Skill，并请求一次质量评估。Skills 始终按用户隔离，系统不提供内置 Skills；每个用户最多 50 个，列表只返回摘要，完整 Markdown 按所选 Skill 单独读取。质量评估只保留当前 Skill 版本的一份结果，重新评估会覆盖，正文修改会清除它。评分等级由服务端按总分确定，评估限制为每用户同时 1 个、每小时 5 次、全局同时 2 个模型任务，整体 90 秒超时。
+
+管理员可以在“系统设置 → AI Provider”保存 OpenAI-compatible 服务配置并测试连接。空测试请求只测试当前生效配置；测试未保存配置必须完整提供 Base URL、API Key、模型和超时，修改 Base URL 时也必须重新输入 API Key，避免把已有密钥发送到新地址。完整且可解密的数据库配置优先于环境变量。数据库中的 API Key 使用 `RAIN_AI_MASTER_KEY` 进行 AES-256-GCM 加密；接口、审计日志和错误信息都不会返回明文或密文。未配置主密钥时仍可使用完整的环境变量 Provider，但不能把新的 API Key 保存进数据库。
+
+任何能查看当前 ACTIVE Issue 的登录用户都可选择自己的已启用 Skill 运行诊断，不要求是 Issue 创建者。Runner 只有 `list_files`、`search_logs`、`read_file_lines` 三个只读工具，且服务端固定绑定当前 Issue；文件列表提供游标续页和路径前缀过滤。固定限制为 8 次迭代、24 次工具调用、每次最多 20 个搜索结果、30 个证据区间、单次工具输出 32 KiB、累计证据 128 KiB、总时长 120 秒，同一用户同时只能运行一个任务。日志和文件名始终按不可信证据处理。
+
+页面刷新后可在同一浏览器会话中续接当前任务。成功、失败或取消后的结果仅按 run ID 临时保留 24 小时，随后连同步骤和 Skill 快照清理；Rain 不提供诊断历史列表。受支持的摘要、每项观察和推断都必须引用经过服务端核验的证据 ID；无证据摘要会被服务端替换为固定的“证据不足”文本。证据携带 Bundle hash、文件和行号，可直接跳回唯一来源。文件发现结果明确标记目录，误读目录会返回非致命工具错误。
 
 ## 用户认证
 
@@ -231,6 +246,7 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 单行默认超过 8 MiB 时索引和分页展示会截断该行，并标记 `[line truncated]`；该限制可配置。
 - Issue 范围和 bundle 范围采用 SQLite FTS5 trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符的关键词直接拒绝。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
 - 登录后的原始文件下载。
+- 用户私有 Skill 管理、当前版本质量评估，以及 Issue 范围的受限 AI 诊断。
 - 删除 Issue、Bundle、单个文件节点。
 - 可选过期清理：设置 `RAIN_RETENTION_DAYS` 后启动时清理过期上传。
 
@@ -250,7 +266,7 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 文件字节访问统一经过 `BlobStore` 接口；当前使用 `LocalCasBlobStore`，上层业务不依赖本地物理路径。
 - Bundle 使用逻辑删除；无引用 Blob 由后台 GC 基于数据库实际引用扫描，并在 24 小时宽限期后回收。
 - timeline 目前固定为 `all`。
-- 当前聚焦原始日志分块搜索；结构化事件查询和 AI 分析能力尚未接入。
+- 当前 AI 分析只支持 OpenAI-compatible Chat Completions，不提供通用聊天、Shell、网络工具、用户脚本、MCP 或 Issue 写操作。
 
 自动测试：
 
