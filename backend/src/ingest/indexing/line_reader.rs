@@ -19,7 +19,7 @@ where
 {
     output.clear();
     let mut total_read = 0usize;
-    let mut truncated = false;
+    let mut previous_byte = None;
 
     loop {
         let available = reader.fill_buf().await?;
@@ -27,42 +27,58 @@ where
             return if total_read == 0 {
                 Ok(None)
             } else {
-                Ok(Some((total_read, total_read, truncated)))
+                Ok(Some((total_read, total_read, total_read > max_bytes)))
             };
         }
 
         let newline_pos = available.iter().position(|byte| *byte == b'\n');
-        let line_ending_bytes = newline_pos.map(|position| {
-            if position > 0 && available[position - 1] == b'\r' {
-                2
+        let has_carriage_return = newline_pos.map(|position| {
+            if position > 0 {
+                available[position - 1] == b'\r'
             } else {
-                1
+                previous_byte == Some(b'\r')
             }
         });
         let consume_len = newline_pos.map_or(available.len(), |pos| pos + 1);
-        let chunk = &available[..consume_len];
+        let content_end = newline_pos.map_or(consume_len, |position| {
+            if position > 0 && available[position - 1] == b'\r' {
+                position - 1
+            } else {
+                position
+            }
+        });
+        let chunk = &available[..content_end];
         total_read = total_read.saturating_add(chunk.len());
 
         let remaining = max_bytes.saturating_sub(output.len());
         if remaining > 0 {
             let keep_len = remaining.min(chunk.len());
             output.extend_from_slice(&chunk[..keep_len]);
-            if keep_len < chunk.len() {
-                truncated = true;
-            }
-        } else {
-            truncated = true;
         }
+
+        let consumed_last_byte = available.get(consume_len.saturating_sub(1)).copied();
+        let skipped_bytes = consume_len.saturating_sub(content_end);
+        total_read = total_read.saturating_add(skipped_bytes);
 
         reader.consume(consume_len);
 
-        if let Some(line_ending_bytes) = line_ending_bytes {
+        if let Some(has_carriage_return) = has_carriage_return {
+            let line_ending_bytes = 1 + usize::from(has_carriage_return);
+            let original_length = total_read.saturating_sub(line_ending_bytes);
+            if has_carriage_return
+                && newline_pos == Some(0)
+                && original_length < max_bytes
+                && output.last() == Some(&b'\r')
+            {
+                output.pop();
+            }
             return Ok(Some((
                 total_read,
-                total_read.saturating_sub(line_ending_bytes),
-                truncated,
+                original_length,
+                original_length > max_bytes,
             )));
         }
+        previous_byte = consumed_last_byte;
     }
 }
 
@@ -82,4 +98,58 @@ pub fn decode_log_line(line: &[u8], truncated: bool) -> String {
         decoded.push_str(TRUNCATED_LINE_MARKER);
     }
     decoded
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::BufReader;
+
+    use super::{decode_log_line, read_line_bytes_limited};
+
+    async fn read_with_capacity(
+        content: &[u8],
+        reader_capacity: usize,
+        max_bytes: usize,
+    ) -> ((usize, usize, bool), Vec<u8>) {
+        let mut reader = BufReader::with_capacity(reader_capacity, content);
+        let mut output = Vec::new();
+        let result = read_line_bytes_limited(&mut reader, &mut output, max_bytes)
+            .await
+            .unwrap()
+            .unwrap();
+        (result, output)
+    }
+
+    #[tokio::test]
+    async fn line_limit_excludes_lf_and_crlf_bytes() {
+        let mut lf = vec![b'a'; 4096];
+        lf.push(b'\n');
+        let (lf_result, lf_output) = read_with_capacity(&lf, 8192, 4096).await;
+        assert_eq!(lf_result, (4097, 4096, false));
+        assert_eq!(lf_output.len(), 4096);
+        assert_eq!(decode_log_line(&lf_output, lf_result.2), "a".repeat(4096));
+
+        let mut crlf = vec![b'b'; 4095];
+        crlf.extend_from_slice(b"\r\n");
+        let (crlf_result, crlf_output) = read_with_capacity(&crlf, 8192, 4096).await;
+        assert_eq!(crlf_result, (4097, 4095, false));
+        assert_eq!(crlf_output.len(), 4095);
+        assert_eq!(
+            decode_log_line(&crlf_output, crlf_result.2),
+            "b".repeat(4095)
+        );
+
+        let mut truncated = vec![b'c'; 4097];
+        truncated.push(b'\n');
+        let (truncated_result, truncated_output) = read_with_capacity(&truncated, 8192, 4096).await;
+        assert_eq!(truncated_result, (4098, 4097, true));
+        assert_eq!(truncated_output.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn crlf_split_across_reader_buffers_has_exact_content_length() {
+        let (result, output) = read_with_capacity(b"abc\r\n", 4, 16).await;
+        assert_eq!(result, (5, 3, false));
+        assert_eq!(output, b"abc");
+    }
 }
