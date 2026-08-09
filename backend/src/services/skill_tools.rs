@@ -14,6 +14,11 @@ use crate::{
 
 const MAX_READ_LINES: i64 = 200;
 const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
+const MAX_TOTAL_TOOL_OUTPUT_BYTES: usize = 128 * 1024;
+const MAX_MANIFEST_BUNDLES: usize = 50;
+const MAX_MANIFEST_EXTENSIONS: usize = 30;
+const MAX_MANIFEST_PREFIXES: usize = 30;
+const MAX_MANIFEST_LARGEST_FILES: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct SkillRunContext {
@@ -25,6 +30,7 @@ pub struct SkillRunContext {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "tool", content = "arguments", rename_all = "snake_case")]
 pub enum SkillToolCall {
+    GetIssueManifest,
     ListFiles {
         cursor: Option<i64>,
         prefix: Option<String>,
@@ -52,7 +58,7 @@ pub struct EvidenceRange {
 pub struct EvidenceLedger {
     searches: HashSet<String>,
     ranges: Vec<EvidenceRange>,
-    total_bytes: usize,
+    retrieval_bytes: usize,
     reads: HashMap<i64, Vec<(i64, i64)>>,
     line_content: HashMap<(i64, i64), String>,
 }
@@ -63,7 +69,7 @@ impl EvidenceLedger {
     }
 
     pub fn total_bytes(&self) -> usize {
-        self.total_bytes
+        self.retrieval_bytes
     }
 
     pub fn supports_evidence(
@@ -97,10 +103,10 @@ impl EvidenceLedger {
     }
 
     fn record_bytes(&mut self, count: usize, limit: usize) -> Result<(), AppError> {
-        if self.total_bytes.saturating_add(count) > limit {
-            return Err(AppError::BadRequest("evidence byte limit reached".into()));
+        if self.retrieval_bytes.saturating_add(count) > limit {
+            return Err(AppError::BadRequest("retrieval byte limit reached".into()));
         }
-        self.total_bytes += count;
+        self.retrieval_bytes += count;
         Ok(())
     }
 
@@ -170,6 +176,7 @@ pub struct SkillToolExecutor<'a> {
     state: &'a AppState,
     pub context: SkillRunContext,
     pub ledger: EvidenceLedger,
+    manifest_cache: Option<Value>,
 }
 
 impl<'a> SkillToolExecutor<'a> {
@@ -178,11 +185,13 @@ impl<'a> SkillToolExecutor<'a> {
             state,
             context,
             ledger: EvidenceLedger::default(),
+            manifest_cache: None,
         }
     }
 
     pub async fn execute(&mut self, call: SkillToolCall) -> Result<Value, AppError> {
         match call {
+            SkillToolCall::GetIssueManifest => self.get_issue_manifest().await,
             SkillToolCall::ListFiles { cursor, prefix } => {
                 self.list_files(cursor, prefix.as_deref()).await
             }
@@ -193,6 +202,130 @@ impl<'a> SkillToolExecutor<'a> {
                 end,
             } => self.read_file_lines(file_id, start, end).await,
         }
+    }
+
+    pub async fn get_issue_manifest(&mut self) -> Result<Value, AppError> {
+        if let Some(value) = self.manifest_cache.clone() {
+            self.record_output(&value)?;
+            return Ok(value);
+        }
+
+        #[derive(Serialize, FromRow)]
+        struct BundleRow {
+            hash: String,
+            name: String,
+            file_count: i64,
+            indexed_text_file_count: i64,
+            content_bytes: i64,
+        }
+        #[derive(Serialize, FromRow)]
+        struct CountRow {
+            extension: String,
+            file_count: i64,
+        }
+        #[derive(Serialize, FromRow)]
+        struct PrefixRow {
+            prefix: String,
+            file_count: i64,
+        }
+        #[derive(Serialize, FromRow)]
+        struct LargestFileRow {
+            file_id: i64,
+            bundle_hash: String,
+            path: String,
+            size_bytes: i64,
+            line_count: Option<i64>,
+        }
+
+        let issue_code = &self.context.issue_code;
+        let bundle_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM bundles WHERE issue_code=?")
+                .bind(issue_code)
+                .fetch_one(&self.state.db.pool)
+                .await
+                .map_err(AppError::Database)?;
+        let ready_bundle_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM bundles WHERE issue_code=? AND status='READY'",
+        )
+        .bind(issue_code)
+        .fetch_one(&self.state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+        let (file_count, directory_count, indexed_text_file_count): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(CASE WHEN f.is_dir=0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN f.is_dir=1 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN f.is_dir=0 AND f.line_count IS NOT NULL THEN 1 ELSE 0 END),0) FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY'",
+        )
+        .bind(issue_code)
+        .fetch_one(&self.state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+        let total_content_bytes: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(content_size_bytes),0) FROM bundles WHERE issue_code=? AND status='READY'",
+        )
+        .bind(issue_code)
+        .fetch_one(&self.state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+        let mut bundles: Vec<BundleRow> = sqlx::query_as(
+            "SELECT b.hash,substr(b.name,1,512) AS name,COALESCE(SUM(CASE WHEN f.is_dir=0 THEN 1 ELSE 0 END),0) AS file_count,COALESCE(SUM(CASE WHEN f.is_dir=0 AND f.line_count IS NOT NULL THEN 1 ELSE 0 END),0) AS indexed_text_file_count,b.content_size_bytes AS content_bytes FROM bundles b LEFT JOIN files f ON f.bundle_id=b.id WHERE b.issue_code=? AND b.status='READY' GROUP BY b.id ORDER BY b.hash ASC LIMIT ?",
+        )
+        .bind(issue_code)
+        .bind((MAX_MANIFEST_BUNDLES + 1) as i64)
+        .fetch_all(&self.state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+        let mut truncated = bundles.len() > MAX_MANIFEST_BUNDLES;
+        bundles.truncate(MAX_MANIFEST_BUNDLES);
+        let mut extensions: Vec<CountRow> = sqlx::query_as(
+            "SELECT lower('.' || json_extract('[' || replace(json_quote(f.name),'.','\",\"') || ']','$[#-1]')) AS extension,COUNT(*) AS file_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 AND instr(f.name,'.')>1 AND substr(f.name,-1)<>'.' GROUP BY extension ORDER BY file_count DESC,extension ASC LIMIT ?",
+        )
+        .bind(issue_code)
+        .bind((MAX_MANIFEST_EXTENSIONS + 1) as i64)
+        .fetch_all(&self.state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+        truncated |= extensions.len() > MAX_MANIFEST_EXTENSIONS;
+        extensions.truncate(MAX_MANIFEST_EXTENSIONS);
+        let mut prefixes: Vec<PrefixRow> = sqlx::query_as(
+            "SELECT CASE WHEN f.path LIKE '/%' AND instr(substr(f.path,2),'/')>0 THEN rtrim(substr(f.path,1,instr(substr(f.path,2),'/')+1),'/') WHEN f.path LIKE '/%' THEN '/' WHEN instr(f.path,'/')>0 THEN '/' || substr(f.path,1,instr(f.path,'/')-1) ELSE '/' END AS prefix,COUNT(*) AS file_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 GROUP BY prefix ORDER BY file_count DESC,prefix ASC LIMIT ?",
+        )
+        .bind(issue_code)
+        .bind((MAX_MANIFEST_PREFIXES + 1) as i64)
+        .fetch_all(&self.state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+        truncated |= prefixes.len() > MAX_MANIFEST_PREFIXES;
+        prefixes.truncate(MAX_MANIFEST_PREFIXES);
+        let mut largest_files: Vec<LargestFileRow> = sqlx::query_as(
+            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,1024) AS path,COALESCE(f.size_bytes,0) AS size_bytes,f.line_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 ORDER BY COALESCE(f.size_bytes,0) DESC,f.id ASC LIMIT ?",
+        )
+        .bind(issue_code)
+        .bind((MAX_MANIFEST_LARGEST_FILES + 1) as i64)
+        .fetch_all(&self.state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+        truncated |= largest_files.len() > MAX_MANIFEST_LARGEST_FILES;
+        largest_files.truncate(MAX_MANIFEST_LARGEST_FILES);
+
+        let mut value = json!({
+            "issue": {
+                "code": issue_code,
+                "bundle_count": bundle_count,
+                "ready_bundle_count": ready_bundle_count,
+                "file_count": file_count,
+                "directory_count": directory_count,
+                "indexed_text_file_count": indexed_text_file_count,
+                "total_content_bytes": total_content_bytes
+            },
+            "bundles": bundles,
+            "extensions": extensions,
+            "top_path_prefixes": prefixes,
+            "largest_files": largest_files,
+            "truncated": truncated
+        });
+        trim_manifest(&mut value)?;
+        self.manifest_cache = Some(value.clone());
+        self.record_output(&value)?;
+        Ok(value)
     }
 
     pub async fn list_files(
@@ -434,8 +567,49 @@ impl<'a> SkillToolExecutor<'a> {
                 "tool output byte limit reached".into(),
             ));
         }
-        self.ledger.record_bytes(bytes.len(), 128 * 1024)
+        self.ledger
+            .record_bytes(bytes.len(), MAX_TOTAL_TOOL_OUTPUT_BYTES)
     }
+}
+
+fn trim_manifest(value: &mut Value) -> Result<(), AppError> {
+    let serialized_len = |value: &Value| {
+        serde_json::to_vec(value)
+            .map(|bytes| bytes.len())
+            .map_err(|_| AppError::Config("failed to serialize issue manifest".into()))
+    };
+    if serialized_len(value)? <= MAX_TOOL_OUTPUT_BYTES {
+        return Ok(());
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("truncated".into(), Value::Bool(true));
+    }
+    for key in [
+        "largest_files",
+        "top_path_prefixes",
+        "extensions",
+        "bundles",
+    ] {
+        loop {
+            if serialized_len(value)? <= MAX_TOOL_OUTPUT_BYTES {
+                return Ok(());
+            }
+            let removed = value
+                .get_mut(key)
+                .and_then(Value::as_array_mut)
+                .and_then(Vec::pop)
+                .is_some();
+            if !removed {
+                break;
+            }
+        }
+    }
+    if serialized_len(value)? > MAX_TOOL_OUTPUT_BYTES {
+        return Err(AppError::BadRequest(
+            "issue manifest output exceeds the tool limit".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

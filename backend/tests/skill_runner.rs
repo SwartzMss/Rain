@@ -216,7 +216,7 @@ async fn runner_keeps_log_instructions_untrusted_and_persists_only_step_metadata
                 message
                     .content
                     .as_deref()
-                    .filter(|content| content.starts_with("UNTRUSTED ISSUE OVERVIEW"))
+                    .filter(|content| content.starts_with("UNTRUSTED ISSUE MANIFEST"))
             })
             .unwrap()
             .to_owned();
@@ -228,7 +228,8 @@ async fn runner_keeps_log_instructions_untrusted_and_persists_only_step_metadata
             .unwrap();
         (requests[0].tools.len(), overview, content)
     };
-    assert_eq!(tool_count, 3);
+    assert_eq!(tool_count, 4);
+    assert!(overview.contains("\"file_count\":1"));
     assert!(overview.contains(injection));
     assert!(content.starts_with("UNTRUSTED TOOL DATA:"));
     assert!(content.contains(injection));
