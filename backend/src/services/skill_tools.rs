@@ -176,6 +176,7 @@ pub struct SkillToolExecutor<'a> {
     state: &'a AppState,
     pub context: SkillRunContext,
     pub ledger: EvidenceLedger,
+    manifest_cache: Option<Value>,
 }
 
 impl<'a> SkillToolExecutor<'a> {
@@ -184,6 +185,7 @@ impl<'a> SkillToolExecutor<'a> {
             state,
             context,
             ledger: EvidenceLedger::default(),
+            manifest_cache: None,
         }
     }
 
@@ -203,6 +205,11 @@ impl<'a> SkillToolExecutor<'a> {
     }
 
     pub async fn get_issue_manifest(&mut self) -> Result<Value, AppError> {
+        if let Some(value) = self.manifest_cache.clone() {
+            self.record_output(&value)?;
+            return Ok(value);
+        }
+
         #[derive(Serialize, FromRow)]
         struct BundleRow {
             hash: String,
@@ -316,6 +323,7 @@ impl<'a> SkillToolExecutor<'a> {
             "truncated": truncated
         });
         trim_manifest(&mut value)?;
+        self.manifest_cache = Some(value.clone());
         self.record_output(&value)?;
         Ok(value)
     }

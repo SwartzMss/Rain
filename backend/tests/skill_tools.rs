@@ -150,6 +150,21 @@ async fn issue_manifest_is_bounded_to_ready_bundles_and_does_not_record_evidence
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap().len();
     assert_eq!(executor.ledger.total_bytes(), manifest_bytes);
     assert!(manifest_bytes <= 32 * 1024);
+
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage,content_size_bytes) VALUES('a-later','A','hz','late.zip','READY','PUBLISHING',500)")
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO files(bundle_id,name,path,is_dir,size_bytes,line_count) VALUES('a-later','late.log','/late.log',0,500,50)")
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+    let cached = executor.get_issue_manifest().await.unwrap();
+    assert_eq!(cached, manifest);
+    assert_eq!(cached["issue"]["ready_bundle_count"], 1);
+    assert!(!cached.to_string().contains("late.log"));
+    assert_eq!(executor.ledger.total_bytes(), manifest_bytes * 2);
+    assert!(executor.ledger.evidence().is_empty());
 }
 
 #[tokio::test]
