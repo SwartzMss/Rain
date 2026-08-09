@@ -29,6 +29,8 @@ struct FileLine {
     line_number: i64,
     content: String,
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_length: Option<usize>,
 }
 
 pub async fn read_file_preview(
@@ -93,7 +95,7 @@ pub async fn read_file_lines(
     let mut buffer = Vec::new();
 
     while current_line < end_line {
-        let Some((_read, truncated)) = read_line_bytes_limited(
+        let Some((_read, original_length, truncated)) = read_line_bytes_limited(
             &mut reader,
             &mut buffer,
             usize::try_from(api.max_preview_line_size).map_err(|_| {
@@ -113,6 +115,7 @@ pub async fn read_file_lines(
                 line_number: current_line,
                 content: decode_log_line(&buffer, truncated),
                 truncated,
+                original_length: truncated.then_some(original_length),
             });
         }
         current_line += 1;

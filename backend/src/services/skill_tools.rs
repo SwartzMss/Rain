@@ -13,6 +13,7 @@ use crate::{
 };
 
 const MAX_READ_LINES: i64 = 200;
+const MAX_SKILL_LINE_BYTES: u64 = 4 * 1024;
 const MAX_TOOL_OUTPUT_BYTES: usize = 32 * 1024;
 const MAX_TOTAL_TOOL_OUTPUT_BYTES: usize = 128 * 1024;
 const MAX_MANIFEST_BUNDLES: usize = 50;
@@ -625,7 +626,7 @@ impl<'a> SkillToolExecutor<'a> {
             return Ok(value);
         }
         let mut api = self.state.limits.api.clone();
-        api.max_preview_line_size = api.max_preview_line_size.min(128);
+        api.max_preview_line_size = api.max_preview_line_size.min(MAX_SKILL_LINE_BYTES);
         let mut lines = Vec::new();
         for (unseen_start, unseen_end) in unseen {
             let response = read_file_lines(

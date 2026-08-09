@@ -529,7 +529,7 @@ async fn ingest_text_file(
 
     loop {
         let line_offset = bytes_scanned;
-        let Some((read, truncated)) = read_line_bytes_limited(
+        let Some((read, _original_length, truncated)) = read_line_bytes_limited(
             &mut reader,
             &mut line,
             usize::try_from(indexing.max_indexed_line_size).map_err(|_| {
