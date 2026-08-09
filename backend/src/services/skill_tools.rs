@@ -37,6 +37,9 @@ pub enum SkillToolCall {
     },
     SearchLogs {
         query: String,
+        path_prefix: Option<String>,
+        bundle_hash: Option<String>,
+        file_id: Option<i64>,
     },
     ReadFileLines {
         file_id: i64,
@@ -195,7 +198,20 @@ impl<'a> SkillToolExecutor<'a> {
             SkillToolCall::ListFiles { cursor, prefix } => {
                 self.list_files(cursor, prefix.as_deref()).await
             }
-            SkillToolCall::SearchLogs { query } => self.search_logs(&query).await,
+            SkillToolCall::SearchLogs {
+                query,
+                path_prefix,
+                bundle_hash,
+                file_id,
+            } => {
+                self.search_logs(
+                    &query,
+                    path_prefix.as_deref(),
+                    bundle_hash.as_deref(),
+                    file_id,
+                )
+                .await
+            }
             SkillToolCall::ReadFileLines {
                 file_id,
                 start,
@@ -402,18 +418,57 @@ impl<'a> SkillToolExecutor<'a> {
         Ok(value)
     }
 
-    pub async fn search_logs(&mut self, query: &str) -> Result<Value, AppError> {
+    pub async fn search_logs(
+        &mut self,
+        query: &str,
+        path_prefix: Option<&str>,
+        bundle_hash: Option<&str>,
+        file_id: Option<i64>,
+    ) -> Result<Value, AppError> {
         let query = query.trim();
-        if query.chars().count() < 3 || query.chars().count() > 200 {
+        let query_chars = query.chars().count();
+        if !(2..=200).contains(&query_chars) {
             return Err(AppError::BadRequest(
-                "search query must contain 3 to 200 characters".into(),
+                "search query must contain 2 to 200 characters".into(),
             ));
         }
-        let key = query.to_ascii_lowercase();
-        if !self.ledger.searches.insert(key) {
-            return Ok(json!({ "duplicate": true, "hits": [] }));
+        if file_id.is_some_and(|value| value <= 0) {
+            return Err(AppError::BadRequest("invalid search file_id".into()));
         }
-        #[derive(Serialize, FromRow)]
+        if query_chars == 2 && file_id.is_none() {
+            return Err(AppError::BadRequest(
+                "2-character search requires file_id".into(),
+            ));
+        }
+        let path_prefix = normalize_search_filter(path_prefix, 512, "path_prefix")?;
+        let bundle_hash = normalize_search_filter(bundle_hash, 128, "bundle_hash")?;
+        let search_mode = if query_chars == 2 {
+            "short_literal"
+        } else {
+            "fts"
+        };
+        let key = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{search_mode}",
+            query.to_lowercase(),
+            path_prefix.as_deref().unwrap_or("").to_lowercase(),
+            bundle_hash.as_deref().unwrap_or("").to_lowercase(),
+            file_id.map_or_else(String::new, |value| value.to_string()),
+        );
+        if !self.ledger.searches.insert(key) {
+            return Ok(
+                json!({ "search_mode": search_mode, "duplicate": true, "hits": [], "truncated": false }),
+            );
+        }
+        #[derive(FromRow)]
+        struct HitRow {
+            file_id: i64,
+            bundle_hash: String,
+            path: String,
+            start_line: i64,
+            end_line: i64,
+            content: String,
+        }
+        #[derive(Serialize)]
         struct Hit {
             file_id: i64,
             bundle_hash: String,
@@ -422,17 +477,70 @@ impl<'a> SkillToolExecutor<'a> {
             end_line: i64,
             snippet: String,
         }
-        let fts = format!("\"{}\"", query.replace('"', "\"\""));
-        let hits: Vec<Hit> = sqlx::query_as(
-            "SELECT f.id AS file_id,b.hash AS bundle_hash,f.path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,1,400) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' ORDER BY rank LIMIT ?",
-        )
-        .bind(fts)
-        .bind(&self.context.issue_code)
-        .bind(self.state.limits.api.max_search_results.min(20))
-        .fetch_all(&self.state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-        let value = json!({ "hits": hits });
+        let path_pattern = path_prefix
+            .as_deref()
+            .map(|value| format!("{}%", escape_like_pattern(value)));
+        let max_hits = self.state.limits.api.max_search_results.clamp(1, 20);
+        let fetch_limit = max_hits.saturating_add(1);
+        let rows: Vec<HitRow> = if search_mode == "short_literal" {
+            let literal_pattern = format!("%{}%", escape_like_pattern(query));
+            sqlx::query_as(
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,ls.content FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
+            )
+            .bind(&self.context.issue_code)
+            .bind(file_id.expect("short search file_id was validated"))
+            .bind(bundle_hash.as_deref())
+            .bind(bundle_hash.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(literal_pattern)
+            .bind(fetch_limit)
+            .fetch_all(&self.state.db.pool)
+            .await
+            .map_err(AppError::Database)?
+        } else {
+            let fts = format!("\"{}\"", query.replace('"', "\"\""));
+            sqlx::query_as(
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,ls.content FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) ORDER BY rank LIMIT ?",
+            )
+            .bind(fts)
+            .bind(&self.context.issue_code)
+            .bind(bundle_hash.as_deref())
+            .bind(bundle_hash.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(file_id)
+            .bind(file_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.state.db.pool)
+            .await
+            .map_err(AppError::Database)?
+        };
+        let mut truncated = rows.len() > max_hits as usize;
+        let mut hits: Vec<Hit> = rows
+            .into_iter()
+            .take(max_hits as usize)
+            .map(|row| Hit {
+                file_id: row.file_id,
+                bundle_hash: row.bundle_hash,
+                path: row.path,
+                start_line: row.start_line,
+                end_line: row.end_line,
+                snippet: bounded_match_snippet(&row.content, query),
+            })
+            .collect();
+        let value = loop {
+            let candidate =
+                json!({ "search_mode": search_mode, "hits": hits, "truncated": truncated });
+            let size = serde_json::to_vec(&candidate)
+                .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
+                .len();
+            if size <= MAX_TOOL_OUTPUT_BYTES || hits.len() <= 1 {
+                break candidate;
+            }
+            hits.pop();
+            truncated = true;
+        };
         self.record_output(&value)?;
         Ok(value)
     }
@@ -612,9 +720,68 @@ fn trim_manifest(value: &mut Value) -> Result<(), AppError> {
     Ok(())
 }
 
+fn normalize_search_filter(
+    value: Option<&str>,
+    max_chars: usize,
+    name: &str,
+) -> Result<Option<String>, AppError> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.chars().count() > max_chars) {
+        return Err(AppError::BadRequest(format!("search {name} is too long")));
+    }
+    Ok(value.map(str::to_owned))
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn bounded_match_snippet(content: &str, query: &str) -> String {
+    const MAX_BYTES: usize = 400;
+    const CONTEXT_BEFORE_BYTES: usize = 120;
+
+    if content.len() <= MAX_BYTES {
+        return content.to_owned();
+    }
+    let content_chars: Vec<(usize, char)> = content.char_indices().collect();
+    let query_chars: Vec<char> = query.chars().collect();
+    let match_char = content_chars
+        .windows(query_chars.len())
+        .position(|window| {
+            window
+                .iter()
+                .zip(&query_chars)
+                .all(|((_, left), right)| left == right || left.eq_ignore_ascii_case(right))
+        })
+        .unwrap_or(0);
+    let match_start = content_chars[match_char].0;
+    let match_end_char = (match_char + query_chars.len()).min(content_chars.len());
+    let match_end = content_chars
+        .get(match_end_char)
+        .map_or(content.len(), |(offset, _)| *offset);
+    let mut start = match_start.saturating_sub(CONTEXT_BEFORE_BYTES);
+    while !content.is_char_boundary(start) {
+        start += 1;
+    }
+    if match_end.saturating_sub(start) > MAX_BYTES {
+        start = match_end.saturating_sub(MAX_BYTES);
+        while !content.is_char_boundary(start) {
+            start += 1;
+        }
+    }
+    let mut end = start.saturating_add(MAX_BYTES).min(content.len());
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content[start..end].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EvidenceLedger, EvidenceRange};
+    use super::{EvidenceLedger, EvidenceRange, bounded_match_snippet};
 
     #[test]
     fn overlapping_reads_return_only_unseen_intervals() {
@@ -664,5 +831,14 @@ mod tests {
             "timeout after 30s"
         ));
         assert!(!ledger.supports_evidence("bundle-a", 7, "/app.log", 10, 10, "root password"));
+    }
+
+    #[test]
+    fn match_snippet_is_bounded_and_contains_a_middle_match() {
+        let content = format!("{}CoFactor failure{}", "前".repeat(200), "后".repeat(200));
+        let snippet = bounded_match_snippet(&content, "cofactor");
+        assert!(snippet.to_ascii_lowercase().contains("cofactor"));
+        assert!(snippet.len() <= 400);
+        assert!(snippet.is_char_boundary(snippet.len()));
     }
 }
