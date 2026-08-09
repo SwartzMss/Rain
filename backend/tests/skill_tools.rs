@@ -104,3 +104,85 @@ async fn list_files_can_continue_with_a_cursor() {
     );
     assert!(second["files"][0]["file_id"].as_i64().unwrap() > cursor);
 }
+
+#[tokio::test]
+async fn issue_manifest_is_bounded_to_ready_bundles_and_does_not_record_evidence() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('A','A'),('B','B')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage,content_size_bytes) VALUES('a-ready','A','ha','android.zip','READY','PUBLISHING',300),('a-pending','A','hap','pending.zip','PENDING','RECEIVING',900),('b-ready','B','hb','foreign.zip','READY','PUBLISHING',700)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO files(bundle_id,name,path,is_dir,size_bytes,line_count) VALUES('a-ready','boot.log','/android/boot.log',0,200,20),('a-ready','config.txt','/android/config.txt',0,100,NULL),('a-ready','android','/android',1,NULL,NULL),('a-pending','hidden.log','/pending/hidden.log',0,999,99),('b-ready','foreign.log','/foreign/foreign.log',0,700,70)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    let mut executor = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "run".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+        },
+    );
+
+    let manifest = executor.get_issue_manifest().await.unwrap();
+    assert_eq!(manifest["issue"]["bundle_count"], 2);
+    assert_eq!(manifest["issue"]["ready_bundle_count"], 1);
+    assert_eq!(manifest["issue"]["file_count"], 2);
+    assert_eq!(manifest["issue"]["directory_count"], 1);
+    assert_eq!(manifest["issue"]["indexed_text_file_count"], 1);
+    assert_eq!(manifest["issue"]["total_content_bytes"], 300);
+    assert_eq!(manifest["bundles"].as_array().unwrap().len(), 1);
+    assert_eq!(manifest["bundles"][0]["hash"], "ha");
+    assert_eq!(manifest["extensions"][0]["extension"], ".log");
+    assert_eq!(manifest["top_path_prefixes"][0]["prefix"], "/android");
+    assert_eq!(manifest["largest_files"][0]["path"], "/android/boot.log");
+    assert!(!manifest.to_string().contains("pending"));
+    assert!(!manifest.to_string().contains("foreign"));
+    assert!(executor.ledger.evidence().is_empty());
+    assert_eq!(executor.ledger.total_bytes(), 0);
+    assert!(serde_json::to_vec(&manifest).unwrap().len() <= 32 * 1024);
+}
+
+#[tokio::test]
+async fn issue_manifest_limits_large_result_sets() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('A','A')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for index in 0..60 {
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage,content_size_bytes) VALUES(?,?,?,?,?,?,?)")
+            .bind(format!("bundle-{index}"))
+            .bind("A")
+            .bind(format!("hash-{index:03}"))
+            .bind(format!("bundle-{index}.zip"))
+            .bind("READY")
+            .bind("PUBLISHING")
+            .bind(1_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    let mut executor = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "run".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+        },
+    );
+    let manifest = executor.get_issue_manifest().await.unwrap();
+    assert_eq!(manifest["issue"]["ready_bundle_count"], 60);
+    assert_eq!(manifest["truncated"], true);
+    assert!(manifest["bundles"].as_array().unwrap().len() <= 50);
+    assert!(serde_json::to_vec(&manifest).unwrap().len() <= 32 * 1024);
+}
