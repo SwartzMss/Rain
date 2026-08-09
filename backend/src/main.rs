@@ -207,9 +207,22 @@ async fn main() -> std::io::Result<()> {
     .bind(bind_addr)?
     .run();
     let result = server.await;
+    let background_task_count = background_tasks.len();
+    match &result {
+        Ok(()) => info!(
+            background_task_count,
+            "Rain backend stopped; shutting down background tasks"
+        ),
+        Err(error) => error!(
+            background_task_count,
+            error = %error,
+            "Rain backend stopped with an error; shutting down background tasks"
+        ),
+    }
     for task in background_tasks {
         task.abort();
     }
+    info!(background_task_count, "Rain backend shutdown completed");
     result
 }
 

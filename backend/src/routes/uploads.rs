@@ -1,14 +1,15 @@
 use actix_web::{
-    HttpRequest, HttpResponse, get,
+    HttpMessage, HttpRequest, HttpResponse, get,
     http::{StatusCode, header::CONTENT_LENGTH},
     post, web,
 };
 use serde::Serialize;
 use tokio::fs;
+use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    AppState,
+    AppState, RequestLogId,
     auth::extractor::RequireBusinessUser,
     error::AppError,
     models::issues::{UploadStage, UploadStatus},
@@ -34,6 +35,11 @@ pub async fn upload_logs(
     req: HttpRequest,
     payload: web::Payload,
 ) -> Result<HttpResponse, AppError> {
+    let receive_started = std::time::Instant::now();
+    let request_id = req
+        .extensions()
+        .get::<RequestLogId>()
+        .map(|value| value.0.clone());
     let issue_code = normalize_issue_code(&path.into_inner())?;
     require_issue_owner(&state.db.pool, &issue_code, &user.0.id).await?;
     let request_limit = raw_payload_limit(state.limits.issue_max_content_size.saturating_mul(2));
@@ -97,6 +103,8 @@ pub async fn upload_logs(
             remove_upload_reservation(&state.db.pool, &bundle_id).await;
             if let Err(cleanup_error) = fs::remove_dir_all(&temp_dir).await {
                 tracing::error!(
+                    request_id = request_id.as_deref().unwrap_or("unavailable"),
+                    bundle_id = %bundle_id,
                     path = %temp_dir.display(),
                     error = %cleanup_error,
                     "failed to remove temporary upload directory after receive failure; queueing retry"
@@ -127,6 +135,8 @@ pub async fn upload_logs(
         remove_upload_reservation(&state.db.pool, &bundle_id).await;
         if let Err(cleanup_error) = fs::remove_dir_all(&temp_dir).await {
             tracing::error!(
+                request_id = request_id.as_deref().unwrap_or("unavailable"),
+                bundle_id = %bundle_id,
                 path = %temp_dir.display(),
                 error = %cleanup_error,
                 "failed to remove temporary upload directory; retaining budget reservation"
@@ -152,6 +162,7 @@ pub async fn upload_logs(
             state.limits.issue_max_content_size,
         ),
         indexing_config: state.limits.indexing.clone(),
+        request_id: request_id.clone(),
         issue_code: issue_code.clone(),
         issue_max_content_size: state.limits.issue_max_content_size,
         bundle_id: bundle_id.clone(),
@@ -160,6 +171,16 @@ pub async fn upload_logs(
         receive_reservation: upload.receive_reservation,
         temp_cleanup_queue: state.upload.temp_cleanup_queue.clone(),
     });
+
+    info!(
+        request_id = request_id.as_deref().unwrap_or("unavailable"),
+        bundle_id = %bundle_id,
+        bundle_hash = %bundle_hash,
+        file_count,
+        total_bytes = upload.total_bytes,
+        elapsed_ms = receive_started.elapsed().as_millis() as u64,
+        "upload received and queued for processing"
+    );
 
     drop(receive_permit);
     touch_issue_activity_best_effort(&state.db.pool, &issue_code, "upload accepted").await;

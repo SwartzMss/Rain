@@ -2,10 +2,11 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use tokio::{fs, sync::Semaphore};
-use tracing::error;
+use tracing::{debug, error, info};
 
 use crate::{
     blob_store::BlobStore,
@@ -75,6 +76,7 @@ pub struct UploadJob {
     pub processing_permits: Arc<Semaphore>,
     pub archive_config: ArchiveConfig,
     pub indexing_config: IndexingConfig,
+    pub request_id: Option<String>,
     pub issue_code: String,
     pub issue_max_content_size: u64,
     pub bundle_id: String,
@@ -86,12 +88,22 @@ pub struct UploadJob {
 
 pub fn spawn_upload_job(job: UploadJob) {
     tokio::spawn(async move {
+        let queued_at = Instant::now();
+        let file_count = job.files.len();
+        let received_bytes = job
+            .files
+            .iter()
+            .fold(0_u64, |total, file| total.saturating_add(file.size_bytes));
         let _permit = match job.processing_permits.clone().acquire_owned().await {
             Ok(permit) => permit,
             Err(error) => {
                 error!(
+                    request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                     bundle_id = %job.bundle_id,
                     bundle_hash = %job.bundle_hash,
+                    file_count,
+                    received_bytes,
+                    queue_elapsed_ms = queued_at.elapsed().as_millis() as u64,
                     error = %error,
                     "failed to acquire upload processing permit"
                 );
@@ -106,6 +118,7 @@ pub fn spawn_upload_job(job: UploadJob) {
                 .await;
                 if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
                     error!(
+                        request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                         bundle_id = %job.bundle_id,
                         path = %job.temp_dir.display(),
                         error = %cleanup_error,
@@ -118,28 +131,54 @@ pub fn spawn_upload_job(job: UploadJob) {
             }
         };
 
+        let processing_started = Instant::now();
+        info!(
+            request_id = job.request_id.as_deref().unwrap_or("unavailable"),
+            bundle_id = %job.bundle_id,
+            bundle_hash = %job.bundle_hash,
+            file_count,
+            received_bytes,
+            queue_elapsed_ms = queued_at.elapsed().as_millis() as u64,
+            "upload processing started"
+        );
         let process_result = process_upload_job(&job).await;
 
-        if let Err(error) = process_result {
-            error!(
+        match process_result {
+            Ok(()) => info!(
+                request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                 bundle_id = %job.bundle_id,
                 bundle_hash = %job.bundle_hash,
-                error = %error,
-                "failed to process uploaded log bundle"
-            );
-            finalize_bundle_failed(
-                &job.pool,
-                &job.bundle_id,
-                &job.data_root,
-                &job.staging_root,
-                &job.bundle_hash,
-                &error,
-            )
-            .await;
+                file_count,
+                received_bytes,
+                elapsed_ms = processing_started.elapsed().as_millis() as u64,
+                "upload processing completed"
+            ),
+            Err(error) => {
+                error!(
+                    request_id = job.request_id.as_deref().unwrap_or("unavailable"),
+                    bundle_id = %job.bundle_id,
+                    bundle_hash = %job.bundle_hash,
+                    file_count,
+                    received_bytes,
+                    elapsed_ms = processing_started.elapsed().as_millis() as u64,
+                    error = %error,
+                    "failed to process uploaded log bundle"
+                );
+                finalize_bundle_failed(
+                    &job.pool,
+                    &job.bundle_id,
+                    &job.data_root,
+                    &job.staging_root,
+                    &job.bundle_hash,
+                    &error,
+                )
+                .await;
+            }
         }
 
         if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
             error!(
+                request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                 bundle_id = %job.bundle_id,
                 path = %job.temp_dir.display(),
                 error = %cleanup_error,
@@ -160,7 +199,15 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
         &job.bundle_id,
         job.issue_max_content_size,
     );
-    for uploaded in &job.files {
+    for (file_index, uploaded) in job.files.iter().enumerate() {
+        let file_started = Instant::now();
+        debug!(
+            request_id = job.request_id.as_deref().unwrap_or("unavailable"),
+            bundle_id = %job.bundle_id,
+            file_index,
+            size_bytes = uploaded.size_bytes,
+            "uploaded file processing started"
+        );
         process_uploaded_file(ProcessFileOptions {
             pool: &job.pool,
             bundle_id: &job.bundle_id,
@@ -178,6 +225,14 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
             indexing: &job.indexing_config,
         })
         .await?;
+        debug!(
+            request_id = job.request_id.as_deref().unwrap_or("unavailable"),
+            bundle_id = %job.bundle_id,
+            file_index,
+            size_bytes = uploaded.size_bytes,
+            elapsed_ms = file_started.elapsed().as_millis() as u64,
+            "uploaded file processing completed"
+        );
     }
 
     finalize_bundle_ready_with_retry(&job.pool, &job.bundle_id).await?;

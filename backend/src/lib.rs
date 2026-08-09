@@ -31,6 +31,9 @@ use tokio_util::sync::CancellationToken;
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AiProviderEnv, AppLimits, AuthConfig};
 
+#[derive(Debug, Clone)]
+pub struct RequestLogId(pub String);
+
 pub struct AuthRateLimitBucket {
     window: Duration,
     pub events: VecDeque<Instant>,

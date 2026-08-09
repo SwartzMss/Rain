@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use actix_web::{HttpResponse, get, http::StatusCode, post, web};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, get, http::StatusCode, post, web};
 use async_stream::stream;
 use serde::Deserialize;
 
 use crate::{
-    AppState,
+    AppState, RequestLogId,
     ai_provider::{client::OpenAiChatClient, config::resolve_effective_config},
     auth::extractor::RequireBusinessUser,
     error::AppError,
@@ -33,6 +33,7 @@ pub async fn create(
     state: web::Data<AppState>,
     issue_code: web::Path<String>,
     body: web::Json<CreateSkillRun>,
+    request: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = issue_code.trim().to_ascii_uppercase();
     let issue_exists: bool =
@@ -99,6 +100,17 @@ pub async fn create(
         }
     })?;
     let (cancellation, _) = state.skill_runs.register(&run.id);
+    let request_id = request
+        .extensions()
+        .get::<RequestLogId>()
+        .map(|value| value.0.clone());
+    tracing::info!(
+        request_id = request_id.as_deref().unwrap_or("unavailable"),
+        run_id = %run.id,
+        skill_id = %run.skill_id,
+        skill_version = run.skill_version,
+        "skill run queued"
+    );
     let run_id = run.id.clone();
     let runner_state = state.clone();
     actix_web::rt::spawn(async move {

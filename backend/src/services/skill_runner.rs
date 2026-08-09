@@ -90,14 +90,26 @@ impl SkillRunner {
         client: Arc<dyn ChatCompletionClient>,
         cancellation: CancellationToken,
     ) {
+        let task_started = Instant::now();
+        tracing::info!(run_id = %run_id, "skill run task accepted");
         let outcome = tokio::time::timeout(
             Duration::from_secs(120),
             Self::execute_inner(&state, &run_id, client, &cancellation),
         )
         .await;
         match outcome {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => tracing::debug!(
+                run_id = %run_id,
+                elapsed_ms = task_started.elapsed().as_millis() as u64,
+                "skill run task finished"
+            ),
             Ok(Err((code, message))) => {
+                tracing::warn!(
+                    run_id = %run_id,
+                    error_code = code,
+                    elapsed_ms = task_started.elapsed().as_millis() as u64,
+                    "skill run failed"
+                );
                 if skill_runs::fail(&state.db.pool, &run_id, code, message)
                     .await
                     .unwrap_or(false)
@@ -112,6 +124,12 @@ impl SkillRunner {
                 }
             }
             Err(_) => {
+                tracing::warn!(
+                    run_id = %run_id,
+                    timeout_ms = 120_000_u64,
+                    elapsed_ms = task_started.elapsed().as_millis() as u64,
+                    "skill run timed out"
+                );
                 if skill_runs::fail(
                     &state.db.pool,
                     &run_id,
@@ -148,8 +166,16 @@ impl SkillRunner {
             .await
             .map_err(|_| ("SKILL_RUN_STORAGE_ERROR", "无法启动 Skill 任务"))?
         {
+            tracing::debug!(run_id, "skill run was no longer eligible to start");
             return Ok(());
         }
+        let run_started = Instant::now();
+        tracing::info!(
+            run_id,
+            skill_id = %run.skill_id,
+            skill_version = run.skill_version,
+            "skill run started"
+        );
         state.skill_runs.emit(
             run_id,
             SkillRunEvent {
@@ -166,10 +192,18 @@ impl SkillRunner {
             },
         );
         let mut messages = initial_messages(&run);
+        let manifest_started = Instant::now();
         let overview = executor
             .get_issue_manifest()
             .await
             .map_err(|_| ("SKILL_TOOL_FAILED", "无法生成 Issue Manifest"))?;
+        tracing::debug!(
+            run_id,
+            output_bytes = overview.to_string().len(),
+            retrieval_bytes = executor.ledger.total_bytes(),
+            elapsed_ms = manifest_started.elapsed().as_millis() as u64,
+            "skill issue manifest generated"
+        );
         messages.push(ChatMessage {
             role: "user".into(),
             content: Some(format!(
@@ -184,10 +218,15 @@ impl SkillRunner {
 
         'iterations: for iteration in 1..=8_usize {
             if cancellation.is_cancelled() {
+                log_skill_run_cancelled(run_id, &run_started, calls);
                 return Ok(());
             }
+            let model_started = Instant::now();
             let response = tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
+                _ = cancellation.cancelled() => {
+                    log_skill_run_cancelled(run_id, &run_started, calls);
+                    return Ok(())
+                },
                 response = client.complete(ChatRequest {
                     model: String::new(),
                     messages: messages.clone(),
@@ -196,6 +235,13 @@ impl SkillRunner {
                     response_format: None,
                 }) => response.map_err(runner_provider_error)?,
             };
+            tracing::debug!(
+                run_id,
+                iteration,
+                elapsed_ms = model_started.elapsed().as_millis() as u64,
+                tool_calls_requested = response.message.tool_calls.len(),
+                "skill model response received"
+            );
             if response.message.tool_calls.is_empty() {
                 let result = parse_with_repair(
                     client.as_ref(),
@@ -218,6 +264,20 @@ impl SkillRunner {
                             data: json!({"status": "SUCCEEDED"}),
                         },
                     );
+                    tracing::info!(
+                        run_id,
+                        iteration,
+                        tool_calls = calls,
+                        retrieval_bytes = executor.ledger.total_bytes(),
+                        evidence_ranges = executor.ledger.evidence().len(),
+                        elapsed_ms = run_started.elapsed().as_millis() as u64,
+                        "skill run completed"
+                    );
+                } else {
+                    tracing::debug!(
+                        run_id,
+                        "skill result was not saved because the run is no longer active"
+                    );
                 }
                 return Ok(());
             }
@@ -234,6 +294,7 @@ impl SkillRunner {
                     break 'iterations;
                 }
                 if cancellation.is_cancelled() {
+                    log_skill_run_cancelled(run_id, &run_started, calls);
                     return Ok(());
                 }
                 calls += 1;
@@ -250,6 +311,7 @@ impl SkillRunner {
                 let arguments_summary = summarize_arguments(&parsed_call);
                 let outcome = execute_tool(&mut executor, parsed_call).await;
                 if cancellation.is_cancelled() {
+                    log_skill_run_cancelled(run_id, &run_started, calls);
                     return Ok(());
                 }
                 let (status, output, limit_reached) = match outcome {
@@ -271,6 +333,7 @@ impl SkillRunner {
                     .map_or(0, Vec::len);
                 let evidence_json = serde_json::to_string(executor.ledger.evidence())
                     .unwrap_or_else(|_| "[]".into());
+                let tool_elapsed_ms = started.elapsed().as_millis() as u64;
                 let step_recorded = skill_runs::record_step(
                     &state.db.pool,
                     &skill_runs::NewSkillRunStep {
@@ -281,13 +344,30 @@ impl SkillRunner {
                         arguments_summary: &arguments_summary,
                         hit_count,
                         evidence_json: &evidence_json,
-                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        elapsed_ms: tool_elapsed_ms,
                         status,
                     },
                 )
                 .await
                 .map_err(|_| ("SKILL_RUN_STORAGE_ERROR", "无法保存 Skill 运行步骤"))?;
-                if !step_recorded || cancellation.is_cancelled() {
+                tracing::debug!(
+                    run_id,
+                    iteration,
+                    tool_call = calls,
+                    tool = tool_name,
+                    status,
+                    hit_count,
+                    limit_reached,
+                    retrieval_bytes = executor.ledger.total_bytes(),
+                    elapsed_ms = tool_elapsed_ms,
+                    "skill tool call completed"
+                );
+                if !step_recorded {
+                    tracing::debug!(run_id, "skill run stopped because it is no longer active");
+                    return Ok(());
+                }
+                if cancellation.is_cancelled() {
+                    log_skill_run_cancelled(run_id, &run_started, calls);
                     return Ok(());
                 }
                 if status == "FAILED" {
@@ -339,8 +419,12 @@ impl SkillRunner {
             content: Some("Retrieval limits are exhausted. Do not request tools. Return the fixed JSON result now and explicitly record insufficient evidence in missing_context.".into()),
             tool_calls: Vec::new(), tool_call_id: None, name: None,
         });
+        let model_started = Instant::now();
         let response = tokio::select! {
-            _ = cancellation.cancelled() => return Ok(()),
+            _ = cancellation.cancelled() => {
+                log_skill_run_cancelled(run_id, &run_started, calls);
+                return Ok(())
+            },
             response = client.complete(ChatRequest {
                 model: String::new(),
                 messages: messages.clone(),
@@ -349,6 +433,11 @@ impl SkillRunner {
                 response_format: Some(json!({"type":"json_object"})),
             }) => response.map_err(runner_provider_error)?,
         };
+        tracing::debug!(
+            run_id,
+            elapsed_ms = model_started.elapsed().as_millis() as u64,
+            "skill final model response received after retrieval limits"
+        );
         let result = parse_with_repair(
             client.as_ref(),
             &messages,
@@ -370,9 +459,32 @@ impl SkillRunner {
                     data: json!({"status": "SUCCEEDED"}),
                 },
             );
+            tracing::info!(
+                run_id,
+                tool_calls = calls,
+                retrieval_bytes = executor.ledger.total_bytes(),
+                evidence_ranges = executor.ledger.evidence().len(),
+                elapsed_ms = run_started.elapsed().as_millis() as u64,
+                retrieval_limits_exhausted = true,
+                "skill run completed"
+            );
+        } else {
+            tracing::debug!(
+                run_id,
+                "skill result was not saved because the run is no longer active"
+            );
         }
         Ok(())
     }
+}
+
+fn log_skill_run_cancelled(run_id: &str, started: &Instant, tool_calls: usize) {
+    tracing::info!(
+        run_id,
+        tool_calls,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "skill run cancelled"
+    );
 }
 
 fn runner_provider_error(error: ProviderError) -> (&'static str, &'static str) {
