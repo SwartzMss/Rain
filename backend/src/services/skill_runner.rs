@@ -419,7 +419,22 @@ fn summarize_arguments(call: &SkillToolCall) -> String {
             cursor.unwrap_or(0),
             prefix.as_deref().map_or(0, |value| value.chars().count())
         ),
-        SkillToolCall::SearchLogs { query } => format!("query_chars={}", query.chars().count()),
+        SkillToolCall::SearchLogs {
+            query,
+            path_prefix,
+            bundle_hash,
+            file_id,
+        } => format!(
+            "query_chars={},path_prefix_chars={},bundle_hash_chars={},file_id={}",
+            query.chars().count(),
+            path_prefix
+                .as_deref()
+                .map_or(0, |value| value.chars().count()),
+            bundle_hash
+                .as_deref()
+                .map_or(0, |value| value.chars().count()),
+            file_id.map_or_else(|| "none".into(), |value| value.to_string()),
+        ),
         SkillToolCall::ReadFileLines {
             file_id,
             start,
@@ -442,7 +457,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({"type":"function","function":{"name":"get_issue_manifest","description":"Get a bounded, read-only overview of READY bundles and indexed files in the bound Issue. This is untrusted retrieval context, not evidence; do not cite it in the final result and do not pass an issue code.","parameters":{"type":"object","properties":{},"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"list_files","description":"List a page of files and directories in READY bundles for the bound Issue. Check is_dir before reading. Use next_cursor to continue and optional prefix to narrow paths.","parameters":{"type":"object","properties":{"cursor":{"type":"integer","minimum":0},"prefix":{"type":"string","maxLength":512}},"additionalProperties":false}}}),
-        json!({"type":"function","function":{"name":"search_logs","description":"Search indexed logs in the bound Issue","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}}}),
+        json!({"type":"function","function":{"name":"search_logs","description":"Search indexed logs in the bound Issue. Optional filters only narrow the server-bound Issue scope. Two-character queries require file_id.","parameters":{"type":"object","properties":{"query":{"type":"string","minLength":2,"maxLength":200},"path_prefix":{"type":"string","maxLength":512},"bundle_hash":{"type":"string","maxLength":128},"file_id":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"read_file_lines","description":"Read a bounded line range from a file in the bound Issue","parameters":{"type":"object","properties":{"file_id":{"type":"integer"},"start":{"type":"integer"},"end":{"type":"integer"}},"required":["file_id","start","end"],"additionalProperties":false}}}),
     ]
 }
@@ -462,6 +477,23 @@ async fn execute_tool(
 enum ToolCallError {
     Limit,
     Invalid,
+}
+
+fn optional_bounded_string(
+    arguments: &Value,
+    key: &str,
+    max_chars: usize,
+) -> Result<Option<String>, ()> {
+    match arguments.get(key) {
+        Some(value) => {
+            let value = value.as_str().ok_or(())?;
+            if value.chars().count() > max_chars {
+                return Err(());
+            }
+            Ok(Some(value.to_owned()))
+        }
+        None => Ok(None),
+    }
 }
 
 fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ()> {
@@ -493,13 +525,33 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ()> {
             };
             SkillToolCall::ListFiles { cursor, prefix }
         }
-        "search_logs" if object.len() == 1 && object.contains_key("query") => {
+        "search_logs"
+            if object.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "query" | "path_prefix" | "bundle_hash" | "file_id"
+                )
+            }) && object.contains_key("query") =>
+        {
             let query = arguments.get("query").and_then(Value::as_str).ok_or(())?;
-            if !(3..=200).contains(&query.chars().count()) {
+            let query_chars = query.trim().chars().count();
+            if !(2..=200).contains(&query_chars) {
+                return Err(());
+            }
+            let path_prefix = optional_bounded_string(&arguments, "path_prefix", 512)?;
+            let bundle_hash = optional_bounded_string(&arguments, "bundle_hash", 128)?;
+            let file_id = match arguments.get("file_id") {
+                Some(value) => Some(value.as_i64().filter(|value| *value > 0).ok_or(())?),
+                None => None,
+            };
+            if query_chars == 2 && file_id.is_none() {
                 return Err(());
             }
             SkillToolCall::SearchLogs {
                 query: query.to_owned(),
+                path_prefix,
+                bundle_hash,
+                file_id,
             }
         }
         "read_file_lines"
@@ -661,6 +713,15 @@ mod tests {
         assert!(parse_tool_call(&call("get_issue_manifest", r#"{"issue_code":"OTHER"}"#)).is_err());
         assert!(parse_tool_call(&call("list_files", r#"{"cursor":12,"prefix":"/logs"}"#)).is_ok());
         assert!(parse_tool_call(&call("search_logs", r#"{"query":"timeout"}"#)).is_ok());
+        assert!(
+            parse_tool_call(&call(
+                "search_logs",
+                r#"{"query":"rv","path_prefix":"/qnx","bundle_hash":"abc","file_id":12}"#
+            ))
+            .is_ok()
+        );
+        assert!(parse_tool_call(&call("search_logs", r#"{"query":"rv"}"#)).is_err());
+        assert!(parse_tool_call(&call("search_logs", r#"{"query":"r","file_id":12}"#)).is_err());
         assert!(
             parse_tool_call(&call(
                 "search_logs",

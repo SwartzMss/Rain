@@ -279,3 +279,269 @@ async fn issue_manifest_limits_large_result_sets() {
     assert!(executor.ledger.total_bytes() <= 128 * 1024);
     assert!(executor.ledger.evidence().is_empty());
 }
+
+#[tokio::test]
+async fn search_logs_supports_scoped_filters_short_terms_and_bounded_snippets() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('A','A'),('B','B')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('a-one','A','hash-a','a','READY','PUBLISHING'),('a-two','A','hash-a2','a2','READY','PUBLISHING'),('a-pending','A','hash-p','pending','PENDING','RECEIVING'),('b-one','B','hash-b','b','READY','PUBLISHING')")
+        .execute(&pool).await.unwrap();
+
+    let file_a: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a-one','app.log','/qnx/app.log',0) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    let file_a2: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a-two','other.log','/android/other.log',0) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    let wildcard_file: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a-one','literal.log','/literal%_\\/literal.log',0) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    let wildcard_decoy: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a-one','decoy.log','/literalXX/decoy.log',0) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    let pending_file: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a-pending','pending.log','/qnx/pending.log',0) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    let foreign_file: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('b-one','foreign.log','/qnx/foreign.log',0) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+
+    let middle_content = format!(
+        "{} COFACTOR failed rv ÄBC failure {}",
+        "0123456789abcdef\n".repeat(30_000),
+        "after ".repeat(100)
+    );
+    for (bundle, file_id, content, line) in [
+        ("a-one", file_a, middle_content.as_str(), 10_i64),
+        ("a-two", file_a2, "timeout and rv in android", 20),
+        ("a-one", wildcard_file, "wildmarker in literal path", 30),
+        ("a-one", wildcard_decoy, "wildmarker in decoy path", 40),
+        ("a-pending", pending_file, "timeout hidden pending", 50),
+        ("b-one", foreign_file, "timeout hidden foreign rv", 60),
+    ] {
+        sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index) VALUES(?,?,?,?,?,0)")
+            .bind(bundle)
+            .bind(file_id)
+            .bind(content)
+            .bind(line)
+            .bind(line + 5)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index) VALUES('a-one',?,?,70,70,1)")
+        .bind(file_a)
+        .bind("x".repeat(200))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    let mut executor = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "run".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+        },
+    );
+
+    let fts = executor
+        .search_logs("cofactor", Some("/qnx"), Some("hash-a"), Some(file_a))
+        .await
+        .unwrap();
+    assert_eq!(fts["search_mode"], "fts");
+    assert_eq!(fts["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(fts["hits"][0]["file_id"], file_a);
+    let snippet = fts["hits"][0]["snippet"].as_str().unwrap();
+    assert!(snippet.to_ascii_lowercase().contains("cofactor"));
+    assert!(snippet.len() <= 400);
+    assert_eq!(
+        executor.ledger.total_bytes(),
+        serde_json::to_vec(&fts).unwrap().len()
+    );
+
+    let unicode_fts = executor
+        .search_logs("äbc", None, None, Some(file_a))
+        .await
+        .unwrap();
+    let unicode_snippet = unicode_fts["hits"][0]["snippet"].as_str().unwrap();
+    assert!(unicode_snippet.contains("ÄBC"));
+    assert!(unicode_snippet.len() <= 400);
+
+    let short = executor
+        .search_logs("rv", None, None, Some(file_a))
+        .await
+        .unwrap();
+    assert_eq!(short["search_mode"], "short_literal");
+    assert_eq!(short["hits"].as_array().unwrap().len(), 1);
+    assert!(short["hits"][0]["snippet"].as_str().unwrap().contains("rv"));
+    assert_eq!(
+        executor.ledger.total_bytes(),
+        serde_json::to_vec(&fts).unwrap().len()
+            + serde_json::to_vec(&unicode_fts).unwrap().len()
+            + serde_json::to_vec(&short).unwrap().len()
+    );
+    assert!(executor.search_logs("rv", None, None, None).await.is_err());
+    assert!(
+        executor
+            .search_logs("r", None, None, Some(file_a))
+            .await
+            .is_err()
+    );
+    assert!(
+        executor
+            .search_logs(&"x".repeat(201), None, None, None)
+            .await
+            .is_err()
+    );
+    let boundary = executor
+        .search_logs(&"x".repeat(200), None, None, Some(file_a))
+        .await
+        .unwrap();
+    assert_eq!(boundary["hits"].as_array().unwrap().len(), 1);
+
+    let other_file = executor
+        .search_logs("timeout", None, None, Some(file_a2))
+        .await
+        .unwrap();
+    assert_eq!(other_file["hits"].as_array().unwrap().len(), 1);
+    let wrong_bundle = executor
+        .search_logs("timeout", None, Some("hash-a"), Some(file_a2))
+        .await
+        .unwrap();
+    assert!(wrong_bundle["hits"].as_array().unwrap().is_empty());
+    let foreign = executor
+        .search_logs("timeout", None, None, Some(foreign_file))
+        .await
+        .unwrap();
+    assert!(foreign["hits"].as_array().unwrap().is_empty());
+    let pending = executor
+        .search_logs("timeout", None, None, Some(pending_file))
+        .await
+        .unwrap();
+    assert!(pending["hits"].as_array().unwrap().is_empty());
+
+    let escaped_prefix = executor
+        .search_logs("wildmarker", Some("/literal%_\\"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(escaped_prefix["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(escaped_prefix["hits"][0]["file_id"], wildcard_file);
+    assert_ne!(escaped_prefix["hits"][0]["file_id"], wildcard_decoy);
+    assert!(executor.ledger.evidence().is_empty());
+    assert!(executor.ledger.total_bytes() <= 128 * 1024);
+}
+
+#[tokio::test]
+async fn search_logs_caps_hits_and_marks_truncation() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('A','A')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('a','A','hash-a','a','READY','PUBLISHING')")
+        .execute(&pool).await.unwrap();
+    let file_id: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a','app.log','/app.log',0) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    for index in 0..25_i64 {
+        sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index) VALUES('a',?,'repeated marker',?,?,?)")
+            .bind(file_id)
+            .bind(index)
+            .bind(index)
+            .bind(index)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    let mut executor = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "run".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+        },
+    );
+
+    let result = executor
+        .search_logs("marker", None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(result["hits"].as_array().unwrap().len(), 20);
+    assert_eq!(result["truncated"], true);
+    assert!(serde_json::to_vec(&result).unwrap().len() <= 32 * 1024);
+    assert!(executor.ledger.evidence().is_empty());
+}
+
+#[tokio::test]
+async fn search_logs_duplicate_key_includes_normalized_filters() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('A','A')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('a','A','hash-a','a','READY','PUBLISHING')")
+        .execute(&pool).await.unwrap();
+    let file_id: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a','app.log','/qnx/app.log',0) RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index) VALUES('a',?,'timeout happened ÄB failure',1,1,0)")
+        .bind(file_id).execute(&pool).await.unwrap();
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    let mut executor = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "run".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+        },
+    );
+
+    executor
+        .search_logs(" timeout ", Some(" /qnx "), Some("hash-a"), Some(file_id))
+        .await
+        .unwrap();
+    let duplicate = executor
+        .search_logs("TIMEOUT", Some("/QNX"), Some("HASH-A"), Some(file_id))
+        .await
+        .unwrap();
+    assert_eq!(duplicate["duplicate"], true);
+    let different_path = executor
+        .search_logs("timeout", Some("/android"), Some("hash-a"), Some(file_id))
+        .await
+        .unwrap();
+    assert_ne!(different_path["duplicate"], true);
+    let different_bundle = executor
+        .search_logs("timeout", Some("/qnx"), Some("other"), Some(file_id))
+        .await
+        .unwrap();
+    assert_ne!(different_bundle["duplicate"], true);
+    let different_file = executor
+        .search_logs("timeout", Some("/qnx"), Some("hash-a"), None)
+        .await
+        .unwrap();
+    assert_ne!(different_file["duplicate"], true);
+
+    let unicode_lower = executor
+        .search_logs("äb", None, None, Some(file_id))
+        .await
+        .unwrap();
+    assert!(unicode_lower["hits"].as_array().unwrap().is_empty());
+    let unicode_exact = executor
+        .search_logs("ÄB", None, None, Some(file_id))
+        .await
+        .unwrap();
+    assert_ne!(unicode_exact["duplicate"], true);
+    assert_eq!(unicode_exact["hits"].as_array().unwrap().len(), 1);
+
+    let separator_in_path = executor
+        .search_logs("timeout", Some("/qnx\u{1f}hash-a"), None, Some(file_id))
+        .await
+        .unwrap();
+    assert_ne!(separator_in_path["duplicate"], true);
+    let separator_in_bundle = executor
+        .search_logs("timeout", Some("/qnx"), Some("hash-a\u{1f}"), Some(file_id))
+        .await
+        .unwrap();
+    assert_ne!(separator_in_bundle["duplicate"], true);
+}

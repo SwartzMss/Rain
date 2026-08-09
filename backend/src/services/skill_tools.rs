@@ -37,6 +37,9 @@ pub enum SkillToolCall {
     },
     SearchLogs {
         query: String,
+        path_prefix: Option<String>,
+        bundle_hash: Option<String>,
+        file_id: Option<i64>,
     },
     ReadFileLines {
         file_id: i64,
@@ -54,9 +57,33 @@ pub struct EvidenceRange {
     pub end_line: i64,
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+enum SearchMode {
+    Fts,
+    ShortLiteral,
+}
+
+impl SearchMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fts => "fts",
+            Self::ShortLiteral => "short_literal",
+        }
+    }
+}
+
+#[derive(Debug, Hash, PartialEq, Eq)]
+struct SearchKey {
+    query: String,
+    path_prefix: Option<String>,
+    bundle_hash: Option<String>,
+    file_id: Option<i64>,
+    mode: SearchMode,
+}
+
 #[derive(Default)]
 pub struct EvidenceLedger {
-    searches: HashSet<String>,
+    searches: HashSet<SearchKey>,
     ranges: Vec<EvidenceRange>,
     retrieval_bytes: usize,
     reads: HashMap<i64, Vec<(i64, i64)>>,
@@ -195,7 +222,20 @@ impl<'a> SkillToolExecutor<'a> {
             SkillToolCall::ListFiles { cursor, prefix } => {
                 self.list_files(cursor, prefix.as_deref()).await
             }
-            SkillToolCall::SearchLogs { query } => self.search_logs(&query).await,
+            SkillToolCall::SearchLogs {
+                query,
+                path_prefix,
+                bundle_hash,
+                file_id,
+            } => {
+                self.search_logs(
+                    &query,
+                    path_prefix.as_deref(),
+                    bundle_hash.as_deref(),
+                    file_id,
+                )
+                .await
+            }
             SkillToolCall::ReadFileLines {
                 file_id,
                 start,
@@ -402,18 +442,60 @@ impl<'a> SkillToolExecutor<'a> {
         Ok(value)
     }
 
-    pub async fn search_logs(&mut self, query: &str) -> Result<Value, AppError> {
+    pub async fn search_logs(
+        &mut self,
+        query: &str,
+        path_prefix: Option<&str>,
+        bundle_hash: Option<&str>,
+        file_id: Option<i64>,
+    ) -> Result<Value, AppError> {
         let query = query.trim();
-        if query.chars().count() < 3 || query.chars().count() > 200 {
+        let query_chars = query.chars().count();
+        if !(2..=200).contains(&query_chars) {
             return Err(AppError::BadRequest(
-                "search query must contain 3 to 200 characters".into(),
+                "search query must contain 2 to 200 characters".into(),
             ));
         }
-        let key = query.to_ascii_lowercase();
-        if !self.ledger.searches.insert(key) {
-            return Ok(json!({ "duplicate": true, "hits": [] }));
+        if file_id.is_some_and(|value| value <= 0) {
+            return Err(AppError::BadRequest("invalid search file_id".into()));
         }
-        #[derive(Serialize, FromRow)]
+        if query_chars == 2 && file_id.is_none() {
+            return Err(AppError::BadRequest(
+                "2-character search requires file_id".into(),
+            ));
+        }
+        let path_prefix = normalize_search_filter(path_prefix, 512, "path_prefix")?;
+        let bundle_hash = normalize_search_filter(bundle_hash, 128, "bundle_hash")?;
+        let search_mode = if query_chars == 2 {
+            SearchMode::ShortLiteral
+        } else {
+            SearchMode::Fts
+        };
+        let key = SearchKey {
+            query: match search_mode {
+                SearchMode::Fts => query.to_lowercase(),
+                SearchMode::ShortLiteral => query.to_ascii_lowercase(),
+            },
+            path_prefix: path_prefix.as_deref().map(str::to_ascii_lowercase),
+            bundle_hash: bundle_hash.as_deref().map(str::to_ascii_lowercase),
+            file_id,
+            mode: search_mode,
+        };
+        if !self.ledger.searches.insert(key) {
+            return Ok(
+                json!({ "search_mode": search_mode.as_str(), "duplicate": true, "hits": [], "truncated": false }),
+            );
+        }
+        #[derive(FromRow)]
+        struct HitRow {
+            file_id: i64,
+            bundle_hash: String,
+            path: String,
+            start_line: i64,
+            end_line: i64,
+            snippet: String,
+        }
+        #[derive(Serialize)]
         struct Hit {
             file_id: i64,
             bundle_hash: String,
@@ -422,17 +504,70 @@ impl<'a> SkillToolExecutor<'a> {
             end_line: i64,
             snippet: String,
         }
-        let fts = format!("\"{}\"", query.replace('"', "\"\""));
-        let hits: Vec<Hit> = sqlx::query_as(
-            "SELECT f.id AS file_id,b.hash AS bundle_hash,f.path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,1,400) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' ORDER BY rank LIMIT ?",
-        )
-        .bind(fts)
-        .bind(&self.context.issue_code)
-        .bind(self.state.limits.api.max_search_results.min(20))
-        .fetch_all(&self.state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-        let value = json!({ "hits": hits });
+        let path_pattern = path_prefix
+            .as_deref()
+            .map(|value| format!("{}%", escape_like_pattern(value)));
+        let max_hits = self.state.limits.api.max_search_results.clamp(1, 20);
+        let fetch_limit = max_hits.saturating_add(1);
+        let rows: Vec<HitRow> = if search_mode == SearchMode::ShortLiteral {
+            let literal_pattern = format!("%{}%", escape_like_pattern(query));
+            sqlx::query_as(
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
+            )
+            .bind(query)
+            .bind(&self.context.issue_code)
+            .bind(file_id.expect("short search file_id was validated"))
+            .bind(bundle_hash.as_deref())
+            .bind(bundle_hash.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(literal_pattern)
+            .bind(fetch_limit)
+            .fetch_all(&self.state.db.pool)
+            .await
+            .map_err(AppError::Database)?
+        } else {
+            let fts = format!("\"{}\"", query.replace('"', "\"\""));
+            sqlx::query_as(
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,snippet(log_segments_fts,0,'','','',64) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) ORDER BY rank LIMIT ?",
+            )
+            .bind(fts)
+            .bind(&self.context.issue_code)
+            .bind(bundle_hash.as_deref())
+            .bind(bundle_hash.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(file_id)
+            .bind(file_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.state.db.pool)
+            .await
+            .map_err(AppError::Database)?
+        };
+        let mut truncated = rows.len() > max_hits as usize;
+        let mut hits: Vec<Hit> = rows
+            .into_iter()
+            .take(max_hits as usize)
+            .map(|row| Hit {
+                file_id: row.file_id,
+                bundle_hash: row.bundle_hash,
+                path: row.path,
+                start_line: row.start_line,
+                end_line: row.end_line,
+                snippet: bounded_snippet_bytes(&row.snippet),
+            })
+            .collect();
+        let value = loop {
+            let candidate = json!({ "search_mode": search_mode.as_str(), "hits": hits, "truncated": truncated });
+            let size = serde_json::to_vec(&candidate)
+                .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
+                .len();
+            if size <= MAX_TOOL_OUTPUT_BYTES || hits.len() <= 1 {
+                break candidate;
+            }
+            hits.pop();
+            truncated = true;
+        };
         self.record_output(&value)?;
         Ok(value)
     }
@@ -612,9 +747,37 @@ fn trim_manifest(value: &mut Value) -> Result<(), AppError> {
     Ok(())
 }
 
+fn normalize_search_filter(
+    value: Option<&str>,
+    max_chars: usize,
+    name: &str,
+) -> Result<Option<String>, AppError> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.chars().count() > max_chars) {
+        return Err(AppError::BadRequest(format!("search {name} is too long")));
+    }
+    Ok(value.map(str::to_owned))
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn bounded_snippet_bytes(snippet: &str) -> String {
+    const MAX_BYTES: usize = 400;
+    let mut end = snippet.len().min(MAX_BYTES);
+    while !snippet.is_char_boundary(end) {
+        end -= 1;
+    }
+    snippet[..end].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EvidenceLedger, EvidenceRange};
+    use super::{EvidenceLedger, EvidenceRange, bounded_snippet_bytes};
 
     #[test]
     fn overlapping_reads_return_only_unseen_intervals() {
@@ -664,5 +827,12 @@ mod tests {
             "timeout after 30s"
         ));
         assert!(!ledger.supports_evidence("bundle-a", 7, "/app.log", 10, 10, "root password"));
+    }
+
+    #[test]
+    fn snippet_byte_limit_preserves_valid_utf8() {
+        let snippet = bounded_snippet_bytes(&"前".repeat(200));
+        assert!(snippet.len() <= 400);
+        assert!(snippet.is_char_boundary(snippet.len()));
     }
 }
