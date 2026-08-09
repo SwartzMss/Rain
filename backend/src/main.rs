@@ -121,7 +121,6 @@ async fn main() -> std::io::Result<()> {
         resume_deleting_bundles(&pool),
     )
     .await;
-
     run_optional_recovery_stage("pending-blob-recovery", STARTUP_RECOVERY_TIMEOUT, async {
         recover_pending_blobs(&pool, blob_store.as_ref())
             .await
@@ -191,6 +190,9 @@ async fn main() -> std::io::Result<()> {
         shared_state.clone(),
     ));
     background_tasks.push(backend::routes::spawn_skill_run_cleanup(
+        shared_state.clone(),
+    ));
+    background_tasks.push(backend::routes::spawn_manual_issue_cleanup(
         shared_state.clone(),
     ));
 

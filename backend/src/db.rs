@@ -285,7 +285,7 @@ pub async fn renew_inactive_issue_lease(
         ));
     }
     let modifier = format!("+{lease_seconds} seconds");
-    let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
+    let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason IN ('INACTIVE', 'MANUAL') AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
         .bind(modifier)
         .bind(issue_code)
         .bind(lease_token)
@@ -313,7 +313,7 @@ async fn require_inactive_issue_lease(
 
 pub async fn resume_deleting_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
     let bundle_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT bundles.id FROM bundles JOIN issues ON issues.code=bundles.issue_code WHERE bundles.status='DELETING' AND NOT (issues.status='DELETING' AND issues.deletion_reason='INACTIVE')",
+        "SELECT bundles.id FROM bundles JOIN issues ON issues.code=bundles.issue_code WHERE bundles.status='DELETING' AND NOT (issues.status='DELETING' AND issues.deletion_reason IN ('INACTIVE', 'MANUAL'))",
     )
             .fetch_all(pool)
             .await
