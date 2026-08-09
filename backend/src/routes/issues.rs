@@ -245,6 +245,20 @@ async fn claim_manual_recovery(
     Ok(changed == 1)
 }
 
+async fn normalize_legacy_manual_deletion(
+    pool: &sqlx::SqlitePool,
+    code: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE issues SET deletion_reason='MANUAL', deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_retry_at=NULL WHERE code=? AND status='DELETING' AND deletion_reason IS NULL",
+    )
+    .bind(code)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(())
+}
+
 async fn schedule_manual_retry(pool: &sqlx::SqlitePool, code: &str, token: &str) {
     let _ = sqlx::query("UPDATE issues SET deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_attempts=deletion_attempts+1, deletion_retry_at=datetime('now', '+' || MIN((deletion_attempts + 1) * 60, 3600) || ' seconds') WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND deletion_lease_token=?")
         .bind(code).bind(token).execute(pool).await;
@@ -626,13 +640,13 @@ pub async fn delete_issue(
             .rows_affected();
     let newly_claimed = claimed == 1;
     if claimed == 0 {
-        let state: Option<(String, Option<String>)> =
+        let issue_state: Option<(String, Option<String>)> =
             sqlx::query_as("SELECT status, deletion_reason FROM issues WHERE code = ?")
                 .bind(&issue_code)
                 .fetch_optional(&state.db.pool)
                 .await
                 .map_err(AppError::Database)?;
-        match state
+        match issue_state
             .as_ref()
             .map(|(status, reason)| (status.as_str(), reason.as_deref()))
         {
@@ -642,7 +656,10 @@ pub async fn delete_issue(
                     "issue {issue_code} is being deleted by inactive cleanup"
                 )));
             }
-            Some(("DELETING", _)) => {} // Resume a previous synchronous deletion attempt.
+            Some(("DELETING", None)) => {
+                normalize_legacy_manual_deletion(&state.db.pool, &issue_code).await?;
+            }
+            Some(("DELETING", Some(_))) => {} // Resume a previous synchronous deletion attempt.
             Some((status, _)) => {
                 return Err(AppError::Conflict(format!(
                     "issue {issue_code} cannot be deleted from {status}"
@@ -814,9 +831,55 @@ mod tests {
 
     use super::{
         claim_inactive_issue, claim_inactive_recovery, cleanup_inactive_issues,
-        cleanup_inactive_issues_with_lease, require_inactive_lease, require_issue_owner,
-        require_issue_owner_for_delete, touch_issue_activity,
+        cleanup_inactive_issues_with_lease, normalize_legacy_manual_deletion,
+        require_inactive_lease, require_issue_owner, require_issue_owner_for_delete,
+        resume_manual_issue_deletions, touch_issue_activity,
     };
+
+    #[tokio::test]
+    async fn manual_recovery_rejects_processing_bundle_and_backs_off() {
+        let pool = db::init_pool("sqlite:file:manual-processing-recovery?mode=memory&cache=shared")
+            .unwrap();
+        db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name,status,deletion_reason) VALUES('MANUAL_BUSY','Busy','DELETING','MANUAL')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('manual-busy-bundle','MANUAL_BUSY','hash','busy','PROCESSING','INDEXING')")
+            .execute(&pool).await.unwrap();
+
+        assert_eq!(resume_manual_issue_deletions(&pool).await.unwrap(), 0);
+        let state: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, deletion_reason, deletion_lease_token, deletion_retry_at FROM issues WHERE code='MANUAL_BUSY'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(state.0, "DELETING");
+        assert_eq!(state.1, "MANUAL");
+        assert!(state.2.is_none());
+        assert!(state.3.is_some());
+        let bundle_status: String =
+            sqlx::query_scalar("SELECT status FROM bundles WHERE id='manual-busy-bundle'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bundle_status, "PROCESSING");
+    }
+
+    #[tokio::test]
+    async fn legacy_manual_deletion_is_normalized_before_recovery() {
+        let pool =
+            db::init_pool("sqlite:file:legacy-manual-recovery?mode=memory&cache=shared").unwrap();
+        db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name,status,deletion_reason) VALUES('LEGACY','Legacy','DELETING',NULL)")
+            .execute(&pool).await.unwrap();
+
+        normalize_legacy_manual_deletion(&pool, "LEGACY")
+            .await
+            .unwrap();
+        assert_eq!(resume_manual_issue_deletions(&pool).await.unwrap(), 1);
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE code='LEGACY'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0);
+    }
 
     #[tokio::test]
     async fn issue_owner_checks_reject_null_and_foreign_users_and_allow_delete_retry() {
