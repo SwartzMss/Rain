@@ -1,14 +1,92 @@
-use std::{path::Path, str::FromStr, time::Duration};
+use std::{
+    path::Path,
+    str::FromStr,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
+};
+
+use once_cell::sync::Lazy;
 
 use sqlx::{
     FromRow, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::error::AppError;
 
-pub const CLEANUP_BATCH_SIZE: u64 = 10_000;
+pub const CLEANUP_BATCH_SIZE: u64 = 1_000;
 const LARGE_CLEANUP_CHECKPOINT_ROWS: u64 = 10_000;
+static HEAVY_CLEANUP_WRITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
+static QUEUED_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
+
+struct CleanupQueueGuard {
+    queued: bool,
+}
+
+impl CleanupQueueGuard {
+    fn enter() -> (Self, usize) {
+        let queue_depth = QUEUED_CLEANUPS.fetch_add(1, Ordering::AcqRel) + 1;
+        (Self { queued: true }, queue_depth)
+    }
+
+    fn leave(&mut self) -> usize {
+        self.queued = false;
+        QUEUED_CLEANUPS.fetch_sub(1, Ordering::AcqRel) - 1
+    }
+}
+
+impl Drop for CleanupQueueGuard {
+    fn drop(&mut self) {
+        if self.queued {
+            QUEUED_CLEANUPS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+struct HeavyCleanupPermit {
+    _permit: SemaphorePermit<'static>,
+    bundle_id: String,
+    started: Instant,
+}
+
+impl Drop for HeavyCleanupPermit {
+    fn drop(&mut self) {
+        let active_cleanup_count = ACTIVE_CLEANUPS.fetch_sub(1, Ordering::AcqRel) - 1;
+        tracing::info!(
+            bundle_id = %self.bundle_id,
+            active_cleanup_count,
+            queue_depth = QUEUED_CLEANUPS.load(Ordering::Acquire),
+            total_elapsed_ms = self.started.elapsed().as_millis() as u64,
+            "bundle cleanup writer released"
+        );
+    }
+}
+
+async fn acquire_heavy_cleanup_writer(bundle_id: &str) -> Result<HeavyCleanupPermit, AppError> {
+    let wait_started = Instant::now();
+    let (mut queue_guard, queue_depth) = CleanupQueueGuard::enter();
+    tracing::info!(bundle_id, queue_depth, "bundle cleanup queued");
+    let permit = HEAVY_CLEANUP_WRITER
+        .acquire()
+        .await
+        .map_err(|_| AppError::Config("bundle cleanup coordinator is closed".into()))?;
+    let queue_depth = queue_guard.leave();
+    let active_cleanup_count = ACTIVE_CLEANUPS.fetch_add(1, Ordering::AcqRel) + 1;
+    tracing::info!(
+        bundle_id,
+        queue_depth,
+        active_cleanup_count,
+        queue_wait_ms = wait_started.elapsed().as_millis() as u64,
+        "bundle cleanup writer acquired"
+    );
+    Ok(HeavyCleanupPermit {
+        _permit: permit,
+        bundle_id: bundle_id.to_owned(),
+        started: Instant::now(),
+    })
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct WalCheckpointStats {
@@ -70,7 +148,7 @@ pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppErr
 
 pub async fn checkpoint_wal(pool: &SqlitePool) -> Result<WalCheckpointStats, AppError> {
     let (busy, log_pages, checkpointed_pages): (i64, i64, i64) =
-        sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+        sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
             .fetch_one(pool)
             .await
             .map_err(AppError::Database)?;
@@ -86,6 +164,7 @@ pub async fn cleanup_bundle_content_batched(
     bundle_id: &str,
     batch_size: u64,
 ) -> Result<BundleCleanupStats, AppError> {
+    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id).await?;
     cleanup_bundle_content_batched_inner(pool, bundle_id, batch_size, None).await
 }
 
@@ -142,6 +221,7 @@ async fn cleanup_bundle_content_batched_inner(
         match checkpoint_wal(pool).await {
             Ok(checkpoint) => tracing::info!(
                 bundle_id,
+                checkpoint_mode = "PASSIVE",
                 busy = checkpoint.busy,
                 log_pages = checkpoint.log_pages,
                 checkpointed_pages = checkpoint.checkpointed_pages,
@@ -150,6 +230,7 @@ async fn cleanup_bundle_content_batched_inner(
             ),
             Err(error) => tracing::warn!(
                 bundle_id,
+                checkpoint_mode = "PASSIVE",
                 error = %error,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "large bundle cleanup WAL checkpoint failed"
@@ -179,6 +260,7 @@ async fn delete_bundle_rows_in_batches(
             require_inactive_issue_lease(pool, lease.issue_code, lease.token, lease.seconds)
                 .await?;
         }
+        let batch_started = Instant::now();
         let affected = sqlx::query(statement)
             .bind(bundle_id)
             .bind(batch_size as i64)
@@ -191,6 +273,17 @@ async fn delete_bundle_rows_in_batches(
         }
         stats.rows += affected;
         stats.batches += 1;
+        tracing::debug!(
+            bundle_id,
+            phase,
+            batch = stats.batches,
+            batch_rows = affected,
+            batch_elapsed_ms = batch_started.elapsed().as_millis() as u64,
+            "bundle cleanup batch completed"
+        );
+        // Leave a small scheduling window between write transactions so foreground
+        // requests can acquire SQLite's writer lock before cleanup takes it again.
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     tracing::info!(
         bundle_id,
@@ -241,7 +334,8 @@ pub async fn cleanup_expired_bundles(
 }
 
 pub async fn finish_bundle_deletion(pool: &SqlitePool, bundle_id: &str) -> Result<(), AppError> {
-    cleanup_bundle_content_batched(pool, bundle_id, CLEANUP_BATCH_SIZE).await?;
+    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id).await?;
+    cleanup_bundle_content_batched_inner(pool, bundle_id, CLEANUP_BATCH_SIZE, None).await?;
     sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
         .bind(bundle_id)
         .execute(pool)
@@ -262,6 +356,7 @@ pub async fn finish_bundle_deletion_with_inactive_lease(
         token: lease_token,
         seconds: lease_seconds,
     };
+    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id).await?;
     cleanup_bundle_content_batched_inner(pool, bundle_id, CLEANUP_BATCH_SIZE, Some(lease)).await?;
     require_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds).await?;
     sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
@@ -795,7 +890,12 @@ pub async fn load_or_initialize_system_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{checkpoint_wal, load_or_initialize_system_settings};
+    use std::time::Duration;
+
+    use super::{
+        ACTIVE_CLEANUPS, QUEUED_CLEANUPS, acquire_heavy_cleanup_writer, checkpoint_wal,
+        load_or_initialize_system_settings,
+    };
 
     #[tokio::test]
     async fn checkpoint_returns_sqlite_page_counts() {
@@ -808,6 +908,38 @@ mod tests {
         assert!(stats.busy >= 0);
         assert!(stats.log_pages >= -1);
         assert!(stats.checkpointed_pages >= -1);
+    }
+
+    #[tokio::test]
+    async fn heavyweight_cleanup_writers_are_serialized() {
+        let first = acquire_heavy_cleanup_writer("first")
+            .await
+            .expect("acquire first cleanup writer");
+
+        let second = tokio::time::timeout(
+            Duration::from_millis(25),
+            acquire_heavy_cleanup_writer("second"),
+        )
+        .await;
+        assert!(second.is_err(), "second cleanup writer must remain queued");
+        assert_eq!(
+            ACTIVE_CLEANUPS.load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            QUEUED_CLEANUPS.load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+
+        drop(first);
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            acquire_heavy_cleanup_writer("second"),
+        )
+        .await
+        .expect("second cleanup writer should be released")
+        .expect("acquire second cleanup writer");
+        drop(second);
     }
 
     #[tokio::test]
