@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, delete, get, post, web};
+use actix_web::{HttpResponse, delete, get, http::header::CACHE_CONTROL, post, web};
 use serde::Deserialize;
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -9,7 +9,8 @@ use crate::{
     db::{finish_bundle_deletion_with_inactive_lease, renew_inactive_issue_lease},
     error::AppError,
     models::issues::{
-        IssueBundlesResponse, IssueSummary, UploadStage, UploadStatus, UploadStatusWrapper,
+        IssueBundlesResponse, IssueInactivityExpiry, IssueSummary, UploadStage, UploadStatus,
+        UploadStatusWrapper,
     },
 };
 
@@ -21,22 +22,27 @@ const MANUAL_CLEANUP_LEASE_SECONDS: u64 = 10 * 60;
 pub(crate) async fn touch_issue_activity(
     pool: &sqlx::SqlitePool,
     code: &str,
-) -> Result<(), AppError> {
-    sqlx::query("UPDATE issues SET last_activity_at = CURRENT_TIMESTAMP WHERE code = ? AND status = 'ACTIVE' AND datetime(last_activity_at) < datetime('now', '-1 hour')")
+) -> Result<bool, AppError> {
+    let updated = sqlx::query("UPDATE issues SET last_activity_at = CURRENT_TIMESTAMP WHERE code = ? AND status = 'ACTIVE' AND datetime(last_activity_at) < datetime('now', '-1 hour')")
         .bind(code)
         .execute(pool)
         .await
-        .map_err(AppError::Database)?;
-    Ok(())
+        .map_err(AppError::Database)?
+        .rows_affected();
+    Ok(updated == 1)
 }
 
 pub(crate) async fn touch_issue_activity_best_effort(
     pool: &sqlx::SqlitePool,
     code: &str,
     operation: &'static str,
-) {
-    if let Err(error) = touch_issue_activity(pool, code).await {
-        tracing::warn!(issue_code = code, operation, %error, "failed to refresh issue activity after successful operation");
+) -> bool {
+    match touch_issue_activity(pool, code).await {
+        Ok(updated) => updated,
+        Err(error) => {
+            tracing::warn!(issue_code = code, operation, %error, "failed to refresh issue activity after successful operation");
+            false
+        }
     }
 }
 
@@ -158,7 +164,7 @@ pub async fn get_issue_bundles(
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     let issue = sqlx::query_as::<_, IssueRow>(
-        "SELECT issues.code, issues.name, issues.owner_user_id, issue_owner.username AS owner_username FROM issues LEFT JOIN users issue_owner ON issue_owner.id = issues.owner_user_id WHERE issues.code = ? AND issues.status = 'ACTIVE' LIMIT 1",
+        "SELECT issues.code, issues.name, issues.owner_user_id, issues.last_activity_at, issue_owner.username AS owner_username FROM issues LEFT JOIN users issue_owner ON issue_owner.id = issues.owner_user_id WHERE issues.code = ? AND issues.status = 'ACTIVE' LIMIT 1",
     )
     .bind(&issue_code)
     .fetch_optional(&state.db.pool)
@@ -174,13 +180,51 @@ pub async fn get_issue_bundles(
     .await
     .map_err(AppError::Database)?;
 
+    let can_write = user
+        .0
+        .as_ref()
+        .is_some_and(|user| issue.owner_user_id.as_deref() == Some(user.id.as_str()));
+
+    let inactive_days = state
+        .issue_inactive_days
+        .load(std::sync::atomic::Ordering::Acquire);
+    let inactivity_expiry = if can_write && (7..=30).contains(&inactive_days) {
+        let previous_expires_at = sqlx::query_scalar::<_, String>(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', datetime(?, '+' || ? || ' days'))",
+        )
+        .bind(&issue.last_activity_at)
+        .bind(inactive_days as i64)
+        .fetch_one(&state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+        let activity_refreshed =
+            touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue detail read")
+                .await;
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', datetime(last_activity_at, '+' || ? || ' days')), CASE WHEN ? AND datetime(?) <= datetime('now', '+72 hours') THEN 1 ELSE 0 END FROM issues WHERE code = ? AND status = 'ACTIVE'",
+        )
+        .bind(inactive_days as i64)
+        .bind(activity_refreshed)
+        .bind(previous_expires_at)
+        .bind(&issue_code)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(AppError::Database)?
+        .map(|(expires_at, renewed_from_expiring)| IssueInactivityExpiry {
+            inactive_days,
+            expires_at,
+            renewed_from_expiring: renewed_from_expiring != 0,
+        })
+    } else {
+        touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue detail read").await;
+        None
+    };
+
     let response = IssueBundlesResponse {
         name: issue.name,
         owner_username: user.0.as_ref().and_then(|_| issue.owner_username.clone()),
-        can_write: user
-            .0
-            .as_ref()
-            .is_some_and(|user| issue.owner_user_id.as_deref() == Some(user.id.as_str())),
+        can_write,
+        inactivity_expiry,
         log_bundles: rows
             .into_iter()
             .map(|bundle| {
@@ -204,9 +248,9 @@ pub async fn get_issue_bundles(
             .collect(),
     };
 
-    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue detail read").await;
-
-    Ok(HttpResponse::Ok().json(response))
+    Ok(HttpResponse::Ok()
+        .insert_header((CACHE_CONTROL, "no-store, private"))
+        .json(response))
 }
 
 pub async fn cleanup_inactive_issues(state: &web::Data<AppState>) -> Result<usize, AppError> {
@@ -556,6 +600,7 @@ struct IssueRow {
     code: String,
     name: String,
     owner_user_id: Option<String>,
+    last_activity_at: String,
     owner_username: Option<String>,
 }
 

@@ -241,6 +241,13 @@ async fn registration_settings_are_persistent_and_admin_only() {
         .fetch_one(&pool)
         .await
         .expect("admin");
+    sqlx::query(
+        "INSERT INTO issues(code,name,owner_user_id) VALUES('ADMIN-OWNED','Admin owned',?)",
+    )
+    .bind(&admin_id)
+    .execute(&pool)
+    .await
+    .expect("admin-owned issue");
     let token = generate_session_token();
     sessions::create_session(
         &pool,
@@ -323,6 +330,17 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(body["issue_inactive_days"], 15);
     assert_eq!(body["allow_registration"], true);
     assert_eq!(body["login_ip_limit_per_minute"], 7);
+    let owner_detail = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/ADMIN-OWNED")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(owner_detail.status(), StatusCode::OK);
+    let owner_detail: serde_json::Value = test::read_body_json(owner_detail).await;
+    assert_eq!(owner_detail["inactivity_expiry"]["inactive_days"], 15);
     let audit: (String, Option<String>, Option<String>, Option<String>, Option<String>) =
         sqlx::query_as("SELECT action,old_value,new_value,client_ip,user_agent FROM admin_audit_logs WHERE action='ISSUE_INACTIVE_SETTINGS_UPDATED' ORDER BY created_at DESC LIMIT 1")
             .fetch_one(&pool).await.expect("issue settings audit");
@@ -338,6 +356,8 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(audit.4.as_deref(), Some("rain-admin-test"));
     for invalid in [
         serde_json::json!(-1),
+        serde_json::json!(1),
+        serde_json::json!(6),
         serde_json::json!(31),
         serde_json::json!(1.5),
         serde_json::json!("invalid"),

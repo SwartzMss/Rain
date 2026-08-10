@@ -41,10 +41,18 @@ pub struct UploadStatusWrapper {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueInactivityExpiry {
+    pub inactive_days: usize,
+    pub expires_at: String,
+    pub renewed_from_expiring: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueBundlesResponse {
     pub name: String,
     pub owner_username: Option<String>,
     pub can_write: bool,
+    pub inactivity_expiry: Option<IssueInactivityExpiry>,
     #[serde(rename = "log_bundles")]
     pub log_bundles: Vec<UploadSummary>,
 }

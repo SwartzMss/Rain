@@ -31,51 +31,281 @@ function formatAdminDate(value: string): string {
   if (Number.isNaN(date.getTime())) return value;
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
     timeZone,
   }).format(date);
 }
 
 function AdminShell({ children }: { children: ReactNode }) {
+  const navClass = ({ isActive }: { isActive: boolean }) =>
+    `flex h-12 items-center border-b-2 px-7 text-sm font-medium transition ${
+      isActive
+        ? "border-cyan-500 text-cyan-700"
+        : "border-transparent text-slate-600 hover:border-slate-300 hover:text-slate-950"
+    }`;
   return (
     <div className="mx-auto max-w-7xl space-y-4">
-      <nav className="inline-flex rounded-xl border border-slate-200 bg-white/80 p-1 text-sm shadow-sm">
-        <NavLink
-          className={({ isActive }) =>
-            `rounded-lg px-4 py-2 font-medium transition ${isActive ? "bg-sky-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"}`
-          }
-          to="/admin/users"
-        >
+      <nav className="flex overflow-x-auto rounded-xl border border-slate-200/90 bg-white/90 px-3 shadow-sm backdrop-blur">
+        <NavLink className={navClass} to="/admin/users">
           用户管理
         </NavLink>
-        <NavLink
-          className={({ isActive }) =>
-            `rounded-lg px-4 py-2 font-medium transition ${isActive ? "bg-sky-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"}`
-          }
-          to="/admin/audit-logs"
-        >
+        <NavLink className={navClass} to="/admin/audit-logs">
           审计日志
         </NavLink>
-        <NavLink
-          className={({ isActive }) =>
-            `rounded-lg px-4 py-2 font-medium transition ${isActive ? "bg-sky-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"}`
-          }
-          to="/admin/auth-rate-limits"
-        >
+        <NavLink className={navClass} to="/admin/auth-rate-limits">
           认证限流
         </NavLink>
-        <NavLink
-          className={({ isActive }) =>
-            `rounded-lg px-4 py-2 font-medium transition ${isActive ? "bg-sky-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"}`
-          }
-          to="/admin/settings"
-        >
+        <NavLink className={navClass} to="/admin/settings">
           系统设置
         </NavLink>
       </nav>
       {children}
     </div>
+  );
+}
+
+type AdminIconName =
+  | "settings"
+  | "registration"
+  | "shield"
+  | "clock"
+  | "users"
+  | "audit"
+  | "rate-limits";
+
+function AdminIcon({
+  name,
+  subtle = false,
+}: {
+  name: AdminIconName;
+  subtle?: boolean;
+}) {
+  const toneClass = subtle
+    ? "bg-slate-100 text-slate-700"
+    : name === "audit"
+      ? "bg-indigo-50 text-indigo-600"
+      : "bg-cyan-50 text-cyan-600";
+  const paths = {
+    settings: (
+      <>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20.3h-3v-.08a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-2.12-2.12.06-.06A1.7 1.7 0 0 0 7 15a1.7 1.7 0 0 0-1.56-1.04H5.3v-3h.14A1.7 1.7 0 0 0 7 9.92a1.7 1.7 0 0 0-.34-1.88L6.6 7.98l2.12-2.12.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 11.7 4.7v-.1h3v.1a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.04h.14v3h-.14A1.7 1.7 0 0 0 19.4 15Z" />
+      </>
+    ),
+    registration: (
+      <>
+        <circle cx="10" cy="8" r="3" />
+        <path d="M4.5 19v-1.4A4.6 4.6 0 0 1 9.1 13h1.8a4.6 4.6 0 0 1 4.6 4.6V19M18 8v6M15 11h6" />
+      </>
+    ),
+    shield: (
+      <>
+        <path d="M12 3 5.5 5.8v5.1c0 4.1 2.8 7.8 6.5 9.1 3.7-1.3 6.5-5 6.5-9.1V5.8L12 3Z" />
+        <path d="M12 7v9M9.5 10.5H12" />
+      </>
+    ),
+    clock: (
+      <>
+        <circle cx="12" cy="12" r="8" />
+        <path d="M12 7.5V12l3 1.8" />
+      </>
+    ),
+    users: (
+      <>
+        <circle cx="9" cy="8" r="3" />
+        <path d="M3.8 19v-1.3A4.7 4.7 0 0 1 8.5 13h1A4.7 4.7 0 0 1 14.2 17.7V19M16 6.7a3 3 0 0 1 0 5.6M17 14a4.7 4.7 0 0 1 3.2 4.5V19" />
+      </>
+    ),
+    audit: (
+      <>
+        <path d="M7 3.8h10a2 2 0 0 1 2 2V20H5V5.8a2 2 0 0 1 2-2Z" />
+        <path d="M9 3.8V2.5h6v1.3M8.5 9h7M8.5 13h7M8.5 17h4" />
+      </>
+    ),
+    "rate-limits": (
+      <>
+        <path d="M12 3 5.5 5.8v5.1c0 4.1 2.8 7.8 6.5 9.1 3.7-1.3 6.5-5 6.5-9.1V5.8L12 3Z" />
+        <path d="M8.5 12h7M12 8.5V12l2.2 2" />
+      </>
+    ),
+  };
+  return (
+    <span
+      className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full ${toneClass}`}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-6 w-6"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
+        viewBox="0 0 24 24"
+      >
+        {paths[name]}
+      </svg>
+    </span>
+  );
+}
+
+function AdminPageHeader({
+  icon,
+  title,
+  description,
+  actions,
+  embedded = false,
+}: {
+  icon: AdminIconName;
+  title: string;
+  description: string;
+  actions?: ReactNode;
+  embedded?: boolean;
+}) {
+  const content = (
+    <>
+      <div className="flex items-center gap-5">
+        <AdminIcon name={icon} subtle={icon === "settings"} />
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-950">
+            {title}
+          </h1>
+          <p className="mt-1 text-sm leading-6 text-slate-500">{description}</p>
+        </div>
+      </div>
+      {actions ? (
+        <div className="w-full lg:w-auto lg:shrink-0" data-testid="admin-page-actions">
+          {actions}
+        </div>
+      ) : null}
+    </>
+  );
+  if (embedded) {
+    return (
+      <div
+        className="flex flex-col gap-4 border-b border-slate-100 px-5 py-5 sm:px-6 lg:flex-row lg:items-center lg:justify-between"
+        data-testid="admin-page-header"
+      >
+        {content}
+      </div>
+    );
+  }
+  return (
+    <section
+      className="flex flex-col gap-4 rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur sm:p-6 lg:flex-row lg:items-center lg:justify-between"
+      data-testid="admin-page-header"
+    >
+      {content}
+    </section>
+  );
+}
+
+function AdminContentCard({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <section
+      className={`overflow-hidden rounded-2xl border border-slate-200/90 bg-white/95 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur ${className}`}
+    >
+      {children}
+    </section>
+  );
+}
+
+function EmptyState({
+  title,
+  description,
+}: {
+  title: string;
+  description?: string;
+}) {
+  return (
+    <div className="flex min-h-52 flex-col items-center justify-center px-5 py-10 text-center">
+      <svg
+        aria-hidden="true"
+        className="h-20 w-28 text-slate-200"
+        fill="none"
+        viewBox="0 0 112 80"
+      >
+        <ellipse
+          cx="56"
+          cy="67"
+          fill="currentColor"
+          opacity=".45"
+          rx="35"
+          ry="6"
+        />
+        <path
+          d="M35 38h42l7 14v13H28V52l7-14Z"
+          fill="currentColor"
+          opacity=".55"
+        />
+        <path d="M28 52h18l5 7h10l5-7h18" stroke="white" strokeWidth="3" />
+        <path
+          d="M22 32h18M71 25h21M83 34h13"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeWidth="7"
+          opacity=".35"
+        />
+      </svg>
+      <p className="mt-2 text-base font-semibold text-slate-800">{title}</p>
+      {description ? (
+        <p className="mt-1 text-sm text-slate-500">{description}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeWidth="2"
+      viewBox="0 0 24 24"
+    >
+      <path d="M20 7v5h-5M4 17v-5h5" />
+      <path d="M6.1 9A7 7 0 0 1 18 6.5L20 9M4 15l2 2.5A7 7 0 0 0 17.9 15" />
+    </svg>
+  );
+}
+
+function SettingsSection({
+  icon,
+  title,
+  description,
+  children,
+}: {
+  icon: AdminIconName;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur sm:p-6">
+      <div className="flex items-start gap-4">
+        <AdminIcon name={icon} />
+        <div className="min-w-0 flex-1">
+          <h2 className="text-lg font-semibold text-slate-950">{title}</h2>
+          <p className="mt-1 text-sm leading-6 text-slate-500">{description}</p>
+          {children}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -107,6 +337,9 @@ export function AdminSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [hasLoadedSettings, setHasLoadedSettings] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [feedbackSection, setFeedbackSection] = useState<
+    "registration" | "rate-limits" | "issue-expiry" | null
+  >(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const load = useCallback(async () => {
@@ -130,6 +363,7 @@ export function AdminSettingsPage() {
     void load();
   }, [load]);
   const save = async (value?: boolean, thresholds = false) => {
+    setFeedbackSection(thresholds ? "rate-limits" : "registration");
     setSaving(true);
     setMessage(null);
     setSaveError(null);
@@ -151,15 +385,26 @@ export function AdminSettingsPage() {
   };
   const saveThresholds = () => void save(undefined, true);
   const saveIssueExpiry = async () => {
-    if (issueInactiveDays === "" || !Number.isInteger(issueInactiveDays) || issueInactiveDays < 0 || issueInactiveDays > 30) {
-      setSaveError("Issue 非活跃天数必须为 0 到 30");
+    setFeedbackSection("issue-expiry");
+    if (
+      issueInactiveDays === "" ||
+      !Number.isInteger(issueInactiveDays) ||
+      (issueInactiveDays !== 0 &&
+        (issueInactiveDays < 7 || issueInactiveDays > 30))
+    ) {
+      setSaveError("Issue 非活跃天数必须为 0，或 7 到 30");
       return;
     }
     setSaving(true);
     setMessage(null);
     setSaveError(null);
     try {
-      const result = await rainApi.updateAdminSettings(undefined, undefined, undefined, issueInactiveDays);
+      const result = await rainApi.updateAdminSettings(
+        undefined,
+        undefined,
+        undefined,
+        issueInactiveDays,
+      );
       setIssueInactiveDays(result.issue_inactive_days);
       setMessage("Issue 过期配置已保存");
     } catch (e) {
@@ -169,100 +414,220 @@ export function AdminSettingsPage() {
       setSaving(false);
     }
   };
+  const sectionFeedback = (section: typeof feedbackSection) => {
+    if (feedbackSection !== section) return null;
+    if (message) {
+      return (
+        <p
+          className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50/80 px-3 py-2 text-sm text-emerald-700"
+          role="status"
+        >
+          <span
+            aria-hidden="true"
+            className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[10px] font-bold text-white"
+          >
+            ✓
+          </span>
+          {message}
+        </p>
+      );
+    }
+    if (saveError) {
+      return (
+        <p
+          className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700"
+          role="alert"
+        >
+          保存失败：{saveError}
+        </p>
+      );
+    }
+    return null;
+  };
+  const controlsDisabled =
+    loading || saving || !hasLoadedSettings || Boolean(loadError);
+  const primaryButtonClass =
+    "rounded-lg bg-cyan-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-cyan-600/20 transition hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-50";
   return (
     <AdminGuard>
-      <section className="max-w-3xl rounded-2xl border border-slate-200 bg-white/95 p-6 shadow-xl">
-        <h1 className="text-xl font-semibold text-slate-950">系统设置</h1>
-        <div className="mt-6 flex items-center justify-between rounded-xl border border-slate-200 p-4">
-          <div>
-            <h2 className="font-semibold">用户注册</h2>
-            <p className="mt-1 text-sm text-slate-500">
-              关闭后，新用户将无法注册；已有用户仍可正常登录和使用系统。
-            </p>
-          </div>
-          <button
-            type="button"
-            disabled={
-              loading || saving || !hasLoadedSettings || Boolean(loadError)
-            }
-            onClick={() => void save(!allowed)}
-            className={`relative h-7 w-12 rounded-full transition ${allowed ? "bg-cyan-600" : "bg-slate-300"} disabled:opacity-50`}
-          >
-            <span
-              className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition ${allowed ? "left-6" : "left-1"}`}
-            />
-          </button>
-        </div>
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <label className="text-sm text-slate-600">
-            IP 每分钟阈值
-            <input
-              type="number"
-              min="1"
-              max="1000"
-              value={ipLimit}
-              disabled={loading || saving || !hasLoadedSettings}
-              onChange={(e) => setIpLimit(Number(e.target.value))}
-              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2"
-            />
-          </label>
-          <label className="text-sm text-slate-600">
-            用户名失败 5 分钟阈值
-            <input
-              type="number"
-              min="1"
-              max="100"
-              value={usernameLimit}
-              disabled={loading || saving || !hasLoadedSettings}
-              onChange={(e) => setUsernameLimit(Number(e.target.value))}
-              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2"
-            />
-          </label>
-        </div>
-        <button
-          type="button"
-          disabled={
-            loading || saving || !hasLoadedSettings || Boolean(loadError)
-          }
-          onClick={saveThresholds}
-          className="mt-4 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-        >
-          保存限流配置
-        </button>
-        <div className="mt-6 rounded-xl border border-slate-200 p-4">
-          <h2 className="font-semibold">Issue 非活跃自动过期</h2>
-          <p className="mt-1 text-sm text-slate-500">0 表示关闭，最大 30 天。修改后从下一次后台扫描开始生效。</p>
-          <label className="mt-3 block text-sm text-slate-600">
-            非活跃天数
-            <input
-              type="number"
-              min="0"
-              max="30"
-              value={issueInactiveDays}
-              disabled={loading || saving || !hasLoadedSettings}
-              onChange={(e) => setIssueInactiveDays(e.target.value === "" ? "" : Number(e.target.value))}
-              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 sm:max-w-xs"
-            />
-          </label>
-          <button
-            type="button"
-            disabled={loading || saving || !hasLoadedSettings || issueInactiveDays === "" || issueInactiveDays < 0 || issueInactiveDays > 30 || !Number.isInteger(issueInactiveDays)}
-            onClick={() => void saveIssueExpiry()}
-            className="mt-3 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-          >
-            保存 Issue 过期配置
-          </button>
-        </div>
-        {message ? (
-          <p className="mt-4 text-sm text-emerald-700">{message}</p>
-        ) : null}
+      <div className="space-y-3">
+        <AdminPageHeader
+          icon="settings"
+          title="系统设置"
+          description="配置系统的注册、认证与过期策略，保障系统安全与稳定运行。"
+        />
+
         {loadError ? (
-          <p className="mt-4 text-sm text-rose-700">{loadError}</p>
+          <p
+            className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+            role="alert"
+          >
+            {loadError}
+          </p>
         ) : null}
-        {saveError ? (
-          <p className="mt-4 text-sm text-rose-700">保存失败：{saveError}</p>
-        ) : null}
-      </section>
+
+        <SettingsSection
+          icon="registration"
+          title="用户注册"
+          description="控制新用户是否可以注册。关闭后，将无法注册新用户，但已有用户仍可正常登录和使用系统。"
+        >
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-4">
+            <span className="text-sm font-medium text-slate-600">用户注册</span>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                aria-label="用户注册"
+                aria-pressed={allowed}
+                disabled={controlsDisabled}
+                onClick={() => void save(!allowed)}
+                className={`relative h-7 w-12 rounded-full transition-colors ${allowed ? "bg-cyan-600" : "bg-slate-300"} disabled:cursor-not-allowed disabled:opacity-50`}
+              >
+                <span
+                  className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm transition-all ${allowed ? "left-6" : "left-1"}`}
+                />
+              </button>
+              <span
+                className={`min-w-10 text-sm font-medium ${allowed ? "text-slate-700" : "text-slate-500"}`}
+              >
+                {allowed ? "已启用" : "已关闭"}
+              </span>
+            </div>
+          </div>
+          {sectionFeedback("registration")}
+        </SettingsSection>
+
+        <SettingsSection
+          icon="shield"
+          title="认证限流"
+          description="通过限制认证请求频率，降低暴力破解与滥用风险。"
+        >
+          <div className="mt-5 grid gap-5 md:grid-cols-2">
+            <div>
+              <label
+                className="text-sm font-medium text-slate-700"
+                htmlFor="login-ip-limit"
+              >
+                IP 每分钟阈值
+              </label>
+              <input
+                id="login-ip-limit"
+                aria-describedby="login-ip-limit-help"
+                type="number"
+                min="1"
+                max="1000"
+                value={ipLimit}
+                disabled={loading || saving || !hasLoadedSettings}
+                onChange={(e) => setIpLimit(Number(e.target.value))}
+                className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:bg-slate-50"
+              />
+              <p
+                id="login-ip-limit-help"
+                className="mt-1.5 text-xs font-normal leading-5 text-slate-500"
+              >
+                同一 IP 在每分钟内允许的最大认证请求次数。
+              </p>
+            </div>
+            <div>
+              <label
+                className="text-sm font-medium text-slate-700"
+                htmlFor="login-username-limit"
+              >
+                用户名失败 5 分钟阈值
+              </label>
+              <input
+                id="login-username-limit"
+                aria-describedby="login-username-limit-help"
+                type="number"
+                min="1"
+                max="100"
+                value={usernameLimit}
+                disabled={loading || saving || !hasLoadedSettings}
+                onChange={(e) => setUsernameLimit(Number(e.target.value))}
+                className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:bg-slate-50"
+              />
+              <p
+                id="login-username-limit-help"
+                className="mt-1.5 text-xs font-normal leading-5 text-slate-500"
+              >
+                同一用户名在 5 分钟内允许的最大失败次数。
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              disabled={controlsDisabled}
+              onClick={saveThresholds}
+              className={primaryButtonClass}
+            >
+              保存限流配置
+            </button>
+          </div>
+          {sectionFeedback("rate-limits")}
+        </SettingsSection>
+
+        <SettingsSection
+          icon="clock"
+          title="Issue 非活跃自动过期"
+          description="设置 Issue 在多少天未活跃后自动过期。"
+        >
+          <div className="mt-5 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div className="w-full md:max-w-sm">
+              <label
+                className="text-sm font-medium text-slate-700"
+                htmlFor="issue-inactive-days"
+              >
+                非活跃天数
+              </label>
+              <input
+                id="issue-inactive-days"
+                aria-describedby="issue-inactive-days-help"
+                type="number"
+                min="0"
+                max="30"
+                value={issueInactiveDays}
+                disabled={loading || saving || !hasLoadedSettings}
+                onChange={(e) =>
+                  setIssueInactiveDays(
+                    e.target.value === "" ? "" : Number(e.target.value),
+                  )
+                }
+                className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:bg-slate-50"
+              />
+              <p
+                id="issue-inactive-days-help"
+                className="mt-1.5 text-xs font-normal leading-5 text-slate-500"
+              >
+                0 表示关闭；启用时可设置为 7 到 30 天。
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={
+                controlsDisabled ||
+                issueInactiveDays === "" ||
+                (issueInactiveDays !== 0 &&
+                  (issueInactiveDays < 7 || issueInactiveDays > 30)) ||
+                !Number.isInteger(issueInactiveDays)
+              }
+              onClick={() => void saveIssueExpiry()}
+              className={primaryButtonClass}
+            >
+              保存 Issue 过期配置
+            </button>
+          </div>
+          <p className="mt-4 flex items-start gap-2 rounded-lg border border-sky-200 bg-sky-50/70 px-3 py-2 text-xs leading-5 text-sky-700">
+            <span
+              aria-hidden="true"
+              className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-sky-500 text-[10px] font-bold text-white"
+            >
+              i
+            </span>
+            配置将在下一次后台扫描任务执行时生效，扫描任务通常每隔一段时间自动运行。
+          </p>
+          {sectionFeedback("issue-expiry")}
+        </SettingsSection>
+      </div>
     </AdminGuard>
   );
 }
@@ -310,60 +675,72 @@ export function AuthRateLimitsPage() {
   };
   const table = (
     title: string,
+    description: string,
     type: "usernames" | "ips",
     items: AuthRateLimitEntry[],
     label: (item: AuthRateLimitEntry) => string,
   ) => (
-    <section className="mt-5 overflow-hidden rounded-xl border border-slate-200">
-      <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-4 py-3">
-        <h2 className="font-semibold">{title}</h2>
+    <section className="overflow-hidden rounded-xl border border-slate-200">
+      <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:gap-6">
+          <h2 className="text-lg font-semibold text-slate-950">{title}</h2>
+          <p className="text-sm text-slate-500">{description}</p>
+        </div>
         <button
           type="button"
           disabled={loading || Boolean(clearingKey) || !items.length}
           onClick={() => void clear(type)}
-          className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+          className="rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          清除全部
+          {clearingKey === `all:${type}` ? "清除中…" : "清除全部"}
         </button>
       </div>
       {!items.length ? (
-        <p className="p-5 text-sm text-slate-500">当前没有认证限流记录</p>
+        <EmptyState title="当前没有认证限流记录" />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-white text-xs text-slate-500">
+          <table className="w-full min-w-[760px] text-left text-sm">
+            <thead className="bg-slate-50 text-xs font-semibold text-slate-500">
               <tr>
-                <th className="px-4 py-2">标识</th>
-                <th className="px-4 py-2">次数/阈值</th>
-                <th className="px-4 py-2">最近事件</th>
-                <th className="px-4 py-2">恢复倒计时</th>
-                <th className="px-4 py-2">操作</th>
+                <th className="px-5 py-3">标识</th>
+                <th className="px-5 py-3">次数/阈值</th>
+                <th className="px-5 py-3">最近事件</th>
+                <th className="px-5 py-3">恢复倒计时</th>
+                <th className="px-5 py-3">操作</th>
               </tr>
             </thead>
             <tbody>
               {items.map((item) => (
-                <tr key={item.key} className="border-t border-slate-100">
-                  <td className="px-4 py-3">{label(item)}</td>
-                  <td className="px-4 py-3">
-                    {item.current_count}/{item.limit}{" "}
+                <tr
+                  key={item.key}
+                  className="border-t border-slate-100 transition hover:bg-sky-50/40"
+                >
+                  <td className="px-5 py-3.5 font-medium text-slate-900">
+                    {label(item)}
+                  </td>
+                  <td className="px-5 py-3.5 tabular-nums text-slate-700">
+                    <span className="font-semibold">{item.current_count}</span>
+                    <span className="text-slate-400"> / {item.limit}</span>{" "}
                     {item.limited ? (
-                      <span className="text-rose-600">受限中</span>
+                      <span className="ml-2 inline-flex rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-200">
+                        受限中
+                      </span>
                     ) : null}
                   </td>
-                  <td className="px-4 py-3 text-slate-500">
+                  <td className="whitespace-nowrap px-5 py-3.5 text-slate-500">
                     {item.last_event_at
                       ? formatAdminDate(item.last_event_at)
                       : "—"}
                   </td>
-                  <td className="px-4 py-3 text-slate-500">
+                  <td className="px-5 py-3.5 tabular-nums text-slate-500">
                     {item.limited ? `${item.retry_after_seconds}s` : "—"}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-5 py-3.5">
                     <button
                       type="button"
                       disabled={loading || Boolean(clearingKey)}
                       onClick={() => void clear(type, item.key)}
-                      className="text-rose-600 disabled:opacity-50"
+                      className="rounded-lg border border-rose-200 bg-white px-2.5 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       {clearingKey === item.key ? "清除中…" : "清除"}
                     </button>
@@ -378,36 +755,57 @@ export function AuthRateLimitsPage() {
   );
   return (
     <AdminGuard>
-      <section className="rounded-2xl border border-slate-200 bg-white/95 p-5 shadow-xl">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold">认证限流</h1>
-            <p className="mt-2 text-sm text-slate-500">
-              限流用于防止暴力破解，命中后返回
-              429；限流临时保存在当前进程内，重启后清空。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => void load()}
-            disabled={loading}
-            className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:opacity-50"
-          >
-            刷新
-          </button>
-        </div>
+      <AdminContentCard>
+        <AdminPageHeader
+          icon="rate-limits"
+          title="认证限流"
+          description="查看当前登录保护状态并解除异常限流；运行时记录会在服务重启后清空。"
+          embedded
+          actions={
+            <button
+              type="button"
+              onClick={() => void load()}
+              disabled={loading}
+              className="inline-flex items-center gap-2 rounded-lg border border-cyan-400 bg-white px-4 py-2.5 text-sm font-medium text-cyan-700 shadow-sm transition hover:bg-cyan-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <RefreshIcon />
+              {loading ? "刷新中…" : "刷新"}
+            </button>
+          }
+        />
         {notice ? (
-          <p className="mt-3 text-sm text-emerald-700">{notice}</p>
+          <p
+            className="mx-5 mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"
+            role="status"
+          >
+            {notice}
+          </p>
         ) : null}
-        {error ? <p className="mt-3 text-sm text-rose-700">{error}</p> : null}
-        {table(
-          "用户名失败限流",
-          "usernames",
-          usernameFailures,
-          (item) => item.username ?? item.key,
-        )}
-        {table("登录 IP 限流", "ips", loginIps, (item) => item.ip ?? item.key)}
-      </section>
+        {error ? (
+          <p
+            className="mx-5 mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+            role="alert"
+          >
+            {error}
+          </p>
+        ) : null}
+        <div className="space-y-5 p-5">
+          {table(
+            "用户名失败限流",
+            "按用户名统计失败登录次数，便于观察是否存在暴力破解行为。",
+            "usernames",
+            usernameFailures,
+            (item) => item.username ?? item.key,
+          )}
+          {table(
+            "登录 IP 限流",
+            "按 IP 维度统计登录限流记录，便于排查异常来源。",
+            "ips",
+            loginIps,
+            (item) => item.ip ?? item.key,
+          )}
+        </div>
+      </AdminContentCard>
     </AdminGuard>
   );
 }
@@ -449,26 +847,19 @@ export function AdminUsersPage() {
 
   return (
     <AdminGuard>
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-[0_18px_50px_rgba(15,23,42,0.08)]">
-        <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="flex items-center gap-3">
-              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-50 text-lg text-sky-600">
-                ⌘
-              </span>
-              <h1 className="text-xl font-semibold tracking-tight text-slate-950">
-                用户管理
-              </h1>
+      <AdminContentCard>
+        <AdminPageHeader
+          icon="users"
+          title="用户管理"
+          description="管理普通用户状态及登录会话。"
+          embedded
+          actions={
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-500">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              当前显示 {users.length} 位用户
             </div>
-            <p className="mt-1 pl-12 text-sm text-slate-500">
-              管理普通用户状态及登录会话
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-slate-500">
-            <span className="h-2 w-2 rounded-full bg-emerald-500" /> 当前显示{" "}
-            {users.length} 位用户
-          </div>
-        </div>
+          }
+        />
         <div className="border-b border-slate-100 bg-slate-50/70 px-5 py-4">
           <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_180px_auto]">
             <label className="relative block">
@@ -499,10 +890,11 @@ export function AdminUsersPage() {
               <option value="DISABLED">停用</option>
             </select>
             <button
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-cyan-400 bg-white px-5 py-2.5 text-sm font-medium text-cyan-700 transition hover:bg-cyan-50"
               type="button"
               onClick={() => void load()}
             >
+              <RefreshIcon />
               刷新
             </button>
           </div>
@@ -517,29 +909,41 @@ export function AdminUsersPage() {
             {notice}
           </p>
         ) : null}
-        {loading ? (
-          <p className="py-8 text-center text-sm text-slate-500">用户加载中…</p>
-        ) : users.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">
-            没有匹配的普通用户
-          </p>
-        ) : (
-          <div className="mx-5 my-4 overflow-x-auto rounded-xl border border-slate-200">
-            <table className="w-full min-w-[980px] text-left text-sm">
-              <thead className="bg-slate-50 text-xs font-semibold text-slate-500">
-                <tr className="border-b border-slate-200">
-                  <th className="px-4 py-3">用户名</th>
-                  <th className="px-4 py-3">状态</th>
-                  <th className="px-4 py-3">Issue 数</th>
-                  <th className="px-4 py-3">占用容量</th>
-                  <th className="px-4 py-3">活跃会话</th>
-                  <th className="px-4 py-3">创建时间</th>
-                  <th className="px-4 py-3">最近登录</th>
-                  <th className="px-4 py-3">操作</th>
+        <div className="mx-5 my-4 overflow-x-auto rounded-xl border border-slate-200">
+          <table className="w-full min-w-[980px] text-left text-sm">
+            <thead className="bg-slate-50 text-xs font-semibold text-slate-500">
+              <tr className="border-b border-slate-200">
+                <th className="px-4 py-3">用户名</th>
+                <th className="px-4 py-3">状态</th>
+                <th className="px-4 py-3">Issue 数</th>
+                <th className="px-4 py-3">占用容量</th>
+                <th className="px-4 py-3">活跃会话</th>
+                <th className="px-4 py-3">创建时间</th>
+                <th className="px-4 py-3">最近登录</th>
+                <th className="px-4 py-3">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td
+                    className="py-12 text-center text-sm text-slate-500"
+                    colSpan={8}
+                  >
+                    用户加载中…
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {users.map((user) => (
+              ) : users.length === 0 ? (
+                <tr>
+                  <td colSpan={8}>
+                    <EmptyState
+                      title="暂无匹配的普通用户"
+                      description="请尝试调整搜索条件或状态筛选"
+                    />
+                  </td>
+                </tr>
+              ) : (
+                users.map((user) => (
                   <UserRow
                     key={user.id}
                     user={user}
@@ -547,11 +951,11 @@ export function AdminUsersPage() {
                     onError={setError}
                     onNotice={setNotice}
                   />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
         <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
           <span>
             {loading
@@ -580,7 +984,7 @@ export function AdminUsersPage() {
             </button>
           </div>
         </div>
-      </section>
+      </AdminContentCard>
     </AdminGuard>
   );
 }
@@ -637,9 +1041,7 @@ function UserRow({
         {formatAdminDate(user.created_at)}
       </td>
       <td className="whitespace-nowrap px-4 py-3.5 tabular-nums text-slate-600">
-        {user.last_login_at
-          ? formatAdminDate(user.last_login_at)
-          : "从未登录"}
+        {user.last_login_at ? formatAdminDate(user.last_login_at) : "从未登录"}
       </td>
       <td className="px-4 py-3.5">
         <div className="flex flex-wrap gap-2">
@@ -727,48 +1129,45 @@ export function AuditLogsPage() {
   ).length;
   return (
     <AdminGuard>
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-[0_18px_50px_rgba(15,23,42,0.08)]">
-        <div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-5 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-50 text-xl text-indigo-600">
-              ▣
-            </span>
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight text-slate-950">
-                审计日志
-              </h1>
-              <p className="mt-1 text-sm text-slate-500">
-                查看管理员对用户和会话执行的安全操作
-              </p>
+      <AdminContentCard>
+        <AdminPageHeader
+          icon="audit"
+          title="审计日志"
+          description="查看管理员对用户、会话和系统配置执行的安全操作。"
+          embedded
+          actions={
+            <div
+              className="grid w-full grid-cols-2 gap-2 lg:w-auto lg:grid-cols-4"
+              data-testid="audit-metrics"
+            >
+              <AuditMetric label="本页事件" value={logs.length} tone="indigo" />
+              <AuditMetric
+                label="本页今日操作"
+                value={todayCount}
+                tone="emerald"
+              />
+              <AuditMetric
+                label="本页用户变更"
+                value={userChangeCount}
+                tone="amber"
+              />
+              <AuditMetric
+                label="本页会话操作"
+                value={sessionActionCount}
+                tone="violet"
+              />
             </div>
-          </div>
-          <div className="grid grid-cols-2 gap-x-8 gap-y-3 text-sm sm:grid-cols-4 lg:min-w-[520px]">
-            <AuditMetric label="本页事件" value={logs.length} tone="indigo" />
-            <AuditMetric
-              label="本页今日操作"
-              value={todayCount}
-              tone="emerald"
-            />
-            <AuditMetric
-              label="本页用户变更"
-              value={userChangeCount}
-              tone="amber"
-            />
-            <AuditMetric
-              label="本页会话操作"
-              value={sessionActionCount}
-              tone="violet"
-            />
-          </div>
-        </div>
+          }
+        />
         <div className="border-b border-slate-100 bg-slate-50/70 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-sm font-medium text-slate-700">操作记录</div>
             <button
-              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700"
+              className="inline-flex items-center gap-2 rounded-xl border border-cyan-400 bg-white px-4 py-2.5 text-sm font-medium text-cyan-700 transition hover:bg-cyan-50"
               type="button"
               onClick={() => void load()}
             >
+              <RefreshIcon />
               刷新
             </button>
           </div>
@@ -783,9 +1182,10 @@ export function AuditLogsPage() {
             审计日志加载中…
           </p>
         ) : logs.length === 0 ? (
-          <p className="py-10 text-center text-sm text-slate-500">
-            暂无审计记录
-          </p>
+          <EmptyState
+            title="暂无审计记录"
+            description="管理员操作会记录在这里"
+          />
         ) : (
           <div className="mx-5 my-4 overflow-x-auto rounded-xl border border-slate-200">
             <table className="w-full min-w-[760px] text-left text-sm">
@@ -874,7 +1274,7 @@ export function AuditLogsPage() {
             </button>
           </div>
         </div>
-      </section>
+      </AdminContentCard>
     </AdminGuard>
   );
 }
@@ -889,19 +1289,17 @@ function AuditMetric({
   tone: "indigo" | "emerald" | "amber" | "violet";
 }) {
   const toneClass = {
-    indigo: "bg-indigo-50 text-indigo-600",
-    emerald: "bg-emerald-50 text-emerald-600",
-    amber: "bg-amber-50 text-amber-600",
-    violet: "bg-violet-50 text-violet-600",
+    indigo: "bg-indigo-50 text-indigo-700 ring-indigo-100",
+    emerald: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+    amber: "bg-amber-50 text-amber-700 ring-amber-100",
+    violet: "bg-violet-50 text-violet-700 ring-violet-100",
   }[tone];
   return (
-    <div className="border-l border-slate-200 pl-4 first:border-l-0 first:pl-0">
-      <div className="text-xs text-slate-500">{label}</div>
-      <div
-        className={`mt-1 inline-flex rounded-lg px-2 py-0.5 text-lg font-semibold ${toneClass}`}
-      >
-        {value}
-      </div>
+    <div
+      className={`rounded-2xl p-4 shadow-[0_8px_24px_rgba(15,23,42,0.04)] ring-1 ring-inset ${toneClass}`}
+    >
+      <div className="text-xs font-medium opacity-75">{label}</div>
+      <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
     </div>
   );
 }

@@ -388,7 +388,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             ,login_ip_limit_per_minute INTEGER NOT NULL DEFAULT 20 CHECK (login_ip_limit_per_minute BETWEEN 1 AND 1000)
             ,login_username_failure_limit_per_5_minutes INTEGER NOT NULL DEFAULT 10 CHECK (login_username_failure_limit_per_5_minutes BETWEEN 1 AND 100)
-            ,issue_inactive_days INTEGER NOT NULL DEFAULT 0 CHECK (issue_inactive_days BETWEEN 0 AND 30)
+            ,issue_inactive_days INTEGER NOT NULL DEFAULT 0 CHECK (issue_inactive_days = 0 OR issue_inactive_days BETWEEN 7 AND 30)
         )
         "#,
         r#"
@@ -694,6 +694,11 @@ pub async fn load_or_initialize_system_settings(
         .map_err(|_| AppError::Config("数据库中的用户名限流阈值无效".into()))?;
     let issue_inactive_days = usize::try_from(row.3)
         .map_err(|_| AppError::Config("数据库中的 Issue 非活跃天数无效".into()))?;
+    if issue_inactive_days != 0 && !(7..=30).contains(&issue_inactive_days) {
+        return Err(AppError::Config(
+            "数据库中的 Issue 非活跃天数必须为 0，或 7 到 30".into(),
+        ));
+    }
     Ok((row.0, ip, username, issue_inactive_days))
 }
 

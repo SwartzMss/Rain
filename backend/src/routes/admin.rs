@@ -324,13 +324,13 @@ pub async fn update_settings(
         None => old.3 as usize,
         Some(value) => value
             .as_i64()
-            .filter(|days| (0..=30).contains(days))
+            .filter(|days| *days == 0 || (7..=30).contains(days))
             .map(|days| days as usize)
             .ok_or_else(|| {
                 AppError::api(
                     StatusCode::BAD_REQUEST,
                     "INVALID_ISSUE_INACTIVE_DAYS",
-                    "Issue 非活跃天数必须为 0 到 30 的整数",
+                    "Issue 非活跃天数必须为 0，或 7 到 30 的整数",
                 )
             })?,
     };

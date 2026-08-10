@@ -575,11 +575,11 @@ impl AppConfig {
 
 fn parse_issue_inactive_days(value: Option<&str>) -> Result<usize, AppError> {
     let days = value.unwrap_or("0").parse::<usize>().map_err(|_| {
-        AppError::Config("RAIN_ISSUE_INACTIVE_DAYS must be an integer between 0 and 30".into())
+        AppError::Config("RAIN_ISSUE_INACTIVE_DAYS must be 0 or an integer between 7 and 30".into())
     })?;
-    if days > 30 {
+    if days != 0 && !(7..=30).contains(&days) {
         return Err(AppError::Config(
-            "RAIN_ISSUE_INACTIVE_DAYS must be an integer between 0 and 30".into(),
+            "RAIN_ISSUE_INACTIVE_DAYS must be 0 or an integer between 7 and 30".into(),
         ));
     }
     Ok(days)
@@ -595,12 +595,12 @@ mod tests {
     };
 
     #[test]
-    fn issue_inactive_days_accepts_only_zero_through_thirty() {
+    fn issue_inactive_days_accepts_zero_or_seven_through_thirty() {
         assert_eq!(parse_issue_inactive_days(None).unwrap(), 0);
         assert_eq!(parse_issue_inactive_days(Some("0")).unwrap(), 0);
-        assert_eq!(parse_issue_inactive_days(Some("1")).unwrap(), 1);
+        assert_eq!(parse_issue_inactive_days(Some("7")).unwrap(), 7);
         assert_eq!(parse_issue_inactive_days(Some("30")).unwrap(), 30);
-        for invalid in ["-1", "31", "1.5", "disabled"] {
+        for invalid in ["-1", "1", "6", "31", "1.5", "disabled"] {
             assert!(parse_issue_inactive_days(Some(invalid)).is_err());
         }
     }
