@@ -655,6 +655,11 @@ pub async fn delete_issue_bundle(
     .execute(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
+
+    // Finish request-scoped writes before the heavyweight cleanup can compete for
+    // SQLite's single writer lock.
+    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "bundle deletion").await;
+
     let pool = state.db.pool.clone();
     let bundle_id = bundle.id.clone();
     tokio::spawn(async move {
@@ -662,8 +667,6 @@ pub async fn delete_issue_bundle(
             tracing::error!(bundle_id, %error, "background bundle deletion failed; it will be retried at startup");
         }
     });
-
-    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "bundle deletion").await;
 
     Ok(HttpResponse::Accepted().finish())
 }

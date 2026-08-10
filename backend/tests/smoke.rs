@@ -1702,7 +1702,12 @@ async fn bundle_content_cleanup_runs_in_batches_and_preserves_bundle() {
     let stats = db::cleanup_bundle_content_batched(&pool, "cleanup", 2)
         .await
         .expect("cleanup bundle content");
+    assert_eq!(stats.line_offsets.rows, 3);
+    assert_eq!(stats.line_offsets.batches, 2);
+    assert_eq!(stats.segments.rows, 3);
+    assert_eq!(stats.segments.batches, 2);
     assert_eq!(stats.files.rows, 3);
+    assert_eq!(stats.files.batches, 2);
 
     for table in [
         "log_line_offsets",
@@ -1722,6 +1727,254 @@ async fn bundle_content_cleanup_runs_in_batches_and_preserves_bundle() {
             .await
             .expect("check retained bundle");
     assert!(bundle_exists);
+}
+
+#[actix_web::test]
+async fn passive_cleanup_checkpoint_does_not_wait_for_a_reader() {
+    let test_dir = TestDir::new("rain-passive-checkpoint");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues (code, name) VALUES ('CHECKPOINT', 'Checkpoint')")
+        .execute(&pool)
+        .await
+        .expect("insert issue");
+
+    let mut reader = pool.begin().await.expect("begin reader");
+    let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues")
+        .fetch_one(&mut *reader)
+        .await
+        .expect("establish read snapshot");
+    sqlx::query("UPDATE issues SET name = 'Changed' WHERE code = 'CHECKPOINT'")
+        .execute(&pool)
+        .await
+        .expect("write after reader snapshot");
+
+    let checkpoint =
+        tokio::time::timeout(std::time::Duration::from_secs(1), db::checkpoint_wal(&pool))
+            .await
+            .expect("passive checkpoint must not wait for the reader")
+            .expect("checkpoint succeeds");
+    assert!(checkpoint.busy >= 0);
+    drop(reader);
+}
+
+async fn run_wal_cleanup_round(pool: &sqlx::SqlitePool, round: usize) {
+    let bundle_id = format!("wal-bundle-{round}");
+    let hash = format!("wal-hash-{round}");
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES(?, 'WAL', ?, 'WAL round', 'DELETING')")
+        .bind(&bundle_id)
+        .bind(hash)
+        .execute(pool)
+        .await
+        .expect("insert WAL benchmark bundle");
+    let file_id: i64 = sqlx::query_scalar(
+        "INSERT INTO files(bundle_id,name,path,is_dir) VALUES(?, 'round.log', '/round.log', 0) RETURNING id",
+    )
+    .bind(&bundle_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert WAL benchmark file");
+    let mut writer = pool.acquire().await.expect("acquire WAL seed writer");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *writer)
+        .await
+        .expect("begin WAL seed");
+    for chunk in 0..250i64 {
+        sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,chunk_index) VALUES(?, ?, 'WAL reuse payload', ?)")
+            .bind(&bundle_id)
+            .bind(file_id)
+            .bind(chunk)
+            .execute(&mut *writer)
+            .await
+            .expect("seed WAL segment");
+    }
+    sqlx::query("COMMIT")
+        .execute(&mut *writer)
+        .await
+        .expect("commit WAL seed");
+    drop(writer);
+    db::cleanup_bundle_content_batched(pool, &bundle_id, 50)
+        .await
+        .expect("clean WAL benchmark bundle");
+}
+
+#[actix_web::test]
+async fn repeated_passive_cleanup_checkpoints_converge_and_reuse_wal() {
+    let test_dir = TestDir::new("rain-wal-reuse");
+    let db_path = test_dir.path.join("rain.db");
+    let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+    let pool = db::init_pool(&sqlite_url(&db_path)).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues(code,name) VALUES('WAL','WAL reuse')")
+        .execute(&pool)
+        .await
+        .expect("insert WAL issue");
+
+    let mut reader = pool.begin().await.expect("begin blocking reader");
+    let _: String = sqlx::query_scalar("SELECT name FROM issues WHERE code='WAL'")
+        .fetch_one(&mut *reader)
+        .await
+        .expect("establish blocking reader snapshot");
+    let mut blocked_checkpoint = None;
+    let mut blocked_wal_high_water = 0u64;
+    for round in 0..4 {
+        run_wal_cleanup_round(&pool, round).await;
+        let checkpoint = db::checkpoint_wal(&pool)
+            .await
+            .expect("checkpoint with reader");
+        blocked_wal_high_water =
+            blocked_wal_high_water.max(fs::metadata(&wal_path).expect("inspect blocked WAL").len());
+        blocked_checkpoint = Some(checkpoint);
+    }
+    let blocked_checkpoint = blocked_checkpoint.expect("blocked checkpoint stats");
+    assert!(
+        blocked_checkpoint.log_pages > blocked_checkpoint.checkpointed_pages,
+        "reader should leave a WAL backlog: {blocked_checkpoint:?}"
+    );
+
+    drop(reader);
+    let drained = db::checkpoint_wal(&pool)
+        .await
+        .expect("checkpoint after reader release");
+    assert_eq!(
+        drained.log_pages, drained.checkpointed_pages,
+        "reader release should let PASSIVE checkpoint drain the backlog"
+    );
+
+    for round in 4..8 {
+        run_wal_cleanup_round(&pool, round).await;
+        let checkpoint = db::checkpoint_wal(&pool)
+            .await
+            .expect("checkpoint reused WAL");
+        assert_eq!(
+            checkpoint.log_pages, checkpoint.checkpointed_pages,
+            "checkpoint backlog should converge after round {round}"
+        );
+        let wal_bytes = fs::metadata(&wal_path).expect("inspect reused WAL").len();
+        assert!(
+            wal_bytes <= blocked_wal_high_water + 64 * 1024,
+            "WAL should reuse its high-water allocation instead of growing: blocked={blocked_wal_high_water}, round={round}, current={wal_bytes}"
+        );
+    }
+}
+
+#[actix_web::test]
+#[ignore = "manual benchmark: cargo test --test smoke cleanup_latency_benchmark -- --ignored --nocapture"]
+async fn cleanup_latency_benchmark_reports_foreground_write_percentiles() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let rows = std::env::var("RAIN_CLEANUP_BENCH_ROWS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(50_000);
+    let batch_size = std::env::var("RAIN_CLEANUP_BENCH_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(db::CLEANUP_BATCH_SIZE);
+    let test_dir = TestDir::new("rain-cleanup-latency-benchmark");
+    let db_path = test_dir.path.join("rain.db");
+    let pool = db::init_pool(&sqlite_url(&db_path)).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues (code, name) VALUES ('BENCH', 'Benchmark')")
+        .execute(&pool)
+        .await
+        .expect("insert issue");
+    sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('bench', 'BENCH', 'bench-hash', 'Benchmark', 'DELETING')")
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+    let file_id: i64 = sqlx::query_scalar("INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('bench', 'bench.log', '/bench.log', 0) RETURNING id")
+        .fetch_one(&pool)
+        .await
+        .expect("insert file");
+
+    let mut seed_connection = pool.acquire().await.expect("acquire benchmark seed writer");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *seed_connection)
+        .await
+        .expect("begin benchmark seed");
+    for row in 0..rows {
+        sqlx::query("INSERT INTO log_segments (bundle_id, file_id, content, chunk_index) VALUES ('bench', ?, 'benchmark log content', ?)")
+            .bind(file_id)
+            .bind(row as i64)
+            .execute(&mut *seed_connection)
+            .await
+            .expect("seed log segment");
+    }
+    sqlx::query("COMMIT")
+        .execute(&mut *seed_connection)
+        .await
+        .expect("commit benchmark seed");
+    drop(seed_connection);
+
+    let sampling = Arc::new(AtomicBool::new(true));
+    let foreground_pool = pool.clone();
+    let foreground_sampling = sampling.clone();
+    let foreground = tokio::spawn(async move {
+        let mut latencies_ms = Vec::new();
+        let mut errors = 0u64;
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        while foreground_sampling.load(Ordering::Acquire) {
+            interval.tick().await;
+            let started = std::time::Instant::now();
+            match sqlx::query(
+                "UPDATE issues SET last_activity_at = CURRENT_TIMESTAMP WHERE code = 'BENCH'",
+            )
+            .execute(&foreground_pool)
+            .await
+            {
+                Ok(_) => latencies_ms.push(started.elapsed().as_secs_f64() * 1_000.0),
+                Err(_) => errors += 1,
+            }
+        }
+        (latencies_ms, errors)
+    });
+
+    tokio::task::yield_now().await;
+    let cleanup_started = std::time::Instant::now();
+    let stats = db::cleanup_bundle_content_batched(&pool, "bench", batch_size)
+        .await
+        .expect("run benchmark cleanup");
+    let cleanup_elapsed_ms = cleanup_started.elapsed().as_millis() as u64;
+    sampling.store(false, Ordering::Release);
+    let (mut latencies_ms, errors) = foreground.await.expect("join foreground writer");
+    latencies_ms.sort_by(f64::total_cmp);
+    let percentile = |fraction: f64| {
+        let index = ((latencies_ms.len().saturating_sub(1)) as f64 * fraction).round() as usize;
+        latencies_ms.get(index).copied().unwrap_or_default()
+    };
+    let wal_bytes = fs::metadata(format!("{}-wal", db_path.display()))
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+
+    println!(
+        "cleanup_latency rows={} batch_size={} batches={} cleanup_ms={} foreground_samples={} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3} errors={} db_bytes={} wal_bytes={}",
+        stats.total_rows(),
+        batch_size,
+        stats.segments.batches + stats.files.batches + stats.line_offsets.batches,
+        cleanup_elapsed_ms,
+        latencies_ms.len(),
+        percentile(0.50),
+        percentile(0.95),
+        percentile(0.99),
+        latencies_ms.last().copied().unwrap_or_default(),
+        errors,
+        fs::metadata(&db_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default(),
+        wal_bytes,
+    );
 }
 
 #[actix_web::test]
