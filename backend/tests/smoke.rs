@@ -1761,6 +1761,108 @@ async fn passive_cleanup_checkpoint_does_not_wait_for_a_reader() {
     drop(reader);
 }
 
+async fn run_wal_cleanup_round(pool: &sqlx::SqlitePool, round: usize) {
+    let bundle_id = format!("wal-bundle-{round}");
+    let hash = format!("wal-hash-{round}");
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES(?, 'WAL', ?, 'WAL round', 'DELETING')")
+        .bind(&bundle_id)
+        .bind(hash)
+        .execute(pool)
+        .await
+        .expect("insert WAL benchmark bundle");
+    let file_id: i64 = sqlx::query_scalar(
+        "INSERT INTO files(bundle_id,name,path,is_dir) VALUES(?, 'round.log', '/round.log', 0) RETURNING id",
+    )
+    .bind(&bundle_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert WAL benchmark file");
+    let mut writer = pool.acquire().await.expect("acquire WAL seed writer");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *writer)
+        .await
+        .expect("begin WAL seed");
+    for chunk in 0..250i64 {
+        sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,chunk_index) VALUES(?, ?, 'WAL reuse payload', ?)")
+            .bind(&bundle_id)
+            .bind(file_id)
+            .bind(chunk)
+            .execute(&mut *writer)
+            .await
+            .expect("seed WAL segment");
+    }
+    sqlx::query("COMMIT")
+        .execute(&mut *writer)
+        .await
+        .expect("commit WAL seed");
+    drop(writer);
+    db::cleanup_bundle_content_batched(pool, &bundle_id, 50)
+        .await
+        .expect("clean WAL benchmark bundle");
+}
+
+#[actix_web::test]
+async fn repeated_passive_cleanup_checkpoints_converge_and_reuse_wal() {
+    let test_dir = TestDir::new("rain-wal-reuse");
+    let db_path = test_dir.path.join("rain.db");
+    let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+    let pool = db::init_pool(&sqlite_url(&db_path)).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues(code,name) VALUES('WAL','WAL reuse')")
+        .execute(&pool)
+        .await
+        .expect("insert WAL issue");
+
+    let mut reader = pool.begin().await.expect("begin blocking reader");
+    let _: String = sqlx::query_scalar("SELECT name FROM issues WHERE code='WAL'")
+        .fetch_one(&mut *reader)
+        .await
+        .expect("establish blocking reader snapshot");
+    let mut blocked_checkpoint = None;
+    let mut blocked_wal_high_water = 0u64;
+    for round in 0..4 {
+        run_wal_cleanup_round(&pool, round).await;
+        let checkpoint = db::checkpoint_wal(&pool)
+            .await
+            .expect("checkpoint with reader");
+        blocked_wal_high_water =
+            blocked_wal_high_water.max(fs::metadata(&wal_path).expect("inspect blocked WAL").len());
+        blocked_checkpoint = Some(checkpoint);
+    }
+    let blocked_checkpoint = blocked_checkpoint.expect("blocked checkpoint stats");
+    assert!(
+        blocked_checkpoint.log_pages > blocked_checkpoint.checkpointed_pages,
+        "reader should leave a WAL backlog: {blocked_checkpoint:?}"
+    );
+
+    drop(reader);
+    let drained = db::checkpoint_wal(&pool)
+        .await
+        .expect("checkpoint after reader release");
+    assert_eq!(
+        drained.log_pages, drained.checkpointed_pages,
+        "reader release should let PASSIVE checkpoint drain the backlog"
+    );
+
+    for round in 4..8 {
+        run_wal_cleanup_round(&pool, round).await;
+        let checkpoint = db::checkpoint_wal(&pool)
+            .await
+            .expect("checkpoint reused WAL");
+        assert_eq!(
+            checkpoint.log_pages, checkpoint.checkpointed_pages,
+            "checkpoint backlog should converge after round {round}"
+        );
+        let wal_bytes = fs::metadata(&wal_path).expect("inspect reused WAL").len();
+        assert!(
+            wal_bytes <= blocked_wal_high_water + 64 * 1024,
+            "WAL should reuse its high-water allocation instead of growing: blocked={blocked_wal_high_water}, round={round}, current={wal_bytes}"
+        );
+    }
+}
+
 #[actix_web::test]
 #[ignore = "manual benchmark: cargo test --test smoke cleanup_latency_benchmark -- --ignored --nocapture"]
 async fn cleanup_latency_benchmark_reports_foreground_write_percentiles() {

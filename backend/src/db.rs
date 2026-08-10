@@ -64,14 +64,47 @@ impl Drop for HeavyCleanupPermit {
     }
 }
 
-async fn acquire_heavy_cleanup_writer(bundle_id: &str) -> Result<HeavyCleanupPermit, AppError> {
+async fn acquire_heavy_cleanup_writer(
+    bundle_id: &str,
+    inactive_lease: Option<(&SqlitePool, InactiveCleanupLease<'_>)>,
+) -> Result<HeavyCleanupPermit, AppError> {
     let wait_started = Instant::now();
     let (mut queue_guard, queue_depth) = CleanupQueueGuard::enter();
     tracing::info!(bundle_id, queue_depth, "bundle cleanup queued");
-    let permit = HEAVY_CLEANUP_WRITER
-        .acquire()
-        .await
-        .map_err(|_| AppError::Config("bundle cleanup coordinator is closed".into()))?;
+    let acquire = HEAVY_CLEANUP_WRITER.acquire();
+    tokio::pin!(acquire);
+    let permit = if let Some((pool, lease)) = inactive_lease {
+        require_inactive_issue_lease(pool, lease.issue_code, lease.token, lease.seconds).await?;
+        let renew_interval_ms = lease
+            .seconds
+            .saturating_mul(1_000)
+            .saturating_div(3)
+            .clamp(50, 60_000);
+        let mut renew_interval = tokio::time::interval(Duration::from_millis(renew_interval_ms));
+        renew_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Tokio intervals tick immediately once; the lease was renewed just above.
+        renew_interval.tick().await;
+        loop {
+            tokio::select! {
+                permit = &mut acquire => {
+                    break permit.map_err(|_| AppError::Config("bundle cleanup coordinator is closed".into()))?;
+                }
+                _ = renew_interval.tick() => {
+                    require_inactive_issue_lease(pool, lease.issue_code, lease.token, lease.seconds).await?;
+                    tracing::debug!(
+                        bundle_id,
+                        issue_code = lease.issue_code,
+                        queue_depth = QUEUED_CLEANUPS.load(Ordering::Acquire),
+                        "bundle cleanup lease renewed while waiting for writer"
+                    );
+                }
+            }
+        }
+    } else {
+        acquire
+            .await
+            .map_err(|_| AppError::Config("bundle cleanup coordinator is closed".into()))?
+    };
     let queue_depth = queue_guard.leave();
     let active_cleanup_count = ACTIVE_CLEANUPS.fetch_add(1, Ordering::AcqRel) + 1;
     tracing::info!(
@@ -164,7 +197,7 @@ pub async fn cleanup_bundle_content_batched(
     bundle_id: &str,
     batch_size: u64,
 ) -> Result<BundleCleanupStats, AppError> {
-    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id).await?;
+    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id, None).await?;
     cleanup_bundle_content_batched_inner(pool, bundle_id, batch_size, None).await
 }
 
@@ -334,7 +367,7 @@ pub async fn cleanup_expired_bundles(
 }
 
 pub async fn finish_bundle_deletion(pool: &SqlitePool, bundle_id: &str) -> Result<(), AppError> {
-    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id).await?;
+    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id, None).await?;
     cleanup_bundle_content_batched_inner(pool, bundle_id, CLEANUP_BATCH_SIZE, None).await?;
     sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
         .bind(bundle_id)
@@ -356,7 +389,7 @@ pub async fn finish_bundle_deletion_with_inactive_lease(
         token: lease_token,
         seconds: lease_seconds,
     };
-    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id).await?;
+    let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id, Some((pool, lease))).await?;
     cleanup_bundle_content_batched_inner(pool, bundle_id, CLEANUP_BATCH_SIZE, Some(lease)).await?;
     require_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds).await?;
     sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
@@ -911,14 +944,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heavyweight_cleanup_writers_are_serialized() {
-        let first = acquire_heavy_cleanup_writer("first")
+    async fn heavyweight_cleanup_writers_are_serialized_and_queued_leases_are_renewed() {
+        let first = acquire_heavy_cleanup_writer("first", None)
             .await
             .expect("acquire first cleanup writer");
 
         let second = tokio::time::timeout(
             Duration::from_millis(25),
-            acquire_heavy_cleanup_writer("second"),
+            acquire_heavy_cleanup_writer("second", None),
         )
         .await;
         assert!(second.is_err(), "second cleanup writer must remain queued");
@@ -934,12 +967,59 @@ mod tests {
         drop(first);
         let second = tokio::time::timeout(
             Duration::from_secs(1),
-            acquire_heavy_cleanup_writer("second"),
+            acquire_heavy_cleanup_writer("second", None),
         )
         .await
         .expect("second cleanup writer should be released")
         .expect("acquire second cleanup writer");
         drop(second);
+
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true).await.expect("schema");
+        sqlx::query("INSERT INTO issues(code,name,status,deletion_reason,deletion_lease_token,deletion_lease_until) VALUES('LEASE','Lease','DELETING','MANUAL','token',datetime('now','+2 seconds'))")
+            .execute(&pool)
+            .await
+            .expect("insert leased issue");
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('leased-bundle','LEASE','leased-hash','Leased','DELETING')")
+            .execute(&pool)
+            .await
+            .expect("insert deleting bundle");
+
+        let blocker = acquire_heavy_cleanup_writer("blocker", None)
+            .await
+            .expect("acquire blocking cleanup writer");
+        let queued_pool = pool.clone();
+        let queued = tokio::spawn(async move {
+            super::finish_bundle_deletion_with_inactive_lease(
+                &queued_pool,
+                "leased-bundle",
+                "LEASE",
+                "token",
+                2,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(3_200)).await;
+        let lease_is_current: bool = sqlx::query_scalar(
+            "SELECT datetime(deletion_lease_until) > datetime('now') FROM issues WHERE code='LEASE'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect queued lease");
+        assert!(lease_is_current, "queued cleanup must keep its lease alive");
+
+        drop(blocker);
+        tokio::time::timeout(Duration::from_secs(2), queued)
+            .await
+            .expect("queued cleanup should acquire the writer")
+            .expect("join queued cleanup")
+            .expect("finish queued cleanup");
+        let bundle_status: String =
+            sqlx::query_scalar("SELECT status FROM bundles WHERE id='leased-bundle'")
+                .fetch_one(&pool)
+                .await
+                .expect("inspect cleaned bundle");
+        assert_eq!(bundle_status, "DELETED");
     }
 
     #[tokio::test]
