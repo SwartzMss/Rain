@@ -171,6 +171,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
+        refreshOnVisible = false;
         clearTimer();
         return;
       }
