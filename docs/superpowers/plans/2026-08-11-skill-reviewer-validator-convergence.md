@@ -65,7 +65,18 @@ fn parse_review_rejects_forbidden_literals_regardless_of_context() {
 }
 ```
 
-- [ ] **Step 4: 调整合法反馈 fixture**
+- [ ] **Step 4: 用新的责任边界测试替换旧语义断言**
+
+删除以下旧测试；它们要求 parser 对未知工具、否定作用域、Evidence Policy 或停止条件做开放式语义分类，与已确认设计冲突：
+
+- `parse_review_rejects_unenumerated_external_tools`
+- `parse_review_rejects_cross_sentence_unsupported_inference`
+- `parse_review_does_not_apply_negation_to_later_violations`
+- `parse_review_rejects_suggestions_that_cross_diagnostic_boundaries`
+
+这些覆盖分别由 `parse_review_does_not_classify_open_ended_semantics`、`parse_review_rejects_forbidden_literals_regardless_of_context` 和 System Prompt 契约测试承担。
+
+- [ ] **Step 5: 调整合法反馈 fixture**
 
 从 `parse_review_allows_chinese_feedback_with_technical_terms_and_safe_boundaries` 的合法 suggestions 中删除含 `grep`、`工具` 的否定式样例，保留：
 
@@ -76,7 +87,7 @@ let review = review_with_findings(
 );
 ```
 
-- [ ] **Step 5: 运行聚焦测试确认 RED**
+- [ ] **Step 6: 运行聚焦测试确认 RED**
 
 Run:
 

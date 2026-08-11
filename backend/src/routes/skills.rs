@@ -45,6 +45,11 @@ const SKILL_REVIEW_SYSTEM_PROMPT: &str = concat!(
     "dimensions must contain exactly the six fixed English keys above. Each score is an integer from 0 to 100; overall_score must equal the rounded weighted average. ",
     "grade must be EXCELLENT, GOOD, NEEDS_IMPROVEMENT, or POOR."
 );
+const SKILL_REVIEW_REPAIR_PROMPT: &str = concat!(
+    "Return only valid JSON matching the requested review schema. ",
+    "Write every warning and suggestion in Simplified Chinese, allowing only isolated technical identifiers. ",
+    "Do not include forbidden capability names in suggestions; describe the diagnostic intent instead."
+);
 
 fn validate(payload: &SkillPayload) -> Result<String, AppError> {
     let name = payload.name.trim();
@@ -215,9 +220,7 @@ pub async fn review(
                     repair.messages.push(first.message);
                     repair.messages.push(ChatMessage {
                         role: "user".into(),
-                        content: Some(
-                            "Return only valid JSON matching the requested review schema.".into(),
-                        ),
+                        content: Some(SKILL_REVIEW_REPAIR_PROMPT.into()),
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                         name: None,
@@ -440,8 +443,8 @@ mod tests {
     };
 
     use super::{
-        SKILL_REVIEW_SYSTEM_PROMPT, build_review_request, grade_for_score, parse_review,
-        with_review_budget,
+        SKILL_REVIEW_REPAIR_PROMPT, SKILL_REVIEW_SYSTEM_PROMPT, build_review_request,
+        grade_for_score, parse_review, with_review_budget,
     };
     use crate::{
         SkillReviewRuntime,
@@ -585,6 +588,12 @@ mod tests {
             "available logs being exhausted without enough evidence",
         ] {
             assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains(expected));
+        }
+        for expected in [
+            "Simplified Chinese",
+            "Do not include forbidden capability names",
+        ] {
+            assert!(SKILL_REVIEW_REPAIR_PROMPT.contains(expected));
         }
     }
 

@@ -207,3 +207,11 @@ Expected: 格式、Clippy 和完整测试通过；提交并推送到 PR #99。
 Run: `cargo fmt --check && cargo clippy --locked -- -D warnings && cargo test --locked && git diff --check`
 
 Expected: 格式、Clippy、完整测试和补丁检查通过；提交并推送到 PR #99。
+
+### Task 6: Review follow-up — 收敛确定性 validator
+
+- [x] 删除 invocation/object、否定作用域、Evidence 推理链和循环停止条件自然语言解析。
+- [x] 简体文本改用 ZhHans 一致性与按 Han 分隔的局部 ASCII prose 检查。
+- [x] suggestion 只保留上下文无关的明确禁用字面量检查。
+- [x] 未知工具、Evidence Policy 和停止条件由 System Prompt best-effort 约束。
+- [x] repair 提示重申简体中文、孤立技术标识和禁用能力字面量契约。
