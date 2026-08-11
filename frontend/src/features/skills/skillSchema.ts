@@ -1,5 +1,4 @@
 export const SKILL_SCHEMA_VERSION = 1;
-export const UNRECOGNIZED_SKILL_SCHEMA_LABEL = '未识别（需迁移到 v1）';
 
 export const REQUIRED_SKILL_SECTIONS = [
   '目标',
