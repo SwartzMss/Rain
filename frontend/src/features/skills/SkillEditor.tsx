@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type { SkillPayload, UserSkill } from '../../api/types';
-import { DEFAULT_SKILL_MARKDOWN, REQUIRED_SKILL_SECTIONS, SKILL_SCHEMA_VERSION, UNRECOGNIZED_SKILL_SCHEMA_LABEL } from './skillSchema';
+import { DEFAULT_SKILL_MARKDOWN, REQUIRED_SKILL_SECTIONS, SKILL_SCHEMA_VERSION } from './skillSchema';
 
 export function SkillEditor({ skill, saving, onSave, onCancel }: { skill?: UserSkill | null; saving: boolean; onSave: (payload: SkillPayload) => Promise<void>; onCancel: () => void }) {
   const [name, setName] = useState('');
@@ -24,7 +24,7 @@ export function SkillEditor({ skill, saving, onSave, onCancel }: { skill?: UserS
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="font-semibold">{skill ? '编辑 Skill' : '新建 Skill'}</h3>
         <span className="rounded-full bg-cyan-100 px-2.5 py-1 text-xs font-semibold text-cyan-800">
-          schema_version: {skill ? skill.schema_version ?? UNRECOGNIZED_SKILL_SCHEMA_LABEL : SKILL_SCHEMA_VERSION}
+          schema_version: {skill?.schema_version ?? SKILL_SCHEMA_VERSION}
         </span>
       </div>
       <label className="block text-sm font-medium">名称<input className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2" maxLength={100} required value={name} onChange={(e) => setName(e.target.value)} /></label>
