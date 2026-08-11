@@ -11,7 +11,6 @@ import { buildFileRows, type FileRow } from './homeRows';
 import { useIssueBundles } from './hooks/useIssueBundles';
 import { useIssues } from './hooks/useIssues';
 import { useUploadTask } from './hooks/useUploadTask';
-import { shouldResetUploadAfterBundleDeletion } from './uploadDeletion';
 import { isUser } from '../../auth/permissions';
 import { IssueExpirationNotice } from './components/IssueExpirationNotice';
 
@@ -30,8 +29,6 @@ export function HomeView() {
 
   const issues = useIssues();
   const selectedIssue = issues.issues.find((issue) => issue.code === issues.currentIssueCode);
-  const selectedIssueRef = useRef(issues.currentIssueCode);
-  selectedIssueRef.current = issues.currentIssueCode;
 
   const handleIssueMissing = useCallback(() => {
     issues.clearSelectedIssue();
@@ -43,10 +40,6 @@ export function HomeView() {
   const ownerUsername = bundles.ownerUsername ?? selectedIssue?.owner_username ?? null;
   const upload = useUploadTask({
     currentIssueCode: issues.currentIssueCode,
-    getSelectedIssueCode: () => selectedIssueRef.current,
-    hasActiveBundleProcessing: bundles.bundles.some(
-      (bundle) => bundle.status.upload_status === 'PROCESSING'
-    ),
     loadBundles: bundles.loadBundles,
     loadIssues: issues.loadIssues
   });
@@ -54,23 +47,19 @@ export function HomeView() {
   const fileRows = useMemo(
     () =>
       buildFileRows({
-        activeTask: upload.activeTask,
         bundleFiles: bundles.bundleFiles,
         bundles: bundles.bundles,
         uploadFailed: upload.uploadFailed,
         uploadProgress: upload.uploadProgress,
         uploadSelection: upload.uploadSelection,
-        uploadTask: upload.uploadTask,
         uploading: upload.uploading
       }),
     [
       bundles.bundleFiles,
       bundles.bundles,
-      upload.activeTask,
       upload.uploadFailed,
       upload.uploadProgress,
       upload.uploadSelection,
-      upload.uploadTask,
       upload.uploading
     ]
   );
@@ -143,14 +132,6 @@ export function HomeView() {
               await bundles.loadBundleFiles(row.bundleHash);
             } else {
               await rainApi.deleteBundle(issues.currentIssueCode, row.bundleHash);
-              if (
-                shouldResetUploadAfterBundleDeletion(
-                  row.bundleHash,
-                  upload.uploadTask?.bundle_hash
-                )
-              ) {
-                upload.resetSelection();
-              }
               await bundles.loadBundles(issues.currentIssueCode);
             }
             await issues.loadIssues();
@@ -162,7 +143,7 @@ export function HomeView() {
         }
       });
     },
-    [bundles, issues, upload]
+    [bundles, issues]
   );
 
   return (
@@ -210,7 +191,6 @@ export function HomeView() {
 
           {canWrite ? (
             <UploadPanel
-              activeTask={upload.activeTask}
               currentIssueCode={issues.currentIssueCode}
               canWrite={canWrite}
               fileInputRef={fileInputRef}

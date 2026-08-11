@@ -1,8 +1,6 @@
 import type { FormEvent, RefObject } from 'react';
-import type { UploadTaskResponse } from '../../../api/types';
 
 type UploadPanelProps = {
-  activeTask: UploadTaskResponse | null;
   currentIssueCode: string;
   canWrite: boolean;
   fileInputRef: RefObject<HTMLInputElement>;
@@ -14,7 +12,6 @@ type UploadPanelProps = {
 };
 
 export function UploadPanel({
-  activeTask,
   currentIssueCode,
   canWrite,
   fileInputRef,
@@ -79,9 +76,7 @@ export function UploadPanel({
                 ? '先选择或新建 Issue'
                 : uploading
                   ? '处理中'
-                  : activeTask
-                    ? '处理中'
-                    : '拖拽日志文件到这里，或点击选择文件'}
+                  : '拖拽日志文件到这里，或点击选择文件'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
               支持 .log、.txt、.zip、.tar.gz、.tgz、.gz，单个文件最大 512 MB
@@ -97,7 +92,7 @@ export function UploadPanel({
             if (canWrite && !uploadDisabled) fileInputRef.current?.click();
           }}
         >
-          {uploading || activeTask ? '处理中' : '选择文件'}
+          {uploading ? '处理中' : '选择文件'}
         </button>
       </div>
       {uploadError ? <p className="text-sm text-rose-600">{uploadError}</p> : null}

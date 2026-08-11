@@ -57,7 +57,7 @@ describe('write permission behavior', () => {
 
   it('disables upload selection for guests and enables it for writable users', () => {
     const props = {
-      activeTask: null, currentIssueCode: 'ISSUE', fileInputRef: createRef<HTMLInputElement>(),
+      currentIssueCode: 'ISSUE', fileInputRef: createRef<HTMLInputElement>(),
       onFilesSelected: vi.fn(), uploadDisabled: false, uploadError: null, uploading: false,
       uploadingRef: createRef<boolean>()
     };
