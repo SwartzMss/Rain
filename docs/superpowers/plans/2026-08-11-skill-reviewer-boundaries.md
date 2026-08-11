@@ -110,3 +110,36 @@ git push -u origin codex/issue-96-reviewer-boundaries
 ```
 
 创建以 `main` 为 base 的草稿 PR，标题使用 `fix: constrain skill reviewer feedback`，正文概述 Prompt 约束与测试，并包含 `Fixes #96`。
+
+### Task 3: Review follow-up — 在保存前强制反馈契约
+
+**Files:**
+- Modify: `backend/src/routes/skills.rs`
+- Modify: `docs/superpowers/specs/2026-08-11-skill-reviewer-boundaries-design.md`
+- Test: `backend/src/routes/skills.rs` 的 `tests` 模块
+
+- [x] **Step 1: 写入合法 JSON 但反馈违规的失败测试**
+
+覆盖纯英文 warning/suggestion、推荐未授权工具、日志不完整时将推断作为根因、循环停止条件，以及包含英文技术标识符的合法中文反馈。
+
+- [x] **Step 2: 运行聚焦测试确认 RED**
+
+Run: `cargo test routes::skills::tests::parse_review_`
+
+Expected: 违规反馈仍被接受的用例失败；合法反馈用例通过。
+
+- [x] **Step 3: 实现确定性反馈校验**
+
+要求每条反馈至少包含一个汉字；按句子检查 suggestions 是否推荐禁用能力、弱化证据规则或使用循环停止条件。英文能力名按独立词或短语匹配，并允许同句中的删除、禁止、避免等否定语义。
+
+- [x] **Step 4: 运行聚焦测试确认 GREEN**
+
+Run: `cargo test routes::skills::tests::parse_review_`
+
+Expected: 所有 parser 契约测试通过。
+
+- [x] **Step 5: 运行全量验证并更新 PR**
+
+Run: `cargo fmt --check && cargo test && git diff origin/main...HEAD --check`
+
+Expected: 格式检查和完整测试通过，补丁无空白错误；提交并推送到现有 PR #99。

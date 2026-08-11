@@ -260,7 +260,11 @@ fn parse_review(content: Option<&str>) -> Result<SkillReview, ()> {
             .warnings
             .iter()
             .chain(&parsed.suggestions)
-            .any(|item| item.chars().count() > 2000)
+            .any(|item| item.chars().count() > 2000 || !contains_han(item))
+        || parsed
+            .suggestions
+            .iter()
+            .any(|item| suggestion_crosses_diagnostic_boundary(item))
     {
         return Err(());
     }
@@ -280,6 +284,124 @@ fn parse_review(content: Option<&str>) -> Result<SkillReview, ()> {
     }
     parsed.grade = grade_for_score(parsed.overall_score).into();
     Ok(parsed)
+}
+
+fn contains_han(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character,
+            '\u{3400}'..='\u{4dbf}'
+                | '\u{4e00}'..='\u{9fff}'
+                | '\u{20000}'..='\u{2fa1f}'
+        )
+    })
+}
+
+fn contains_any(value: &str, candidates: &[&str]) -> bool {
+    candidates.iter().any(|candidate| value.contains(candidate))
+}
+
+fn contains_ascii_term(value: &str, term: &str) -> bool {
+    value.match_indices(term).any(|(start, matched)| {
+        let before = value[..start].chars().next_back();
+        let after = value[start + matched.len()..].chars().next();
+        let is_identifier = |character: char| character.is_ascii_alphanumeric() || character == '_';
+
+        before.is_none_or(|character| !is_identifier(character))
+            && after.is_none_or(|character| !is_identifier(character))
+    })
+}
+
+fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
+    const UNSUPPORTED_ASCII_CAPABILITIES: &[&str] = &[
+        "grep",
+        "shell",
+        "parser",
+        "script",
+        "sql",
+        "network access",
+        "network request",
+        "curl",
+    ];
+    const UNSUPPORTED_CHINESE_CAPABILITIES: &[&str] = &["解析器", "脚本", "网络访问", "网络请求"];
+    const NEGATIONS: &[&str] = &[
+        "不应",
+        "不得",
+        "不要",
+        "禁止",
+        "避免",
+        "移除",
+        "删除",
+        "不可",
+        "不能",
+        "未授权",
+        "不存在",
+        "do not",
+        "don't",
+        "avoid",
+        "remove",
+        "unsupported",
+        "unavailable",
+    ];
+    const INCOMPLETE_LOGS: &[&str] = &[
+        "日志不完整",
+        "日志缺失",
+        "日志截断",
+        "证据不足",
+        "incomplete log",
+        "missing log",
+        "truncated log",
+        "insufficient evidence",
+    ];
+    const INFERENCES: &[&str] = &["推断", "推测", "猜测", "假设", "infer", "assume"];
+    const CONCLUSIONS: &[&str] = &["根因", "结论", "root cause", "conclusion"];
+    const UNVERIFIED: &[&str] = &[
+        "待验证",
+        "未经验证",
+        "保留假设",
+        "不可",
+        "不能",
+        "不得",
+        "不要",
+        "避免",
+        "unverified",
+        "not verified",
+        "do not",
+        "don't",
+    ];
+    const CIRCULAR_STOPS: &[&str] = &[
+        "得出结论时停止",
+        "形成结论时停止",
+        "得出诊断结论时停止",
+        "形成诊断结论时停止",
+        "stop when reaching a conclusion",
+        "stop when reaching a diagnostic conclusion",
+    ];
+
+    suggestion
+        .split(['。', '！', '？', '；', '\n', '.', '!', '?', ';'])
+        .filter(|sentence| !sentence.trim().is_empty())
+        .any(|sentence| {
+            let sentence = sentence.to_lowercase();
+            let recommends_unsupported = sentence
+                .split(['，', '：', ',', ':'])
+                .filter(|clause| !clause.trim().is_empty())
+                .any(|clause| {
+                    let mentions_unsupported = UNSUPPORTED_ASCII_CAPABILITIES
+                        .iter()
+                        .any(|capability| contains_ascii_term(clause, capability))
+                        || contains_any(clause, UNSUPPORTED_CHINESE_CAPABILITIES);
+
+                    mentions_unsupported && !contains_any(clause, NEGATIONS)
+                });
+            let promotes_unsupported_inference = contains_any(&sentence, INCOMPLETE_LOGS)
+                && contains_any(&sentence, INFERENCES)
+                && contains_any(&sentence, CONCLUSIONS)
+                && !contains_any(&sentence, UNVERIFIED);
+            let uses_circular_stop = contains_any(&sentence, CIRCULAR_STOPS);
+
+            recommends_unsupported || promotes_unsupported_inference || uses_circular_stop
+        })
 }
 
 fn grade_for_score(score: i64) -> &'static str {
@@ -374,6 +496,51 @@ mod tests {
         .unwrap();
         assert_eq!(review.overall_score, 95);
         assert_eq!(review.grade, "EXCELLENT");
+    }
+
+    fn review_with_findings(warnings: &str, suggestions: &str) -> String {
+        format!(
+            r#"{{"overall_score":50,"grade":"POOR","dimensions":{{"task_scope":50,"retrieval_strategy":50,"evidence_constraints":50,"incomplete_logs":50,"stopping_conditions":50,"clarity":50}},"warnings":{warnings},"suggestions":{suggestions}}}"#
+        )
+    }
+
+    #[test]
+    fn parse_review_rejects_user_visible_feedback_without_chinese() {
+        for review in [
+            review_with_findings(r#"["Check the evidence policy."]"#, "[]"),
+            review_with_findings("[]", r#"["Use grep to search Bluetooth logs."]"#),
+        ] {
+            assert!(parse_review(Some(&review)).is_err());
+        }
+    }
+
+    #[test]
+    fn parse_review_rejects_suggestions_that_cross_diagnostic_boundaries() {
+        for suggestion in [
+            "使用 grep 搜索蓝牙日志。",
+            "使用 shell 搜索蓝牙日志。",
+            "调用外部 parser 分析蓝牙日志。",
+            "编写脚本处理蓝牙日志。",
+            "执行 SQL 查询蓝牙日志。",
+            "发起网络请求补充蓝牙日志。",
+            "使用 curl 下载蓝牙日志。",
+            "不要使用 grep，改用 shell 搜索蓝牙日志。",
+            "日志不完整时，根据现有数据推断根因。",
+            "得出诊断结论时停止。",
+        ] {
+            let review = review_with_findings("[]", &serde_json::json!([suggestion]).to_string());
+            assert!(parse_review(Some(&review)).is_err(), "{suggestion}");
+        }
+    }
+
+    #[test]
+    fn parse_review_allows_chinese_feedback_with_technical_terms_and_safe_boundaries() {
+        let review = review_with_findings(
+            r#"["Skill 中的 grep 指令属于未授权能力。"]"#,
+            r#"["删除 grep 指令，改为先定位 Bluetooth 失败信号。","读取 BT_PARSER_TIMEOUT 的原始日志上下文。","日志截断时，将 HCI_TIMEOUT 根因假设标记为待验证。","当原始日志证据足够或可用日志已耗尽时停止。"]"#,
+        );
+
+        assert!(parse_review(Some(&review)).is_ok());
     }
 
     #[test]
