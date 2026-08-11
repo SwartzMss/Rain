@@ -225,6 +225,76 @@ describe('upload and bundle polling behavior', () => {
     unmount();
   });
 
+  it('retries a failed Bundle refresh when the last snapshot has no active Bundle', async () => {
+    vi.mocked(rainApi.fetchIssueBundles)
+      .mockResolvedValueOnce(bundlesResponse([]))
+      .mockRejectedValueOnce(new Error('temporary post-upload failure'))
+      .mockResolvedValueOnce(bundlesResponse([bundle('newly-accepted', 'READY')]));
+    const onIssueMissing = vi.fn();
+    const { result, unmount } = renderHook(() => useIssueBundles('ISSUE-1', onIssueMissing));
+    await settle();
+    expect(result.current.bundles).toEqual([]);
+
+    await act(async () => {
+      await result.current.loadBundles('ISSUE-1');
+    });
+    expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2999);
+    });
+    expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(3);
+    expect(result.current.bundles).toEqual([bundle('newly-accepted', 'READY')]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(3);
+    unmount();
+  });
+
+  it('suppresses hidden polling and refreshes immediately when visibility returns', async () => {
+    let hidden = false;
+    const hiddenSpy = vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    vi.mocked(rainApi.fetchIssueBundles)
+      .mockResolvedValueOnce(bundlesResponse([bundle('hidden', 'PROCESSING')]))
+      .mockResolvedValueOnce(bundlesResponse([bundle('hidden', 'READY')]));
+    const onIssueMissing = vi.fn();
+    const { result, unmount } = renderHook(() => useIssueBundles('ISSUE-1', onIssueMissing));
+
+    try {
+      await settle();
+      hidden = true;
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(1);
+
+      hidden = false;
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+        await Promise.resolve();
+      });
+      expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+      expect(result.current.bundles).toEqual([bundle('hidden', 'READY')]);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+    } finally {
+      unmount();
+      hiddenSpy.mockRestore();
+    }
+  });
+
   it('does not overlap polling requests and schedules the next poll after the current one settles', async () => {
     const secondPoll = deferred<IssueBundlesResponse>();
     vi.mocked(rainApi.fetchIssueBundles)

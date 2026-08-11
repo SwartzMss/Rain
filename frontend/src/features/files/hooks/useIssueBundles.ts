@@ -11,6 +11,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   const [inactivityExpiry, setInactivityExpiry] = useState<IssueInactivityExpiry | null>(null);
   const [, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
+  const [refreshRetryPending, setRefreshRetryPending] = useState(false);
   const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
   const selectedIssueRef = useRef(currentIssueCode);
   const bundleRequestIdRef = useRef(0);
@@ -28,6 +29,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
     setInactivityExpiry(null);
     setBundleFiles({});
     setBundlesError(null);
+    setRefreshRetryPending(false);
   }, []);
 
   const loadBundles = useCallback(
@@ -48,6 +50,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
           return;
         }
         setBundles(data.log_bundles);
+        setRefreshRetryPending(false);
         setCanWrite(data.can_write);
         setOwnerUsername(data.owner_username);
         setInactivityExpiry(visibleInactivityExpiry(data.inactivity_expiry));
@@ -70,6 +73,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
         }
         setInactivityExpiry(null);
         setBundlesError(message);
+        setRefreshRetryPending(true);
       } finally {
         if (requestId === bundleRequestIdRef.current) {
           setBundlesLoading(false);
@@ -123,9 +127,10 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
     const status = bundle.status.upload_status;
     return status === 'PENDING' || status === 'PROCESSING';
   });
+  const shouldPollBundles = hasActiveBundles || refreshRetryPending;
 
   useEffect(() => {
-    if (!currentIssueCode || !hasActiveBundles) return;
+    if (!currentIssueCode || !shouldPollBundles) return;
 
     let cancelled = false;
     let polling = false;
@@ -185,7 +190,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
       clearTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [currentIssueCode, hasActiveBundles, loadBundles]);
+  }, [currentIssueCode, loadBundles, shouldPollBundles]);
 
   useEffect(() => {
     for (const bundle of bundles) {
