@@ -4,7 +4,7 @@
 
 Rain is still an internal pre-release build. Existing free-form Skill records and historical review rows do not need a compatibility or migration path; development databases may be rebuilt when the schema contract changes.
 
-PR #94 introduces deterministic `SKILL.md` v1 parsing and separates structure validation from AI quality review. Review found three correctness issues: the review request duplicated standard section content, stored reviews were read without checking their rubric version, and non-whitespace content between Front Matter and the first H1 was visible to the Runner but absent from the reviewer's parsed section input. The PR also contained legacy-Skill UI and API behavior that is unnecessary under the pre-release constraint.
+PR #94 introduces deterministic `SKILL.md` v1 parsing and separates structure validation from AI quality review. Review found four correctness issues: the review request duplicated standard section content, stored reviews were read without checking their rubric version, non-whitespace content between Front Matter and the first H1 was visible to the Runner but absent from the reviewer input, and serializing every parsed section as a JSON object allowed a near-limit Skill containing thousands of short custom H1 sections to amplify into a much larger model request. The PR also contained legacy-Skill UI and API behavior that is unnecessary under the pre-release constraint.
 
 ## Goals
 
@@ -14,6 +14,7 @@ PR #94 introduces deterministic `SKILL.md` v1 parsing and separates structure va
 - Use one complete v1 parse as the authoritative meaning of `schema_version` everywhere.
 - Remove legacy migration messaging and nullable schema behavior.
 - Ensure the Runner cannot consume Skill instructions that the reviewer did not receive.
+- Bound reviewer input growth independently of the number of custom sections.
 
 ## Non-goals
 
@@ -32,9 +33,11 @@ Review persistence will define one `CURRENT_SKILL_REVIEW_RUBRIC` constant. Savin
 
 ## Reviewer Input
 
-The parser already returns an ordered `sections` collection containing each heading, body, and optional standard-section key. The review request will serialize that collection once, with enough metadata to map standard sections to the five content dimensions and to let `clarity` evaluate all standard and custom sections.
+After successful v1 parsing, the review request will send `body_markdown` exactly once after a fixed untrusted-content prefix. It will not serialize a JSON object per section. The system prompt will map the six exact Chinese H1 headings to the five section-specific scoring dimensions and use the complete Markdown for `clarity`.
 
-The request will no longer include both `standard_sections` and the complete `body_markdown`. Front matter remains excluded. A near-limit regression test will assert that a large section marker appears once and that the serialized user input remains close to the original document size rather than approximately doubling it.
+Front Matter remains excluded. The deterministic parser still owns schema validation, required-section recognition, alias rejection, duplicate detection, and the body-preamble invariant before any model request is built. JSON was only a transport representation and did not create a stronger prompt-injection boundary; the system message continues to label the raw Markdown as untrusted content that must be assessed rather than followed.
+
+The model request length must be `body_markdown.len()` plus one fixed prefix. A near-limit regression test will construct a valid Skill with thousands of short custom H1 sections and assert exact body preservation, one occurrence of a unique marker, no per-section JSON fields, and only constant request overhead. Rain will not add an arbitrary section-count limit because the raw Markdown representation already makes section count irrelevant to transport size.
 
 ## Body Preamble Invariant
 
@@ -52,11 +55,12 @@ Legacy migration labels, behavior tests, and the historical-Skill section in `do
 
 Implementation follows red-green-refactor cycles:
 
-1. Add reviewer request tests proving sections are serialized once and near-limit input does not duplicate content.
+1. Add reviewer request tests proving the raw post-Front-Matter Markdown is sent exactly once and no section JSON is produced.
 2. Add repository/API tests proving mismatched rubric reviews are omitted while the current rubric is returned.
 3. Update response and frontend tests to require a non-null schema version and remove migration behavior.
 4. Add parser and API regression tests proving a whitespace-only body prefix is accepted and a non-whitespace preamble is rejected.
-5. Run targeted backend and frontend tests after each change, then the complete Rust and frontend verification suites, formatting, lint, build, and `git diff --check`.
+5. Add a near-64-KiB, thousands-of-short-H1 regression test proving reviewer input grows only by a fixed prefix.
+6. Run targeted backend and frontend tests after each change, then the complete Rust and frontend verification suites, formatting, lint, build, and `git diff --check`.
 
 ## GitHub Scope
 
