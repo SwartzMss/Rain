@@ -53,10 +53,12 @@ function bundlesResponse(logBundles: UploadSummary[]): IssueBundlesResponse {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 async function settle() {
@@ -143,6 +145,67 @@ describe('upload and bundle polling behavior', () => {
     });
     expect(result.current.uploading).toBe(false);
     expect(result.current.uploadDisabled).toBe(false);
+    unmount();
+  });
+
+  it('does not show an old Issue upload failure after switching Issues', async () => {
+    const uploadA = deferred<UploadResponse>();
+    vi.mocked(rainApi.uploadLogs)
+      .mockReturnValueOnce(uploadA.promise)
+      .mockResolvedValueOnce(uploadResponse('task-b', 'PROCESSING'));
+    const loadBundles = vi.fn().mockResolvedValue(undefined);
+    const loadIssues = vi.fn().mockResolvedValue(undefined);
+    const { result, rerender, unmount } = renderHook(
+      ({ issueCode }) => useUploadTask({ currentIssueCode: issueCode, loadBundles, loadIssues }),
+      { initialProps: { issueCode: 'ISSUE-A' } }
+    );
+    let uploadPromise!: Promise<void>;
+
+    await act(async () => {
+      uploadPromise = result.current.performUpload([new File(['a'], 'a.log')]);
+      await Promise.resolve();
+    });
+    rerender({ issueCode: 'ISSUE-B' });
+    act(() => result.current.resetSelection());
+    expect(result.current.uploadDisabled).toBe(true);
+
+    await act(async () => {
+      uploadA.reject(new Error('Issue A upload failed'));
+      await uploadPromise;
+    });
+
+    expect(result.current.uploading).toBe(false);
+    expect(result.current.uploadDisabled).toBe(false);
+    expect(result.current.uploadFailed).toBe(false);
+    expect(result.current.uploadError).toBeNull();
+    expect(result.current.uploadSelection).toEqual([]);
+    expect(result.current.uploadingRef.current).toBe(false);
+
+    await act(async () => {
+      await result.current.performUpload([new File(['b'], 'b.log')]);
+    });
+    expect(rainApi.uploadLogs).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it('shows a failed upload when its Issue context has not been reset', async () => {
+    vi.mocked(rainApi.uploadLogs).mockRejectedValueOnce(new Error('current Issue upload failed'));
+    const loadBundles = vi.fn().mockResolvedValue(undefined);
+    const loadIssues = vi.fn().mockResolvedValue(undefined);
+    const { result, unmount } = renderHook(() =>
+      useUploadTask({ currentIssueCode: 'ISSUE-A', loadBundles, loadIssues })
+    );
+
+    await act(async () => {
+      await result.current.performUpload([new File(['a'], 'a.log')]);
+    });
+
+    expect(result.current.uploading).toBe(false);
+    expect(result.current.uploadDisabled).toBe(false);
+    expect(result.current.uploadFailed).toBe(true);
+    expect(result.current.uploadError).toContain('current Issue upload failed');
+    expect(result.current.uploadSelection).toEqual([{ name: 'a.log', sizeBytes: 1 }]);
+    expect(result.current.uploadingRef.current).toBe(false);
     unmount();
   });
 

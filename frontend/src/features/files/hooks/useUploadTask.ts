@@ -54,12 +54,14 @@ export function useUploadTask(options: {
   const { currentIssueCode, loadBundles, loadIssues } = options;
   const [state, dispatch] = useReducer(uploadReducer, initialUploadState);
   const uploadingRef = useRef(false);
+  const uploadGenerationRef = useRef(0);
 
   const uploading = state.status === 'uploading';
   const uploadFailed = state.status === 'failed';
   const uploadDisabled = !currentIssueCode || uploading;
 
   const resetSelection = useCallback(() => {
+    uploadGenerationRef.current += 1;
     dispatch({ type: 'reset-selection' });
   }, []);
 
@@ -75,6 +77,7 @@ export function useUploadTask(options: {
         return;
       }
 
+      const uploadGeneration = ++uploadGenerationRef.current;
       uploadingRef.current = true;
       dispatch({
         type: 'upload-started',
@@ -86,9 +89,12 @@ export function useUploadTask(options: {
           dispatch({ type: 'upload-progress', progress });
         });
       } catch (error) {
-        dispatch({ type: 'upload-failed', message: normalizeApiError(error) });
         uploadingRef.current = false;
-        dispatch({ type: 'upload-finished' });
+        dispatch(
+          uploadGenerationRef.current === uploadGeneration
+            ? { type: 'upload-failed', message: normalizeApiError(error) }
+            : { type: 'upload-finished' }
+        );
         return;
       }
 
