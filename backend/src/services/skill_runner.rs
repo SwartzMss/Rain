@@ -19,6 +19,8 @@ use crate::{
     skill_schema::parse_skill_markdown,
 };
 
+const MAX_CONSECUTIVE_TOOL_ERRORS: usize = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillEvidence {
@@ -218,6 +220,8 @@ impl SkillRunner {
         });
         let tools = tool_definitions();
         let mut calls = 0_usize;
+        let mut consecutive_tool_errors = 0_usize;
+        let mut finalization_reason = "iteration limit reached";
 
         'iterations: for iteration in 1..=8_usize {
             if cancellation.is_cancelled() {
@@ -247,6 +251,7 @@ impl SkillRunner {
             );
             if response.message.tool_calls.is_empty() {
                 let result = parse_with_repair(
+                    run_id,
                     client.as_ref(),
                     &messages,
                     response,
@@ -285,14 +290,10 @@ impl SkillRunner {
                 return Ok(());
             }
             let tool_calls = response.message.tool_calls.clone();
-            let parsed_calls = tool_calls
-                .iter()
-                .map(|call| parse_tool_call(call).map(|parsed| (call, parsed)))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| ("SKILL_TOOL_FAILED", "Skill 只读工具调用无效"))?;
             messages.push(response.message);
-            for (call_index, (call, parsed_call)) in parsed_calls.into_iter().enumerate() {
+            for (call_index, call) in tool_calls.iter().enumerate() {
                 if calls >= 24 {
+                    finalization_reason = "tool call limit reached";
                     append_limit_responses(&mut messages, &tool_calls[call_index..]);
                     break 'iterations;
                 }
@@ -301,33 +302,110 @@ impl SkillRunner {
                     return Ok(());
                 }
                 calls += 1;
-                let tool_name = canonical_tool_name(&parsed_call);
                 let _ = skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
-                state.skill_runs.emit(
-                    run_id,
-                    SkillRunEvent {
-                        event: "tool.started".into(),
-                        data: json!({"tool": tool_name, "iteration": iteration}),
-                    },
-                );
                 let started = Instant::now();
-                let arguments_summary = summarize_arguments(&parsed_call);
-                let outcome = execute_tool(&mut executor, parsed_call).await;
+                let (tool_name, arguments_summary, status, output, limit_reached, error_details) =
+                    match parse_tool_call(call) {
+                        Ok(parsed_call) => {
+                            let tool_name = canonical_tool_name(&parsed_call);
+                            let arguments_summary = summarize_arguments(&parsed_call);
+                            state.skill_runs.emit(
+                                run_id,
+                                SkillRunEvent {
+                                    event: "tool.started".into(),
+                                    data: json!({"tool": tool_name, "iteration": iteration}),
+                                },
+                            );
+                            match execute_tool(&mut executor, parsed_call).await {
+                                Ok(output) => (
+                                    tool_name,
+                                    arguments_summary,
+                                    "SUCCEEDED",
+                                    output,
+                                    false,
+                                    None,
+                                ),
+                                Err(ToolCallError::Limit) => (
+                                    tool_name,
+                                    arguments_summary,
+                                    "LIMIT_REACHED",
+                                    json!({"error":"RETRIEVAL_LIMIT","limit_reached":true,"message":"retrieval limit reached"}),
+                                    true,
+                                    None,
+                                ),
+                                Err(ToolCallError::Recoverable { category, reason }) => (
+                                    tool_name,
+                                    arguments_summary,
+                                    "FAILED",
+                                    tool_error_output(
+                                        "TOOL_EXECUTION_ERROR",
+                                        category,
+                                        tool_name,
+                                        reason,
+                                    ),
+                                    false,
+                                    Some(("execute", category, reason)),
+                                ),
+                                Err(ToolCallError::Fatal {
+                                    code,
+                                    message,
+                                    category,
+                                    reason,
+                                }) => {
+                                    tracing::error!(
+                                        run_id,
+                                        iteration,
+                                        tool_call_index = call_index,
+                                        tool_call = calls,
+                                        tool = tool_name,
+                                        error_stage = "execute",
+                                        error_category = category.as_str(),
+                                        arguments_summary = %arguments_summary,
+                                        reason,
+                                        "skill tool call failed with a platform error"
+                                    );
+                                    return Err((code, message));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            if !error.recoverable {
+                                tracing::warn!(
+                                    run_id,
+                                    iteration,
+                                    tool_call_index = call_index,
+                                    tool_call = calls,
+                                    tool = error.tool_name,
+                                    error_stage = "parse",
+                                    error_category = error.category.as_str(),
+                                    arguments_summary = %error.arguments_summary,
+                                    reason = error.reason,
+                                    "skill tool call envelope rejected"
+                                );
+                                return Err((
+                                    "SKILL_TOOL_PROTOCOL_INVALID",
+                                    "模型工具调用协议无效",
+                                ));
+                            }
+                            (
+                                error.tool_name,
+                                error.arguments_summary,
+                                "REJECTED",
+                                tool_error_output(
+                                    "INVALID_TOOL_CALL",
+                                    error.category,
+                                    error.tool_name,
+                                    error.reason,
+                                ),
+                                false,
+                                Some(("parse", error.category, error.reason)),
+                            )
+                        }
+                    };
                 if cancellation.is_cancelled() {
                     log_skill_run_cancelled(run_id, &run_started, calls);
                     return Ok(());
                 }
-                let (status, output, limit_reached) = match outcome {
-                    Ok(output) => ("SUCCEEDED", output, false),
-                    Err(ToolCallError::Limit) => (
-                        "LIMIT_REACHED",
-                        json!({"limit_reached":true,"message":"retrieval limit reached"}),
-                        true,
-                    ),
-                    Err(ToolCallError::Invalid) => {
-                        ("FAILED", json!({"error":"tool call rejected"}), false)
-                    }
-                };
                 let hit_count = output
                     .get("hits")
                     .and_then(Value::as_array)
@@ -353,18 +431,6 @@ impl SkillRunner {
                 )
                 .await
                 .map_err(|_| ("SKILL_RUN_STORAGE_ERROR", "无法保存 Skill 运行步骤"))?;
-                tracing::debug!(
-                    run_id,
-                    iteration,
-                    tool_call = calls,
-                    tool = tool_name,
-                    status,
-                    hit_count,
-                    limit_reached,
-                    retrieval_bytes = executor.ledger.total_bytes(),
-                    elapsed_ms = tool_elapsed_ms,
-                    "skill tool call completed"
-                );
                 if !step_recorded {
                     tracing::debug!(run_id, "skill run stopped because it is no longer active");
                     return Ok(());
@@ -373,9 +439,6 @@ impl SkillRunner {
                     log_skill_run_cancelled(run_id, &run_started, calls);
                     return Ok(());
                 }
-                if status == "FAILED" {
-                    return Err(("SKILL_TOOL_FAILED", "Skill 只读工具调用失败"));
-                }
                 messages.push(ChatMessage {
                     role: "tool".into(),
                     content: Some(format!("UNTRUSTED TOOL DATA:\n{output}")),
@@ -383,14 +446,79 @@ impl SkillRunner {
                     tool_call_id: Some(call.id.clone()),
                     name: None,
                 });
-                state.skill_runs.emit(
-                    run_id,
-                    SkillRunEvent {
-                        event: "tool.completed".into(),
-                        data: json!({"tool": tool_name, "iteration": iteration}),
-                    },
-                );
+                if let Some((error_stage, error_category, reason)) = error_details {
+                    consecutive_tool_errors += 1;
+                    tracing::warn!(
+                        run_id,
+                        iteration,
+                        tool_call_index = call_index,
+                        tool_call = calls,
+                        tool = tool_name,
+                        error_stage,
+                        error_category = error_category.as_str(),
+                        arguments_summary = %arguments_summary,
+                        reason,
+                        consecutive_tool_errors,
+                        "skill tool call rejected"
+                    );
+                    state.skill_runs.emit(
+                        run_id,
+                        SkillRunEvent {
+                            event: if error_stage == "parse" {
+                                "tool.rejected".into()
+                            } else {
+                                "tool.failed".into()
+                            },
+                            data: json!({
+                                "tool": tool_name,
+                                "iteration": iteration,
+                                "error_category": error_category.as_str(),
+                            }),
+                        },
+                    );
+                } else {
+                    consecutive_tool_errors = 0;
+                    tracing::debug!(
+                        run_id,
+                        iteration,
+                        tool_call_index = call_index,
+                        tool_call = calls,
+                        tool = tool_name,
+                        status,
+                        hit_count,
+                        limit_reached,
+                        retrieval_bytes = executor.ledger.total_bytes(),
+                        elapsed_ms = tool_elapsed_ms,
+                        "skill tool call completed"
+                    );
+                    state.skill_runs.emit(
+                        run_id,
+                        SkillRunEvent {
+                            event: "tool.completed".into(),
+                            data: json!({"tool": tool_name, "iteration": iteration}),
+                        },
+                    );
+                }
+                if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS {
+                    finalization_reason = "invalid tool call retry limit reached";
+                    append_retry_limit_responses(&mut messages, &tool_calls[call_index + 1..]);
+                    let _ =
+                        skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
+                    state.skill_runs.emit(
+                        run_id,
+                        SkillRunEvent {
+                            event: "iteration.completed".into(),
+                            data: json!({
+                                "iteration": iteration,
+                                "tool_calls": calls,
+                                "tool_error_limit_reached": true,
+                            }),
+                        },
+                    );
+                    break 'iterations;
+                }
                 if limit_reached {
+                    finalization_reason = "retrieval limit reached";
                     append_limit_responses(&mut messages, &tool_calls[call_index + 1..]);
                     let _ =
                         skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
@@ -413,13 +541,14 @@ impl SkillRunner {
                 },
             );
             if calls >= 24 {
+                finalization_reason = "tool call limit reached";
                 break;
             }
         }
 
         messages.push(ChatMessage {
             role: "system".into(),
-            content: Some("Retrieval limits are exhausted. Do not request tools. Return the fixed JSON result now and explicitly record insufficient evidence in missing_context.".into()),
+            content: Some(format!("Tool use stopped because {finalization_reason}. Do not request tools. Return the fixed JSON result now. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context.")),
             tool_calls: Vec::new(), tool_call_id: None, name: None,
         });
         let model_started = Instant::now();
@@ -438,10 +567,12 @@ impl SkillRunner {
         };
         tracing::debug!(
             run_id,
+            finalization_reason,
             elapsed_ms = model_started.elapsed().as_millis() as u64,
-            "skill final model response received after retrieval limits"
+            "skill final model response received after tool use stopped"
         );
         let result = parse_with_repair(
+            run_id,
             client.as_ref(),
             &messages,
             response,
@@ -505,7 +636,25 @@ fn append_limit_responses(messages: &mut Vec<ChatMessage>, calls: &[ChatToolCall
     for call in calls {
         messages.push(ChatMessage {
             role: "tool".into(),
-            content: Some("UNTRUSTED TOOL DATA:\n{\"limit_reached\":true}".into()),
+            content: Some(
+                "UNTRUSTED TOOL DATA:\n{\"error\":\"RETRIEVAL_LIMIT\",\"limit_reached\":true}"
+                    .into(),
+            ),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call.id.clone()),
+            name: None,
+        });
+    }
+}
+
+fn append_retry_limit_responses(messages: &mut Vec<ChatMessage>, calls: &[ChatToolCall]) {
+    for call in calls {
+        messages.push(ChatMessage {
+            role: "tool".into(),
+            content: Some(
+                "UNTRUSTED TOOL DATA:\n{\"error\":\"INVALID_TOOL_CALL_LIMIT\",\"message\":\"tool call retry limit reached\"}"
+                    .into(),
+            ),
             tool_calls: Vec::new(),
             tool_call_id: Some(call.id.clone()),
             name: None,
@@ -581,17 +730,228 @@ async fn execute_tool(
     executor: &mut SkillToolExecutor<'_>,
     call: SkillToolCall,
 ) -> Result<Value, ToolCallError> {
-    executor.execute(call).await.map_err(|error| match error {
+    match executor.execute(call).await {
+        Ok(value) => match value.get("error").and_then(Value::as_str) {
+            Some("FILE_IS_DIRECTORY") => Err(ToolCallError::Recoverable {
+                category: ToolErrorCategory::FileIsDirectory,
+                reason: "requested file is a directory",
+            }),
+            Some("FILE_NOT_TEXT") => Err(ToolCallError::Recoverable {
+                category: ToolErrorCategory::FileNotText,
+                reason: "requested file is not readable text",
+            }),
+            _ => Ok(value),
+        },
+        Err(error) => Err(classify_tool_execution_error(error)),
+    }
+}
+
+fn classify_tool_execution_error(error: crate::error::AppError) -> ToolCallError {
+    match error {
         crate::error::AppError::BadRequest(message) if message.contains("limit reached") => {
             ToolCallError::Limit
         }
-        _ => ToolCallError::Invalid,
-    })
+        crate::error::AppError::BadRequest(message) => ToolCallError::Recoverable {
+            category: ToolErrorCategory::InvalidArgument,
+            reason: safe_bad_request_reason(&message),
+        },
+        crate::error::AppError::NotFound(_) => ToolCallError::Recoverable {
+            category: ToolErrorCategory::ResourceNotFound,
+            reason: "requested resource is unavailable in this run",
+        },
+        crate::error::AppError::Api { status, .. }
+        | crate::error::AppError::PublicApi { status, .. }
+            if status.is_client_error() =>
+        {
+            ToolCallError::Recoverable {
+                category: ToolErrorCategory::RequestRejected,
+                reason: "tool request was rejected",
+            }
+        }
+        crate::error::AppError::Database(_) | crate::error::AppError::Io(_) => {
+            ToolCallError::Fatal {
+                code: "SKILL_TOOL_STORAGE_ERROR",
+                message: "Skill 只读工具暂时不可用",
+                category: ToolErrorCategory::StorageError,
+                reason: "tool storage operation failed",
+            }
+        }
+        _ => ToolCallError::Fatal {
+            code: "SKILL_TOOL_EXECUTION_ERROR",
+            message: "Skill 只读工具执行失败",
+            category: ToolErrorCategory::PlatformError,
+            reason: "tool execution failed",
+        },
+    }
 }
 
 enum ToolCallError {
     Limit,
-    Invalid,
+    Recoverable {
+        category: ToolErrorCategory,
+        reason: &'static str,
+    },
+    Fatal {
+        code: &'static str,
+        message: &'static str,
+        category: ToolErrorCategory,
+        reason: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolErrorCategory {
+    InvalidEnvelope,
+    UnknownTool,
+    InvalidJson,
+    UnexpectedArgument,
+    MissingArgument,
+    InvalidArgument,
+    RequestRejected,
+    ResourceNotFound,
+    FileIsDirectory,
+    FileNotText,
+    StorageError,
+    PlatformError,
+}
+
+impl ToolErrorCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidEnvelope => "INVALID_ENVELOPE",
+            Self::UnknownTool => "UNKNOWN_TOOL",
+            Self::InvalidJson => "INVALID_JSON",
+            Self::UnexpectedArgument => "UNEXPECTED_ARGUMENT",
+            Self::MissingArgument => "MISSING_ARGUMENT",
+            Self::InvalidArgument => "INVALID_ARGUMENT",
+            Self::RequestRejected => "REQUEST_REJECTED",
+            Self::ResourceNotFound => "RESOURCE_NOT_FOUND",
+            Self::FileIsDirectory => "FILE_IS_DIRECTORY",
+            Self::FileNotText => "FILE_NOT_TEXT",
+            Self::StorageError => "STORAGE_ERROR",
+            Self::PlatformError => "PLATFORM_ERROR",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ToolCallValidationError {
+    category: ToolErrorCategory,
+    tool_name: &'static str,
+    arguments_summary: String,
+    reason: &'static str,
+    recoverable: bool,
+}
+
+fn safe_bad_request_reason(message: &str) -> &'static str {
+    if message.contains("file line range") {
+        "read_file_lines requires 0 <= start <= end and at most 200 lines"
+    } else if message.contains("file cursor") {
+        "list_files cursor must be non-negative"
+    } else if message.contains("file prefix") {
+        "list_files prefix is too long"
+    } else if message.contains("search query") {
+        "search_logs query must contain 2 to 200 characters"
+    } else if message.contains("search file_id") {
+        "search_logs file_id must be positive"
+    } else if message.contains("2-character search") {
+        "a 2-character search_logs query requires file_id"
+    } else if message.contains("path_prefix") {
+        "search_logs path_prefix is too long"
+    } else if message.contains("bundle_hash") {
+        "search_logs bundle_hash is too long"
+    } else {
+        "tool arguments were rejected"
+    }
+}
+
+fn requested_tool_name(name: &str) -> Option<&'static str> {
+    match name {
+        "get_issue_manifest" => Some("get_issue_manifest"),
+        "list_files" => Some("list_files"),
+        "search_logs" => Some("search_logs"),
+        "read_file_lines" => Some("read_file_lines"),
+        _ => None,
+    }
+}
+
+fn summarize_json_integer(arguments: &Value, key: &str) -> String {
+    match arguments.get(key) {
+        Some(value) => value
+            .as_i64()
+            .map_or_else(|| "invalid".into(), |value| value.to_string()),
+        None => "missing".into(),
+    }
+}
+
+fn summarize_json_string_length(arguments: &Value, key: &str) -> String {
+    match arguments.get(key) {
+        Some(value) => value.as_str().map_or_else(
+            || "invalid".into(),
+            |value| value.chars().count().to_string(),
+        ),
+        None => "missing".into(),
+    }
+}
+
+fn summarize_unvalidated_arguments(call: &ChatToolCall) -> String {
+    let Ok(arguments) = serde_json::from_str::<Value>(&call.function.arguments) else {
+        return format!("arguments_bytes={}", call.function.arguments.len());
+    };
+    match requested_tool_name(&call.function.name) {
+        Some("get_issue_manifest") => format!(
+            "argument_fields={}",
+            arguments.as_object().map_or(0, serde_json::Map::len)
+        ),
+        Some("list_files") => format!(
+            "cursor={},prefix_chars={}",
+            summarize_json_integer(&arguments, "cursor"),
+            summarize_json_string_length(&arguments, "prefix")
+        ),
+        Some("search_logs") => format!(
+            "query_chars={},path_prefix_chars={},bundle_hash_chars={},file_id={}",
+            summarize_json_string_length(&arguments, "query"),
+            summarize_json_string_length(&arguments, "path_prefix"),
+            summarize_json_string_length(&arguments, "bundle_hash"),
+            summarize_json_integer(&arguments, "file_id")
+        ),
+        Some("read_file_lines") => format!(
+            "file_id={},start={},end={}",
+            summarize_json_integer(&arguments, "file_id"),
+            summarize_json_integer(&arguments, "start"),
+            summarize_json_integer(&arguments, "end")
+        ),
+        _ => format!("arguments_bytes={}", call.function.arguments.len()),
+    }
+}
+
+fn validation_error(
+    call: &ChatToolCall,
+    category: ToolErrorCategory,
+    reason: &'static str,
+    recoverable: bool,
+) -> ToolCallValidationError {
+    ToolCallValidationError {
+        category,
+        tool_name: requested_tool_name(&call.function.name).unwrap_or("unknown"),
+        arguments_summary: summarize_unvalidated_arguments(call),
+        reason,
+        recoverable,
+    }
+}
+
+fn tool_error_output(
+    error: &'static str,
+    category: ToolErrorCategory,
+    tool_name: &str,
+    message: &'static str,
+) -> Value {
+    json!({
+        "error": error,
+        "category": category.as_str(),
+        "tool": tool_name,
+        "message": message,
+    })
 }
 
 fn optional_bounded_string(
@@ -611,56 +971,139 @@ fn optional_bounded_string(
     }
 }
 
-fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ()> {
+fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidationError> {
     if call.kind != "function" || call.id.is_empty() || call.id.len() > 128 {
-        return Err(());
+        return Err(validation_error(
+            call,
+            ToolErrorCategory::InvalidEnvelope,
+            "tool call envelope is invalid",
+            false,
+        ));
     }
-    let arguments: Value = serde_json::from_str(&call.function.arguments).map_err(|_| ())?;
-    let object = arguments.as_object().ok_or(())?;
+    if requested_tool_name(&call.function.name).is_none() {
+        return Err(validation_error(
+            call,
+            ToolErrorCategory::UnknownTool,
+            "tool is not available",
+            true,
+        ));
+    }
+    let fail = |category, reason| validation_error(call, category, reason, true);
+    let arguments: Value = serde_json::from_str(&call.function.arguments).map_err(|_| {
+        fail(
+            ToolErrorCategory::InvalidJson,
+            "tool arguments must be valid JSON",
+        )
+    })?;
+    let object = arguments.as_object().ok_or_else(|| {
+        fail(
+            ToolErrorCategory::InvalidJson,
+            "tool arguments must be a JSON object",
+        )
+    })?;
     let tool = match call.function.name.as_str() {
-        "get_issue_manifest" if object.is_empty() => SkillToolCall::GetIssueManifest,
-        "list_files"
-            if object
+        "get_issue_manifest" => {
+            if !object.is_empty() {
+                return Err(fail(
+                    ToolErrorCategory::UnexpectedArgument,
+                    "get_issue_manifest does not accept arguments",
+                ));
+            }
+            SkillToolCall::GetIssueManifest
+        }
+        "list_files" => {
+            if !object
                 .keys()
-                .all(|key| matches!(key.as_str(), "cursor" | "prefix")) =>
-        {
+                .all(|key| matches!(key.as_str(), "cursor" | "prefix"))
+            {
+                return Err(fail(
+                    ToolErrorCategory::UnexpectedArgument,
+                    "list_files received an unexpected argument",
+                ));
+            }
             let cursor = match arguments.get("cursor") {
-                Some(value) => Some(value.as_i64().filter(|value| *value >= 0).ok_or(())?),
-                None => None,
-            };
-            let prefix = match arguments.get("prefix") {
                 Some(value) => {
-                    let value = value.as_str().ok_or(())?;
-                    if value.chars().count() > 512 {
-                        return Err(());
-                    }
-                    Some(value.to_owned())
+                    Some(value.as_i64().filter(|value| *value >= 0).ok_or_else(|| {
+                        fail(
+                            ToolErrorCategory::InvalidArgument,
+                            "list_files cursor must be non-negative",
+                        )
+                    })?)
                 }
                 None => None,
             };
+            let prefix = optional_bounded_string(&arguments, "prefix", 512).map_err(|_| {
+                fail(
+                    ToolErrorCategory::InvalidArgument,
+                    "list_files prefix must be a string of at most 512 characters",
+                )
+            })?;
             SkillToolCall::ListFiles { cursor, prefix }
         }
-        "search_logs"
-            if object.keys().all(|key| {
+        "search_logs" => {
+            if !object.keys().all(|key| {
                 matches!(
                     key.as_str(),
                     "query" | "path_prefix" | "bundle_hash" | "file_id"
                 )
-            }) && object.contains_key("query") =>
-        {
-            let query = arguments.get("query").and_then(Value::as_str).ok_or(())?;
+            }) {
+                return Err(fail(
+                    ToolErrorCategory::UnexpectedArgument,
+                    "search_logs received an unexpected argument",
+                ));
+            }
+            if !object.contains_key("query") {
+                return Err(fail(
+                    ToolErrorCategory::MissingArgument,
+                    "search_logs requires query",
+                ));
+            }
+            let query = arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    fail(
+                        ToolErrorCategory::InvalidArgument,
+                        "search_logs query must be a string",
+                    )
+                })?;
             let query_chars = query.trim().chars().count();
             if !(2..=200).contains(&query_chars) {
-                return Err(());
+                return Err(fail(
+                    ToolErrorCategory::InvalidArgument,
+                    "search_logs query must contain 2 to 200 characters",
+                ));
             }
-            let path_prefix = optional_bounded_string(&arguments, "path_prefix", 512)?;
-            let bundle_hash = optional_bounded_string(&arguments, "bundle_hash", 128)?;
+            let path_prefix =
+                optional_bounded_string(&arguments, "path_prefix", 512).map_err(|_| {
+                    fail(
+                        ToolErrorCategory::InvalidArgument,
+                        "search_logs path_prefix must be a string of at most 512 characters",
+                    )
+                })?;
+            let bundle_hash =
+                optional_bounded_string(&arguments, "bundle_hash", 128).map_err(|_| {
+                    fail(
+                        ToolErrorCategory::InvalidArgument,
+                        "search_logs bundle_hash must be a string of at most 128 characters",
+                    )
+                })?;
             let file_id = match arguments.get("file_id") {
-                Some(value) => Some(value.as_i64().filter(|value| *value > 0).ok_or(())?),
+                Some(value) => {
+                    Some(value.as_i64().filter(|value| *value > 0).ok_or_else(|| {
+                        fail(
+                            ToolErrorCategory::InvalidArgument,
+                            "search_logs file_id must be positive",
+                        )
+                    })?)
+                }
                 None => None,
             };
             if query_chars == 2 && file_id.is_none() {
-                return Err(());
+                return Err(fail(
+                    ToolErrorCategory::InvalidArgument,
+                    "a 2-character search_logs query requires file_id",
+                ));
             }
             SkillToolCall::SearchLogs {
                 query: query.to_owned(),
@@ -669,17 +1112,57 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ()> {
                 file_id,
             }
         }
-        "read_file_lines"
-            if object.len() == 3
-                && object.contains_key("file_id")
-                && object.contains_key("start")
-                && object.contains_key("end") =>
-        {
-            let file_id = arguments.get("file_id").and_then(Value::as_i64).ok_or(())?;
-            let start = arguments.get("start").and_then(Value::as_i64).ok_or(())?;
-            let end = arguments.get("end").and_then(Value::as_i64).ok_or(())?;
+        "read_file_lines" => {
+            if !object
+                .keys()
+                .all(|key| matches!(key.as_str(), "file_id" | "start" | "end"))
+            {
+                return Err(fail(
+                    ToolErrorCategory::UnexpectedArgument,
+                    "read_file_lines received an unexpected argument",
+                ));
+            }
+            if !["file_id", "start", "end"]
+                .iter()
+                .all(|key| object.contains_key(*key))
+            {
+                return Err(fail(
+                    ToolErrorCategory::MissingArgument,
+                    "read_file_lines requires file_id, start, and end",
+                ));
+            }
+            let file_id = arguments
+                .get("file_id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| {
+                    fail(
+                        ToolErrorCategory::InvalidArgument,
+                        "read_file_lines file_id must be an integer",
+                    )
+                })?;
+            let start = arguments
+                .get("start")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| {
+                    fail(
+                        ToolErrorCategory::InvalidArgument,
+                        "read_file_lines start must be an integer",
+                    )
+                })?;
+            let end = arguments
+                .get("end")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| {
+                    fail(
+                        ToolErrorCategory::InvalidArgument,
+                        "read_file_lines end must be an integer",
+                    )
+                })?;
             if file_id <= 0 || start < 0 || end < start || end.saturating_sub(start) >= 200 {
-                return Err(());
+                return Err(fail(
+                    ToolErrorCategory::InvalidArgument,
+                    "read_file_lines requires a positive file_id, 0 <= start <= end, and at most 200 lines",
+                ));
             }
             SkillToolCall::ReadFileLines {
                 file_id,
@@ -687,13 +1170,40 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ()> {
                 end,
             }
         }
-        _ => return Err(()),
+        _ => unreachable!("known tool names were checked before parsing arguments"),
     };
     Ok(tool)
 }
 
-fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ()> {
-    let mut result: SkillRunResult = serde_json::from_str(content.ok_or(())?).map_err(|_| ())?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultValidationStage {
+    ParseJson,
+    Schema,
+    Evidence,
+}
+
+impl ResultValidationStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ParseJson => "parse_json",
+            Self::Schema => "schema",
+            Self::Evidence => "evidence",
+        }
+    }
+
+    fn run_error(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Evidence => ("SKILL_EVIDENCE_INVALID", "模型引用了未读取的日志证据"),
+            Self::ParseJson | Self::Schema => ("SKILL_RESULT_INVALID", "模型结果无效"),
+        }
+    }
+}
+
+fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidationStage> {
+    let value: Value = serde_json::from_str(content.ok_or(ResultValidationStage::ParseJson)?)
+        .map_err(|_| ResultValidationStage::ParseJson)?;
+    let mut result: SkillRunResult =
+        serde_json::from_value(value).map_err(|_| ResultValidationStage::Schema)?;
     if result.summary.text.trim().is_empty()
         || result.summary.text.len() > 16 * 1024
         || result.summary.evidence_ids.len() > 30
@@ -732,7 +1242,7 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ()> {
             .any(|item| item.trim().is_empty() || item.len() > 16 * 1024)
         || serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > 256 * 1024)
     {
-        return Err(());
+        return Err(ResultValidationStage::Schema);
     }
     if result.summary.status == SkillSummaryStatus::InsufficientEvidence {
         result.summary.text = "证据不足，无法得出诊断结论".into();
@@ -741,17 +1251,23 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ()> {
 }
 
 async fn parse_with_repair(
+    run_id: &str,
     client: &dyn ChatCompletionClient,
     messages: &[ChatMessage],
     response: ChatResponse,
     ledger: &EvidenceLedger,
     cancellation: &CancellationToken,
 ) -> Result<SkillRunResult, (&'static str, &'static str)> {
-    if let Ok(result) = parse_result(response.message.content.as_deref())
-        && validate_evidence(&result, ledger).is_ok()
-    {
-        return Ok(result);
-    }
+    let first_stage = match validate_result(response.message.content.as_deref(), ledger) {
+        Ok(result) => return Ok(result),
+        Err(stage) => stage,
+    };
+    tracing::warn!(
+        run_id,
+        result_validation_stage = first_stage.as_str(),
+        repair_attempt = 1_u8,
+        "skill result validation failed; requesting repair"
+    );
     let mut repair = messages.to_vec();
     repair.push(response.message);
     repair.push(ChatMessage { role: "user".into(), content: Some("The result was invalid or cited evidence that was not returned by read_file_lines. Return only JSON: summary as {status:SUPPORTED|INSUFFICIENT_EVIDENCE,text,evidence_ids[]}; observations as {text,evidence_ids[]} objects; inferences as {text,confidence:LOW|MEDIUM|HIGH,evidence_ids[]} objects; missing_context as strings; evidence as {id,bundle_hash,file_id,path,start_line,end_line,excerpt,explanation} objects. A SUPPORTED summary and every observation/inference need valid evidence IDs. An INSUFFICIENT_EVIDENCE summary needs empty evidence_ids and non-empty missing_context. Remove unsupported claims and citations.".into()), tool_calls: vec![], tool_call_id: None, name: None });
@@ -759,16 +1275,30 @@ async fn parse_with_repair(
         _ = cancellation.cancelled() => return Err(("SKILL_RUN_CANCELLED", "Skill 任务已取消")),
         response = client.complete(ChatRequest { model: String::new(), messages: repair, tools: vec![], tool_choice: None, response_format: Some(json!({"type":"json_object"})) }) => response.map_err(runner_provider_error)?,
     };
-    let result = parse_result(response.message.content.as_deref())
-        .map_err(|_| ("SKILL_RESULT_INVALID", "模型结果无效"))?;
-    validate_evidence(&result, ledger)?;
+    match validate_result(response.message.content.as_deref(), ledger) {
+        Ok(result) => Ok(result),
+        Err(stage) => {
+            tracing::warn!(
+                run_id,
+                result_validation_stage = stage.as_str(),
+                repair_attempt = 1_u8,
+                "skill result validation failed after repair"
+            );
+            Err(stage.run_error())
+        }
+    }
+}
+
+fn validate_result(
+    content: Option<&str>,
+    ledger: &EvidenceLedger,
+) -> Result<SkillRunResult, ResultValidationStage> {
+    let result = parse_result(content)?;
+    validate_evidence(&result, ledger).map_err(|_| ResultValidationStage::Evidence)?;
     Ok(result)
 }
 
-fn validate_evidence(
-    result: &SkillRunResult,
-    ledger: &EvidenceLedger,
-) -> Result<(), (&'static str, &'static str)> {
+fn validate_evidence(result: &SkillRunResult, ledger: &EvidenceLedger) -> Result<(), ()> {
     let mut unique_ranges = std::collections::HashSet::new();
     let mut evidence_ids = std::collections::HashSet::new();
     let evidence_valid = result.evidence.iter().all(|item| {
@@ -802,14 +1332,19 @@ fn validate_evidence(
     if evidence_valid && claims_valid {
         Ok(())
     } else {
-        Err(("SKILL_EVIDENCE_INVALID", "模型引用了未读取的日志证据"))
+        Err(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_tool_call;
+    use super::{
+        ResultValidationStage, ToolCallError, ToolErrorCategory, classify_tool_execution_error,
+        parse_result, parse_tool_call, validate_result,
+    };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
+    use crate::error::AppError;
+    use crate::services::skill_tools::EvidenceLedger;
 
     fn call(name: &str, arguments: &str) -> ChatToolCall {
         ChatToolCall {
@@ -854,5 +1389,95 @@ mod tests {
         let mut wrong_kind = call("list_files", "{}");
         wrong_kind.kind = "custom".into();
         assert!(parse_tool_call(&wrong_kind).is_err());
+    }
+
+    #[test]
+    fn tool_validation_errors_are_classified_and_sanitized() {
+        let extra = parse_tool_call(&call(
+            "search_logs",
+            r#"{"query":"timeout","filename":"secret.log"}"#,
+        ))
+        .unwrap_err();
+        assert_eq!(extra.category, ToolErrorCategory::UnexpectedArgument);
+        assert_eq!(extra.tool_name, "search_logs");
+        assert!(extra.arguments_summary.contains("query_chars=7"));
+        assert!(!extra.arguments_summary.contains("secret.log"));
+
+        let range = parse_tool_call(&call(
+            "read_file_lines",
+            r#"{"file_id":123,"start":100,"end":400}"#,
+        ))
+        .unwrap_err();
+        assert_eq!(range.category, ToolErrorCategory::InvalidArgument);
+        assert_eq!(range.arguments_summary, "file_id=123,start=100,end=400");
+
+        let missing = parse_tool_call(&call("read_file_lines", r#"{"file_id":123,"start":100}"#))
+            .unwrap_err();
+        assert_eq!(missing.category, ToolErrorCategory::MissingArgument);
+
+        let unknown = parse_tool_call(&call("send_secret_elsewhere", r#"{"token":"do-not-log"}"#))
+            .unwrap_err();
+        assert_eq!(unknown.category, ToolErrorCategory::UnknownTool);
+        assert_eq!(unknown.tool_name, "unknown");
+        assert!(unknown.arguments_summary.starts_with("arguments_bytes="));
+        assert!(!unknown.arguments_summary.contains("do-not-log"));
+
+        let invalid_json = parse_tool_call(&call("list_files", "{")).unwrap_err();
+        assert_eq!(invalid_json.category, ToolErrorCategory::InvalidJson);
+
+        let mut invalid_envelope = call("list_files", "{}");
+        invalid_envelope.id.clear();
+        let invalid_envelope = parse_tool_call(&invalid_envelope).unwrap_err();
+        assert_eq!(
+            invalid_envelope.category,
+            ToolErrorCategory::InvalidEnvelope
+        );
+        assert!(!invalid_envelope.recoverable);
+    }
+
+    #[test]
+    fn platform_storage_errors_remain_fatal() {
+        let error = classify_tool_execution_error(AppError::Database(sqlx::Error::Protocol(
+            "secret database detail".into(),
+        )));
+        match error {
+            ToolCallError::Fatal {
+                code,
+                message,
+                category,
+                reason,
+            } => {
+                assert_eq!(code, "SKILL_TOOL_STORAGE_ERROR");
+                assert_eq!(message, "Skill 只读工具暂时不可用");
+                assert_eq!(category, ToolErrorCategory::StorageError);
+                assert_eq!(reason, "tool storage operation failed");
+                assert!(!reason.contains("secret database detail"));
+            }
+            ToolCallError::Limit | ToolCallError::Recoverable { .. } => {
+                panic!("storage errors must terminate the run")
+            }
+        }
+    }
+
+    #[test]
+    fn result_validation_distinguishes_json_schema_and_evidence_stages() {
+        assert_eq!(
+            parse_result(Some("not json")).unwrap_err(),
+            ResultValidationStage::ParseJson
+        );
+        assert_eq!(
+            parse_result(Some("{}")).unwrap_err(),
+            ResultValidationStage::Schema
+        );
+        let schema_invalid = r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
+        assert_eq!(
+            parse_result(Some(schema_invalid)).unwrap_err(),
+            ResultValidationStage::Schema
+        );
+        let unsupported_evidence = r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":["e1"]},"observations":[],"inferences":[],"missing_context":[],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x"}]}"#;
+        assert_eq!(
+            validate_result(Some(unsupported_evidence), &EvidenceLedger::default()).unwrap_err(),
+            ResultValidationStage::Evidence
+        );
     }
 }
