@@ -62,6 +62,10 @@ Reviewer 的第六个维度 `clarity` 根据全部章节整体评价。章节存
 
 Runner 只注入 front matter 之后的 Playbook 正文，`schema_version` 不会成为诊断指令。Skill 描述 What/Strategy，不能授予 shell、网络、文件写入、SQL、跨 Issue 或额外工具权限；当前 Issue 绑定、只读工具和证据规则始终由平台强制执行。
 
-## 历史 Skill
+## 兼容策略
 
-开发阶段已有的自由格式 Skill 仍可列出、查看和删除，详情中的 `schema_version` 为 `null`。下一次编辑、质量评估或运行前必须按 v1 模板完成迁移；Rain 不为旧标题维护永久 alias。
+Rain 当前仍处于内测阶段，`SKILL.md` v1 不提供历史自由格式 Skill 的迁移或兼容模式。产品与 API 统一假设持久化 Skill 都满足 v1 Schema。
+
+升级到该版本前，应清理或重建内测环境中旧的 `user_skills` / `skill_reviews` 数据。旧格式 Skill 不会以“未识别”“需迁移”等状态继续暴露，也不会保留 legacy prompt mode、标题 alias 或旧评分兼容逻辑。
+
+服务端在 Create、Update、Review 和 Run 路径仍保留格式校验，作为数据完整性与防御性边界；这不构成旧格式兼容能力。
