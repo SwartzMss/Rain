@@ -4,7 +4,7 @@
 
 Rain is still an internal pre-release build. Existing free-form Skill records and historical review rows do not need a compatibility or migration path; development databases may be rebuilt when the schema contract changes.
 
-PR #94 introduces deterministic `SKILL.md` v1 parsing and separates structure validation from AI quality review. Review found two correctness issues: the review request duplicates standard section content, and stored reviews are read without checking their rubric version. The PR also contains legacy-Skill UI and API behavior that is unnecessary under the pre-release constraint.
+PR #94 introduces deterministic `SKILL.md` v1 parsing and separates structure validation from AI quality review. Review found three correctness issues: the review request duplicated standard section content, stored reviews were read without checking their rubric version, and non-whitespace content between Front Matter and the first H1 was visible to the Runner but absent from the reviewer's parsed section input. The PR also contained legacy-Skill UI and API behavior that is unnecessary under the pre-release constraint.
 
 ## Goals
 
@@ -13,6 +13,7 @@ PR #94 introduces deterministic `SKILL.md` v1 parsing and separates structure va
 - Ensure only reviews produced by the current rubric are returned.
 - Use one complete v1 parse as the authoritative meaning of `schema_version` everywhere.
 - Remove legacy migration messaging and nullable schema behavior.
+- Ensure the Runner cannot consume Skill instructions that the reviewer did not receive.
 
 ## Non-goals
 
@@ -35,6 +36,12 @@ The parser already returns an ordered `sections` collection containing each head
 
 The request will no longer include both `standard_sections` and the complete `body_markdown`. Front matter remains excluded. A near-limit regression test will assert that a large section marker appears once and that the serialized user input remains close to the original document size rather than approximately doubling it.
 
+## Body Preamble Invariant
+
+After the Front Matter closing delimiter, `SKILL.md` v1 permits only whitespace before the first H1. Any other content in that range—including prose, comments, lists, or fenced blocks—is rejected by `parse_skill_markdown` and therefore surfaces through API admission paths as `SKILL_FORMAT_INVALID`.
+
+Blank lines remain valid with both LF and CRLF input. The parser continues preserving the post-Front-Matter Markdown in `body_markdown`; because the newly constrained prefix is semantically empty, the Runner and reviewer now consume the same instruction-bearing content without reconstructing or normalizing Markdown.
+
 ## Frontend and Documentation
 
 The frontend type will require `schema_version: number`. The Skill editor and detail view will always render the returned version directly. The run selector will filter only by `enabled`; it will not count, hide, or explain legacy Skills because no such state is supported.
@@ -48,8 +55,9 @@ Implementation follows red-green-refactor cycles:
 1. Add reviewer request tests proving sections are serialized once and near-limit input does not duplicate content.
 2. Add repository/API tests proving mismatched rubric reviews are omitted while the current rubric is returned.
 3. Update response and frontend tests to require a non-null schema version and remove migration behavior.
-4. Run targeted backend and frontend tests after each change, then the complete Rust and frontend verification suites, formatting, lint, build, and `git diff --check`.
+4. Add parser and API regression tests proving a whitespace-only body prefix is accepted and a non-whitespace preamble is rejected.
+5. Run targeted backend and frontend tests after each change, then the complete Rust and frontend verification suites, formatting, lint, build, and `git diff --check`.
 
 ## GitHub Scope
 
-Both currently unresolved PR #94 review threads are addressed locally. This work does not reply to or resolve GitHub threads unless the user separately authorizes those GitHub write actions.
+The three identified PR #94 review issues are addressed locally. This work does not reply to or resolve GitHub threads unless the user separately authorizes those GitHub write actions.
