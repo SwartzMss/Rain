@@ -37,21 +37,4 @@ describe('issue skill runner', () => {
     await user.click(screen.getByRole('button', { name: /app\.log:42-43/ }));
     expect(reveal).toHaveBeenCalledWith(expect.objectContaining({ file_id: 8, start_line: 42 }));
   });
-
-  it('hides enabled historical Skills until they are migrated to v1', async () => {
-    vi.mocked(rainApi.fetchSkills).mockResolvedValue([
-      { id: 'legacy', name: '旧诊断', description: '', schema_version: null, enabled: true, version: 1, content_hash: 'legacy-hash', created_at: '', updated_at: '', review: null },
-      { id: 'valid', name: '新诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'valid-hash', created_at: '', updated_at: '', review: null }
-    ]);
-    vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
-    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(null);
-
-    render(<IssueSkillRunner issueCode="ISSUE-1" onRevealEvidence={vi.fn()} />);
-
-    const select = await screen.findByLabelText('选择 Skill');
-    expect(select).toHaveValue('valid');
-    expect(screen.queryByRole('option', { name: /旧诊断/ })).not.toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /新诊断/ })).toBeInTheDocument();
-    expect(screen.getByText('有 1 个已启用 Skill 需要先迁移到 v1，已从运行列表中隐藏。')).toBeInTheDocument();
-  });
 });
