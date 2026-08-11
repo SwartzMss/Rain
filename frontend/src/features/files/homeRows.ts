@@ -1,4 +1,4 @@
-import type { FileNode, UploadStage, UploadStatus, UploadSummary, UploadTaskResponse } from '../../api/types';
+import type { FileNode, UploadStage, UploadStatus, UploadSummary } from '../../api/types';
 import { uploadFailureMessage } from './uploadFailure';
 import { createOptimisticUploadRows, type UploadSelectionItem } from './uploadRows';
 
@@ -53,57 +53,36 @@ const getFileLabel = (file: FileNode) =>
 export function buildFileRows(options: {
   bundles: UploadSummary[];
   bundleFiles: Record<string, BundleFileState>;
-  uploadTask: UploadTaskResponse | null;
   uploadSelection: UploadSelectionItem[];
   uploading: boolean;
   uploadFailed: boolean;
   uploadProgress: number;
-  activeTask: UploadTaskResponse | null;
 }): FileRow[] {
   const {
-    activeTask,
     bundleFiles,
     bundles,
     uploadFailed,
     uploadProgress,
     uploadSelection,
-    uploadTask,
     uploading
   } = options;
   const rows = bundles.flatMap<FileRow>((bundle) => {
     const status = bundle.status.upload_status;
-    const currentTask = uploadTask?.bundle_hash === bundle.hash ? uploadTask : null;
-    const stage = currentTask?.stage ?? bundle.stage;
+    const stage = bundle.stage;
     const state = bundleFiles[bundle.hash];
     if (status !== 'READY') {
-      if (currentTask && uploadSelection.length > 0) {
-        return uploadSelection.map((item, index) => ({
-          key: `active-upload:${index}:${item.name}`,
-          bundleHash: bundle.hash,
-          bundleName: item.name,
-          name: item.name,
-          status,
-          stage,
-          progressPercent: currentTask.progress_percent,
-          sizeBytes: item.sizeBytes,
-          failureReason: uploadFailureMessage({
-            status,
-            failure_reason: currentTask.failure_reason ?? bundle.failure_reason
-          })
-        }));
-      }
       return [
         {
-          key: currentTask ? 'active-upload' : bundle.hash,
+          key: bundle.hash,
           bundleHash: bundle.hash,
           bundleName: bundle.name || bundle.hash,
           name: bundle.name || bundle.hash,
           status,
           stage,
-          sizeBytes: currentTask?.total_bytes ?? bundle.size_bytes ?? undefined,
+          sizeBytes: bundle.size_bytes ?? undefined,
           failureReason: uploadFailureMessage({
             status,
-            failure_reason: currentTask?.failure_reason ?? bundle.failure_reason
+            failure_reason: bundle.failure_reason
           })
         }
       ];
@@ -120,14 +99,12 @@ export function buildFileRows(options: {
       sizeBytes: file.size_bytes
     }));
   });
-  const taskBundleVisible =
-    !!uploadTask?.bundle_hash && bundles.some((bundle) => bundle.hash === uploadTask.bundle_hash);
-  if ((uploading || activeTask || uploadFailed) && uploadSelection.length > 0 && !taskBundleVisible) {
+  if ((uploading || uploadFailed) && uploadSelection.length > 0) {
     rows.unshift(
       ...createOptimisticUploadRows(
         uploadSelection,
         uploadProgress,
-        uploadTask?.bundle_hash ?? '',
+        '',
         uploadFailed ? 'FAILED' : 'UPLOADING'
       )
     );

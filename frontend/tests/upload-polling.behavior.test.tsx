@@ -15,7 +15,6 @@ vi.mock('../src/api/client', () => ({
   rainApi: {
     fetchFileNode: vi.fn(),
     fetchIssueBundles: vi.fn(),
-    fetchUploadTask: vi.fn(),
     uploadLogs: vi.fn()
   }
 }));
@@ -70,11 +69,6 @@ describe('upload and bundle polling behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.mocked(rainApi.fetchFileNode).mockResolvedValue({ children: [] });
-    vi.mocked(rainApi.fetchUploadTask).mockResolvedValue({
-      ...uploadResponse('task-1'),
-      progress_percent: 50,
-      total_bytes: 1
-    });
   });
 
   afterEach(() => {
@@ -92,12 +86,9 @@ describe('upload and bundle polling behavior', () => {
       .mockResolvedValueOnce(uploadResponse('task-2', 'PROCESSING'));
     const loadBundles = vi.fn().mockReturnValueOnce(refreshA).mockResolvedValue(undefined);
     const loadIssues = vi.fn().mockResolvedValue(undefined);
-    const getSelectedIssueCode = vi.fn(() => 'ISSUE-1');
     const { result, unmount } = renderHook(() =>
       useUploadTask({
         currentIssueCode: 'ISSUE-1',
-        getSelectedIssueCode,
-        hasActiveBundleProcessing: false,
         loadBundles,
         loadIssues
       })
@@ -107,7 +98,7 @@ describe('upload and bundle polling behavior', () => {
       void result.current.performUpload([new File(['a'], 'a.log')]);
       await Promise.resolve();
     });
-    expect(result.current.uploadTask?.status).toBe('PROCESSING');
+    expect(result.current.uploading).toBe(false);
     expect(result.current.uploadDisabled).toBe(false);
 
     await act(async () => {

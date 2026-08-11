@@ -22,6 +22,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   const clearBundles = useCallback(() => {
     bundleRequestIdRef.current += 1;
     setBundles([]);
+    setBundlesLoading(false);
     setCanWrite(false);
     setOwnerUsername(null);
     setInactivityExpiry(null);
@@ -41,8 +42,6 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
 
       setBundlesLoading(true);
       setBundlesError(null);
-      setOwnerUsername(null);
-      setInactivityExpiry(null);
       try {
         const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
         if (requestId !== bundleRequestIdRef.current || selectedIssueRef.current !== trimmed) {
@@ -69,7 +68,6 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
           }
           return;
         }
-        setBundles([]);
         setInactivityExpiry(null);
         setBundlesError(message);
       } finally {
@@ -117,9 +115,77 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
       clearBundles();
       return;
     }
-    setBundleFiles({});
+    clearBundles();
     loadBundles(currentIssueCode).catch(() => undefined);
   }, [clearBundles, currentIssueCode, loadBundles]);
+
+  const hasActiveBundles = bundles.some((bundle) => {
+    const status = bundle.status.upload_status;
+    return status === 'PENDING' || status === 'PROCESSING';
+  });
+
+  useEffect(() => {
+    if (!currentIssueCode || !hasActiveBundles) return;
+
+    let cancelled = false;
+    let polling = false;
+    let refreshOnVisible = false;
+    let timer: number | undefined;
+
+    const clearTimer = () => {
+      if (timer === undefined) return;
+      window.clearTimeout(timer);
+      timer = undefined;
+    };
+
+    const schedulePoll = () => {
+      clearTimer();
+      if (cancelled || document.hidden) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        poll().catch(() => undefined);
+      }, 3000);
+    };
+
+    const poll = async () => {
+      if (cancelled || polling || document.hidden) return;
+      polling = true;
+      try {
+        await loadBundles(currentIssueCode);
+      } finally {
+        polling = false;
+        if (cancelled) return;
+        if (refreshOnVisible && !document.hidden) {
+          refreshOnVisible = false;
+          poll().catch(() => undefined);
+          return;
+        }
+        schedulePoll();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        clearTimer();
+        return;
+      }
+      clearTimer();
+      if (polling) {
+        refreshOnVisible = true;
+        return;
+      }
+      poll().catch(() => undefined);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    schedulePoll();
+
+    return () => {
+      cancelled = true;
+      clearTimer();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [currentIssueCode, hasActiveBundles, loadBundles]);
 
   useEffect(() => {
     for (const bundle of bundles) {
