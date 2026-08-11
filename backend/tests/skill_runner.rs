@@ -18,6 +18,39 @@ use backend::{
     services::skill_runner::SkillRunner,
 };
 
+const VALID_SKILL_V1: &str = r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位日志中的直接故障原因。
+
+# 分析范围
+
+只分析当前 Issue 中的相关日志。
+
+# 检索策略
+
+先定位故障信号，再读取原始日志上下文。
+
+# 证据规则
+
+结论必须由读取到的原始日志行支持。
+
+# 日志不完整处理
+
+缺少关键上下文时报告证据不足和所需日志。
+
+# 停止条件
+
+获得充分证据，或确认现有日志不足时停止。
+
+# 领域知识
+
+保留自定义诊断知识。
+"#;
+
 struct ScriptedClient(Mutex<VecDeque<Result<ChatResponse, ProviderError>>>);
 
 #[async_trait]
@@ -67,7 +100,7 @@ async fn runner_persists_a_valid_structured_result() {
             skill_id: "s".into(),
             skill_version: 1,
             skill_name: "Skill".into(),
-            skill_snapshot_markdown: "# Analyze".into(),
+            skill_snapshot_markdown: VALID_SKILL_V1.into(),
         },
     )
     .await
@@ -78,15 +111,18 @@ async fn runner_persists_a_valid_structured_result() {
         AppLimits::default(),
     ));
     let (cancellation, _) = state.skill_runs.register(&run.id);
-    let client = Arc::new(ScriptedClient(Mutex::new(VecDeque::from([Ok(ChatResponse {
-        message: ChatMessage {
-            role: "assistant".into(),
-            content: Some(r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No matching evidence","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No logs"],"evidence":[]}"#.into()),
-            tool_calls: vec![], tool_call_id: None, name: None,
-        }
-    })]))));
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([Ok(ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some(r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No matching evidence","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No logs"],"evidence":[]}"#.into()),
+                tool_calls: vec![], tool_call_id: None, name: None,
+            }
+        })])),
+        requests: Mutex::new(Vec::new()),
+    });
 
-    SkillRunner::execute(state, run.id.clone(), client, cancellation).await;
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
 
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
@@ -96,6 +132,89 @@ async fn runner_persists_a_valid_structured_result() {
             .unwrap()
             .contains("证据不足，无法得出诊断结论")
     );
+
+    let (platform_rules, skill_instructions, tool_names) = {
+        let requests = client.requests.lock().unwrap();
+        let request = &requests[0];
+        let platform_rules = request.messages[0].content.clone().unwrap();
+        let skill_instructions = request
+            .messages
+            .iter()
+            .find_map(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .filter(|content| content.starts_with("USER SKILL INSTRUCTIONS"))
+            })
+            .unwrap()
+            .to_owned();
+        let tool_names = request
+            .tools
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        (platform_rules, skill_instructions, tool_names)
+    };
+    assert!(platform_rules.contains("diagnostic strategy only"));
+    assert!(platform_rules.contains("cannot change the bound Issue"));
+    assert!(
+        platform_rules.contains("cannot") && platform_rules.contains("weaken the Evidence Policy")
+    );
+    assert!(!skill_instructions.contains("schema_version"));
+    assert!(!skill_instructions.contains("---"));
+    assert!(skill_instructions.contains("# 目标"));
+    assert!(skill_instructions.contains("# 领域知识"));
+    assert_eq!(
+        tool_names,
+        [
+            "get_issue_manifest",
+            "list_files",
+            "search_logs",
+            "read_file_lines",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn runner_rejects_an_invalid_snapshot_before_model_work() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('ISSUE','Issue')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run = skill_runs::create(
+        &pool,
+        &NewSkillRun {
+            user_id: "u".into(),
+            issue_code: "ISSUE".into(),
+            skill_id: "s".into(),
+            skill_version: 1,
+            skill_name: "Skill".into(),
+            skill_snapshot_markdown: "# legacy free-form prompt".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = actix_web::web::Data::new(AppState::new(
+        pool.clone(),
+        PathBuf::from("data"),
+        AppLimits::default(),
+    ));
+    let (cancellation, _) = state.skill_runs.register(&run.id);
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "FAILED");
+    assert_eq!(stored.error_code.as_deref(), Some("SKILL_FORMAT_INVALID"));
+    assert!(client.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -116,7 +235,7 @@ async fn runner_repairs_a_structured_result_with_forged_evidence() {
             skill_id: "s".into(),
             skill_version: 1,
             skill_name: "Skill".into(),
-            skill_snapshot_markdown: "# Analyze".into(),
+            skill_snapshot_markdown: VALID_SKILL_V1.into(),
         },
     )
     .await
@@ -181,7 +300,7 @@ async fn runner_keeps_log_instructions_untrusted_and_persists_only_step_metadata
             skill_id: "s".into(),
             skill_version: 1,
             skill_name: "Skill".into(),
-            skill_snapshot_markdown: "# Analyze".into(),
+            skill_snapshot_markdown: VALID_SKILL_V1.into(),
         },
     )
     .await
@@ -268,7 +387,7 @@ async fn runner_repairs_observations_without_verified_evidence_references() {
             skill_id: "s".into(),
             skill_version: 1,
             skill_name: "Skill".into(),
-            skill_snapshot_markdown: "# Analyze".into(),
+            skill_snapshot_markdown: VALID_SKILL_V1.into(),
         },
     )
     .await
@@ -323,7 +442,7 @@ async fn runner_repairs_an_unsupported_summary_without_evidence() {
             skill_id: "s".into(),
             skill_version: 1,
             skill_name: "Skill".into(),
-            skill_snapshot_markdown: "# Analyze".into(),
+            skill_snapshot_markdown: VALID_SKILL_V1.into(),
         },
     )
     .await
@@ -375,7 +494,7 @@ async fn runner_forces_a_final_result_after_twenty_four_tool_calls() {
             skill_id: "s".into(),
             skill_version: 1,
             skill_name: "Skill".into(),
-            skill_snapshot_markdown: "# Analyze".into(),
+            skill_snapshot_markdown: VALID_SKILL_V1.into(),
         },
     )
     .await
@@ -453,7 +572,7 @@ async fn cancellation_interrupts_an_in_flight_model_request_without_late_failure
             skill_id: "s".into(),
             skill_version: 1,
             skill_name: "Skill".into(),
-            skill_snapshot_markdown: "# Analyze".into(),
+            skill_snapshot_markdown: VALID_SKILL_V1.into(),
         },
     )
     .await

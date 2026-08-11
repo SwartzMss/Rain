@@ -33,6 +33,8 @@ pub struct UserSkillResponse {
     pub name: String,
     pub description: Option<String>,
     pub skill_markdown: String,
+    /// Parsed machine metadata. Historical free-form Skill records return `null`.
+    pub schema_version: Option<u64>,
     pub content_hash: String,
     pub version: i64,
     pub enabled: bool,
@@ -46,6 +48,8 @@ pub struct UserSkillSummaryResponse {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    /// `Some(1)` only when the complete stored document is a valid v1 Skill.
+    pub schema_version: Option<u64>,
     pub content_hash: String,
     pub version: i64,
     pub enabled: bool,

@@ -12,6 +12,38 @@ use backend::{
 };
 use chrono::{Duration, Utc};
 
+fn valid_skill_markdown() -> String {
+    r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位蓝牙连接失败的直接原因。
+
+# 分析范围
+
+关注 Bluetooth Framework、HAL 与 HCI。
+
+# 检索策略
+
+先定位失败信号，再读取原始日志上下文。
+
+# 证据规则
+
+关键事实和根因必须由原始日志行支持。
+
+# 日志不完整处理
+
+证据不足时说明缺失信息，不猜测根因。
+
+# 停止条件
+
+证据足以支持根因或现有日志不足时停止。
+"#
+    .into()
+}
+
 async fn user_cookie(pool: &sqlx::SqlitePool, id: &str, username: &str) -> Cookie<'static> {
     sqlx::query(
         "INSERT INTO users(id,username,username_normalized,password_hash) VALUES(?,?,?,'hash')",
@@ -116,7 +148,7 @@ async fn skills_are_private_versioned_and_validated() {
             .set_json(serde_json::json!({
                 "name": "QSEE analysis",
                 "description": "private",
-                "skill_markdown": "# Goal\nSearch QSEE evidence",
+                "skill_markdown": valid_skill_markdown(),
                 "enabled": true
             }))
             .to_request(),
@@ -126,6 +158,7 @@ async fn skills_are_private_versioned_and_validated() {
     let created: serde_json::Value = test::read_body_json(response).await;
     let id = created["id"].as_str().unwrap();
     assert_eq!(created["version"], 1);
+    assert_eq!(created["schema_version"], 1);
     assert!(created["review"].is_null());
 
     let response = test::call_service(
@@ -140,6 +173,7 @@ async fn skills_are_private_versioned_and_validated() {
     let listed: serde_json::Value = test::read_body_json(response).await;
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert!(listed[0].get("skill_markdown").is_none());
+    assert_eq!(listed[0]["schema_version"], 1);
 
     let response = test::call_service(
         &app,
@@ -159,7 +193,10 @@ async fn skills_are_private_versioned_and_validated() {
             .set_json(serde_json::json!({
                 "name": "QSEE analysis",
                 "description": "updated",
-                "skill_markdown": "# Goal\nSearch QSEE evidence and error codes",
+                "skill_markdown": valid_skill_markdown().replace(
+                    "定位蓝牙连接失败的直接原因。",
+                    "定位 QSEE 失败的直接原因并关联错误码。"
+                ),
                 "enabled": false
             }))
             .to_request(),
@@ -177,7 +214,7 @@ async fn skills_are_private_versioned_and_validated() {
             .cookie(owner.clone())
             .set_json(serde_json::json!({
                 "name": "qsee ANALYSIS",
-                "skill_markdown": "content"
+                "skill_markdown": valid_skill_markdown()
             }))
             .to_request(),
     )
@@ -202,7 +239,7 @@ async fn skills_are_private_versioned_and_validated() {
             .cookie(owner.clone())
             .set_json(serde_json::json!({
                 "name": "Skill over limit",
-                "skill_markdown": "# Too many"
+                "skill_markdown": valid_skill_markdown()
             }))
             .to_request(),
     )
@@ -230,4 +267,93 @@ async fn skills_are_private_versioned_and_validated() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[actix_web::test]
+async fn create_and_update_reject_invalid_skill_format_before_persistence() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let owner = user_cookie(&pool, "owner", "owner").await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let missing_schema = valid_skill_markdown().replacen("schema_version: 1\n", "", 1);
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/me/skills")
+            .cookie(owner.clone())
+            .set_json(serde_json::json!({
+                "name": "invalid create",
+                "skill_markdown": missing_schema
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "SKILL_FORMAT_INVALID");
+    assert_eq!(body["message"], "Front Matter 缺少 schema_version");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_skills")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/me/skills")
+            .cookie(owner.clone())
+            .set_json(serde_json::json!({
+                "name": "valid",
+                "skill_markdown": valid_skill_markdown()
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = test::read_body_json(response).await;
+    let id = created["id"].as_str().unwrap();
+
+    let duplicate_goal = format!("{}\n# 目标\n\n第二个目标。\n", valid_skill_markdown());
+    let response = test::call_service(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/api/me/skills/{id}"))
+            .cookie(owner.clone())
+            .set_json(serde_json::json!({
+                "name": "should not persist",
+                "skill_markdown": duplicate_goal,
+                "enabled": false
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "SKILL_FORMAT_INVALID");
+    assert_eq!(body["message"], "重复定义必填章节：目标");
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/me/skills/{id}"))
+            .cookie(owner)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let stored: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(stored["name"], "valid");
+    assert_eq!(stored["version"], 1);
+    assert_eq!(stored["enabled"], true);
 }
