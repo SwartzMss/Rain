@@ -215,3 +215,9 @@ Expected: 格式、Clippy、完整测试和补丁检查通过；提交并推送�
 - [x] suggestion 只保留上下文无关的明确禁用字面量检查。
 - [x] 未知工具、Evidence Policy 和停止条件由 System Prompt best-effort 约束。
 - [x] repair 提示重申简体中文、孤立技术标识和禁用能力字面量契约。
+
+### Task 7: Review follow-up — 对齐关闭语义并收窄 denylist
+
+- [x] deterministic denylist 只保留具体且稳定的能力名，允许 `工具`、`命令`、`外部工具` 和 `第三方工具` 等普通关系词出现在合规建议中。
+- [x] 增加泛化能力措辞的回归测试，并同步 validator 设计记录。
+- [x] 保留 #96 的原始硬验收标准，将 PR #99 的 `Fixes #96` 改为 `Refs #96`，避免合并时错误关闭 issue。

@@ -356,16 +356,7 @@ fn suggestion_contains_forbidden_literal(suggestion: &str) -> bool {
         "network request",
         "curl",
     ];
-    const CHINESE_LITERALS: &[&str] = &[
-        "外部工具",
-        "第三方工具",
-        "工具",
-        "命令",
-        "解析器",
-        "脚本",
-        "网络访问",
-        "网络请求",
-    ];
+    const CHINESE_LITERALS: &[&str] = &["解析器", "脚本", "网络访问", "网络请求"];
 
     let suggestion = suggestion.to_lowercase();
     ASCII_LITERALS
@@ -527,16 +518,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_review_rejects_forbidden_literals_regardless_of_context() {
+    fn parse_review_rejects_forbidden_capability_literals_regardless_of_context() {
         for suggestion in [
             "使用 grep 搜索蓝牙日志。",
             "删除 grep 指令并改写检索策略。",
-            "保持建议与具体工具无关。",
             "不要调用外部解析器。",
             "不要发起网络访问。",
         ] {
             let review = review_with_findings("[]", &serde_json::json!([suggestion]).to_string());
             assert!(parse_review(Some(&review)).is_err(), "{suggestion}");
+        }
+    }
+
+    #[test]
+    fn parse_review_accepts_generic_capability_language() {
+        for suggestion in [
+            "保持建议与具体工具无关。",
+            "不要依赖未授权工具或命令。",
+            "仅描述诊断策略，不指定第三方工具。",
+            "避免依赖外部工具。",
+        ] {
+            let review = review_with_findings("[]", &serde_json::json!([suggestion]).to_string());
+            assert!(parse_review(Some(&review)).is_ok(), "{suggestion}");
         }
     }
 

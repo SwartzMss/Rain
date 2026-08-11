@@ -47,15 +47,14 @@ fn parse_review_does_not_classify_open_ended_semantics() {
 
 该测试明确记录边界：`awk` 与 Evidence Policy 的语义由 Prompt 约束，不由 parser 猜测。当前实现会因第二条 suggestion 的 inference-to-conclusion 规则而失败。
 
-- [ ] **Step 3: 增加禁用字面量不解释上下文的失败测试**
+- [ ] **Step 3: 增加具体禁用能力不解释上下文的失败测试**
 
 ```rust
 #[test]
-fn parse_review_rejects_forbidden_literals_regardless_of_context() {
+fn parse_review_rejects_forbidden_capability_literals_regardless_of_context() {
     for suggestion in [
         "使用 grep 搜索蓝牙日志。",
         "删除 grep 指令并改写检索策略。",
-        "保持建议与具体工具无关。",
         "不要调用外部解析器。",
         "不要发起网络访问。",
     ] {
@@ -64,6 +63,8 @@ fn parse_review_rejects_forbidden_literals_regardless_of_context() {
     }
 }
 ```
+
+同时增加 `parse_review_accepts_generic_capability_language`，确保 `工具`、`命令`、`外部工具` 和 `第三方工具` 这类普通关系词不会误触发 repair。
 
 - [ ] **Step 4: 用新的责任边界测试替换旧语义断言**
 
@@ -74,11 +75,11 @@ fn parse_review_rejects_forbidden_literals_regardless_of_context() {
 - `parse_review_does_not_apply_negation_to_later_violations`
 - `parse_review_rejects_suggestions_that_cross_diagnostic_boundaries`
 
-这些覆盖分别由 `parse_review_does_not_classify_open_ended_semantics`、`parse_review_rejects_forbidden_literals_regardless_of_context` 和 System Prompt 契约测试承担。
+这些覆盖分别由 `parse_review_does_not_classify_open_ended_semantics`、`parse_review_rejects_forbidden_capability_literals_regardless_of_context`、`parse_review_accepts_generic_capability_language` 和 System Prompt 契约测试承担。
 
 - [ ] **Step 5: 调整合法反馈 fixture**
 
-从 `parse_review_allows_chinese_feedback_with_technical_terms_and_safe_boundaries` 的合法 suggestions 中删除含 `grep`、`工具` 的否定式样例，保留：
+从 `parse_review_allows_chinese_feedback_with_technical_terms_and_safe_boundaries` 的合法 suggestions 中删除含具体禁用能力名的否定式样例；普通的工具无关表述由独立回归测试覆盖。保留：
 
 ```rust
 let review = review_with_findings(
@@ -160,8 +161,7 @@ fn suggestion_contains_forbidden_literal(suggestion: &str) -> bool {
         "network request",
         "curl",
     ];
-    const CHINESE_LITERALS: &[&str] =
-        &["外部工具", "第三方工具", "工具", "命令", "解析器", "脚本", "网络访问", "网络请求"];
+    const CHINESE_LITERALS: &[&str] = &["解析器", "脚本", "网络访问", "网络请求"];
 
     let suggestion = suggestion.to_lowercase();
     ASCII_LITERALS
@@ -266,7 +266,7 @@ content: Some(SKILL_REVIEW_REPAIR_PROMPT.into()),
 
 - [x] 删除 invocation/object、否定作用域、Evidence 推理链和循环停止条件自然语言解析。
 - [x] 简体文本改用 ZhHans 一致性与按 Han 分隔的局部 ASCII prose 检查。
-- [x] suggestion 只保留上下文无关的明确禁用字面量检查。
+- [x] suggestion 只保留上下文无关的具体禁用能力字面量检查，不拦截 `工具`、`命令` 等普通关系词。
 - [x] 未知工具、Evidence Policy 和停止条件由 System Prompt best-effort 约束。
 - [x] repair 提示重申简体中文、孤立技术标识和禁用能力字面量契约。
 ```
