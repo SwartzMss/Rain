@@ -71,7 +71,7 @@ describe('upload and bundle polling behavior', () => {
 
   afterEach(() => {
     vi.useRealTimers();
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it('allows upload B to start after upload A is accepted with PROCESSING status', async () => {
