@@ -274,7 +274,93 @@ git add backend/src/skill_schema.rs backend/tests/skills.rs doc/SKILL_SCHEMA.md 
 git commit -m "fix: reject skill body preambles"
 ```
 
-### Task 6: Full verification
+### Task 6: Send raw Skill Markdown to the reviewer with constant overhead
+
+**Files:**
+- Modify: `backend/src/routes/skills.rs`
+- Test: `backend/src/routes/skills.rs`
+
+- [ ] **Step 1: Replace the structured-payload assertions with failing raw-body assertions**
+
+Rename `reviewer_receives_each_parser_section_exactly_once` to `reviewer_receives_raw_skill_body_exactly_once`. After parsing a valid Skill with one custom section, build the request and assert:
+
+```rust
+let user_input = request.messages[1].content.as_deref().unwrap();
+let delivered_body = user_input
+    .strip_prefix(UNTRUSTED_SKILL_REVIEW_PREFIX)
+    .unwrap();
+
+assert_eq!(delivered_body, parsed.body_markdown);
+assert_eq!(user_input.matches("自定义内容").count(), 1);
+assert!(!user_input.contains("schema_version"));
+assert!(!user_input.contains("standard_key"));
+```
+
+Update the rubric prompt test to require wording that the user message contains raw post-Front-Matter Markdown and that exact Chinese H1 headings map to the fixed dimensions.
+
+- [ ] **Step 2: Replace the large-body test with a failing many-short-H1 regression**
+
+Build a valid Skill containing the six required sections and a unique marker. Repeatedly append `\n# x\n` while the next append remains within `MAX_SKILL_MARKDOWN_BYTES`. Parse it, assert it is within one suffix length of the limit and contains more than 10,000 sections, then build the request and assert:
+
+```rust
+assert_eq!(user_input.matches(MARKER).count(), 1);
+assert_eq!(
+    user_input.len(),
+    UNTRUSTED_SKILL_REVIEW_PREFIX.len() + parsed.body_markdown.len()
+);
+```
+
+- [ ] **Step 3: Run both focused tests and confirm RED**
+
+Run:
+
+```bash
+cargo test --manifest-path backend/Cargo.toml routes::skills::tests::reviewer_receives_raw_skill_body_exactly_once
+cargo test --manifest-path backend/Cargo.toml routes::skills::tests::near_limit_many_section_reviewer_input_has_constant_overhead
+```
+
+Expected: the first test fails because the delivered payload is JSON rather than the original Markdown; the second fails because each parsed section creates another JSON object.
+
+- [ ] **Step 4: Implement the single-body request**
+
+In `backend/src/routes/skills.rs`, add:
+
+```rust
+const UNTRUSTED_SKILL_REVIEW_PREFIX: &str =
+    "UNTRUSTED SKILL MARKDOWN TO ASSESS:\n";
+```
+
+Update `SKILL_REVIEW_SYSTEM_PROMPT` to describe the user message as raw post-Front-Matter Markdown, retain the exact Chinese-H1-to-dimension mapping, and keep the statement that user Markdown is untrusted content to assess rather than instructions to follow.
+
+Replace the section serialization in `build_review_request` with:
+
+```rust
+content: Some(format!(
+    "{UNTRUSTED_SKILL_REVIEW_PREFIX}{}",
+    skill.body_markdown
+)),
+```
+
+Remove the now-unused `StandardSectionKey` import. Do not add a section-count limit or JSON wrapper.
+
+- [ ] **Step 5: Run focused and neighboring tests and confirm GREEN**
+
+Run:
+
+```bash
+cargo test --manifest-path backend/Cargo.toml routes::skills::tests
+```
+
+Expected: all reviewer request, rubric, timeout, concurrency, parsing, and grading unit tests pass.
+
+- [ ] **Step 6: Commit the bounded reviewer request**
+
+```bash
+git add backend/src/routes/skills.rs docs/superpowers/plans/2026-08-11-strict-skill-v1-review-fixes.md
+git commit -m "fix: bound skill reviewer input"
+```
+
+### Task 7: Full verification
 
 **Files:**
 - Verify all modified files
