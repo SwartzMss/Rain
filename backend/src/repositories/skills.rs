@@ -40,13 +40,12 @@ pub async fn list(
         .fetch_all(pool)
         .await
         .map_err(AppError::Database)?;
-    Ok(rows
-        .into_iter()
+
+    rows.into_iter()
         .map(|row| {
-            let schema_version = crate::skill_schema::parse_skill_markdown(&row.skill_markdown)
-                .ok()
-                .map(|skill| skill.schema_version);
-            UserSkillSummaryResponse {
+            let schema_version =
+                crate::skill_schema::parse_skill_markdown(&row.skill_markdown)?.schema_version;
+            Ok(UserSkillSummaryResponse {
                 id: row.id,
                 name: row.name,
                 description: row.description,
@@ -63,9 +62,9 @@ pub async fn list(
                     row.review_findings,
                     row.review_evaluated_at,
                 ),
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub async fn find_owned(
@@ -197,7 +196,8 @@ async fn with_review(
     pool: &SqlitePool,
     record: UserSkillRecord,
 ) -> Result<UserSkillResponse, AppError> {
-    let schema_version = crate::skill_schema::schema_version(&record.skill_markdown);
+    let schema_version =
+        crate::skill_schema::parse_skill_markdown(&record.skill_markdown)?.schema_version;
     let row: Option<(i64, String, String, String, String)> = sqlx::query_as("SELECT overall_score,grade,dimension_scores_json,findings_json,evaluated_at FROM skill_reviews WHERE skill_id=? AND skill_version=? AND skill_content_hash=?")
         .bind(&record.id).bind(record.version).bind(&record.content_hash)
         .fetch_optional(pool).await.map_err(AppError::Database)?;
