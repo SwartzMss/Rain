@@ -52,6 +52,14 @@ function bundlesResponse(logBundles: UploadSummary[]): IssueBundlesResponse {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 async function settle() {
   await act(async () => {
     await Promise.resolve();
@@ -159,6 +167,27 @@ describe('upload and bundle polling behavior', () => {
     unmount();
   });
 
+  it('stops polling after a PROCESSING Bundle reaches FAILED', async () => {
+    vi.mocked(rainApi.fetchIssueBundles)
+      .mockResolvedValueOnce(bundlesResponse([bundle('failed', 'PROCESSING')]))
+      .mockResolvedValueOnce(bundlesResponse([bundle('failed', 'FAILED')]));
+    const onIssueMissing = vi.fn();
+    const { result, unmount } = renderHook(() => useIssueBundles('ISSUE-1', onIssueMissing));
+    await settle();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+    expect(result.current.bundles[0].status.upload_status).toBe('FAILED');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
   it('continues polling when one Bundle is READY while another remains PROCESSING', async () => {
     vi.mocked(rainApi.fetchIssueBundles)
       .mockResolvedValueOnce(bundlesResponse([bundle('a', 'PROCESSING'), bundle('b', 'PROCESSING')]))
@@ -203,6 +232,68 @@ describe('upload and bundle polling behavior', () => {
     expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(3);
     expect(result.current.bundles).toEqual([bundle('retry', 'READY')]);
     unmount();
+  });
+
+  it('does not overlap polling requests and schedules the next poll after the current one settles', async () => {
+    const secondPoll = deferred<IssueBundlesResponse>();
+    vi.mocked(rainApi.fetchIssueBundles)
+      .mockResolvedValueOnce(bundlesResponse([bundle('slow', 'PROCESSING')]))
+      .mockReturnValueOnce(secondPoll.promise)
+      .mockResolvedValueOnce(bundlesResponse([bundle('slow', 'READY')]));
+    const onIssueMissing = vi.fn();
+    const { result, unmount } = renderHook(() => useIssueBundles('ISSUE-1', onIssueMissing));
+    await settle();
+    let pollResolved = false;
+
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3001);
+      });
+      expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        pollResolved = true;
+        secondPoll.resolve(bundlesResponse([bundle('slow', 'PROCESSING')]));
+        await secondPoll.promise;
+      });
+      expect(result.current.bundles[0].status.upload_status).toBe('PROCESSING');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2999);
+      });
+      expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(3);
+    } finally {
+      if (!pollResolved) {
+        secondPoll.resolve(bundlesResponse([bundle('slow', 'READY')]));
+        await secondPoll.promise;
+      }
+      unmount();
+    }
+  });
+
+  it('cancels a pending polling timer when the hook unmounts', async () => {
+    vi.mocked(rainApi.fetchIssueBundles).mockResolvedValueOnce(
+      bundlesResponse([bundle('unmounted', 'PROCESSING')])
+    );
+    const onIssueMissing = vi.fn();
+    const { unmount } = renderHook(() => useIssueBundles('ISSUE-1', onIssueMissing));
+    await settle();
+    unmount();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(1);
   });
 
   it('cancels the old polling chain when switching Issues', async () => {
