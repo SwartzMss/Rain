@@ -261,11 +261,11 @@ fn parse_review(content: Option<&str>) -> Result<SkillReview, ()> {
             .warnings
             .iter()
             .chain(&parsed.suggestions)
-            .any(|item| item.chars().count() > 2000 || !feedback_is_chinese_dominant(item))
+            .any(|item| item.chars().count() > 2000 || !feedback_matches_text_contract(item))
         || parsed
             .suggestions
             .iter()
-            .any(|item| suggestion_crosses_diagnostic_boundary(item))
+            .any(|item| suggestion_contains_forbidden_literal(item))
     {
         return Err(());
     }
@@ -294,12 +294,8 @@ fn is_han(character: char) -> bool {
     )
 }
 
-fn feedback_is_chinese_dominant(value: &str) -> bool {
-    let han_count = value.chars().filter(|character| is_han(*character)).count();
-    if han_count == 0 {
-        return false;
-    }
-    let ascii_prose_words = value
+fn ascii_prose_word_count(value: &str) -> usize {
+    value
         .split(|character: char| {
             !(character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '/' | ':'))
         })
@@ -323,13 +319,15 @@ fn feedback_is_chinese_dominant(value: &str) -> bool {
 
             !has_identifier_syntax && !is_acronym
         })
-        .count();
-
-    han_count >= ascii_prose_words.saturating_mul(2) && zhconv(value, Variant::ZhHans) == value
+        .count()
 }
 
-fn contains_any(value: &str, candidates: &[&str]) -> bool {
-    candidates.iter().any(|candidate| value.contains(candidate))
+fn feedback_matches_text_contract(value: &str) -> bool {
+    value.chars().any(is_han)
+        && zhconv(value, Variant::ZhHans) == value
+        && !value
+            .split(is_han)
+            .any(|ascii_run| ascii_prose_word_count(ascii_run) >= 2)
 }
 
 fn find_ascii_term(value: &str, term: &str) -> Option<(usize, usize)> {
@@ -344,71 +342,8 @@ fn find_ascii_term(value: &str, term: &str) -> Option<(usize, usize)> {
     })
 }
 
-fn find_earliest(value: &str, candidates: &[&str], start: usize) -> Option<(usize, usize)> {
-    candidates
-        .iter()
-        .filter_map(|candidate| {
-            value[start..]
-                .find(candidate)
-                .map(|offset| (start + offset, candidate.len()))
-        })
-        .min_by_key(|(position, _)| *position)
-}
-
-fn capability_is_negated(clause: &str, capability: usize) -> bool {
-    const PREFIX_NEGATIONS: &[&str] = &[
-        "不应",
-        "不得",
-        "不要",
-        "禁止",
-        "避免",
-        "移除",
-        "删除",
-        "不可",
-        "不能",
-        "无需",
-        "不依赖",
-        "do not",
-        "don't",
-        "avoid",
-        "remove",
-        "without relying on",
-    ];
-    const CONTRASTS: &[&str] = &[
-        "而是", "但是", "但", "却", "反而", "仍然", "仍", "改用", "转而", "instead", "should",
-    ];
-    const POSTFIX_NEGATIONS: &[&str] = &[
-        "未授权",
-        "不存在",
-        "无关",
-        "不可用",
-        "unsupported",
-        "unavailable",
-        "independent of",
-    ];
-
-    let prefix = &clause[..capability];
-    let last_negation = PREFIX_NEGATIONS
-        .iter()
-        .filter_map(|negation| {
-            prefix
-                .rfind(negation)
-                .map(|position| (position, negation.len()))
-        })
-        .max_by_key(|(position, _)| *position);
-    let negated_by_prefix = last_negation.is_some_and(|(position, length)| {
-        !contains_any(&clause[position + length..capability], CONTRASTS)
-    });
-    let postfix_end = find_earliest(clause, CONTRASTS, capability)
-        .map(|(position, _)| position)
-        .unwrap_or(clause.len());
-    let negated_by_postfix = contains_any(&clause[capability..postfix_end], POSTFIX_NEGATIONS);
-
-    negated_by_prefix || negated_by_postfix
-}
-
-fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
-    const UNSUPPORTED_ASCII_CAPABILITIES: &[&str] = &[
+fn suggestion_contains_forbidden_literal(suggestion: &str) -> bool {
+    const ASCII_LITERALS: &[&str] = &[
         "grep",
         "shell",
         "parser",
@@ -418,156 +353,24 @@ fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
         "network request",
         "curl",
     ];
-    const UNSUPPORTED_CHINESE_CAPABILITIES: &[&str] = &["解析器", "脚本", "网络访问", "网络请求"];
-    const GENERIC_CAPABILITIES: &[&str] = &[
-        "第三方",
+    const CHINESE_LITERALS: &[&str] = &[
         "外部工具",
-        "日志分析工具",
-        "分析工具",
-        "命令行",
-        "命令",
+        "第三方工具",
         "工具",
-        "程序",
-        "软件",
-        "分析器",
-        "third-party",
-        "external tool",
-        "command-line",
-        "command line",
-        " utility",
-    ];
-    const INVOCATIONS: &[&str] = &[
-        "使用", "利用", "调用", "运行", "执行", "借助", "采用", "通过", "用", "use ", "invoke ",
-        "run ", "execute ",
-    ];
-    const DIAGNOSTIC_ACTIONS: &[&str] = &[
-        "搜索", "检索", "分析", "解析", "查询", "下载", "请求", "抓取", "处理", "定位", "过滤",
-        "匹配", "验证", "缩小", "search", "analy", "parse", "query", "download", "request",
-        "filter", "match", "locate", "verify",
-    ];
-    const STRATEGY_OBJECTS: &[&str] = &[
-        "日志",
-        "证据",
-        "时间",
-        "模块",
-        "关键词",
-        "关键字",
-        "错误",
-        "故障",
-        "信号",
-        "事件",
-        "上下文",
-        "候选文件",
-        "文件",
-        "子系统",
-        "范围",
-        "原始记录",
-        "记录",
-        "路径",
-        "模式",
-        "策略",
-    ];
-    const INCOMPLETE_LOGS: &[&str] = &[
-        "日志不完整",
-        "日志缺失",
-        "日志截断",
-        "证据不足",
-        "incomplete log",
-        "missing log",
-        "truncated log",
-        "insufficient evidence",
-    ];
-    const INFERENCES: &[&str] = &["推断", "推测", "猜测", "假设", "infer", "assume"];
-    const CONCLUSIONS: &[&str] = &["根因", "结论", "root cause", "conclusion"];
-    const UNVERIFIED_QUALIFIERS: &[&str] = &[
-        "待验证",
-        "未经验证",
-        "保留假设",
-        "不作为结论",
-        "不作为根因",
-        "不得作为结论",
-        "不得作为根因",
-        "不能作为结论",
-        "不能作为根因",
-        "不可作为结论",
-        "不可作为根因",
-        "无法验证",
-        "证据不足以",
-        "unverified",
-        "not verified",
-        "must not be treated as a conclusion",
-        "must not be treated as a root cause",
-    ];
-    const CIRCULAR_STOPS: &[&str] = &[
-        "得出结论时停止",
-        "形成结论时停止",
-        "得出诊断结论时停止",
-        "形成诊断结论时停止",
-        "stop when reaching a conclusion",
-        "stop when reaching a diagnostic conclusion",
+        "命令",
+        "解析器",
+        "脚本",
+        "网络访问",
+        "网络请求",
     ];
 
     let suggestion = suggestion.to_lowercase();
-    let violates_sentence_boundary = suggestion
-        .split(['。', '！', '？', '；', '\n', '.', '!', '?', ';'])
-        .filter(|sentence| !sentence.trim().is_empty())
-        .any(|sentence| {
-            let recommends_unsupported = sentence
-                .split(['，', '：', ',', ':'])
-                .filter(|clause| !clause.trim().is_empty())
-                .any(|clause| {
-                    let mut violations = Vec::new();
-                    for capability in UNSUPPORTED_ASCII_CAPABILITIES {
-                        let mut search_start = 0;
-                        while let Some((position, length)) =
-                            find_ascii_term(&clause[search_start..], capability)
-                        {
-                            violations.push(search_start + position);
-                            search_start += position + length;
-                        }
-                    }
-                    for capability in UNSUPPORTED_CHINESE_CAPABILITIES
-                        .iter()
-                        .chain(GENERIC_CAPABILITIES)
-                    {
-                        violations.extend(
-                            clause
-                                .match_indices(capability)
-                                .map(|(position, _)| position),
-                        );
-                    }
-                    for invocation in INVOCATIONS {
-                        for (position, _) in clause.match_indices(invocation) {
-                            let object_start = position + invocation.len();
-                            if find_earliest(clause, DIAGNOSTIC_ACTIONS, object_start)
-                                .map(|(action, _)| &clause[object_start..action])
-                                .is_some_and(|object| !contains_any(object, STRATEGY_OBJECTS))
-                            {
-                                violations.push(position);
-                            }
-                        }
-                    }
-
-                    violations
-                        .into_iter()
-                        .any(|position| !capability_is_negated(clause, position))
-                });
-            let uses_circular_stop = contains_any(sentence, CIRCULAR_STOPS);
-
-            recommends_unsupported || uses_circular_stop
-        });
-    let promotes_unsupported_inference = find_earliest(&suggestion, INCOMPLETE_LOGS, 0)
-        .and_then(|(incomplete, _)| find_earliest(&suggestion, INFERENCES, incomplete))
-        .is_some_and(|(inference, _)| {
-            suggestion[inference..]
-                .split(['。', '！', '？', '；', '，', '\n', '.', '!', '?', ';', ','])
-                .any(|clause| {
-                    contains_any(clause, CONCLUSIONS)
-                        && !contains_any(clause, UNVERIFIED_QUALIFIERS)
-                })
-        });
-
-    violates_sentence_boundary || promotes_unsupported_inference
+    ASCII_LITERALS
+        .iter()
+        .any(|literal| find_ascii_term(&suggestion, literal).is_some())
+        || CHINESE_LITERALS
+            .iter()
+            .any(|literal| suggestion.contains(literal))
 }
 
 fn grade_for_score(score: i64) -> &'static str {
@@ -694,6 +497,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_review_rejects_english_prose_after_chinese_context() {
+        let review = review_with_findings(
+            "[]",
+            r#"["建议进一步明确蓝牙故障范围和证据规则，Clarify the Bluetooth failure scope."]"#,
+        );
+
+        assert!(parse_review(Some(&review)).is_err());
+    }
+
+    #[test]
     fn parse_review_rejects_traditional_chinese_feedback() {
         let review = review_with_findings(r#"["請明確藍牙檢索範圍並補充證據規則。"]"#, "[]");
 
@@ -701,54 +514,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_review_rejects_unenumerated_external_tools() {
-        for suggestion in [
-            "使用 awk 搜索蓝牙日志。",
-            "用 awk 搜索蓝牙日志。",
-            "利用 jq 处理日志。",
-            "调用第三方日志分析工具定位关键字。",
-        ] {
-            let review = review_with_findings("[]", &serde_json::json!([suggestion]).to_string());
-            assert!(parse_review(Some(&review)).is_err(), "{suggestion}");
-        }
-    }
-
-    #[test]
-    fn parse_review_rejects_cross_sentence_unsupported_inference() {
+    fn parse_review_does_not_classify_open_ended_semantics() {
         let review = review_with_findings(
             "[]",
-            r#"["日志不完整时，根据现有数据进行推断。最终将结果作为根因结论。"]"#,
+            r#"["使用 awk 对日志进行搜索。","日志不完整时先保留待验证假设；补齐缺失日志并验证后再形成根因结论。"]"#,
         );
 
-        assert!(parse_review(Some(&review)).is_err());
+        assert!(parse_review(Some(&review)).is_ok());
     }
 
     #[test]
-    fn parse_review_does_not_apply_negation_to_later_violations() {
-        for suggestion in [
-            "不要只查看时间而是应该使用 shell 搜索日志。",
-            "不要使用 grep 而是应该使用 shell 搜索日志。",
-            "日志不完整时，根据现有数据进行推断，不要忽略时间顺序，最终将结果作为根因结论。",
-            "日志不完整时，根据现有数据推断并标记为待验证，而后最终将结果作为根因结论。",
-        ] {
-            let review = review_with_findings("[]", &serde_json::json!([suggestion]).to_string());
-            assert!(parse_review(Some(&review)).is_err(), "{suggestion}");
-        }
-    }
-
-    #[test]
-    fn parse_review_rejects_suggestions_that_cross_diagnostic_boundaries() {
+    fn parse_review_rejects_forbidden_literals_regardless_of_context() {
         for suggestion in [
             "使用 grep 搜索蓝牙日志。",
-            "使用 shell 搜索蓝牙日志。",
-            "调用外部 parser 分析蓝牙日志。",
-            "编写脚本处理蓝牙日志。",
-            "执行 SQL 查询蓝牙日志。",
-            "发起网络请求补充蓝牙日志。",
-            "使用 curl 下载蓝牙日志。",
-            "不要使用 grep，改用 shell 搜索蓝牙日志。",
-            "日志不完整时，根据现有数据推断根因。",
-            "得出诊断结论时停止。",
+            "删除 grep 指令并改写检索策略。",
+            "保持建议与具体工具无关。",
+            "不要调用外部解析器。",
+            "不要发起网络访问。",
         ] {
             let review = review_with_findings("[]", &serde_json::json!([suggestion]).to_string());
             assert!(parse_review(Some(&review)).is_err(), "{suggestion}");
@@ -758,8 +540,8 @@ mod tests {
     #[test]
     fn parse_review_allows_chinese_feedback_with_technical_terms_and_safe_boundaries() {
         let review = review_with_findings(
-            r#"["Skill 中的 grep 指令属于未授权能力。"]"#,
-            r#"["检查 Bluetooth 日志。","读取 com.android.bluetooth 和 BT_PARSER_TIMEOUT 的原始日志上下文。","使用时间和模块逐步缩小候选日志范围。","通过关键词搜索蓝牙失败信号。","保持建议与具体工具无关，只描述诊断策略。","删除 grep 指令，改为先定位 Bluetooth 失败信号。","避免调用第三方日志分析工具，改为读取原始日志上下文。","日志截断时，将 HCI_TIMEOUT 根因假设标记为待验证。","日志不完整时，可以保留推断。将结果标记为待验证假设，不作为根因结论。","当原始日志证据足够或可用日志已耗尽时停止。"]"#,
+            r#"["Skill 中存在未授权能力说明。"]"#,
+            r#"["检查 Bluetooth 日志。","读取 com.android.bluetooth 和 BT_PARSER_TIMEOUT 的原始日志上下文。","使用时间和模块逐步缩小候选日志范围。","通过关键词搜索蓝牙失败信号。","日志截断时，将 HCI_TIMEOUT 根因假设标记为待验证。","日志不完整时，可以保留推断。将结果标记为待验证假设，不作为根因结论。","当原始日志证据足够或可用日志已耗尽时停止。"]"#,
         );
 
         assert!(parse_review(Some(&review)).is_ok());
