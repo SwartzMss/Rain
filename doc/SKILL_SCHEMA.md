@@ -38,6 +38,7 @@ schema_version: 1
 
 - 内容必须是有效 UTF-8，且不超过 64 KiB。
 - 文件必须以 YAML front matter 开始，并声明 `schema_version: 1`。v1 不接受其他版本。
+- Front Matter 结束标记与第一个一级标题之间只允许空白；任何正文、注释、列表或代码块都会返回 `SKILL_FORMAT_INVALID`，确保 Reviewer 与 Runner 看到的指令内容一致。
 - 以下六个一级标题必须使用固定中文名称、各出现一次且正文非空；顺序可以自由调整。
 - fenced code block 中形似标题的文本不参与章节识别。
 - 可以添加 `输出重点`、`领域知识`、`已知模式`、`已知错误码`、`示例` 或其他自定义章节。
