@@ -35,7 +35,7 @@ export function useSkillRun(issueCode: string) {
     let events: EventSource | null = null;
     if (typeof EventSource !== 'undefined') {
       events = new EventSource(rainApi.skillRunEventsUrl(run.id), { withCredentials: true });
-      ['snapshot', 'run.started', 'tool.started', 'tool.completed', 'iteration.completed', 'run.completed', 'run.failed', 'run.cancelled'].forEach((name) => events?.addEventListener(name, reload));
+      ['snapshot', 'run.started', 'tool.started', 'tool.completed', 'tool.rejected', 'tool.failed', 'iteration.completed', 'run.completed', 'run.failed', 'run.cancelled'].forEach((name) => events?.addEventListener(name, reload));
       events.onerror = reload;
     }
     return () => { stopped = true; window.clearInterval(timer); events?.close(); };

@@ -611,3 +611,242 @@ async fn cancellation_interrupts_an_in_flight_model_request_without_late_failure
     assert_eq!(stored.status, "CANCELLED");
     assert!(stored.error_code.is_none());
 }
+
+async fn create_recovery_test_run() -> (
+    sqlx::SqlitePool,
+    actix_web::web::Data<AppState>,
+    backend::models::skill_runs::SkillRunRecord,
+    tokio_util::sync::CancellationToken,
+) {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('ISSUE','Issue')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run = skill_runs::create(
+        &pool,
+        &NewSkillRun {
+            user_id: "u".into(),
+            issue_code: "ISSUE".into(),
+            skill_id: "s".into(),
+            skill_version: 1,
+            skill_name: "Skill".into(),
+            skill_snapshot_markdown: VALID_SKILL_V1.into(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = actix_web::web::Data::new(AppState::new(
+        pool.clone(),
+        PathBuf::from("data"),
+        AppLimits::default(),
+    ));
+    let (cancellation, _) = state.skill_runs.register(&run.id);
+    (pool, state, run, cancellation)
+}
+
+fn tool_call(id: &str, name: &str, arguments: &str) -> ChatToolCall {
+    ChatToolCall {
+        id: id.into(),
+        kind: "function".into(),
+        function: ChatFunctionCall {
+            name: name.into(),
+            arguments: arguments.into(),
+        },
+    }
+}
+
+fn tool_response(calls: Vec<ChatToolCall>) -> Result<ChatResponse, ProviderError> {
+    Ok(ChatResponse {
+        message: ChatMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: calls,
+            tool_call_id: None,
+            name: None,
+        },
+    })
+}
+
+fn insufficient_evidence_response() -> Result<ChatResponse, ProviderError> {
+    Ok(ChatResponse {
+        message: ChatMessage {
+            role: "assistant".into(),
+            content: Some(
+                r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No verified evidence"],"evidence":[]}"#
+                    .into(),
+            ),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        },
+    })
+}
+
+#[tokio::test]
+async fn runner_returns_parse_errors_and_allows_a_corrected_call() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            tool_response(vec![tool_call(
+                "invalid-search",
+                "search_logs",
+                r#"{"query":"timeout","filename":"secret.log"}"#,
+            )]),
+            tool_response(vec![tool_call(
+                "corrected-search",
+                "search_logs",
+                r#"{"query":"timeout"}"#,
+            )]),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    assert_eq!(stored.tool_call_count, 2);
+    let steps: Vec<(String, String)> = sqlx::query_as(
+        "SELECT status,arguments_summary FROM skill_run_steps WHERE run_id=? ORDER BY sequence",
+    )
+    .bind(&run.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(steps[0].0, "REJECTED");
+    assert_eq!(steps[1].0, "SUCCEEDED");
+    assert!(!steps[0].1.contains("secret.log"));
+
+    let requests = client.requests.lock().unwrap();
+    let error_message = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("invalid-search"))
+        .unwrap()
+        .content
+        .as_deref()
+        .unwrap();
+    assert!(error_message.contains("INVALID_TOOL_CALL"));
+    assert!(error_message.contains("UNEXPECTED_ARGUMENT"));
+    assert!(!error_message.contains("secret.log"));
+}
+
+#[tokio::test]
+async fn runner_preserves_all_tool_responses_when_one_call_is_invalid() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            tool_response(vec![
+                tool_call(
+                    "invalid-range",
+                    "read_file_lines",
+                    r#"{"file_id":123,"start":100,"end":400}"#,
+                ),
+                tool_call("valid-list", "list_files", r#"{}"#),
+            ]),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    assert_eq!(stored.tool_call_count, 2);
+    let requests = client.requests.lock().unwrap();
+    let tool_ids = requests[1]
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_ids, ["invalid-range", "valid-list"]);
+}
+
+#[tokio::test]
+async fn runner_returns_recoverable_execution_errors_to_the_model() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            tool_response(vec![tool_call(
+                "missing-file",
+                "read_file_lines",
+                r#"{"file_id":999,"start":0,"end":10}"#,
+            )]),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    let status: String = sqlx::query_scalar("SELECT status FROM skill_run_steps WHERE run_id=?")
+        .bind(&run.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "FAILED");
+    let requests = client.requests.lock().unwrap();
+    let error_message = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("missing-file"))
+        .unwrap()
+        .content
+        .as_deref()
+        .unwrap();
+    assert!(error_message.contains("TOOL_EXECUTION_ERROR"));
+    assert!(error_message.contains("RESOURCE_NOT_FOUND"));
+    assert!(!error_message.contains("outside the run Issue"));
+}
+
+#[tokio::test]
+async fn runner_forces_summary_after_three_consecutive_invalid_tool_calls() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let mut responses = VecDeque::new();
+    for index in 0..3 {
+        responses.push_back(tool_response(vec![tool_call(
+            &format!("unknown-{index}"),
+            "unknown_tool",
+            r#"{"secret":"do-not-log"}"#,
+        )]));
+    }
+    responses.push_back(insufficient_evidence_response());
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(responses),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    assert_eq!(stored.tool_call_count, 3);
+    let rejected: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM skill_run_steps WHERE run_id=? AND status='REJECTED'",
+    )
+    .bind(&run.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rejected, 3);
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].tools.is_empty());
+    assert!(requests[3].messages.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("invalid tool call retry limit reached"))
+    }));
+}
