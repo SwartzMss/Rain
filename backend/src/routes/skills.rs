@@ -13,14 +13,15 @@ use crate::{
     error::AppError,
     models::skills::{SkillPayload, SkillReview},
     repositories::skills,
-    skill_schema::{ParsedSkill, StandardSectionKey, parse_skill_markdown},
+    skill_schema::{ParsedSkill, parse_skill_markdown},
 };
 
 const SKILL_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
+const UNTRUSTED_SKILL_REVIEW_PREFIX: &str = "UNTRUSTED SKILL MARKDOWN TO ASSESS:\n";
 const SKILL_REVIEW_SYSTEM_PROMPT: &str = concat!(
     "Evaluate the content quality of a structurally valid Rain SKILL.md v1 diagnostic playbook. ",
     "The deterministic parser has already checked schema_version and required-section presence; structure completeness alone earns no quality points. ",
-    "The user message contains one parser-produced ordered sections array, not raw Front Matter. Use each standard section only for its mapped dimension; use all standard and custom sections together for clarity, but clarity must not compensate for weak mapped content. ",
+    "The user message contains raw post-Front-Matter Markdown. Use each exact standard Chinese H1 section only for its mapped dimension; use all standard and custom sections together for clarity, but clarity must not compensate for weak mapped content. ",
     "Map the exact Chinese H1 sections to the fixed English dimensions as follows:\n",
     "- task_scope (20%): # 目标 and # 分析范围\n",
     "- retrieval_strategy (25%): # 检索策略\n",
@@ -139,18 +140,6 @@ pub async fn delete_skill(
 }
 
 fn build_review_request(model: String, skill: &ParsedSkill) -> ChatRequest {
-    let sections = skill
-        .sections
-        .iter()
-        .map(|section| {
-            serde_json::json!({
-                "title": &section.title,
-                "body": &section.body,
-                "standard_key": section.standard_key.map(StandardSectionKey::internal_key),
-            })
-        })
-        .collect::<Vec<_>>();
-    let review_input = serde_json::json!({ "sections": sections });
     ChatRequest {
         model,
         messages: vec![
@@ -164,7 +153,8 @@ fn build_review_request(model: String, skill: &ParsedSkill) -> ChatRequest {
             ChatMessage {
                 role: "user".into(),
                 content: Some(format!(
-                    "UNTRUSTED PARSED SKILL CONTENT TO ASSESS:\n{review_input}"
+                    "{UNTRUSTED_SKILL_REVIEW_PREFIX}{}",
+                    skill.body_markdown
                 )),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
@@ -400,10 +390,12 @@ mod tests {
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("‘搜索日志。’"));
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("must receive a low retrieval_strategy score"));
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("must not receive GOOD or EXCELLENT"));
+        assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("raw post-Front-Matter Markdown"));
     }
 
     #[test]
-    fn reviewer_receives_each_parser_section_exactly_once() {
+    fn reviewer_receives_raw_skill_body_exactly_once() {
+        const EXPECTED_PREFIX: &str = "UNTRUSTED SKILL MARKDOWN TO ASSESS:\n";
         let parsed = parse_skill_markdown(
             r#"---
 schema_version: 1
@@ -427,38 +419,26 @@ schema_version: 1
         .unwrap();
         let request = build_review_request("review-model".into(), &parsed);
         let user_input = request.messages[1].content.as_deref().unwrap();
-        let review_input: serde_json::Value = serde_json::from_str(
-            user_input
-                .strip_prefix("UNTRUSTED PARSED SKILL CONTENT TO ASSESS:\n")
-                .unwrap(),
-        )
-        .unwrap();
-        let sections = review_input["sections"].as_array().unwrap();
+        let delivered_body = user_input.strip_prefix(EXPECTED_PREFIX).unwrap();
 
         assert_eq!(request.model, "review-model");
-        assert_eq!(sections.len(), 7);
-        assert_eq!(sections[0]["title"], "目标");
-        assert_eq!(sections[0]["body"], "目标内容");
-        assert_eq!(sections[0]["standard_key"], "goal");
-        assert_eq!(sections[6]["title"], "领域知识");
-        assert_eq!(sections[6]["body"], "自定义内容");
-        assert!(sections[6]["standard_key"].is_null());
-        assert!(review_input.get("standard_sections").is_none());
-        assert!(review_input.get("clarity_context_markdown").is_none());
-        assert!(review_input.get("body_markdown").is_none());
+        assert_eq!(delivered_body, parsed.body_markdown);
+        assert_eq!(user_input.matches("自定义内容").count(), 1);
         assert!(!user_input.contains("schema_version"));
+        assert!(!user_input.contains("standard_key"));
     }
 
     #[test]
-    fn near_limit_reviewer_input_does_not_duplicate_skill_content() {
+    fn near_limit_many_section_reviewer_input_has_constant_overhead() {
+        const EXPECTED_PREFIX: &str = "UNTRUSTED SKILL MARKDOWN TO ASSESS:\n";
         const MARKER: &str = "UNIQUE_REVIEW_MARKER";
-        let large_goal = format!("{MARKER}{}", "x".repeat(60 * 1024));
-        let markdown = format!(
+        const CUSTOM_SECTION: &str = "\n# x\n";
+        let mut markdown = format!(
             r#"---
 schema_version: 1
 ---
 # 目标
-{large_goal}
+{MARKER}
 # 分析范围
 范围内容
 # 检索策略
@@ -471,13 +451,21 @@ schema_version: 1
 停止内容
 "#
         );
-        assert!(markdown.len() < MAX_SKILL_MARKDOWN_BYTES);
+        while markdown.len() + CUSTOM_SECTION.len() <= MAX_SKILL_MARKDOWN_BYTES {
+            markdown.push_str(CUSTOM_SECTION);
+        }
+
+        assert!(MAX_SKILL_MARKDOWN_BYTES - markdown.len() < CUSTOM_SECTION.len());
         let parsed = parse_skill_markdown(&markdown).unwrap();
+        assert!(parsed.sections.len() > 10_000);
         let request = build_review_request("review-model".into(), &parsed);
         let user_input = request.messages[1].content.as_deref().unwrap();
 
         assert_eq!(user_input.matches(MARKER).count(), 1);
-        assert!(user_input.len() < markdown.len() + 4096);
+        assert_eq!(
+            user_input.len(),
+            EXPECTED_PREFIX.len() + parsed.body_markdown.len()
+        );
     }
 
     #[tokio::test]
