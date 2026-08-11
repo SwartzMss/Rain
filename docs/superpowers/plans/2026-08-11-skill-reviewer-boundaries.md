@@ -176,3 +176,34 @@ Expected: 格式检查和完整测试通过，补丁无空白错误；提交并�
 Run: `cargo fmt --check && cargo clippy --locked -- -D warnings && cargo test --locked`
 
 Expected: 格式、Clippy 和完整测试通过；提交并推送到 PR #99。
+
+### Task 5: Review follow-up — 校验简体字与否定作用域
+
+**Files:**
+- Modify: `backend/Cargo.toml`
+- Modify: `backend/Cargo.lock`
+- Modify: `backend/src/routes/skills.rs`
+- Modify: `docs/superpowers/specs/2026-08-11-skill-reviewer-boundaries-design.md`
+- Test: `backend/src/routes/skills.rs` 的 `tests` 模块
+
+- [x] **Step 1: 复现繁体、调用同义词和否定越界**
+
+加入 review 原样样例及相同根因变体，运行聚焦测试确认繁体反馈、`用/利用` 外部工具和跨转折/跨子句否定均为 RED。
+
+- [x] **Step 2: 使用 OpenCC 数据校验简体中文**
+
+保留中文主体比例规则，并要求反馈转换到 `ZhHans` 后文本不变；使用 `zhconv` 的 OpenCC feature，避免维护不完整的手写简繁字符表。
+
+- [x] **Step 3: 将工具否定绑定到具体能力位置**
+
+枚举同一子句中的全部能力提及和调用结构，逐个判断其前置否定、转折边界和后置状态，防止早先的安全否定豁免后续推荐。
+
+- [x] **Step 4: 将证据限定绑定到结论子句**
+
+只接受与根因/结论位于同一子句的明确“待验证/不作为结论”限定，不再使用全 suggestion 的泛化否定词。
+
+- [x] **Step 5: 运行 CI 等价验证并更新 PR**
+
+Run: `cargo fmt --check && cargo clippy --locked -- -D warnings && cargo test --locked && git diff --check`
+
+Expected: 格式、Clippy、完整测试和补丁检查通过；提交并推送到 PR #99。

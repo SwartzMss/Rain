@@ -2,6 +2,7 @@ use std::{future::Future, time::Duration};
 
 use actix_web::{HttpResponse, delete, get, http::StatusCode, post, put, web};
 use sha2::{Digest, Sha256};
+use zhconv::{Variant, zhconv};
 
 use crate::{
     AppState, SkillReviewAdmissionError, SkillReviewRuntime,
@@ -324,21 +325,22 @@ fn feedback_is_chinese_dominant(value: &str) -> bool {
         })
         .count();
 
-    han_count >= ascii_prose_words.saturating_mul(2)
+    han_count >= ascii_prose_words.saturating_mul(2) && zhconv(value, Variant::ZhHans) == value
 }
 
 fn contains_any(value: &str, candidates: &[&str]) -> bool {
     candidates.iter().any(|candidate| value.contains(candidate))
 }
 
-fn contains_ascii_term(value: &str, term: &str) -> bool {
-    value.match_indices(term).any(|(start, matched)| {
+fn find_ascii_term(value: &str, term: &str) -> Option<(usize, usize)> {
+    value.match_indices(term).find_map(|(start, matched)| {
         let before = value[..start].chars().next_back();
         let after = value[start + matched.len()..].chars().next();
         let is_identifier = |character: char| character.is_ascii_alphanumeric() || character == '_';
 
-        before.is_none_or(|character| !is_identifier(character))
-            && after.is_none_or(|character| !is_identifier(character))
+        (before.is_none_or(|character| !is_identifier(character))
+            && after.is_none_or(|character| !is_identifier(character)))
+        .then_some((start, matched.len()))
     })
 }
 
@@ -351,6 +353,58 @@ fn find_earliest(value: &str, candidates: &[&str], start: usize) -> Option<(usiz
                 .map(|offset| (start + offset, candidate.len()))
         })
         .min_by_key(|(position, _)| *position)
+}
+
+fn capability_is_negated(clause: &str, capability: usize) -> bool {
+    const PREFIX_NEGATIONS: &[&str] = &[
+        "不应",
+        "不得",
+        "不要",
+        "禁止",
+        "避免",
+        "移除",
+        "删除",
+        "不可",
+        "不能",
+        "无需",
+        "不依赖",
+        "do not",
+        "don't",
+        "avoid",
+        "remove",
+        "without relying on",
+    ];
+    const CONTRASTS: &[&str] = &[
+        "而是", "但是", "但", "却", "反而", "仍然", "仍", "改用", "转而", "instead", "should",
+    ];
+    const POSTFIX_NEGATIONS: &[&str] = &[
+        "未授权",
+        "不存在",
+        "无关",
+        "不可用",
+        "unsupported",
+        "unavailable",
+        "independent of",
+    ];
+
+    let prefix = &clause[..capability];
+    let last_negation = PREFIX_NEGATIONS
+        .iter()
+        .filter_map(|negation| {
+            prefix
+                .rfind(negation)
+                .map(|position| (position, negation.len()))
+        })
+        .max_by_key(|(position, _)| *position);
+    let negated_by_prefix = last_negation.is_some_and(|(position, length)| {
+        !contains_any(&clause[position + length..capability], CONTRASTS)
+    });
+    let postfix_end = find_earliest(clause, CONTRASTS, capability)
+        .map(|(position, _)| position)
+        .unwrap_or(clause.len());
+    let negated_by_postfix = contains_any(&clause[capability..postfix_end], POSTFIX_NEGATIONS);
+
+    negated_by_prefix || negated_by_postfix
 }
 
 fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
@@ -383,8 +437,8 @@ fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
         " utility",
     ];
     const INVOCATIONS: &[&str] = &[
-        "使用", "调用", "运行", "执行", "借助", "采用", "通过", "use ", "invoke ", "run ",
-        "execute ",
+        "使用", "利用", "调用", "运行", "执行", "借助", "采用", "通过", "用", "use ", "invoke ",
+        "run ", "execute ",
     ];
     const DIAGNOSTIC_ACTIONS: &[&str] = &[
         "搜索", "检索", "分析", "解析", "查询", "下载", "请求", "抓取", "处理", "定位", "过滤",
@@ -413,30 +467,6 @@ fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
         "模式",
         "策略",
     ];
-    const NEGATIONS: &[&str] = &[
-        "不应",
-        "不得",
-        "不要",
-        "禁止",
-        "避免",
-        "移除",
-        "删除",
-        "不可",
-        "不能",
-        "未授权",
-        "不存在",
-        "无关",
-        "无需",
-        "不依赖",
-        "do not",
-        "don't",
-        "avoid",
-        "remove",
-        "unsupported",
-        "unavailable",
-        "independent of",
-        "without relying on",
-    ];
     const INCOMPLETE_LOGS: &[&str] = &[
         "日志不完整",
         "日志缺失",
@@ -449,19 +479,24 @@ fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
     ];
     const INFERENCES: &[&str] = &["推断", "推测", "猜测", "假设", "infer", "assume"];
     const CONCLUSIONS: &[&str] = &["根因", "结论", "root cause", "conclusion"];
-    const UNVERIFIED: &[&str] = &[
+    const UNVERIFIED_QUALIFIERS: &[&str] = &[
         "待验证",
         "未经验证",
         "保留假设",
-        "不可",
-        "不能",
-        "不得",
-        "不要",
-        "避免",
+        "不作为结论",
+        "不作为根因",
+        "不得作为结论",
+        "不得作为根因",
+        "不能作为结论",
+        "不能作为根因",
+        "不可作为结论",
+        "不可作为根因",
+        "无法验证",
+        "证据不足以",
         "unverified",
         "not verified",
-        "do not",
-        "don't",
+        "must not be treated as a conclusion",
+        "must not be treated as a root cause",
     ];
     const CIRCULAR_STOPS: &[&str] = &[
         "得出结论时停止",
@@ -481,21 +516,41 @@ fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
                 .split(['，', '：', ',', ':'])
                 .filter(|clause| !clause.trim().is_empty())
                 .any(|clause| {
-                    let mentions_unsupported = UNSUPPORTED_ASCII_CAPABILITIES
+                    let mut violations = Vec::new();
+                    for capability in UNSUPPORTED_ASCII_CAPABILITIES {
+                        let mut search_start = 0;
+                        while let Some((position, length)) =
+                            find_ascii_term(&clause[search_start..], capability)
+                        {
+                            violations.push(search_start + position);
+                            search_start += position + length;
+                        }
+                    }
+                    for capability in UNSUPPORTED_CHINESE_CAPABILITIES
                         .iter()
-                        .any(|capability| contains_ascii_term(clause, capability))
-                        || contains_any(clause, UNSUPPORTED_CHINESE_CAPABILITIES)
-                        || contains_any(clause, GENERIC_CAPABILITIES);
-                    let invokes_concrete_capability = find_earliest(clause, INVOCATIONS, 0)
-                        .and_then(|(invocation, invocation_len)| {
-                            let object_start = invocation + invocation_len;
-                            find_earliest(clause, DIAGNOSTIC_ACTIONS, object_start)
+                        .chain(GENERIC_CAPABILITIES)
+                    {
+                        violations.extend(
+                            clause
+                                .match_indices(capability)
+                                .map(|(position, _)| position),
+                        );
+                    }
+                    for invocation in INVOCATIONS {
+                        for (position, _) in clause.match_indices(invocation) {
+                            let object_start = position + invocation.len();
+                            if find_earliest(clause, DIAGNOSTIC_ACTIONS, object_start)
                                 .map(|(action, _)| &clause[object_start..action])
-                        })
-                        .is_some_and(|object| !contains_any(object, STRATEGY_OBJECTS));
+                                .is_some_and(|object| !contains_any(object, STRATEGY_OBJECTS))
+                            {
+                                violations.push(position);
+                            }
+                        }
+                    }
 
-                    (mentions_unsupported || invokes_concrete_capability)
-                        && !contains_any(clause, NEGATIONS)
+                    violations
+                        .into_iter()
+                        .any(|position| !capability_is_negated(clause, position))
                 });
             let uses_circular_stop = contains_any(sentence, CIRCULAR_STOPS);
 
@@ -503,10 +558,14 @@ fn suggestion_crosses_diagnostic_boundary(suggestion: &str) -> bool {
         });
     let promotes_unsupported_inference = find_earliest(&suggestion, INCOMPLETE_LOGS, 0)
         .and_then(|(incomplete, _)| find_earliest(&suggestion, INFERENCES, incomplete))
-        .and_then(|(inference, _)| {
-            find_earliest(&suggestion, CONCLUSIONS, inference).map(|_| &suggestion[inference..])
-        })
-        .is_some_and(|inference_to_conclusion| !contains_any(inference_to_conclusion, UNVERIFIED));
+        .is_some_and(|(inference, _)| {
+            suggestion[inference..]
+                .split(['。', '！', '？', '；', '，', '\n', '.', '!', '?', ';', ','])
+                .any(|clause| {
+                    contains_any(clause, CONCLUSIONS)
+                        && !contains_any(clause, UNVERIFIED_QUALIFIERS)
+                })
+        });
 
     violates_sentence_boundary || promotes_unsupported_inference
 }
@@ -635,9 +694,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_review_rejects_traditional_chinese_feedback() {
+        let review = review_with_findings(r#"["請明確藍牙檢索範圍並補充證據規則。"]"#, "[]");
+
+        assert!(parse_review(Some(&review)).is_err());
+    }
+
+    #[test]
     fn parse_review_rejects_unenumerated_external_tools() {
         for suggestion in [
             "使用 awk 搜索蓝牙日志。",
+            "用 awk 搜索蓝牙日志。",
+            "利用 jq 处理日志。",
             "调用第三方日志分析工具定位关键字。",
         ] {
             let review = review_with_findings("[]", &serde_json::json!([suggestion]).to_string());
@@ -653,6 +721,19 @@ mod tests {
         );
 
         assert!(parse_review(Some(&review)).is_err());
+    }
+
+    #[test]
+    fn parse_review_does_not_apply_negation_to_later_violations() {
+        for suggestion in [
+            "不要只查看时间而是应该使用 shell 搜索日志。",
+            "不要使用 grep 而是应该使用 shell 搜索日志。",
+            "日志不完整时，根据现有数据进行推断，不要忽略时间顺序，最终将结果作为根因结论。",
+            "日志不完整时，根据现有数据推断并标记为待验证，而后最终将结果作为根因结论。",
+        ] {
+            let review = review_with_findings("[]", &serde_json::json!([suggestion]).to_string());
+            assert!(parse_review(Some(&review)).is_err(), "{suggestion}");
+        }
     }
 
     #[test]
