@@ -30,7 +30,9 @@ const initialUploadState: UploadState = {
 function uploadReducer(state: UploadState, action: UploadAction): UploadState {
   switch (action.type) {
     case 'reset-selection':
-      return { status: 'idle', selection: [], message: null, progress: 0 };
+      return state.status === 'uploading'
+        ? { ...state, selection: [], message: null, progress: 0 }
+        : { status: 'idle', selection: [], message: null, progress: 0 };
     case 'error':
       return { ...state, message: action.message };
     case 'upload-started':

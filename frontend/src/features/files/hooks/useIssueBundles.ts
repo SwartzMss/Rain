@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ApiError, normalizeApiError, rainApi } from '../../../api/client';
 import type { IssueBundlesResponse, IssueInactivityExpiry, UploadSummary } from '../../../api/types';
 import type { BundleFileState } from '../homeRows';
@@ -16,7 +16,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   const selectedIssueRef = useRef(currentIssueCode);
   const bundleRequestIdRef = useRef(0);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     selectedIssueRef.current = currentIssueCode;
   }, [currentIssueCode]);
 
@@ -35,12 +35,13 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   const loadBundles = useCallback(
     async (code: string) => {
       const trimmed = code.trim();
-      const requestId = ++bundleRequestIdRef.current;
       if (!trimmed) {
         clearBundles();
         setBundlesLoading(false);
         return;
       }
+      if (selectedIssueRef.current !== trimmed) return;
+      const requestId = ++bundleRequestIdRef.current;
 
       setBundlesLoading(true);
       setBundlesError(null);

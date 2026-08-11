@@ -112,6 +112,96 @@ describe('upload and bundle polling behavior', () => {
     unmount();
   });
 
+  it('keeps an in-flight upload disabled when switching Issues resets the selection', async () => {
+    const uploadA = deferred<UploadResponse>();
+    vi.mocked(rainApi.uploadLogs).mockReturnValueOnce(uploadA.promise);
+    const loadBundles = vi.fn().mockResolvedValue(undefined);
+    const loadIssues = vi.fn().mockResolvedValue(undefined);
+    const { result, rerender, unmount } = renderHook(
+      ({ issueCode }) => useUploadTask({ currentIssueCode: issueCode, loadBundles, loadIssues }),
+      { initialProps: { issueCode: 'ISSUE-A' } }
+    );
+    let uploadPromise!: Promise<void>;
+
+    await act(async () => {
+      uploadPromise = result.current.performUpload([new File(['a'], 'a.log')]);
+      await Promise.resolve();
+    });
+    expect(result.current.uploading).toBe(true);
+    expect(result.current.uploadDisabled).toBe(true);
+
+    rerender({ issueCode: 'ISSUE-B' });
+    act(() => result.current.resetSelection());
+
+    expect(result.current.uploading).toBe(true);
+    expect(result.current.uploadDisabled).toBe(true);
+    expect(result.current.uploadingRef.current).toBe(true);
+
+    await act(async () => {
+      uploadA.resolve(uploadResponse('task-a', 'PROCESSING'));
+      await uploadPromise;
+    });
+    expect(result.current.uploading).toBe(false);
+    expect(result.current.uploadDisabled).toBe(false);
+    unmount();
+  });
+
+  it('does not let an old Issue post-upload refresh invalidate the selected Issue request', async () => {
+    const uploadA = deferred<UploadResponse>();
+    const issueB = deferred<IssueBundlesResponse>();
+    let issueARequests = 0;
+    vi.mocked(rainApi.uploadLogs).mockReturnValueOnce(uploadA.promise);
+    vi.mocked(rainApi.fetchIssueBundles).mockImplementation(async (code) => {
+      if (code === 'ISSUE-B') return issueB.promise;
+      issueARequests += 1;
+      return bundlesResponse([]);
+    });
+    const loadIssues = vi.fn().mockResolvedValue(undefined);
+    const onIssueMissing = vi.fn();
+    const { result, rerender, unmount } = renderHook(
+      ({ issueCode }) => {
+        const bundleState = useIssueBundles(issueCode, onIssueMissing);
+        const uploadState = useUploadTask({
+          currentIssueCode: issueCode,
+          loadBundles: bundleState.loadBundles,
+          loadIssues
+        });
+        return { bundleState, uploadState };
+      },
+      { initialProps: { issueCode: 'ISSUE-A' } }
+    );
+    await settle();
+    let uploadPromise!: Promise<void>;
+
+    await act(async () => {
+      uploadPromise = result.current.uploadState.performUpload([new File(['a'], 'a.log')]);
+      await Promise.resolve();
+    });
+    rerender({ issueCode: 'ISSUE-B' });
+    await settle();
+    expect(vi.mocked(rainApi.fetchIssueBundles).mock.calls.map(([code]) => code)).toEqual([
+      'ISSUE-A',
+      'ISSUE-B'
+    ]);
+
+    await act(async () => {
+      uploadA.resolve(uploadResponse('task-a', 'PROCESSING'));
+      await uploadPromise;
+    });
+    await act(async () => {
+      issueB.resolve(bundlesResponse([bundle('bundle-b', 'READY')]));
+      await issueB.promise;
+    });
+
+    expect(issueARequests).toBe(1);
+    expect(vi.mocked(rainApi.fetchIssueBundles).mock.calls.map(([code]) => code)).toEqual([
+      'ISSUE-A',
+      'ISSUE-B'
+    ]);
+    expect(result.current.bundleState.bundles).toEqual([bundle('bundle-b', 'READY')]);
+    unmount();
+  });
+
   it('starts polling when the selected Issue contains a PENDING Bundle', async () => {
     vi.mocked(rainApi.fetchIssueBundles)
       .mockResolvedValueOnce(bundlesResponse([bundle('pending', 'PENDING')]))
