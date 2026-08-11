@@ -360,7 +360,147 @@ git add backend/src/routes/skills.rs docs/superpowers/plans/2026-08-11-strict-sk
 git commit -m "fix: bound skill reviewer input"
 ```
 
-### Task 7: Full verification
+### Task 7: Keep Skill summary reads independent of Markdown size
+
+**Files:**
+- Modify: `backend/src/repositories/skills.rs`
+- Test: `backend/tests/skills.rs`
+
+- [ ] **Step 1: Change the invalid direct-insert regression to express the summary trust boundary**
+
+Rename `invalid_stored_skills_fail_reads` to `summary_list_trusts_v1_storage_invariant_while_detail_validates_content`. After directly inserting the invalid record, replace the list error assertion with:
+
+```rust
+let listed = skills::list(&pool, "u").await.unwrap();
+assert_eq!(listed.len(), 1);
+assert_eq!(listed[0].schema_version, 1);
+
+let error = skills::find_response(&pool, "u", "invalid")
+    .await
+    .unwrap_err();
+assert!(matches!(
+    error,
+    AppError::PublicApi {
+        code: "SKILL_FORMAT_INVALID",
+        ..
+    }
+));
+```
+
+- [ ] **Step 2: Run the focused repository test and confirm RED**
+
+Run:
+
+```bash
+cargo test --manifest-path backend/Cargo.toml --test skills summary_list_trusts_v1_storage_invariant_while_detail_validates_content
+```
+
+Expected: FAIL because `skills::list` still parses the invalid Markdown and returns `SKILL_FORMAT_INVALID`.
+
+- [ ] **Step 3: Remove Markdown from the list row and return the schema constant**
+
+In `backend/src/repositories/skills.rs`:
+
+- import `skill_schema::SKILL_SCHEMA_VERSION`;
+- remove `skill_markdown` from `SkillListRow`;
+- remove `s.skill_markdown` from the list SELECT;
+- replace the fallible row mapping with:
+
+```rust
+Ok(rows
+    .into_iter()
+    .map(|row| UserSkillSummaryResponse {
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        schema_version: SKILL_SCHEMA_VERSION,
+        content_hash: row.content_hash,
+        version: row.version,
+        enabled: row.enabled,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        review: parse_review_row(
+            row.review_overall_score,
+            row.review_grade,
+            row.review_dimensions,
+            row.review_findings,
+            row.review_evaluated_at,
+        ),
+    })
+    .collect())
+```
+
+Keep `COLUMNS` and `with_review` unchanged because detail responses require the complete Markdown and validate it.
+
+- [ ] **Step 4: Run repository tests and confirm GREEN**
+
+Run:
+
+```bash
+cargo test --manifest-path backend/Cargo.toml --test skills
+```
+
+Expected: all Skill repository and API tests pass. The direct-insert regression returns a v1 summary and detail still returns `SKILL_FORMAT_INVALID`.
+
+- [ ] **Step 5: Commit the lightweight list query**
+
+```bash
+git add backend/src/repositories/skills.rs backend/tests/skills.rs docs/superpowers/plans/2026-08-11-strict-skill-v1-review-fixes.md
+git commit -m "fix: keep skill summaries lightweight"
+```
+
+### Task 8: Align Reviewer fenced-heading semantics with the parser
+
+**Files:**
+- Modify: `backend/src/routes/skills.rs`
+- Test: `backend/src/routes/skills.rs`
+
+- [ ] **Step 1: Add a failing prompt-contract assertion**
+
+In `reviewer_rubric_maps_chinese_sections_and_penalizes_generic_content`, add:
+
+```rust
+assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains(
+    "Headings inside fenced code blocks are content or examples, not Skill section boundaries"
+));
+```
+
+- [ ] **Step 2: Run the focused prompt test and confirm RED**
+
+Run:
+
+```bash
+cargo test --manifest-path backend/Cargo.toml routes::skills::tests::reviewer_rubric_maps_chinese_sections_and_penalizes_generic_content
+```
+
+Expected: FAIL because the system prompt does not define fenced-code heading semantics.
+
+- [ ] **Step 3: Add the parser-aligned instruction**
+
+Add this sentence to `SKILL_REVIEW_SYSTEM_PROMPT` after the raw-Markdown description:
+
+```text
+Headings inside fenced code blocks are content or examples, not Skill section boundaries.
+```
+
+- [ ] **Step 4: Run all reviewer route tests and confirm GREEN**
+
+Run:
+
+```bash
+cargo test --manifest-path backend/Cargo.toml routes::skills::tests
+```
+
+Expected: all reviewer request, rubric, timeout, concurrency, parsing, and grading unit tests pass.
+
+- [ ] **Step 5: Commit the prompt alignment**
+
+```bash
+git add backend/src/routes/skills.rs
+git commit -m "fix: align reviewer fenced headings"
+```
+
+### Task 9: Full verification
 
 **Files:**
 - Verify all modified files
