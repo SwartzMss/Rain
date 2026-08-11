@@ -10,6 +10,7 @@ pub mod models;
 pub mod repositories;
 pub mod routes;
 pub mod services;
+pub mod skill_schema;
 pub mod upload;
 
 use chrono::{DateTime, Utc};

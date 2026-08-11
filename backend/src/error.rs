@@ -55,6 +55,16 @@ impl AppError {
     }
 }
 
+impl From<crate::skill_schema::SkillFormatError> for AppError {
+    fn from(error: crate::skill_schema::SkillFormatError) -> Self {
+        Self::public(
+            StatusCode::BAD_REQUEST,
+            "SKILL_FORMAT_INVALID",
+            error.to_string(),
+        )
+    }
+}
+
 impl ResponseError for AppError {
     fn status_code(&self) -> StatusCode {
         match self {
@@ -202,5 +212,18 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
         assert_eq!(payload["code"], "SEARCH_EXPRESSION_INVALID");
         assert_eq!(payload["message"], "搜索条件无效（位置 12）");
+    }
+
+    #[actix_web::test]
+    async fn skill_format_errors_have_a_stable_public_contract() {
+        let response = AppError::from(
+            crate::skill_schema::SkillFormatError::MissingRequiredSection("证据规则"),
+        )
+        .error_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body()).await.expect("response body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
+        assert_eq!(payload["code"], "SKILL_FORMAT_INVALID");
+        assert_eq!(payload["message"], "缺少必填章节：证据规则");
     }
 }

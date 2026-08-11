@@ -12,6 +12,7 @@ use crate::{
     models::skill_runs::NewSkillRun,
     repositories::{skill_runs, skills},
     services::skill_runner::SkillRunner,
+    skill_schema::parse_skill_markdown,
 };
 
 #[derive(Deserialize)]
@@ -59,6 +60,7 @@ pub async fn create(
             "Skill 已停用",
         ));
     }
+    parse_skill_markdown(&skill.skill_markdown)?;
     let provider = resolve_effective_config(&state.db.pool, &state.ai_provider)
         .await?
         .ok_or_else(|| {

@@ -22,7 +22,7 @@ describe('issue skill runner', () => {
   beforeEach(() => { vi.clearAllMocks(); sessionStorage.clear(); });
 
   it('runs an enabled private skill and shows its evidence', async () => {
-    vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '', review: null }]);
+    vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '', review: null }]);
     vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
     vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(null);
     vi.mocked(rainApi.createSkillRun).mockResolvedValue({ id: 'run-1', user_id: 'user-1', issue_code: 'ISSUE-1', skill_id: 'skill-1', skill_version: 1, skill_name: '诊断', status: 'SUCCEEDED', iteration_count: 1, tool_call_count: 1, cancel_requested: false, created_at: '' });
@@ -36,5 +36,22 @@ describe('issue skill runner', () => {
     expect(await screen.findByText('发现数据库超时')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /app\.log:42-43/ }));
     expect(reveal).toHaveBeenCalledWith(expect.objectContaining({ file_id: 8, start_line: 42 }));
+  });
+
+  it('shows only enabled Skills', async () => {
+    vi.mocked(rainApi.fetchSkills).mockResolvedValue([
+      { id: 'disabled', name: '停用诊断', description: '', schema_version: 1, enabled: false, version: 1, content_hash: 'disabled-hash', created_at: '', updated_at: '', review: null },
+      { id: 'enabled', name: '启用诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'enabled-hash', created_at: '', updated_at: '', review: null }
+    ]);
+    vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
+    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(null);
+
+    render(<IssueSkillRunner issueCode="ISSUE-1" onRevealEvidence={vi.fn()} />);
+
+    const select = await screen.findByLabelText('选择 Skill');
+    expect(select).toHaveValue('enabled');
+    expect(screen.queryByRole('option', { name: /停用诊断/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /启用诊断/ })).toBeInTheDocument();
+    expect(screen.queryByText(/迁移到 v1/)).not.toBeInTheDocument();
   });
 });

@@ -233,6 +233,7 @@ export interface UserSkill {
   name: string;
   description?: string | null;
   skill_markdown: string;
+  schema_version: number;
   content_hash: string;
   version: number;
   enabled: boolean;
