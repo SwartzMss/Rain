@@ -198,10 +198,27 @@ impl SkillRunner {
         );
         let mut messages = initial_messages(&run, &parsed_skill.body_markdown);
         let manifest_started = Instant::now();
-        let overview = executor
-            .get_issue_manifest()
-            .await
-            .map_err(|_| ("SKILL_TOOL_FAILED", "无法生成 Issue Manifest"))?;
+        let overview = match executor.get_issue_manifest().await {
+            Ok(overview) => overview,
+            Err(error) => {
+                let failure = classify_bootstrap_manifest_error(error);
+                tracing::error!(
+                    run_id,
+                    iteration = 0_usize,
+                    tool_call_index = 0_usize,
+                    tool_call = 0_usize,
+                    budget_counted = false,
+                    tool = "get_issue_manifest",
+                    error_stage = "execute",
+                    error_category = failure.category.as_str(),
+                    arguments_summary = "no arguments",
+                    reason = failure.reason,
+                    elapsed_ms = manifest_started.elapsed().as_millis() as u64,
+                    "skill bootstrap manifest failed with a platform error"
+                );
+                return Err((failure.code, failure.message));
+            }
+        };
         tracing::debug!(
             run_id,
             output_bytes = overview.to_string().len(),
@@ -785,6 +802,42 @@ fn classify_tool_execution_error(error: crate::error::AppError) -> ToolCallError
     }
 }
 
+fn classify_bootstrap_manifest_error(error: crate::error::AppError) -> FatalToolFailure {
+    match classify_tool_execution_error(error) {
+        ToolCallError::Fatal {
+            code,
+            message,
+            category,
+            reason,
+        } => FatalToolFailure {
+            code,
+            message,
+            category,
+            reason,
+        },
+        ToolCallError::Limit => FatalToolFailure {
+            code: "SKILL_TOOL_EXECUTION_ERROR",
+            message: "Skill 只读工具执行失败",
+            category: ToolErrorCategory::PlatformError,
+            reason: "bootstrap manifest exceeded retrieval limits",
+        },
+        ToolCallError::Recoverable { category, reason } => FatalToolFailure {
+            code: "SKILL_TOOL_EXECUTION_ERROR",
+            message: "Skill 只读工具执行失败",
+            category,
+            reason,
+        },
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FatalToolFailure {
+    code: &'static str,
+    message: &'static str,
+    category: ToolErrorCategory,
+    reason: &'static str,
+}
+
 enum ToolCallError {
     Limit,
     Recoverable {
@@ -1339,8 +1392,8 @@ fn validate_evidence(result: &SkillRunResult, ledger: &EvidenceLedger) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        ResultValidationStage, ToolCallError, ToolErrorCategory, classify_tool_execution_error,
-        parse_result, parse_tool_call, validate_result,
+        ResultValidationStage, ToolCallError, ToolErrorCategory, classify_bootstrap_manifest_error,
+        classify_tool_execution_error, parse_result, parse_tool_call, validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
     use crate::error::AppError;
@@ -1457,6 +1510,32 @@ mod tests {
                 panic!("storage errors must terminate the run")
             }
         }
+    }
+
+    #[test]
+    fn bootstrap_manifest_uses_shared_platform_error_classification() {
+        let storage = classify_bootstrap_manifest_error(AppError::Database(sqlx::Error::Protocol(
+            "secret database detail".into(),
+        )));
+        assert_eq!(storage.code, "SKILL_TOOL_STORAGE_ERROR");
+        assert_eq!(storage.category, ToolErrorCategory::StorageError);
+        assert_eq!(storage.reason, "tool storage operation failed");
+        assert!(!storage.reason.contains("secret database detail"));
+
+        let io_storage = classify_bootstrap_manifest_error(AppError::Io(std::io::Error::other(
+            "secret storage path",
+        )));
+        assert_eq!(io_storage.code, "SKILL_TOOL_STORAGE_ERROR");
+        assert_eq!(io_storage.category, ToolErrorCategory::StorageError);
+        assert_eq!(io_storage.reason, "tool storage operation failed");
+        assert!(!io_storage.reason.contains("secret storage path"));
+
+        let platform =
+            classify_bootstrap_manifest_error(AppError::Config("secret config detail".into()));
+        assert_eq!(platform.code, "SKILL_TOOL_EXECUTION_ERROR");
+        assert_eq!(platform.category, ToolErrorCategory::PlatformError);
+        assert_eq!(platform.reason, "tool execution failed");
+        assert!(!platform.reason.contains("secret config detail"));
     }
 
     #[test]

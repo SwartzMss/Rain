@@ -29,6 +29,7 @@
 - [x] 保留 retrieval limit 的强制总结语义。
 - [x] 数据库和 I/O 失败映射为 `SKILL_TOOL_STORAGE_ERROR`。
 - [x] 其他不可恢复平台错误映射为 `SKILL_TOOL_EXECUTION_ERROR`。
+- [x] 启动 Manifest 复用平台错误分类和安全日志，且不计入 Tool Call 预算。
 - [x] 日志包含 parse/execute 阶段、分类、调用位置和安全参数摘要。
 
 ## Task 5：最终结果可观测性
@@ -45,5 +46,5 @@
 - [x] `cargo clippy --locked -- -D warnings`
 - [x] `cargo fmt --check`
 - [x] `cargo check --locked`
-- [x] `cargo test --locked`（242 个自动化测试通过，1 个手工 benchmark 按设计忽略）
+- [x] `cargo test --locked`（243 个自动化测试通过，1 个手工 benchmark 按设计忽略）
 - [x] `git diff --check`

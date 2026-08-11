@@ -46,6 +46,7 @@ Tool 名只记录四个允许名称；其他名称统一记为 `unknown`。参�
 - retrieval byte/range/output limit：保持 `RETRIEVAL_LIMIT`，进入既有强制总结流程。
 - Database、I/O：终止为 `SKILL_TOOL_STORAGE_ERROR`。
 - 其他平台异常：终止为 `SKILL_TOOL_EXECUTION_ERROR`。
+- 启动阶段自动获取的 Issue Manifest 复用同一分类与脱敏日志，但仍不计入模型的 24 次 Tool Call 预算。
 
 对模型和日志只使用固定安全原因，不转发 `AppError` 内部文本、SQL、堆栈或物理路径。
 
