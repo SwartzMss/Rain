@@ -143,3 +143,36 @@ Expected: 所有 parser 契约测试通过。
 Run: `cargo fmt --check && cargo test && git diff origin/main...HEAD --check`
 
 Expected: 格式检查和完整测试通过，补丁无空白错误；提交并推送到现有 PR #99。
+
+### Task 4: Review follow-up — 收紧中文主体和开放式语义边界
+
+**Files:**
+- Modify: `backend/src/routes/skills.rs`
+- Modify: `docs/superpowers/specs/2026-08-11-skill-reviewer-boundaries-design.md`
+- Test: `backend/src/routes/skills.rs` 的 `tests` 模块
+
+- [x] **Step 1: 复现中文前缀、未枚举工具和跨句证据升级**
+
+加入 review 中的原样样例，运行 `cargo test routes::skills::tests::parse_review_rejects_`，确认三个新测试均为 RED。
+
+- [x] **Step 2: 用中文主体比例替代单汉字判断**
+
+统计 Han 字符与非技术 ASCII 自然语言词；要求 Han 数量至少是英文词数量的两倍，同时忽略错误码、包名、路径和缩写。
+
+- [x] **Step 3: 用结构规则补充能力边界**
+
+识别通用外部能力语义，并校验“调用对象 + 诊断动作”；只允许日志、证据、时间、模块、关键词、文件和上下文等策略对象。
+
+- [x] **Step 4: 聚合整条 suggestion 的证据状态**
+
+跨句按顺序识别日志不完整、推断和根因结论；待验证或明确否定结论的表达继续放行。
+
+- [x] **Step 5: 验证合法技术文本与工具无关建议**
+
+运行 `cargo test routes::skills::tests::parse_review_`，确认非法样例拒绝且 Bluetooth、包名、错误码、合法策略对象和工具无关建议均通过。
+
+- [x] **Step 6: 运行 CI 等价验证并更新 PR**
+
+Run: `cargo fmt --check && cargo clippy --locked -- -D warnings && cargo test --locked`
+
+Expected: 格式、Clippy 和完整测试通过；提交并推送到 PR #99。
