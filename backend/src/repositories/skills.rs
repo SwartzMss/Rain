@@ -6,6 +6,7 @@ use crate::{
     models::skills::{
         SkillPayload, SkillReview, UserSkillRecord, UserSkillResponse, UserSkillSummaryResponse,
     },
+    skill_schema::SKILL_SCHEMA_VERSION,
 };
 
 const COLUMNS: &str = "id,owner_user_id,name,description,skill_markdown,content_hash,version,enabled,created_at,updated_at";
@@ -17,7 +18,6 @@ struct SkillListRow {
     id: String,
     name: String,
     description: Option<String>,
-    skill_markdown: String,
     content_hash: String,
     version: i64,
     enabled: bool,
@@ -35,7 +35,7 @@ pub async fn list(
     user_id: &str,
 ) -> Result<Vec<UserSkillSummaryResponse>, AppError> {
     let rows: Vec<SkillListRow> = sqlx::query_as(
-        "SELECT s.id,s.name,s.description,s.skill_markdown,s.content_hash,s.version,s.enabled,s.created_at,s.updated_at,r.overall_score AS review_overall_score,r.grade AS review_grade,r.dimension_scores_json AS review_dimensions,r.findings_json AS review_findings,r.evaluated_at AS review_evaluated_at FROM user_skills s LEFT JOIN skill_reviews r ON r.skill_id=s.id AND r.skill_version=s.version AND r.skill_content_hash=s.content_hash AND r.rubric_version=? WHERE s.owner_user_id=? ORDER BY s.updated_at DESC,s.id DESC LIMIT 50",
+        "SELECT s.id,s.name,s.description,s.content_hash,s.version,s.enabled,s.created_at,s.updated_at,r.overall_score AS review_overall_score,r.grade AS review_grade,r.dimension_scores_json AS review_dimensions,r.findings_json AS review_findings,r.evaluated_at AS review_evaluated_at FROM user_skills s LEFT JOIN skill_reviews r ON r.skill_id=s.id AND r.skill_version=s.version AND r.skill_content_hash=s.content_hash AND r.rubric_version=? WHERE s.owner_user_id=? ORDER BY s.updated_at DESC,s.id DESC LIMIT 50",
     )
         .bind(CURRENT_SKILL_REVIEW_RUBRIC)
         .bind(user_id)
@@ -43,30 +43,27 @@ pub async fn list(
         .await
         .map_err(AppError::Database)?;
 
-    rows.into_iter()
-        .map(|row| {
-            let schema_version =
-                crate::skill_schema::parse_skill_markdown(&row.skill_markdown)?.schema_version;
-            Ok(UserSkillSummaryResponse {
-                id: row.id,
-                name: row.name,
-                description: row.description,
-                schema_version,
-                content_hash: row.content_hash,
-                version: row.version,
-                enabled: row.enabled,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                review: parse_review_row(
-                    row.review_overall_score,
-                    row.review_grade,
-                    row.review_dimensions,
-                    row.review_findings,
-                    row.review_evaluated_at,
-                ),
-            })
+    Ok(rows
+        .into_iter()
+        .map(|row| UserSkillSummaryResponse {
+            id: row.id,
+            name: row.name,
+            description: row.description,
+            schema_version: SKILL_SCHEMA_VERSION,
+            content_hash: row.content_hash,
+            version: row.version,
+            enabled: row.enabled,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            review: parse_review_row(
+                row.review_overall_score,
+                row.review_grade,
+                row.review_dimensions,
+                row.review_findings,
+                row.review_evaluated_at,
+            ),
         })
-        .collect()
+        .collect())
 }
 
 pub async fn find_owned(

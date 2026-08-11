@@ -194,7 +194,7 @@ async fn current_rubric_controls_review_visibility() {
 }
 
 #[tokio::test]
-async fn invalid_stored_skills_fail_reads() {
+async fn summary_list_trusts_v1_storage_invariant_while_detail_validates_content() {
     let pool = db::init_pool("sqlite::memory:").unwrap();
     db::prepare_schema(&pool, false).await.unwrap();
     sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
@@ -206,20 +206,20 @@ async fn invalid_stored_skills_fail_reads() {
         .await
         .unwrap();
 
-    for error in [
-        skills::list(&pool, "u").await.unwrap_err(),
-        skills::find_response(&pool, "u", "invalid")
-            .await
-            .unwrap_err(),
-    ] {
-        assert!(matches!(
-            error,
-            AppError::PublicApi {
-                code: "SKILL_FORMAT_INVALID",
-                ..
-            }
-        ));
-    }
+    let listed = skills::list(&pool, "u").await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].schema_version, 1);
+
+    let error = skills::find_response(&pool, "u", "invalid")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AppError::PublicApi {
+            code: "SKILL_FORMAT_INVALID",
+            ..
+        }
+    ));
 }
 
 #[actix_web::test]
