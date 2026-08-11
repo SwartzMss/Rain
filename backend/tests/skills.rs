@@ -6,6 +6,7 @@ use backend::{
     auth::session::{SESSION_COOKIE_NAME, generate_session_token, hash_session_token},
     config::AppLimits,
     db,
+    error::AppError,
     models::skills::{SkillPayload, SkillReview},
     repositories::{sessions, skills},
     routes,
@@ -77,7 +78,7 @@ async fn review_save_is_conditioned_on_the_current_skill_version_and_hash() {
     let payload = SkillPayload {
         name: "diagnose".into(),
         description: None,
-        skill_markdown: "# v1".into(),
+        skill_markdown: valid_skill_markdown(),
         enabled: true,
     };
     let created = skills::create(&pool, "u", &payload, "hash-v1")
@@ -102,7 +103,10 @@ async fn review_save_is_conditioned_on_the_current_skill_version_and_hash() {
     );
 
     let changed = SkillPayload {
-        skill_markdown: "# v2".into(),
+        skill_markdown: valid_skill_markdown().replace(
+            "定位蓝牙连接失败的直接原因。",
+            "定位蓝牙连接失败的直接原因并建立故障链。",
+        ),
         ..payload
     };
     skills::update(&pool, "u", &created.id, &changed, "hash-v2")
@@ -121,6 +125,101 @@ async fn review_save_is_conditioned_on_the_current_skill_version_and_hash() {
             .review
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn current_rubric_controls_review_visibility() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let payload = SkillPayload {
+        name: "diagnose".into(),
+        description: None,
+        skill_markdown: valid_skill_markdown(),
+        enabled: true,
+    };
+    let created = skills::create(&pool, "u", &payload, "hash").await.unwrap();
+    let snapshot = skills::find_owned(&pool, "u", &created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let review = SkillReview {
+        overall_score: 80,
+        grade: "GOOD".into(),
+        dimensions: serde_json::json!({"task_scope": 80}),
+        warnings: vec![],
+        suggestions: vec![],
+        evaluated_at: None,
+    };
+    assert!(
+        skills::save_review(&pool, &snapshot, "model", &review)
+            .await
+            .unwrap()
+    );
+    let rubric_version: String =
+        sqlx::query_scalar("SELECT rubric_version FROM skill_reviews WHERE skill_id=?")
+            .bind(&created.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rubric_version, "skill-quality-v2");
+    assert!(
+        skills::find_response(&pool, "u", &created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .review
+            .is_some()
+    );
+    assert!(skills::list(&pool, "u").await.unwrap()[0].review.is_some());
+
+    sqlx::query("UPDATE skill_reviews SET rubric_version='obsolete-rubric' WHERE skill_id=?")
+        .bind(&created.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert!(
+        skills::find_response(&pool, "u", &created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .review
+            .is_none()
+    );
+    assert!(skills::list(&pool, "u").await.unwrap()[0].review.is_none());
+}
+
+#[tokio::test]
+async fn invalid_stored_skills_fail_reads() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_skills(id,owner_user_id,name,skill_markdown,content_hash) VALUES('invalid','u','Invalid','# free-form prompt','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for error in [
+        skills::list(&pool, "u").await.unwrap_err(),
+        skills::find_response(&pool, "u", "invalid")
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            AppError::PublicApi {
+                code: "SKILL_FORMAT_INVALID",
+                ..
+            }
+        ));
+    }
 }
 
 #[actix_web::test]

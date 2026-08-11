@@ -233,13 +233,6 @@ pub fn parse_skill_markdown(markdown: &str) -> Result<ParsedSkill, SkillFormatEr
     })
 }
 
-/// Returns machine metadata without requiring the historical document body to satisfy v1.
-/// This keeps reads of pre-schema Skill records backward compatible.
-pub fn schema_version(markdown: &str) -> Option<u64> {
-    let front_matter = split_front_matter(markdown).ok()?;
-    parse_schema_version(front_matter.yaml).ok()
-}
-
 fn split_front_matter(markdown: &str) -> Result<FrontMatter<'_>, SkillFormatError> {
     let markdown = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
     let Some((first_line, mut cursor)) = next_line(markdown, 0) else {
@@ -432,7 +425,6 @@ fn unsupported_standard_title(title: &str) -> Option<&'static str> {
 mod tests {
     use super::{
         MAX_SKILL_MARKDOWN_BYTES, SkillFormatError, StandardSectionKey, parse_skill_markdown,
-        schema_version,
     };
 
     fn valid_skill() -> String {
@@ -521,7 +513,6 @@ schema_version: 1
             parse_skill_markdown(&unsupported),
             Err(SkillFormatError::UnsupportedSchemaVersion(2))
         );
-        assert_eq!(schema_version(&unsupported), Some(2));
     }
 
     #[test]

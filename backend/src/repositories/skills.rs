@@ -10,6 +10,7 @@ use crate::{
 
 const COLUMNS: &str = "id,owner_user_id,name,description,skill_markdown,content_hash,version,enabled,created_at,updated_at";
 pub const MAX_SKILLS_PER_USER: i64 = 50;
+pub const CURRENT_SKILL_REVIEW_RUBRIC: &str = "skill-quality-v2";
 
 #[derive(FromRow)]
 struct SkillListRow {
@@ -34,8 +35,9 @@ pub async fn list(
     user_id: &str,
 ) -> Result<Vec<UserSkillSummaryResponse>, AppError> {
     let rows: Vec<SkillListRow> = sqlx::query_as(
-        "SELECT s.id,s.name,s.description,s.skill_markdown,s.content_hash,s.version,s.enabled,s.created_at,s.updated_at,r.overall_score AS review_overall_score,r.grade AS review_grade,r.dimension_scores_json AS review_dimensions,r.findings_json AS review_findings,r.evaluated_at AS review_evaluated_at FROM user_skills s LEFT JOIN skill_reviews r ON r.skill_id=s.id AND r.skill_version=s.version AND r.skill_content_hash=s.content_hash WHERE s.owner_user_id=? ORDER BY s.updated_at DESC,s.id DESC LIMIT 50",
+        "SELECT s.id,s.name,s.description,s.skill_markdown,s.content_hash,s.version,s.enabled,s.created_at,s.updated_at,r.overall_score AS review_overall_score,r.grade AS review_grade,r.dimension_scores_json AS review_dimensions,r.findings_json AS review_findings,r.evaluated_at AS review_evaluated_at FROM user_skills s LEFT JOIN skill_reviews r ON r.skill_id=s.id AND r.skill_version=s.version AND r.skill_content_hash=s.content_hash AND r.rubric_version=? WHERE s.owner_user_id=? ORDER BY s.updated_at DESC,s.id DESC LIMIT 50",
     )
+        .bind(CURRENT_SKILL_REVIEW_RUBRIC)
         .bind(user_id)
         .fetch_all(pool)
         .await
@@ -185,7 +187,7 @@ pub async fn save_review(
     });
     let affected = sqlx::query("INSERT INTO skill_reviews(skill_id,skill_version,skill_content_hash,reviewer_model,rubric_version,overall_score,grade,dimension_scores_json,findings_json,evaluated_at) SELECT id,version,content_hash,?,?,?,?,?,?,CURRENT_TIMESTAMP FROM user_skills WHERE id=? AND owner_user_id=? AND version=? AND content_hash=? ON CONFLICT(skill_id) DO UPDATE SET skill_version=excluded.skill_version,skill_content_hash=excluded.skill_content_hash,reviewer_model=excluded.reviewer_model,rubric_version=excluded.rubric_version,overall_score=excluded.overall_score,grade=excluded.grade,dimension_scores_json=excluded.dimension_scores_json,findings_json=excluded.findings_json,evaluated_at=CURRENT_TIMESTAMP")
         .bind(reviewer_model)
-        .bind("skill-quality-v1").bind(review.overall_score).bind(&review.grade)
+        .bind(CURRENT_SKILL_REVIEW_RUBRIC).bind(review.overall_score).bind(&review.grade)
         .bind(review.dimensions.to_string()).bind(findings.to_string())
         .bind(&skill.id).bind(&skill.owner_user_id).bind(skill.version).bind(&skill.content_hash)
         .execute(pool).await.map_err(AppError::Database)?.rows_affected();
@@ -198,8 +200,8 @@ async fn with_review(
 ) -> Result<UserSkillResponse, AppError> {
     let schema_version =
         crate::skill_schema::parse_skill_markdown(&record.skill_markdown)?.schema_version;
-    let row: Option<(i64, String, String, String, String)> = sqlx::query_as("SELECT overall_score,grade,dimension_scores_json,findings_json,evaluated_at FROM skill_reviews WHERE skill_id=? AND skill_version=? AND skill_content_hash=?")
-        .bind(&record.id).bind(record.version).bind(&record.content_hash)
+    let row: Option<(i64, String, String, String, String)> = sqlx::query_as("SELECT overall_score,grade,dimension_scores_json,findings_json,evaluated_at FROM skill_reviews WHERE skill_id=? AND skill_version=? AND skill_content_hash=? AND rubric_version=?")
+        .bind(&record.id).bind(record.version).bind(&record.content_hash).bind(CURRENT_SKILL_REVIEW_RUBRIC)
         .fetch_optional(pool).await.map_err(AppError::Database)?;
     let review = row.and_then(|(score, grade, dimensions, findings, evaluated_at)| {
         parse_review_row(
