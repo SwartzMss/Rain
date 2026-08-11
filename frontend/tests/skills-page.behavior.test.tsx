@@ -31,12 +31,12 @@ describe('skills page detail loading', () => {
 
   it('loads markdown only for the selected skill', async () => {
     vi.mocked(rainApi.fetchSkills).mockResolvedValue([{
-      id: 'skill-1', name: '诊断', description: 'private', content_hash: 'hash',
+      id: 'skill-1', name: '诊断', description: 'private', schema_version: 1, content_hash: 'hash',
       enabled: true, version: 1, created_at: '', updated_at: '', review: null
     }]);
     vi.mocked(rainApi.fetchSkill).mockResolvedValue({
       id: 'skill-1', name: '诊断', description: 'private', skill_markdown: '# Full private markdown',
-      schema_version: null, content_hash: 'hash', enabled: true, version: 1, created_at: '', updated_at: '', review: null
+      schema_version: 1, content_hash: 'hash', enabled: true, version: 1, created_at: '', updated_at: '', review: null
     });
 
     render(<SkillsPage />);
@@ -49,12 +49,12 @@ describe('skills page detail loading', () => {
   it('disables quality assessment when the AI provider is not configured', async () => {
     vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: false });
     vi.mocked(rainApi.fetchSkills).mockResolvedValue([{
-      id: 'skill-1', name: '诊断', description: 'private', content_hash: 'hash',
+      id: 'skill-1', name: '诊断', description: 'private', schema_version: 1, content_hash: 'hash',
       enabled: true, version: 1, created_at: '', updated_at: '', review: null
     }]);
     vi.mocked(rainApi.fetchSkill).mockResolvedValue({
       id: 'skill-1', name: '诊断', description: 'private', skill_markdown: '# Full private markdown',
-      schema_version: null, content_hash: 'hash', enabled: true, version: 1, created_at: '', updated_at: '', review: null
+      schema_version: 1, content_hash: 'hash', enabled: true, version: 1, created_at: '', updated_at: '', review: null
     });
 
     render(<SkillsPage />);
@@ -83,7 +83,7 @@ describe('skills page detail loading', () => {
 
   it('shows the authoritative schema version returned for an existing Skill', async () => {
     vi.mocked(rainApi.fetchSkills).mockResolvedValue([{
-      id: 'skill-1', name: '诊断', description: 'private', content_hash: 'hash',
+      id: 'skill-1', name: '诊断', description: 'private', schema_version: 1, content_hash: 'hash',
       enabled: true, version: 1, created_at: '', updated_at: '', review: null
     }]);
     vi.mocked(rainApi.fetchSkill).mockResolvedValue({
@@ -94,25 +94,6 @@ describe('skills page detail loading', () => {
     render(<SkillsPage />);
 
     expect(await screen.findByText('schema_version: 1')).toBeInTheDocument();
-  });
-
-  it('marks a historical free-form Skill as requiring v1 migration', async () => {
-    const user = userEvent.setup();
-    vi.mocked(rainApi.fetchSkills).mockResolvedValue([{
-      id: 'skill-1', name: '旧诊断', description: 'private', content_hash: 'hash',
-      enabled: true, version: 1, created_at: '', updated_at: '', review: null
-    }]);
-    vi.mocked(rainApi.fetchSkill).mockResolvedValue({
-      id: 'skill-1', name: '旧诊断', description: 'private', skill_markdown: '# Legacy prompt',
-      schema_version: null, content_hash: 'hash', enabled: true, version: 1, created_at: '', updated_at: '', review: null
-    });
-
-    render(<SkillsPage />);
-
-    expect(await screen.findByText('schema_version: 未识别（需迁移到 v1）')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '编辑' }));
-    expect(screen.getByText('schema_version: 未识别（需迁移到 v1）')).toBeInTheDocument();
-    expect(screen.getByLabelText('SKILL.md')).toHaveValue('# Legacy prompt');
   });
 
   it('keeps the editor open and displays a SKILL_FORMAT_INVALID Chinese message exactly', async () => {
