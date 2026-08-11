@@ -22,6 +22,7 @@ const SKILL_REVIEW_SYSTEM_PROMPT: &str = concat!(
     "Evaluate the content quality of a structurally valid Rain SKILL.md v1 diagnostic playbook. ",
     "The deterministic parser has already checked schema_version and required-section presence; structure completeness alone earns no quality points. ",
     "The user message contains raw post-Front-Matter Markdown. Use each exact standard Chinese H1 section only for its mapped dimension; use all standard and custom sections together for clarity, but clarity must not compensate for weak mapped content. ",
+    "Headings inside fenced code blocks are content or examples, not Skill section boundaries. ",
     "Map the exact Chinese H1 sections to the fixed English dimensions as follows:\n",
     "- task_scope (20%): # 目标 and # 分析范围\n",
     "- retrieval_strategy (25%): # 检索策略\n",
@@ -391,6 +392,9 @@ mod tests {
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("must receive a low retrieval_strategy score"));
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("must not receive GOOD or EXCELLENT"));
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("raw post-Front-Matter Markdown"));
+        assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains(
+            "Headings inside fenced code blocks are content or examples, not Skill section boundaries"
+        ));
     }
 
     #[test]
