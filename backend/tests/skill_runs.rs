@@ -154,7 +154,7 @@ async fn recover_active_before_does_not_touch_runs_created_after_cutoff() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE skill_runs SET created_at='2020-01-01 00:00:00' WHERE id=?")
+    sqlx::query("UPDATE skill_runs SET created_at='2021-01-01 00:00:00' WHERE id=?")
         .bind(&old_run.id)
         .execute(&pool)
         .await

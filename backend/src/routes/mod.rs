@@ -119,7 +119,7 @@ async fn reject_requests_during_recovery(
     let recovery_pending = request
         .app_data::<web::Data<crate::AppState>>()
         .is_some_and(|state| !state.recovery.invariant_recovery_ready());
-    if recovery_pending {
+    if recovery_pending && request.path() != "/api/auth/me" {
         return Ok(
             request.into_response(HttpResponse::ServiceUnavailable().json(json!({
                 "code": "SERVICE_RECOVERING",

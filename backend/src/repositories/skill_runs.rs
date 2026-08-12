@@ -133,7 +133,7 @@ pub async fn recover_active_before(
     pool: &SqlitePool,
     created_before: &str,
 ) -> Result<u64, AppError> {
-    Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code='SERVICE_RESTARTED',error_message='服务重启导致任务中断',completed_at=CURRENT_TIMESTAMP WHERE status IN ('QUEUED','RUNNING') AND datetime(created_at) < datetime(?)")
+    Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code='SERVICE_RESTARTED',error_message='服务重启导致任务中断',completed_at=CURRENT_TIMESTAMP WHERE status IN ('QUEUED','RUNNING') AND datetime(created_at) <= datetime(?)")
         .bind(created_before)
         .execute(pool).await.map_err(AppError::Database)?.rows_affected())
 }

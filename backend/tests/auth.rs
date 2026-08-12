@@ -37,6 +37,15 @@ async fn recovery_gate_blocks_api_but_allows_health_endpoints() {
     let body: Value = test::read_body_json(response).await;
     assert_eq!(body["code"], "SERVICE_RECOVERING");
 
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get().uri("/api/auth/me").to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body, json!({"authenticated": false, "user": null}));
+
     let response =
         test::call_service(&app, test::TestRequest::get().uri("/healthz").to_request()).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -51,6 +60,55 @@ async fn recovery_gate_blocks_api_but_allows_health_endpoints() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+
+    let register = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username": "RecoveryUser", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(register.status(), StatusCode::CREATED);
+    let login = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({"username": "RecoveryUser", "password": "password123"}))
+            .to_request(),
+    )
+    .await;
+    let cookie = login
+        .response()
+        .cookies()
+        .next()
+        .expect("session cookie")
+        .into_owned();
+
+    let mut pending_state = AppState::new(
+        state.db.pool.clone(),
+        PathBuf::from("data"),
+        AppLimits::default(),
+    );
+    pending_state.recovery = Arc::new(RecoveryRuntime::default());
+    let pending_state = web::Data::new(pending_state);
+    let pending_app = test::init_service(
+        App::new()
+            .app_data(pending_state)
+            .configure(routes::register),
+    )
+    .await;
+    let response = test::call_service(
+        &pending_app,
+        test::TestRequest::get()
+            .uri("/api/auth/me")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["authenticated"], true);
 }
 
 #[actix_web::test]

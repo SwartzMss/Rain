@@ -1990,7 +1990,7 @@ async fn startup_recovery_marks_processing_bundle_failed_with_reason() {
         .await
         .expect("insert issue");
     sqlx::query(
-        "INSERT INTO bundles (id, issue_code, hash, name, status, created_at) VALUES ('stale', 'STALE', 'stale-hash', 'stale', 'PROCESSING', '2020-01-01 00:00:00')",
+        "INSERT INTO bundles (id, issue_code, hash, name, status, created_at) VALUES ('stale', 'STALE', 'stale-hash', 'stale', 'PROCESSING', '2021-01-01 00:00:00')",
     )
     .execute(&pool)
     .await
@@ -2031,7 +2031,7 @@ async fn stale_bundle_recovery_cutoff_preserves_new_processing_bundle() {
         .execute(&pool)
         .await
         .expect("insert issue");
-    sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status, created_at) VALUES ('old', 'CUTOFF', 'old-hash', 'old', 'PROCESSING', '2020-01-01 00:00:00'), ('new', 'CUTOFF', 'new-hash', 'new', 'PROCESSING', '2022-01-01 00:00:00')")
+    sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status, created_at) VALUES ('old', 'CUTOFF', 'old-hash', 'old', 'PROCESSING', '2021-01-01 00:00:00'), ('new', 'CUTOFF', 'new-hash', 'new', 'PROCESSING', '2022-01-01 00:00:00')")
         .execute(&pool)
         .await
         .expect("insert bundles");

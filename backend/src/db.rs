@@ -493,7 +493,7 @@ pub async fn fail_stale_processing_bundles_before(
             status = 'FAILED',
             failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
         WHERE status IN ('PENDING', 'PROCESSING')
-          AND datetime(created_at) < datetime(?)
+          AND datetime(created_at) <= datetime(?)
         "#,
     )
     .bind(created_before)
