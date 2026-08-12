@@ -1734,6 +1734,10 @@ mod tests {
             parse_tool_call(&call("read_file_lines", r#"{"start":100,"limit":10}"#)).unwrap_err();
         assert_eq!(missing_file_id.field, Some("file_id"));
 
+        let missing_start =
+            parse_tool_call(&call("read_file_lines", r#"{"file_id":123,"limit":10}"#)).unwrap_err();
+        assert_eq!(missing_start.field, Some("start"));
+
         let overflow = parse_tool_call(&call(
             "read_file_lines",
             &format!(r#"{{"file_id":123,"start":{},"limit":2}}"#, i64::MAX),
