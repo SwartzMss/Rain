@@ -1,10 +1,15 @@
-use std::path::PathBuf;
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use actix_web::{App, cookie::Cookie, http::StatusCode, test, web};
 use backend::{
     AppState,
     auth::session::{SESSION_COOKIE_NAME, generate_session_token, hash_session_token},
-    config::AppLimits,
+    config::{AiProviderEnv, AppLimits},
     db,
     error::AppError,
     models::skills::{SkillPayload, SkillReview},
@@ -12,6 +17,53 @@ use backend::{
     routes,
 };
 use chrono::{Duration, Utc};
+use tracing_subscriber::fmt::MakeWriter;
+
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedWriterGuard {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> MakeWriter<'writer> for SharedWriter {
+    type Writer = SharedWriterGuard;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        SharedWriterGuard(self.0.clone())
+    }
+}
+
+fn review_failure_server(
+    responses: Vec<(&'static str, &'static str)>,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = std::thread::spawn(move || {
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 64 * 1024];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        }
+    });
+    (format!("http://{address}/v1"), task)
+}
 
 fn valid_skill_markdown() -> String {
     r#"---
@@ -366,6 +418,158 @@ async fn skills_are_private_versioned_and_validated() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+#[actix_web::test]
+async fn skill_review_logs_real_repair_failure_without_skill_content() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let owner = user_cookie(&pool, "owner", "owner").await;
+    let skill_markdown = valid_skill_markdown().replace(
+        "定位蓝牙连接失败的直接原因。",
+        "SECRET SKILL MARKDOWN SENTINEL",
+    );
+    let payload = SkillPayload {
+        name: "diagnose".into(),
+        description: None,
+        skill_markdown,
+        enabled: true,
+    };
+    let skill = skills::create(&pool, "owner", &payload, "hash-v1")
+        .await
+        .unwrap();
+    let invalid_review = r#"{"choices":[{"message":{"role":"assistant","content":"not json"}}]}"#;
+    let response_secret = "UPSTREAM REVIEW RESPONSE SENTINEL";
+    let (base_url, server) = review_failure_server(vec![
+        ("200 OK", invalid_review),
+        ("400 Bad Request", response_secret),
+    ]);
+    let state = AppState::new_with_ai(
+        pool,
+        PathBuf::from("data"),
+        AppLimits::default(),
+        AiProviderEnv::from_values(
+            Some(&base_url),
+            Some("sk-review-secret"),
+            Some("review-model"),
+            5,
+            None,
+        )
+        .unwrap(),
+    );
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(routes::register),
+    )
+    .await;
+    let writer = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/api/me/skills/{}/review", skill.id))
+            .cookie(owner)
+            .to_request(),
+    )
+    .await;
+    drop(guard);
+    server.join().unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+    for expected in [
+        "stage=skill_review_repair",
+        "tools_enabled=false",
+        "response_format=json_object",
+        "error_category=http_status",
+        "http_status=400",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
+    for sensitive in [
+        "SECRET SKILL MARKDOWN SENTINEL",
+        "sk-review-secret",
+        response_secret,
+        &base_url,
+    ] {
+        assert!(
+            !output.contains(sensitive),
+            "leaked {sensitive} in {output}"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn skill_review_logs_real_initial_provider_failure() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let owner = user_cookie(&pool, "owner", "owner").await;
+    let payload = SkillPayload {
+        name: "diagnose".into(),
+        description: None,
+        skill_markdown: valid_skill_markdown(),
+        enabled: true,
+    };
+    let skill = skills::create(&pool, "owner", &payload, "hash-v1")
+        .await
+        .unwrap();
+    let (base_url, server) =
+        review_failure_server(vec![("401 Unauthorized", "provider response secret")]);
+    let state = AppState::new_with_ai(
+        pool,
+        PathBuf::from("data"),
+        AppLimits::default(),
+        AiProviderEnv::from_values(
+            Some(&base_url),
+            Some("sk-review-secret"),
+            Some("review-model"),
+            5,
+            None,
+        )
+        .unwrap(),
+    );
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(routes::register),
+    )
+    .await;
+    let writer = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/api/me/skills/{}/review", skill.id))
+            .cookie(owner)
+            .to_request(),
+    )
+    .await;
+    drop(guard);
+    server.join().unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+    for expected in [
+        "stage=skill_review ",
+        "error_category=http_status",
+        "http_status=401",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
+    assert!(!output.contains("provider response secret"));
+    assert!(!output.contains("sk-review-secret"));
+    assert!(!output.contains(&base_url));
 }
 
 #[actix_web::test]

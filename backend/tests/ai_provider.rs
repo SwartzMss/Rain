@@ -2,9 +2,12 @@ use actix_web::{App, cookie::Cookie, http::StatusCode, test as actix_test, web};
 use backend::{
     AppState,
     ai_provider::{
-        client::parse_chat_response,
+        client::{
+            ChatCompletionClient, ChatMessage, ChatRequest, OpenAiChatClient, parse_chat_response,
+        },
         config::{ProviderSource, resolve_effective_config},
         crypto::SecretCipher,
+        observability::{ProviderRequestContext, log_provider_failure},
     },
     auth::session::{SESSION_COOKIE_NAME, generate_session_token, hash_session_token},
     config::{AiProviderEnv, AppLimits},
@@ -14,7 +17,55 @@ use backend::{
 };
 use chrono::{Duration, Utc};
 use sqlx::sqlite::SqlitePoolOptions;
-use std::path::PathBuf;
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use tracing_subscriber::fmt::MakeWriter;
+
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedWriterGuard {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> MakeWriter<'writer> for SharedWriter {
+    type Writer = SharedWriterGuard;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        SharedWriterGuard(self.0.clone())
+    }
+}
+
+fn http_failure_server(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 16 * 1024];
+        let _ = stream.read(&mut request).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    (format!("http://{address}/v1"), task)
+}
 
 #[tokio::test]
 async fn schema_creates_skill_runner_storage_and_active_run_guard() {
@@ -357,6 +408,173 @@ async fn administrator_can_save_masked_provider_without_exposing_the_secret() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
+async fn provider_test_logs_real_http_failure_before_audit_storage_failure() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    bootstrap_admin::bootstrap_admin(&pool, "admin", "strong-password")
+        .await
+        .unwrap();
+    let admin_id: String = sqlx::query_scalar("SELECT id FROM users WHERE role='ADMIN'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &admin_id,
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query("DROP TABLE admin_audit_logs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response_secret = "UPSTREAM RESPONSE BODY SENTINEL";
+    let (base_url, server) = http_failure_server(response_secret);
+    let state = AppState::new_with_ai(
+        pool,
+        PathBuf::from("data"),
+        AppLimits::default(),
+        AiProviderEnv::from_values(None, None, None, 120, Some([5; 32])).unwrap(),
+    );
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(routes::register),
+    )
+    .await;
+    let writer = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    let response = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/api/admin/ai-provider/test")
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+            .set_json(serde_json::json!({
+                "base_url": base_url,
+                "api_key": "sk-secret-value",
+                "model": "FULL PROMPT SENTINEL",
+                "request_timeout_seconds": 5
+            }))
+            .to_request(),
+    )
+    .await;
+    drop(guard);
+    server.join().unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+    for expected in [
+        "stage=provider_test",
+        "error_category=http_status",
+        "http_status=400",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
+    for sensitive in [
+        "sk-secret-value",
+        "FULL PROMPT SENTINEL",
+        response_secret,
+        &base_url,
+    ] {
+        assert!(
+            !output.contains(sensitive),
+            "leaked {sensitive} in {output}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn real_connection_failure_is_reduced_to_an_allow_listed_transport_reason() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let credential_url = format!("http://user:password@{address}/v1");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let env = AiProviderEnv::from_values(
+        Some(&credential_url),
+        Some("sk-transport-secret"),
+        Some("transport-model"),
+        5,
+        None,
+    )
+    .unwrap();
+    let provider = resolve_effective_config(&pool, &env)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = OpenAiChatClient::new(&provider).unwrap();
+    let error = client
+        .complete(ChatRequest {
+            model: String::new(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: Some(
+                    "FULL PROMPT SENTINEL; SECRET SKILL MARKDOWN; ISSUE LOG BODY SENTINEL".into(),
+                ),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                name: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+        })
+        .await
+        .unwrap_err();
+    let writer = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        log_provider_failure(ProviderRequestContext::provider_test(1), error);
+    });
+    let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+
+    assert_eq!(error.category(), "transport");
+    assert!(matches!(
+        error.transport_reason(),
+        Some("connect_failed" | "request_failed")
+    ));
+    assert!(output.contains("error_category=transport"));
+    assert!(output.contains("reason="));
+    for sensitive in [
+        "user:password",
+        "sk-transport-secret",
+        "FULL PROMPT SENTINEL",
+        "SECRET SKILL MARKDOWN",
+        "ISSUE LOG BODY SENTINEL",
+        &credential_url,
+    ] {
+        assert!(
+            !output.contains(sensitive),
+            "leaked {sensitive} in {output}"
+        );
+        assert!(!error.to_string().contains(sensitive));
+    }
 }
 
 #[test]

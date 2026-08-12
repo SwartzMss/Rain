@@ -1,5 +1,7 @@
 use std::{
     collections::VecDeque,
+    future::Future,
+    io::{self, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -9,7 +11,7 @@ use backend::{
     AppState,
     ai_provider::client::{
         ChatCompletionClient, ChatFunctionCall, ChatMessage, ChatRequest, ChatResponse,
-        ChatToolCall, ProviderError,
+        ChatToolCall, ProviderError, TransportReason,
     },
     config::AppLimits,
     db,
@@ -17,6 +19,7 @@ use backend::{
     repositories::skill_runs,
     services::skill_runner::SkillRunner,
 };
+use tracing_subscriber::fmt::MakeWriter;
 
 const VALID_SKILL_V1: &str = r#"---
 schema_version: 1
@@ -66,6 +69,44 @@ struct RecordingClient {
 }
 
 struct PendingClient;
+
+#[derive(Clone, Default)]
+struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+struct SharedWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedWriterGuard {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> MakeWriter<'writer> for SharedWriter {
+    type Writer = SharedWriterGuard;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        SharedWriterGuard(self.0.clone())
+    }
+}
+
+async fn capture_logs(action: impl Future<Output = ()>) -> String {
+    let writer = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    action.await;
+    drop(guard);
+    let bytes = writer.0.lock().unwrap().clone();
+    String::from_utf8(bytes).unwrap()
+}
 
 #[async_trait]
 impl ChatCompletionClient for PendingClient {
@@ -648,6 +689,121 @@ async fn create_recovery_test_run() -> (
     ));
     let (cancellation, _) = state.skill_runs.register(&run.id);
     (pool, state, run, cancellation)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_failure_log_preserves_http_status_and_public_error_contract() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(ScriptedClient(Mutex::new(VecDeque::from([Err(
+        ProviderError::HttpStatus(400),
+    )]))));
+
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client,
+        cancellation,
+    ))
+    .await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "FAILED");
+    assert_eq!(
+        stored.error_code.as_deref(),
+        Some("AI_PROVIDER_REQUEST_FAILED")
+    );
+    for expected in [
+        "stage=model_request",
+        "iteration=Some(1)",
+        "tools_enabled=true",
+        "tool_choice=auto",
+        "response_format=none",
+        "error_category=http_status",
+        "http_status=400",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_failure_log_identifies_final_model_request() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let mut responses = VecDeque::new();
+    for index in 0..3 {
+        responses.push_back(tool_response(vec![tool_call(
+            &format!("unknown-{index}"),
+            "unknown_tool",
+            "{}",
+        )]));
+    }
+    responses.push_back(Err(ProviderError::HttpStatus(503)));
+    let client = Arc::new(ScriptedClient(Mutex::new(responses)));
+
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client,
+        cancellation,
+    ))
+    .await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "FAILED");
+    assert_eq!(
+        stored.error_code.as_deref(),
+        Some("AI_PROVIDER_REQUEST_FAILED")
+    );
+    for expected in [
+        "stage=final_model_request",
+        "tools_enabled=false",
+        "tool_choice=none",
+        "response_format=json_object",
+        "error_category=http_status",
+        "http_status=503",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_failure_log_identifies_result_repair_transport_reason() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(ScriptedClient(Mutex::new(VecDeque::from([
+        Ok(ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some("not json".into()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                name: None,
+            },
+        }),
+        Err(ProviderError::Transport(TransportReason::ConnectFailed)),
+    ]))));
+
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client,
+        cancellation,
+    ))
+    .await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "FAILED");
+    assert_eq!(
+        stored.error_code.as_deref(),
+        Some("AI_PROVIDER_REQUEST_FAILED")
+    );
+    for expected in [
+        "stage=result_repair",
+        "tools_enabled=false",
+        "response_format=json_object",
+        "error_category=transport",
+        "reason=connect_failed",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
 }
 
 fn tool_call(id: &str, name: &str, arguments: &str) -> ChatToolCall {
