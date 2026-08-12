@@ -603,6 +603,7 @@ impl SkillRunner {
             content: Some(format!("Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now, with only these top-level fields: summary, observations, inferences, missing_context, evidence. summary must be {{status: SUPPORTED|INSUFFICIENT_EVIDENCE, text, evidence_ids[]}}. observations must contain {{text, evidence_ids[]}} objects. inferences must contain {{text, confidence: LOW|MEDIUM|HIGH, evidence_ids[]}} objects. evidence must contain only EvidenceLedger entries returned by read_file_lines, and every cited evidence id must exist in that array. SUPPORTED requires evidence_ids for the summary and every observation/inference; INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context.")),
             tool_calls: Vec::new(), tool_call_id: None, name: None,
         });
+        let structured_output_mode = client.structured_output_mode();
         let model_started = Instant::now();
         let response = tokio::select! {
             _ = cancellation.cancelled() => {
@@ -616,7 +617,7 @@ impl SkillRunner {
                     messages: messages.clone(),
                     tools: Vec::new(),
                     tool_choice: None,
-                    response_format: Some(json!({"type":"json_object"})),
+                    response_format: Some(skill_result_response_format(structured_output_mode)),
                 },
                 ProviderRequestContext {
                     stage: ProviderRequestStage::FinalModelRequest,
@@ -625,7 +626,7 @@ impl SkillRunner {
                     elapsed_ms: 0,
                     tools_enabled: false,
                     tool_choice: None,
-                    response_format: Some("json_object"),
+                    response_format: Some(structured_output_mode.as_str()),
                 },
                 retry_deadline,
             ) => response.map_err(runner_provider_error)?,
@@ -1911,6 +1912,60 @@ fn validate_evidence_array(value: &Value) -> Result<(), ResultValidationError> {
     Ok(())
 }
 
+fn repair_prompt(error: ResultValidationError) -> String {
+    let field = error.field.map(ValidationField::as_str);
+    let targeted = match error.reason {
+        ResultValidationReason::InvalidJson => {
+            "The previous response was not valid JSON. Return one JSON object only.".into()
+        }
+        ResultValidationReason::MissingTopLevelField => format!(
+            "The previous JSON omitted the required top-level field `{}`.",
+            field.unwrap_or("a required field")
+        ),
+        ResultValidationReason::MissingNestedField => format!(
+            "The previous JSON omitted the required field `{}`.",
+            field.unwrap_or("a required nested field")
+        ),
+        ResultValidationReason::UnknownField => format!(
+            "The previous JSON contained an unsupported field within `{}`. Remove fields not in the schema.",
+            field.unwrap_or("the result")
+        ),
+        ResultValidationReason::InvalidFieldType => format!(
+            "The field `{}` has the wrong type. Return the field using the type required by the schema.",
+            field.unwrap_or("the invalid field")
+        ),
+        ResultValidationReason::InvalidSummaryStatus => {
+            "`summary.status` must be either `SUPPORTED` or `INSUFFICIENT_EVIDENCE`.".into()
+        }
+        ResultValidationReason::InvalidConfidence => {
+            "`inferences[].confidence` must be `LOW`, `MEDIUM`, or `HIGH`.".into()
+        }
+        ResultValidationReason::EmptyRequiredText => format!(
+            "The required text field `{}` must not be empty.",
+            field.unwrap_or("the result")
+        ),
+        ResultValidationReason::InvalidArraySize => format!(
+            "The array `{}` exceeds the allowed size. Return fewer items.",
+            field.unwrap_or("the result")
+        ),
+        ResultValidationReason::InvalidMissingContext => {
+            "`INSUFFICIENT_EVIDENCE` requires empty summary evidence_ids and non-empty missing_context.".into()
+        }
+        ResultValidationReason::InvalidEvidenceReference => {
+            "Every evidence item and evidence_id must match a verified EvidenceLedger entry.".into()
+        }
+        ResultValidationReason::UnsupportedClaim => {
+            "Do not make claims without supporting evidence_ids; use INSUFFICIENT_EVIDENCE when evidence is insufficient.".into()
+        }
+        ResultValidationReason::ResultTooLarge => {
+            "The result is too large. Return a concise result within the schema limits.".into()
+        }
+    };
+    format!(
+        "{targeted}\n\nReturn only one JSON object, with exactly these top-level fields: summary, observations, inferences, missing_context, evidence. summary.status must be SUPPORTED or INSUFFICIENT_EVIDENCE; summary has text and evidence_ids. observations have text and evidence_ids; inferences have text, confidence LOW/MEDIUM/HIGH, and evidence_ids. Every evidence_id must refer to an id in evidence, and every evidence item must match an EvidenceLedger entry returned by read_file_lines. SUPPORTED summaries and all observations/inferences require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Do not make unsupported claims. Do not use Markdown, code fences, extra prose, or tool calls."
+    )
+}
+
 async fn parse_with_repair(
     run_id: &str,
     client: &dyn ChatCompletionClient,
@@ -1936,17 +1991,25 @@ async fn parse_with_repair(
         run_id,
         final_result_validation = "failed",
         validation_reason = first_reason.as_str(),
+        validation_field = first_reason.field.map(ValidationField::as_str),
         repair_attempt = 1_u8,
         "skill result validation failed; requesting repair"
     );
     let mut repair = messages.to_vec();
     repair.push(response.message);
-    repair.push(ChatMessage { role: "user".into(), content: Some("The previous final result failed validation. Return only one JSON object, with exactly these top-level fields: summary, observations, inferences, missing_context, evidence. summary.status must be SUPPORTED or INSUFFICIENT_EVIDENCE; summary has text and evidence_ids. observations have text and evidence_ids; inferences have text, confidence LOW/MEDIUM/HIGH, and evidence_ids. Every evidence_id must refer to an id in evidence, and every evidence item must match an EvidenceLedger entry returned by read_file_lines. SUPPORTED summaries and all observations/inferences require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Do not make unsupported claims. Do not use Markdown, code fences, extra prose, or tool calls.".into()), tool_calls: vec![], tool_call_id: None, name: None });
+    repair.push(ChatMessage {
+        role: "user".into(),
+        content: Some(repair_prompt(first_reason)),
+        tool_calls: vec![],
+        tool_call_id: None,
+        name: None,
+    });
+    let structured_output_mode = client.structured_output_mode();
     let response = tokio::select! {
         _ = cancellation.cancelled() => return Err(("SKILL_RUN_CANCELLED", "Skill 任务已取消")),
         response = complete_with_retry(
             client,
-            ChatRequest { model: String::new(), messages: repair, tools: vec![], tool_choice: None, response_format: Some(json!({"type":"json_object"})) },
+            ChatRequest { model: String::new(), messages: repair, tools: vec![], tool_choice: None, response_format: Some(skill_result_response_format(structured_output_mode)) },
             ProviderRequestContext {
                 stage: ProviderRequestStage::ResultRepair,
                 run_id: Some(run_id),
@@ -1954,7 +2017,7 @@ async fn parse_with_repair(
                 elapsed_ms: 0,
                 tools_enabled: false,
                 tool_choice: None,
-                response_format: Some("json_object"),
+                response_format: Some(structured_output_mode.as_str()),
             },
             retry_deadline,
         ) => response.map_err(runner_provider_error)?,
@@ -1975,6 +2038,7 @@ async fn parse_with_repair(
                 run_id,
                 final_result_validation = "failed",
                 validation_reason = reason.as_str(),
+                validation_field = reason.field.map(ValidationField::as_str),
                 repair_attempt = 1_u8,
                 "skill result validation failed after repair"
             );

@@ -14,7 +14,7 @@ use backend::{
         ChatCompletionClient, ChatFunctionCall, ChatMessage, ChatRequest, ChatResponse,
         ChatToolCall, ProviderError, TransportReason,
     },
-    config::AppLimits,
+    config::{AppLimits, StructuredOutputMode},
     db,
     models::skill_runs::NewSkillRun,
     repositories::skill_runs,
@@ -65,6 +65,12 @@ impl ChatCompletionClient for ScriptedClient {
 }
 
 struct RecordingClient {
+    responses: Mutex<VecDeque<Result<ChatResponse, ProviderError>>>,
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+struct ModeRecordingClient {
+    mode: StructuredOutputMode,
     responses: Mutex<VecDeque<Result<ChatResponse, ProviderError>>>,
     requests: Mutex<Vec<ChatRequest>>,
 }
@@ -121,6 +127,18 @@ impl ChatCompletionClient for RecordingClient {
     async fn complete(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
         self.requests.lock().unwrap().push(request);
         self.responses.lock().unwrap().pop_front().unwrap()
+    }
+}
+
+#[async_trait]
+impl ChatCompletionClient for ModeRecordingClient {
+    async fn complete(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        self.responses.lock().unwrap().pop_front().unwrap()
+    }
+
+    fn structured_output_mode(&self) -> StructuredOutputMode {
+        self.mode
     }
 }
 
@@ -716,6 +734,99 @@ async fn create_recovery_test_run() -> (
     ));
     let (cancellation, _) = state.skill_runs.register(&run.id);
     (pool, state, run, cancellation)
+}
+
+async fn run_final_result_request_shape(mode: StructuredOutputMode) -> Vec<ChatRequest> {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let invalid_final = Ok(ChatResponse {
+        message: ChatMessage {
+            role: "assistant".into(),
+            content: Some("not json".into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        },
+    });
+    let client = Arc::new(ModeRecordingClient {
+        mode,
+        responses: Mutex::new(VecDeque::from([
+            tool_response(vec![tool_call("unknown", "unknown_tool", "{}")]),
+            tool_response(vec![tool_call("unknown-2", "unknown_tool", "{}")]),
+            tool_response(vec![tool_call("unknown-3", "unknown_tool", "{}")]),
+            invalid_final,
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    client.requests.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn result_repair_uses_configured_response_format() {
+    let schema_requests = run_final_result_request_shape(StructuredOutputMode::JsonSchema).await;
+    assert_eq!(schema_requests.len(), 5);
+    assert!(schema_requests[0].response_format.is_none());
+    assert_eq!(
+        schema_requests[3].response_format.as_ref().unwrap()["type"],
+        "json_schema"
+    );
+    assert_eq!(
+        schema_requests[4].response_format.as_ref().unwrap()["type"],
+        "json_schema"
+    );
+
+    let fallback_requests = run_final_result_request_shape(StructuredOutputMode::JsonObject).await;
+    assert_eq!(fallback_requests.len(), 5);
+    assert_eq!(
+        fallback_requests[3].response_format,
+        Some(serde_json::json!({"type":"json_object"}))
+    );
+    assert_eq!(
+        fallback_requests[4].response_format,
+        Some(serde_json::json!({"type":"json_object"}))
+    );
+}
+
+#[tokio::test]
+async fn repair_prompt_targets_validation_field() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let missing_evidence = Ok(ChatResponse {
+        message: ChatMessage {
+            role: "assistant".into(),
+            content: Some(r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No verified evidence"]}"#.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        },
+    });
+    let client = Arc::new(ModeRecordingClient {
+        mode: StructuredOutputMode::JsonObject,
+        responses: Mutex::new(VecDeque::from([
+            missing_evidence,
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    let requests = client.requests.lock().unwrap();
+    let repair_prompt = requests[1]
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .as_deref()
+        .unwrap();
+    assert!(repair_prompt.contains("omitted the required top-level field `evidence`"));
+    assert!(!repair_prompt.contains("model_secret"));
 }
 
 #[tokio::test(flavor = "current_thread")]
