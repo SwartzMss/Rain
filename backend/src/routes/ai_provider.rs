@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::Duration;
 
 use actix_web::{HttpRequest, HttpResponse, get, http::StatusCode, post, put, web};
 use serde::Deserialize;
@@ -7,10 +7,11 @@ use uuid::Uuid;
 use crate::{
     AppState,
     ai_provider::{
-        client::{ChatCompletionClient, ChatMessage, ChatRequest, OpenAiChatClient, ProviderError},
+        client::{ChatMessage, ChatRequest, OpenAiChatClient, ProviderError},
         config::{ProviderSource, ResolvedAiProvider, resolve_effective_config},
         crypto::SecretCipher,
-        observability::{ProviderRequestContext, log_provider_failure},
+        observability::ProviderRequestContext,
+        retry::complete_with_retry_until,
     },
     auth::extractor::{RequireAdmin, RequireBusinessUser},
     error::AppError,
@@ -318,9 +319,11 @@ pub async fn test_ai_provider(
     let model = provider.model.clone();
     let timeout_seconds = provider.timeout_seconds;
     let client = OpenAiChatClient::new(&provider).map_err(provider_error)?;
-    let request_started = Instant::now();
-    let outcome = client
-        .complete(ChatRequest {
+    let context = ProviderRequestContext::provider_test(0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    let outcome = complete_with_retry_until(
+        &client,
+        ChatRequest {
             model: model.clone(),
             messages: vec![ChatMessage {
                 role: "user".into(),
@@ -332,15 +335,11 @@ pub async fn test_ai_provider(
             tools: Vec::new(),
             tool_choice: None,
             response_format: None,
-        })
-        .await;
-    let request_elapsed_ms = request_started.elapsed().as_millis() as u64;
-    if let Err(error) = &outcome {
-        log_provider_failure(
-            ProviderRequestContext::provider_test(request_elapsed_ms),
-            *error,
-        );
-    }
+        },
+        context,
+        deadline,
+    )
+    .await;
     let audit_value = serde_json::json!({
         "base_url": base_url,
         "model": model,

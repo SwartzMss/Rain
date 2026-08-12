@@ -1,7 +1,4 @@
-use std::{
-    future::Future,
-    time::{Duration, Instant},
-};
+use std::{future::Future, time::Duration};
 
 use actix_web::{HttpResponse, delete, get, http::StatusCode, post, put, web};
 use sha2::{Digest, Sha256};
@@ -10,9 +7,10 @@ use zhconv::{Variant, zhconv};
 use crate::{
     AppState, SkillReviewAdmissionError, SkillReviewRuntime,
     ai_provider::{
-        client::{ChatCompletionClient, ChatMessage, ChatRequest, OpenAiChatClient},
+        client::{ChatMessage, ChatRequest, OpenAiChatClient},
         config::resolve_effective_config,
-        observability::{ProviderRequestContext, log_provider_failure},
+        observability::ProviderRequestContext,
+        retry::complete_with_retry,
     },
     auth::extractor::RequireBusinessUser,
     error::AppError,
@@ -208,22 +206,20 @@ pub async fn review(
     let pool = state.db.pool.clone();
     let reviewer_model = provider.model.clone();
     let operation_user_id = user_id.clone();
+    let retry_deadline = std::time::Instant::now() + SKILL_REVIEW_TIMEOUT;
     let review = with_review_budget(
         &state.skill_reviews,
         &user_id,
         SKILL_REVIEW_TIMEOUT,
         async move {
-            let first_started = Instant::now();
-            let first = client.complete(request.clone()).await.map_err(|error| {
-                log_provider_failure(
-                    ProviderRequestContext::skill_review(
-                        false,
-                        first_started.elapsed().as_millis() as u64,
-                    ),
-                    error,
-                );
-                review_failed()
-            })?;
+            let first = complete_with_retry(
+                &client,
+                request.clone(),
+                ProviderRequestContext::skill_review(false, 0),
+                retry_deadline,
+            )
+            .await
+            .map_err(|_| review_failed())?;
             let review = match parse_review(first.message.content.as_deref()) {
                 Ok(review) => Ok(review),
                 Err(_) => {
@@ -236,17 +232,14 @@ pub async fn review(
                         tool_call_id: None,
                         name: None,
                     });
-                    let repair_started = Instant::now();
-                    let repaired = client.complete(repair).await.map_err(|error| {
-                        log_provider_failure(
-                            ProviderRequestContext::skill_review(
-                                true,
-                                repair_started.elapsed().as_millis() as u64,
-                            ),
-                            error,
-                        );
-                        review_failed()
-                    })?;
+                    let repaired = complete_with_retry(
+                        &client,
+                        repair,
+                        ProviderRequestContext::skill_review(true, 0),
+                        retry_deadline,
+                    )
+                    .await
+                    .map_err(|_| review_failed())?;
                     parse_review(repaired.message.content.as_deref()).map_err(|_| review_failed())
                 }
             }?;

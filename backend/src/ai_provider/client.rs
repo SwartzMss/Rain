@@ -1,7 +1,11 @@
-use std::{error::Error as _, time::Duration};
+use std::{
+    error::Error as _,
+    time::{Duration, SystemTime},
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use reqwest::header::{HeaderValue, RETRY_AFTER};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -60,8 +64,11 @@ pub enum ProviderError {
     Timeout,
     #[error("AI provider request failed")]
     Transport(TransportReason),
-    #[error("AI provider returned HTTP status {0}")]
-    HttpStatus(u16),
+    #[error("AI provider returned HTTP status {status}")]
+    HttpStatus {
+        status: u16,
+        retry_after: Option<Duration>,
+    },
     #[error("AI provider response exceeded the size limit")]
     ResponseTooLarge,
     #[error("AI provider returned an invalid response")]
@@ -94,7 +101,7 @@ impl ProviderError {
         match self {
             Self::Timeout => "AI_PROVIDER_TIMEOUT",
             Self::Transport(_) => "AI_PROVIDER_UNAVAILABLE",
-            Self::HttpStatus(_) => "AI_PROVIDER_HTTP_ERROR",
+            Self::HttpStatus { .. } => "AI_PROVIDER_HTTP_ERROR",
             Self::ResponseTooLarge => "AI_PROVIDER_RESPONSE_TOO_LARGE",
             Self::InvalidResponse => "AI_PROVIDER_INVALID_RESPONSE",
         }
@@ -104,7 +111,7 @@ impl ProviderError {
         match self {
             Self::Timeout => "timeout",
             Self::Transport(_) => "transport",
-            Self::HttpStatus(_) => "http_status",
+            Self::HttpStatus { .. } => "http_status",
             Self::ResponseTooLarge => "response_too_large",
             Self::InvalidResponse => "invalid_response",
         }
@@ -112,7 +119,7 @@ impl ProviderError {
 
     pub fn http_status(self) -> Option<u16> {
         match self {
-            Self::HttpStatus(status) => Some(status),
+            Self::HttpStatus { status, .. } => Some(status),
             _ => None,
         }
     }
@@ -120,6 +127,27 @@ impl ProviderError {
     pub fn transport_reason(self) -> Option<&'static str> {
         match self {
             Self::Transport(reason) => Some(reason.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn http(status: u16) -> Self {
+        Self::HttpStatus {
+            status,
+            retry_after: None,
+        }
+    }
+
+    pub fn http_with_retry_after(status: u16, retry_after: Duration) -> Self {
+        Self::HttpStatus {
+            status,
+            retry_after: Some(retry_after),
+        }
+    }
+
+    pub fn retry_after(self) -> Option<Duration> {
+        match self {
+            Self::HttpStatus { retry_after, .. } => retry_after,
             _ => None,
         }
     }
@@ -170,7 +198,13 @@ impl ChatCompletionClient for OpenAiChatClient {
             .map_err(provider_request_error)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(ProviderError::HttpStatus(status.as_u16()));
+            return Err(ProviderError::HttpStatus {
+                status: status.as_u16(),
+                retry_after: parse_retry_after(
+                    response.headers().get(RETRY_AFTER),
+                    SystemTime::now(),
+                ),
+            });
         }
 
         let mut bytes = Vec::new();
@@ -184,6 +218,19 @@ impl ChatCompletionClient for OpenAiChatClient {
         }
         parse_chat_response(&bytes)
     }
+}
+
+fn parse_retry_after(value: Option<&HeaderValue>, now: SystemTime) -> Option<Duration> {
+    let value = value?.to_str().ok()?;
+    let duration = if let Ok(seconds) = value.parse::<u64>() {
+        Duration::from_secs(seconds)
+    } else {
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .ok()?
+    };
+    Some(duration)
 }
 
 fn provider_request_error(error: reqwest::Error) -> ProviderError {
@@ -201,6 +248,7 @@ fn classify_transport_reason(error: &reqwest::Error) -> TransportReason {
     let mut connection_reset = false;
     while let Some(cause) = source {
         let message = cause.to_string().to_ascii_lowercase();
+        tls_failed |= contains_rustls_error(cause);
         dns_failed |= message.contains("dns")
             || message.contains("name resolution")
             || message.contains("failed to lookup address");
@@ -221,6 +269,16 @@ fn classify_transport_reason(error: &reqwest::Error) -> TransportReason {
     } else {
         TransportReason::RequestFailed
     }
+}
+
+fn contains_rustls_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    if error.is::<rustls::Error>() {
+        return true;
+    }
+    error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::get_ref)
+        .is_some_and(|inner| contains_rustls_error(inner))
 }
 
 #[derive(Deserialize)]
@@ -246,4 +304,57 @@ pub fn parse_chat_response(bytes: &[u8]) -> Result<ChatResponse, ProviderError> 
         return Err(ProviderError::InvalidResponse);
     }
     Ok(ChatResponse { message })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use reqwest::header::HeaderValue;
+
+    use super::parse_retry_after;
+
+    #[test]
+    fn retry_after_preserves_valid_seconds() {
+        let three = HeaderValue::from_static("3");
+        let thirty = HeaderValue::from_static("30");
+
+        assert_eq!(
+            parse_retry_after(Some(&three), SystemTime::UNIX_EPOCH),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            parse_retry_after(Some(&thirty), SystemTime::UNIX_EPOCH),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn retry_after_parses_future_http_date() {
+        let value = HeaderValue::from_static("Thu, 01 Jan 1970 00:00:04 GMT");
+
+        assert_eq!(
+            parse_retry_after(Some(&value), SystemTime::UNIX_EPOCH),
+            Some(Duration::from_secs(4))
+        );
+    }
+
+    #[test]
+    fn retry_after_rejects_invalid_and_expired_values() {
+        let invalid = HeaderValue::from_static("invalid");
+        let expired = HeaderValue::from_static("Thu, 01 Jan 1970 00:00:04 GMT");
+
+        assert_eq!(
+            parse_retry_after(Some(&invalid), SystemTime::UNIX_EPOCH),
+            None
+        );
+        assert_eq!(
+            parse_retry_after(
+                Some(&expired),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(5)
+            ),
+            None
+        );
+        assert_eq!(parse_retry_after(None, SystemTime::UNIX_EPOCH), None);
+    }
 }

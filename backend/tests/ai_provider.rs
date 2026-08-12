@@ -8,6 +8,7 @@ use backend::{
         config::{ProviderSource, resolve_effective_config},
         crypto::SecretCipher,
         observability::{ProviderRequestContext, log_provider_failure},
+        retry::complete_with_retry,
     },
     auth::session::{SESSION_COOKIE_NAME, generate_session_token, hash_session_token},
     config::{AiProviderEnv, AppLimits},
@@ -21,7 +22,12 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
+    time::Duration as StdDuration,
 };
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -500,6 +506,106 @@ async fn provider_test_logs_real_http_failure_before_audit_storage_failure() {
     }
 }
 
+#[actix_web::test]
+async fn provider_test_retries_cannot_run_past_the_operation_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = attempts.clone();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut first, _) = listener.accept().unwrap();
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        let mut request = [0_u8; 16 * 1024];
+        let _ = first.read(&mut request).unwrap();
+        std::thread::sleep(StdDuration::from_millis(700));
+        first
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        let (mut second, _) = listener.accept().unwrap();
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        let _ = second.read(&mut request).unwrap();
+        let _ = stop_rx.recv_timeout(StdDuration::from_secs(3));
+    });
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    bootstrap_admin::bootstrap_admin(&pool, "admin", "strong-password")
+        .await
+        .unwrap();
+    let admin_id: String = sqlx::query_scalar("SELECT id FROM users WHERE role='ADMIN'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &admin_id,
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let state = AppState::new_with_ai(
+        pool,
+        PathBuf::from("data"),
+        AppLimits::default(),
+        AiProviderEnv::from_values(None, None, None, 120, Some([8; 32])).unwrap(),
+    );
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(routes::register),
+    )
+    .await;
+    let writer = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    let started = std::time::Instant::now();
+    let response = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/api/admin/ai-provider/test")
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+            .set_json(serde_json::json!({
+                "base_url": format!("http://{address}/v1"),
+                "api_key": "sk-provider-test-deadline",
+                "model": "deadline-model",
+                "request_timeout_seconds": 1
+            }))
+            .to_request(),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    drop(guard);
+    let _ = stop_tx.send(());
+    server.join().unwrap();
+    let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
+
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert!(output.contains("error_category=timeout"), "{output}");
+    assert!(output.contains("attempt=2"), "{output}");
+    assert!(output.contains("max_attempts=3"), "{output}");
+    assert!(!output.contains("elapsed_ms=0 "), "{output}");
+    assert!(
+        elapsed < StdDuration::from_millis(1_400),
+        "provider test exceeded its operation deadline: {elapsed:?}"
+    );
+}
+
 #[tokio::test]
 async fn real_connection_failure_is_reduced_to_an_allow_listed_transport_reason() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -575,6 +681,69 @@ async fn real_connection_failure_is_reduced_to_an_allow_listed_transport_reason(
         );
         assert!(!error.to_string().contains(sensitive));
     }
+}
+
+#[tokio::test]
+async fn tls_handshake_failure_is_not_retried() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_attempts = attempts.clone();
+    let server_stop = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !server_stop.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    server_attempts.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(StdDuration::from_millis(5));
+                }
+                Err(error) => panic!("TLS test server accept failed: {error}"),
+            }
+        }
+    });
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let env = AiProviderEnv::from_values(
+        Some(&format!("https://{address}/v1")),
+        Some("sk-tls-test"),
+        Some("tls-test-model"),
+        5,
+        None,
+    )
+    .unwrap();
+    let provider = resolve_effective_config(&pool, &env)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = OpenAiChatClient::new(&provider).unwrap();
+    let error = complete_with_retry(
+        &client,
+        ChatRequest {
+            model: provider.model,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+        },
+        ProviderRequestContext::provider_test(0),
+        std::time::Instant::now() + StdDuration::from_secs(5),
+    )
+    .await
+    .unwrap_err();
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+
+    assert_eq!(error.transport_reason(), Some("tls_failed"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
 #[test]

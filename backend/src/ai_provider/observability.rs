@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::client::ProviderError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +67,18 @@ impl ProviderRequestContext<'static> {
 }
 
 pub fn log_provider_failure(context: ProviderRequestContext<'_>, error: ProviderError) {
+    log_provider_failure_attempt(context, error, 1, 1, false);
+}
+
+pub fn log_provider_failure_attempt(
+    context: ProviderRequestContext<'_>,
+    error: ProviderError,
+    attempt: usize,
+    max_attempts: usize,
+    retry_exhausted: bool,
+) {
     match error {
-        ProviderError::HttpStatus(status) => tracing::warn!(
+        ProviderError::HttpStatus { status, .. } => tracing::warn!(
             stage = %context.stage.as_str(),
             run_id = ?context.run_id,
             iteration = ?context.iteration,
@@ -76,6 +88,9 @@ pub fn log_provider_failure(context: ProviderRequestContext<'_>, error: Provider
             response_format = %context.response_format.unwrap_or("none"),
             error_category = %error.category(),
             http_status = status,
+            attempt,
+            max_attempts,
+            retry_exhausted,
             "AI provider request failed"
         ),
         ProviderError::Transport(reason) => tracing::warn!(
@@ -88,6 +103,9 @@ pub fn log_provider_failure(context: ProviderRequestContext<'_>, error: Provider
             response_format = %context.response_format.unwrap_or("none"),
             error_category = %error.category(),
             reason = %reason.as_str(),
+            attempt,
+            max_attempts,
+            retry_exhausted,
             "AI provider request failed"
         ),
         _ => tracing::warn!(
@@ -99,7 +117,66 @@ pub fn log_provider_failure(context: ProviderRequestContext<'_>, error: Provider
             tool_choice = %context.tool_choice.unwrap_or("none"),
             response_format = %context.response_format.unwrap_or("none"),
             error_category = %error.category(),
+            attempt,
+            max_attempts,
+            retry_exhausted,
             "AI provider request failed"
+        ),
+    }
+}
+
+pub fn log_provider_retry(
+    context: ProviderRequestContext<'_>,
+    error: ProviderError,
+    attempt: usize,
+    max_attempts: usize,
+    backoff: Duration,
+) {
+    let backoff_ms = backoff.as_millis() as u64;
+    match error {
+        ProviderError::HttpStatus { status, .. } => tracing::warn!(
+            stage = %context.stage.as_str(),
+            run_id = ?context.run_id,
+            iteration = ?context.iteration,
+            elapsed_ms = context.elapsed_ms,
+            tools_enabled = context.tools_enabled,
+            tool_choice = %context.tool_choice.unwrap_or("none"),
+            response_format = %context.response_format.unwrap_or("none"),
+            error_category = %error.category(),
+            http_status = status,
+            attempt,
+            max_attempts,
+            backoff_ms,
+            "AI provider request will be retried"
+        ),
+        ProviderError::Transport(reason) => tracing::warn!(
+            stage = %context.stage.as_str(),
+            run_id = ?context.run_id,
+            iteration = ?context.iteration,
+            elapsed_ms = context.elapsed_ms,
+            tools_enabled = context.tools_enabled,
+            tool_choice = %context.tool_choice.unwrap_or("none"),
+            response_format = %context.response_format.unwrap_or("none"),
+            error_category = %error.category(),
+            reason = %reason.as_str(),
+            attempt,
+            max_attempts,
+            backoff_ms,
+            "AI provider request will be retried"
+        ),
+        _ => tracing::warn!(
+            stage = %context.stage.as_str(),
+            run_id = ?context.run_id,
+            iteration = ?context.iteration,
+            elapsed_ms = context.elapsed_ms,
+            tools_enabled = context.tools_enabled,
+            tool_choice = %context.tool_choice.unwrap_or("none"),
+            response_format = %context.response_format.unwrap_or("none"),
+            error_category = %error.category(),
+            attempt,
+            max_attempts,
+            backoff_ms,
+            "AI provider request will be retried"
         ),
     }
 }
@@ -113,7 +190,10 @@ mod tests {
 
     use tracing_subscriber::fmt::MakeWriter;
 
-    use super::{ProviderRequestContext, ProviderRequestStage, log_provider_failure};
+    use super::{
+        ProviderRequestContext, ProviderRequestStage, log_provider_failure,
+        log_provider_failure_attempt, log_provider_retry,
+    };
     use crate::ai_provider::client::{ProviderError, TransportReason};
 
     #[derive(Clone, Default)]
@@ -165,7 +245,7 @@ mod tests {
                     tool_choice: Some("auto"),
                     response_format: None,
                 },
-                ProviderError::HttpStatus(400),
+                ProviderError::http(400),
             );
         });
 
@@ -242,7 +322,7 @@ mod tests {
         assert_eq!(error.category(), "transport");
         assert_eq!(error.http_status(), None);
         assert_eq!(error.transport_reason(), Some("request_failed"));
-        assert_eq!(ProviderError::HttpStatus(401).http_status(), Some(401));
+        assert_eq!(ProviderError::http(401).http_status(), Some(401));
     }
 
     #[test]
@@ -250,7 +330,7 @@ mod tests {
         let output = capture_log(|| {
             log_provider_failure(
                 ProviderRequestContext::provider_test(17),
-                ProviderError::HttpStatus(429),
+                ProviderError::http(429),
             );
         });
 
@@ -290,6 +370,63 @@ mod tests {
             ] {
                 assert!(output.contains(expected), "missing {expected} in {output}");
             }
+        }
+    }
+
+    #[test]
+    fn retry_log_contains_safe_attempt_and_backoff_fields() {
+        let output = capture_log(|| {
+            log_provider_retry(
+                ProviderRequestContext {
+                    stage: ProviderRequestStage::ResultRepair,
+                    run_id: Some("run-2"),
+                    iteration: None,
+                    elapsed_ms: 12,
+                    tools_enabled: false,
+                    tool_choice: None,
+                    response_format: Some("json_object"),
+                },
+                ProviderError::http(429),
+                1,
+                3,
+                std::time::Duration::from_secs(1),
+            );
+        });
+
+        for expected in [
+            "stage=result_repair",
+            "attempt=1",
+            "max_attempts=3",
+            "error_category=http_status",
+            "http_status=429",
+            "backoff_ms=1000",
+        ] {
+            assert!(output.contains(expected), "missing {expected} in {output}");
+        }
+    }
+
+    #[test]
+    fn exhausted_failure_log_is_explicit_and_safe() {
+        let output = capture_log(|| {
+            log_provider_failure_attempt(
+                ProviderRequestContext::provider_test(17),
+                ProviderError::Transport(TransportReason::ConnectionReset),
+                3,
+                3,
+                true,
+            );
+        });
+
+        for expected in [
+            "attempt=3",
+            "max_attempts=3",
+            "retry_exhausted=true",
+            "reason=connection_reset",
+        ] {
+            assert!(output.contains(expected), "missing {expected} in {output}");
+        }
+        for sensitive in ["Authorization", "FULL PROMPT", "UPSTREAM RESPONSE BODY"] {
+            assert!(!output.contains(sensitive));
         }
     }
 }
