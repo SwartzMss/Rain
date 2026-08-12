@@ -249,6 +249,7 @@ fn classify_transport_reason(error: &reqwest::Error) -> TransportReason {
     let mut connection_reset = false;
     while let Some(cause) = source {
         let message = cause.to_string().to_ascii_lowercase();
+        tls_failed |= contains_rustls_error(cause);
         dns_failed |= message.contains("dns")
             || message.contains("name resolution")
             || message.contains("failed to lookup address");
@@ -269,6 +270,16 @@ fn classify_transport_reason(error: &reqwest::Error) -> TransportReason {
     } else {
         TransportReason::RequestFailed
     }
+}
+
+fn contains_rustls_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    if error.is::<rustls::Error>() {
+        return true;
+    }
+    error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::get_ref)
+        .is_some_and(|inner| contains_rustls_error(inner))
 }
 
 #[derive(Deserialize)]

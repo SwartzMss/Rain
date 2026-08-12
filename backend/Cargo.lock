@@ -442,6 +442,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rust-embed",
+ "rustls",
  "serde",
  "serde_json",
  "serde_repr",

@@ -8,6 +8,7 @@ use backend::{
         config::{ProviderSource, resolve_effective_config},
         crypto::SecretCipher,
         observability::{ProviderRequestContext, log_provider_failure},
+        retry::complete_with_retry,
     },
     auth::session::{SESSION_COOKIE_NAME, generate_session_token, hash_session_token},
     config::{AiProviderEnv, AppLimits},
@@ -21,7 +22,11 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration as StdDuration,
 };
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -575,6 +580,68 @@ async fn real_connection_failure_is_reduced_to_an_allow_listed_transport_reason(
         );
         assert!(!error.to_string().contains(sensitive));
     }
+}
+
+#[tokio::test]
+async fn tls_handshake_failure_is_not_retried() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_attempts = attempts.clone();
+    let server_stop = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !server_stop.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    server_attempts.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(StdDuration::from_millis(5));
+                }
+                Err(error) => panic!("TLS test server accept failed: {error}"),
+            }
+        }
+    });
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let env = AiProviderEnv::from_values(
+        Some(&format!("https://{address}/v1")),
+        Some("sk-tls-test"),
+        Some("tls-test-model"),
+        5,
+        None,
+    )
+    .unwrap();
+    let provider = resolve_effective_config(&pool, &env)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = OpenAiChatClient::new(&provider).unwrap();
+    let error = complete_with_retry(
+        &client,
+        ChatRequest {
+            model: provider.model,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+        },
+        ProviderRequestContext::provider_test(0),
+    )
+    .await
+    .unwrap_err();
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+
+    assert_eq!(error.transport_reason(), Some("tls_failed"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
 
 #[test]
