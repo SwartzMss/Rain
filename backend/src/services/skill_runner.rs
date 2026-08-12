@@ -1545,9 +1545,7 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
         ));
     }
     if let Some(field) = result.observations.iter().find_map(|item| {
-        if item.text.trim().is_empty() {
-            Some(ValidationField::ObservationText)
-        } else if item.text.len() > 16 * 1024 {
+        if item.text.trim().is_empty() || item.text.len() > 16 * 1024 {
             Some(ValidationField::ObservationText)
         } else if item.evidence_ids.len() > 30 {
             Some(ValidationField::ObservationEvidenceIds)
@@ -1575,9 +1573,7 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
         ));
     }
     if let Some(field) = result.inferences.iter().find_map(|item| {
-        if item.text.trim().is_empty() {
-            Some(ValidationField::InferenceText)
-        } else if item.text.len() > 16 * 1024 {
+        if item.text.trim().is_empty() || item.text.len() > 16 * 1024 {
             Some(ValidationField::InferenceText)
         } else if item.evidence_ids.len() > 30 {
             Some(ValidationField::InferenceEvidenceIds)
@@ -1605,9 +1601,7 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
         ));
     }
     if let Some(field) = result.missing_context.iter().find_map(|item| {
-        if item.trim().is_empty() {
-            Some(ValidationField::MissingContext)
-        } else if item.len() > 16 * 1024 {
+        if item.trim().is_empty() || item.len() > 16 * 1024 {
             Some(ValidationField::MissingContext)
         } else {
             None
@@ -1627,17 +1621,11 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
         ));
     }
     if let Some(field) = result.evidence.iter().find_map(|item| {
-        if item.id.is_empty() {
+        if item.id.is_empty() || item.id.len() > 128 {
             Some(ValidationField::EvidenceId)
-        } else if item.id.len() > 128 {
-            Some(ValidationField::EvidenceId)
-        } else if item.bundle_hash.is_empty() {
+        } else if item.bundle_hash.is_empty() || item.bundle_hash.len() > 128 {
             Some(ValidationField::EvidenceBundleHash)
-        } else if item.bundle_hash.len() > 128 {
-            Some(ValidationField::EvidenceBundleHash)
-        } else if item.path.is_empty() {
-            Some(ValidationField::EvidencePath)
-        } else if item.path.len() > 4096 {
+        } else if item.path.is_empty() || item.path.len() > 4096 {
             Some(ValidationField::EvidencePath)
         } else if item.excerpt.len() > 4096 {
             Some(ValidationField::EvidenceExcerpt)
