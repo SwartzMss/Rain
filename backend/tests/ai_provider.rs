@@ -611,7 +611,7 @@ async fn real_connection_failure_is_reduced_to_an_allow_listed_transport_reason(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let credential_url = format!("http://user:password@{address}/v1");
+    let credential_url = format!("https://user:password@{address}/v1");
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -661,10 +661,7 @@ async fn real_connection_failure_is_reduced_to_an_allow_listed_transport_reason(
     let output = String::from_utf8(writer.0.lock().unwrap().clone()).unwrap();
 
     assert_eq!(error.category(), "transport");
-    assert!(matches!(
-        error.transport_reason(),
-        Some("connect_failed" | "request_failed")
-    ));
+    assert_eq!(error.transport_reason(), Some("connect_failed"));
     assert!(output.contains("error_category=transport"));
     assert!(output.contains("reason="));
     for sensitive in [
