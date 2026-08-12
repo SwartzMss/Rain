@@ -252,9 +252,7 @@ fn classify_transport_reason(error: &reqwest::Error) -> TransportReason {
         dns_failed |= message.contains("dns")
             || message.contains("name resolution")
             || message.contains("failed to lookup address");
-        tls_failed |= message.contains("tls")
-            || message.contains("rustls")
-            || message.contains("certificate");
+        tls_failed |= transport_message_is_tls(&message);
         connection_reset |= message.contains("connection reset");
         source = cause.source();
     }
@@ -265,17 +263,9 @@ fn classify_transport_reason(error: &reqwest::Error) -> TransportReason {
     } else if connection_reset {
         TransportReason::ConnectionReset
     } else if error.is_connect() {
-        classify_connect_failure(error.url())
+        TransportReason::ConnectFailed
     } else {
         TransportReason::RequestFailed
-    }
-}
-
-fn classify_connect_failure(url: Option<&reqwest::Url>) -> TransportReason {
-    if url.is_some_and(|url| url.scheme() == "https") {
-        TransportReason::TlsFailed
-    } else {
-        TransportReason::ConnectFailed
     }
 }
 
@@ -287,6 +277,19 @@ fn contains_rustls_error(error: &(dyn std::error::Error + 'static)) -> bool {
         .downcast_ref::<std::io::Error>()
         .and_then(std::io::Error::get_ref)
         .is_some_and(|inner| contains_rustls_error(inner))
+}
+
+fn transport_message_is_tls(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("tls")
+        || message.contains("rustls")
+        || message.contains("certificate")
+        || message.contains("handshake")
+        || message.contains("fatal alert")
+        || message.contains("peer is incompatible")
+        || message.contains("corrupt message")
+        || message.contains("unexpected message")
+        || message.contains("message received was unexpected")
 }
 
 #[derive(Deserialize)]
@@ -320,7 +323,7 @@ mod tests {
 
     use reqwest::header::HeaderValue;
 
-    use super::{TransportReason, classify_connect_failure, parse_retry_after};
+    use super::{parse_retry_after, transport_message_is_tls};
 
     #[test]
     fn retry_after_preserves_valid_seconds() {
@@ -367,20 +370,19 @@ mod tests {
     }
 
     #[test]
-    fn https_connect_errors_without_specific_markers_are_tls_failures() {
-        let https = reqwest::Url::parse("https://127.0.0.1:443/v1").unwrap();
-        let http = reqwest::Url::parse("http://127.0.0.1:80/v1").unwrap();
-        assert_eq!(
-            classify_connect_failure(Some(&https)),
-            TransportReason::TlsFailed
-        );
-        assert_eq!(
-            classify_connect_failure(Some(&http)),
-            TransportReason::ConnectFailed
-        );
-        assert_eq!(
-            classify_connect_failure(None),
-            TransportReason::ConnectFailed
-        );
+    fn unmarked_connect_errors_remain_retryable() {
+        assert!(!transport_message_is_tls("connection refused"));
+    }
+
+    #[test]
+    fn platform_tls_handshake_messages_are_detected() {
+        for message in [
+            "The message received was unexpected",
+            "received corrupt message",
+            "peer is incompatible",
+            "received fatal alert: handshake_failure",
+        ] {
+            assert!(transport_message_is_tls(message), "{message}");
+        }
     }
 }
