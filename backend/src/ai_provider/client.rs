@@ -201,7 +201,10 @@ impl ChatCompletionClient for OpenAiChatClient {
         if !status.is_success() {
             return Err(ProviderError::HttpStatus {
                 status: status.as_u16(),
-                retry_after: parse_retry_after(response.headers().get(RETRY_AFTER), SystemTime::now()),
+                retry_after: parse_retry_after(
+                    response.headers().get(RETRY_AFTER),
+                    SystemTime::now(),
+                ),
             });
         }
 
@@ -331,7 +334,10 @@ mod tests {
         let invalid = HeaderValue::from_static("invalid");
         let expired = HeaderValue::from_static("Thu, 01 Jan 1970 00:00:04 GMT");
 
-        assert_eq!(parse_retry_after(Some(&invalid), SystemTime::UNIX_EPOCH), None);
+        assert_eq!(
+            parse_retry_after(Some(&invalid), SystemTime::UNIX_EPOCH),
+            None
+        );
         assert_eq!(
             parse_retry_after(
                 Some(&expired),
