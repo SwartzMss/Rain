@@ -68,8 +68,8 @@ pub fn log_provider_failure(context: ProviderRequestContext<'_>, error: Provider
     match error {
         ProviderError::HttpStatus(status) => tracing::warn!(
             stage = %context.stage.as_str(),
-            run_id = %context.run_id.unwrap_or("-"),
-            iteration = context.iteration.unwrap_or(0),
+            run_id = ?context.run_id,
+            iteration = ?context.iteration,
             elapsed_ms = context.elapsed_ms,
             tools_enabled = context.tools_enabled,
             tool_choice = %context.tool_choice.unwrap_or("none"),
@@ -80,8 +80,8 @@ pub fn log_provider_failure(context: ProviderRequestContext<'_>, error: Provider
         ),
         ProviderError::Transport(reason) => tracing::warn!(
             stage = %context.stage.as_str(),
-            run_id = %context.run_id.unwrap_or("-"),
-            iteration = context.iteration.unwrap_or(0),
+            run_id = ?context.run_id,
+            iteration = ?context.iteration,
             elapsed_ms = context.elapsed_ms,
             tools_enabled = context.tools_enabled,
             tool_choice = %context.tool_choice.unwrap_or("none"),
@@ -92,8 +92,8 @@ pub fn log_provider_failure(context: ProviderRequestContext<'_>, error: Provider
         ),
         _ => tracing::warn!(
             stage = %context.stage.as_str(),
-            run_id = %context.run_id.unwrap_or("-"),
-            iteration = context.iteration.unwrap_or(0),
+            run_id = ?context.run_id,
+            iteration = ?context.iteration,
             elapsed_ms = context.elapsed_ms,
             tools_enabled = context.tools_enabled,
             tool_choice = %context.tool_choice.unwrap_or("none"),
@@ -171,8 +171,8 @@ mod tests {
 
         for expected in [
             "stage=model_request",
-            "run_id=run-1",
-            "iteration=1",
+            "run_id=Some(\"run-1\")",
+            "iteration=Some(1)",
             "elapsed_ms=21000",
             "tools_enabled=true",
             "tool_choice=auto",
@@ -256,6 +256,8 @@ mod tests {
 
         for expected in [
             "stage=provider_test",
+            "run_id=None",
+            "iteration=None",
             "elapsed_ms=17",
             "tools_enabled=false",
             "tool_choice=none",

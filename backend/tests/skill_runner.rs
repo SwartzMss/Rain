@@ -714,7 +714,7 @@ async fn provider_failure_log_preserves_http_status_and_public_error_contract() 
     );
     for expected in [
         "stage=model_request",
-        "iteration=1",
+        "iteration=Some(1)",
         "tools_enabled=true",
         "tool_choice=auto",
         "response_format=none",

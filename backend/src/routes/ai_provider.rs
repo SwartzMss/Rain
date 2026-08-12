@@ -334,6 +334,13 @@ pub async fn test_ai_provider(
             response_format: None,
         })
         .await;
+    let request_elapsed_ms = request_started.elapsed().as_millis() as u64;
+    if let Err(error) = &outcome {
+        log_provider_failure(
+            ProviderRequestContext::provider_test(request_elapsed_ms),
+            *error,
+        );
+    }
     let audit_value = serde_json::json!({
         "base_url": base_url,
         "model": model,
@@ -346,13 +353,7 @@ pub async fn test_ai_provider(
         .bind(req.peer_addr().map(|address| address.ip().to_string()))
         .bind(req.headers().get("user-agent").and_then(|value| value.to_str().ok()))
         .execute(&state.db.pool).await.map_err(AppError::Database)?;
-    outcome.map_err(|error| {
-        log_provider_failure(
-            ProviderRequestContext::provider_test(request_started.elapsed().as_millis() as u64),
-            error,
-        );
-        provider_error(error)
-    })?;
+    outcome.map_err(provider_error)?;
     Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true, "model": model })))
 }
 
