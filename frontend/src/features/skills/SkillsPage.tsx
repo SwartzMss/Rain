@@ -36,9 +36,9 @@ export function SkillsPage() {
     setReviewingSkillId(skillId);
     setError('');
     try {
-      await rainApi.reviewSkill(skillId);
-      await load();
-      setDetailRevision((value) => value + 1);
+      const review = await rainApi.reviewSkill(skillId);
+      setItems((current) => current.map((item) => item.id === skillId ? { ...item, review } : item));
+      setSelectedSkill((current) => current?.id === skillId ? { ...current, review } : current);
     } catch (reason) {
       setError(normalizeApiError(reason));
     } finally {

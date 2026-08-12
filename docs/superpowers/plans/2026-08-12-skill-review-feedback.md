@@ -4,7 +4,7 @@
 
 **Goal:** Give users explicit, unambiguous feedback while a Skill quality assessment is running, without changing public APIs or backend behavior.
 
-**Architecture:** Track the ID of the Skill currently being reviewed separately from the page's generic mutation state. Route assessment through a dedicated async handler, and let `SkillReviewPanel` replace either an absent or existing score with one loading presentation while that ID is active.
+**Architecture:** Track the ID of the Skill currently being reviewed separately from the page's generic mutation state. Route assessment through a dedicated async handler, apply the returned review directly to list and detail state before ending the loading state, and let `SkillReviewPanel` replace either an absent or existing score with one loading presentation while that ID is active.
 
 **Tech Stack:** React 18, TypeScript, Tailwind CSS, Vitest, Testing Library
 
@@ -82,9 +82,9 @@ const reviewSkill = async (skillId: string) => {
   setReviewingSkillId(skillId);
   setError('');
   try {
-    await rainApi.reviewSkill(skillId);
-    await load();
-    setDetailRevision((value) => value + 1);
+    const review = await rainApi.reviewSkill(skillId);
+    setItems((current) => current.map((item) => item.id === skillId ? { ...item, review } : item));
+    setSelectedSkill((current) => current?.id === skillId ? { ...current, review } : current);
   } catch (reason) {
     setError(normalizeApiError(reason));
   } finally {
@@ -120,7 +120,7 @@ if (reviewing) {
 
 Run from `frontend/`: `npx vitest run tests/skills-page.behavior.test.tsx`
 
-Expected: PASS for all tests in `skills-page.behavior.test.tsx`.
+Expected: PASS for all tests in `skills-page.behavior.test.tsx`, including an assertion that the returned score is visible as soon as the loading state ends and no second detail fetch occurs.
 
 - [ ] **Step 5: Commit the implementation**
 

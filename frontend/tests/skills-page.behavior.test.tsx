@@ -145,8 +145,9 @@ describe('skills page detail loading', () => {
     pending.resolve(existingReview);
 
     expect(await screen.findByRole('button', { name: '质量评估' })).toBeEnabled();
-    expect(rainApi.fetchSkills).toHaveBeenCalledTimes(2);
-    expect(rainApi.fetchSkill).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('86')).toBeInTheDocument();
+    expect(rainApi.fetchSkills).toHaveBeenCalledTimes(1);
+    expect(rainApi.fetchSkill).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
