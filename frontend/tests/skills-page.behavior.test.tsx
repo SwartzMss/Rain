@@ -5,6 +5,36 @@ import { ApiError, rainApi } from '../src/api/client';
 import { SkillsPage } from '../src/features/skills/SkillsPage';
 import { DEFAULT_SKILL_MARKDOWN, REQUIRED_SKILL_SECTIONS } from '../src/features/skills/skillSchema';
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+const existingReview = {
+  overall_score: 86,
+  grade: '良好',
+  dimensions: { 完整性: 88, 可执行性: 84 },
+  warnings: [],
+  suggestions: ['补充失败场景'],
+  evaluated_at: '2026-08-12T00:00:00Z'
+};
+
+function mockSingleSkill(review: typeof existingReview | null) {
+  vi.mocked(rainApi.fetchSkills).mockResolvedValue([{
+    id: 'skill-1', name: '诊断', description: 'private', schema_version: 1, content_hash: 'hash',
+    enabled: true, version: 1, created_at: '', updated_at: '', review
+  }]);
+  vi.mocked(rainApi.fetchSkill).mockResolvedValue({
+    id: 'skill-1', name: '诊断', description: 'private', skill_markdown: '# Full private markdown',
+    schema_version: 1, content_hash: 'hash', enabled: true, version: 1, created_at: '', updated_at: '', review
+  });
+}
+
 vi.mock('../src/api/client', () => ({
   ApiError: class ApiError extends Error {
     constructor(message: string, readonly status?: number, readonly code?: string) {
@@ -63,6 +93,61 @@ describe('skills page detail loading', () => {
     expect(button).toBeDisabled();
     expect(screen.getByText('尚未配置 AI 模型服务，暂时无法进行质量评估。')).toBeInTheDocument();
     expect(rainApi.reviewSkill).not.toHaveBeenCalled();
+  });
+
+  it('replaces an empty review with explicit feedback while the first assessment is pending', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<typeof existingReview>();
+    mockSingleSkill(null);
+    vi.mocked(rainApi.reviewSkill).mockReturnValue(pending.promise);
+
+    render(<SkillsPage />);
+
+    await user.click(await screen.findByRole('button', { name: '质量评估' }));
+
+    expect(screen.getByRole('button', { name: 'AI 评估中...' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('正在评估，请稍候…');
+    expect(screen.queryByText('当前版本尚未评估。')).not.toBeInTheDocument();
+  });
+
+  it('hides the previous score while reassessment is pending and restores it on failure', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<typeof existingReview>();
+    mockSingleSkill(existingReview);
+    vi.mocked(rainApi.reviewSkill).mockReturnValue(pending.promise);
+
+    render(<SkillsPage />);
+
+    expect(await screen.findByText('86')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '质量评估' }));
+
+    expect(screen.queryByText('86')).not.toBeInTheDocument();
+    expect(screen.queryByText('86 分')).not.toBeInTheDocument();
+    expect(screen.getByText(/评估中$/)).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('正在评估，请稍候…');
+
+    pending.reject(new Error('AI 服务暂时不可用'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('AI 服务暂时不可用');
+    expect(screen.getByText('86')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '质量评估' })).toBeEnabled();
+  });
+
+  it('refreshes the Skill detail and exits the loading state after assessment succeeds', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<typeof existingReview>();
+    mockSingleSkill(null);
+    vi.mocked(rainApi.reviewSkill).mockReturnValue(pending.promise);
+
+    render(<SkillsPage />);
+
+    await user.click(await screen.findByRole('button', { name: '质量评估' }));
+    pending.resolve(existingReview);
+
+    expect(await screen.findByRole('button', { name: '质量评估' })).toBeEnabled();
+    expect(rainApi.fetchSkills).toHaveBeenCalledTimes(2);
+    expect(rainApi.fetchSkill).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('prefills a new Skill with the Chinese v1 template and required-section guidance', async () => {
