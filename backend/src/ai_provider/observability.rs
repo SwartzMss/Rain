@@ -66,7 +66,7 @@ impl ProviderRequestContext<'static> {
 
 pub fn log_provider_failure(context: ProviderRequestContext<'_>, error: ProviderError) {
     match error {
-        ProviderError::HttpStatus(status) => tracing::warn!(
+        ProviderError::HttpStatus { status, .. } => tracing::warn!(
             stage = %context.stage.as_str(),
             run_id = ?context.run_id,
             iteration = ?context.iteration,
@@ -165,7 +165,7 @@ mod tests {
                     tool_choice: Some("auto"),
                     response_format: None,
                 },
-                ProviderError::HttpStatus(400),
+                ProviderError::http(400),
             );
         });
 
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(error.category(), "transport");
         assert_eq!(error.http_status(), None);
         assert_eq!(error.transport_reason(), Some("request_failed"));
-        assert_eq!(ProviderError::HttpStatus(401).http_status(), Some(401));
+        assert_eq!(ProviderError::http(401).http_status(), Some(401));
     }
 
     #[test]
@@ -250,7 +250,7 @@ mod tests {
         let output = capture_log(|| {
             log_provider_failure(
                 ProviderRequestContext::provider_test(17),
-                ProviderError::HttpStatus(429),
+                ProviderError::http(429),
             );
         });
 

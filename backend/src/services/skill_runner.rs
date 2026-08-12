@@ -674,7 +674,7 @@ fn runner_provider_error(error: ProviderError) -> (&'static str, &'static str) {
         ProviderError::Timeout => ("AI_PROVIDER_TIMEOUT", "模型服务请求超时"),
         ProviderError::ResponseTooLarge => ("AI_PROVIDER_RESPONSE_TOO_LARGE", "模型服务响应过大"),
         ProviderError::InvalidResponse => ("AI_PROVIDER_INVALID_RESPONSE", "模型服务响应无效"),
-        ProviderError::Transport(_) | ProviderError::HttpStatus(_) => {
+        ProviderError::Transport(_) | ProviderError::HttpStatus { .. } => {
             ("AI_PROVIDER_REQUEST_FAILED", "模型服务请求失败")
         }
     }

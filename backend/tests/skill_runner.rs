@@ -695,7 +695,7 @@ async fn create_recovery_test_run() -> (
 async fn provider_failure_log_preserves_http_status_and_public_error_contract() {
     let (pool, state, run, cancellation) = create_recovery_test_run().await;
     let client = Arc::new(ScriptedClient(Mutex::new(VecDeque::from([Err(
-        ProviderError::HttpStatus(400),
+        ProviderError::http(400),
     )]))));
 
     let output = capture_logs(SkillRunner::execute(
@@ -736,7 +736,7 @@ async fn provider_failure_log_identifies_final_model_request() {
             "{}",
         )]));
     }
-    responses.push_back(Err(ProviderError::HttpStatus(503)));
+    responses.push_back(Err(ProviderError::http(503)));
     let client = Arc::new(ScriptedClient(Mutex::new(responses)));
 
     let output = capture_logs(SkillRunner::execute(
