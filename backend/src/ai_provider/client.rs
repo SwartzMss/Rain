@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::config::StructuredOutputMode;
+
 use super::config::ResolvedAiProvider;
 
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -156,6 +158,10 @@ impl ProviderError {
 #[async_trait]
 pub trait ChatCompletionClient: Send + Sync {
     async fn complete(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError>;
+
+    fn structured_output_mode(&self) -> StructuredOutputMode {
+        StructuredOutputMode::JsonObject
+    }
 }
 
 pub struct OpenAiChatClient {
@@ -164,6 +170,7 @@ pub struct OpenAiChatClient {
     api_key: String,
     timeout: Duration,
     model: String,
+    structured_output: StructuredOutputMode,
 }
 
 impl OpenAiChatClient {
@@ -177,12 +184,17 @@ impl OpenAiChatClient {
             api_key: config.api_key().to_owned(),
             timeout: Duration::from_secs(config.timeout_seconds),
             model: config.model.clone(),
+            structured_output: config.structured_output,
         })
     }
 }
 
 #[async_trait]
 impl ChatCompletionClient for OpenAiChatClient {
+    fn structured_output_mode(&self) -> StructuredOutputMode {
+        self.structured_output
+    }
+
     async fn complete(&self, mut request: ChatRequest) -> Result<ChatResponse, ProviderError> {
         if request.model.is_empty() {
             request.model.clone_from(&self.model);
@@ -321,9 +333,31 @@ pub fn parse_chat_response(bytes: &[u8]) -> Result<ChatResponse, ProviderError> 
 mod tests {
     use std::time::{Duration, SystemTime};
 
+    use async_trait::async_trait;
     use reqwest::header::HeaderValue;
 
-    use super::{parse_retry_after, transport_message_is_tls};
+    use super::{
+        ChatCompletionClient, ChatRequest, ChatResponse, ProviderError, parse_retry_after,
+        transport_message_is_tls,
+    };
+    use crate::config::StructuredOutputMode;
+
+    struct DefaultModeClient;
+
+    #[async_trait]
+    impl ChatCompletionClient for DefaultModeClient {
+        async fn complete(&self, _request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+            Err(ProviderError::InvalidResponse)
+        }
+    }
+
+    #[test]
+    fn structured_output_mode_defaults_to_json_object() {
+        assert_eq!(
+            DefaultModeClient.structured_output_mode(),
+            StructuredOutputMode::JsonObject
+        );
+    }
 
     #[test]
     fn retry_after_preserves_valid_seconds() {

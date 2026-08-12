@@ -1,7 +1,10 @@
 use serde::Serialize;
 use sqlx::{FromRow, SqlitePool};
 
-use crate::{config::AiProviderEnv, error::AppError};
+use crate::{
+    config::{AiProviderEnv, StructuredOutputMode},
+    error::AppError,
+};
 
 use super::crypto::SecretCipher;
 
@@ -19,6 +22,7 @@ pub struct ResolvedAiProvider {
     api_key: String,
     pub model: String,
     pub timeout_seconds: u64,
+    pub structured_output: StructuredOutputMode,
 }
 
 impl std::fmt::Debug for ResolvedAiProvider {
@@ -29,6 +33,7 @@ impl std::fmt::Debug for ResolvedAiProvider {
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
             .field("timeout_seconds", &self.timeout_seconds)
+            .field("structured_output", &self.structured_output.as_str())
             .finish()
     }
 }
@@ -45,12 +50,31 @@ impl ResolvedAiProvider {
         model: String,
         timeout_seconds: u64,
     ) -> Self {
+        Self::candidate_with_mode(
+            source,
+            base_url,
+            api_key,
+            model,
+            timeout_seconds,
+            StructuredOutputMode::JsonObject,
+        )
+    }
+
+    pub(crate) fn candidate_with_mode(
+        source: ProviderSource,
+        base_url: String,
+        api_key: String,
+        model: String,
+        timeout_seconds: u64,
+        structured_output: StructuredOutputMode,
+    ) -> Self {
         Self {
             source,
             base_url,
             api_key,
             model,
             timeout_seconds,
+            structured_output,
         }
     }
 }
@@ -87,6 +111,7 @@ pub async fn resolve_effective_config(
             api_key,
             model: stored.model,
             timeout_seconds: stored.request_timeout_seconds as u64,
+            structured_output: env.structured_output,
         }));
     }
 
@@ -97,6 +122,7 @@ pub async fn resolve_effective_config(
             api_key: env.api_key().expect("complete provider API key").to_owned(),
             model: env.model.clone().expect("complete provider model"),
             timeout_seconds: env.timeout_seconds,
+            structured_output: env.structured_output,
         }));
     }
 

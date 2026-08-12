@@ -12,6 +12,31 @@ const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuredOutputMode {
+    JsonObject,
+    JsonSchema,
+}
+
+impl StructuredOutputMode {
+    pub fn parse(value: Option<&str>) -> Result<Self, AppError> {
+        match value.unwrap_or("json_object").trim() {
+            "json_object" => Ok(Self::JsonObject),
+            "json_schema" => Ok(Self::JsonSchema),
+            _ => Err(AppError::Config(
+                "RAIN_AI_STRUCTURED_OUTPUT must be json_object or json_schema".into(),
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::JsonObject => "json_object",
+            Self::JsonSchema => "json_schema",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AiProviderEnv {
     pub base_url: Option<String>,
@@ -19,6 +44,7 @@ pub struct AiProviderEnv {
     pub model: Option<String>,
     pub timeout_seconds: u64,
     pub master_key: Option<[u8; 32]>,
+    pub structured_output: StructuredOutputMode,
 }
 
 impl Default for AiProviderEnv {
@@ -29,6 +55,7 @@ impl Default for AiProviderEnv {
             model: None,
             timeout_seconds: 120,
             master_key: None,
+            structured_output: StructuredOutputMode::JsonObject,
         }
     }
 }
@@ -40,6 +67,7 @@ impl std::fmt::Debug for AiProviderEnv {
             .field("api_key_configured", &self.api_key.is_some())
             .field("model", &self.model)
             .field("timeout_seconds", &self.timeout_seconds)
+            .field("structured_output", &self.structured_output.as_str())
             .field("master_key_configured", &self.master_key.is_some())
             .finish()
     }
@@ -68,6 +96,7 @@ impl AiProviderEnv {
                 .map(str::to_owned),
             timeout_seconds,
             master_key,
+            structured_output: StructuredOutputMode::JsonObject,
         };
         config.validate()?;
         Ok(config)
@@ -86,6 +115,9 @@ impl AiProviderEnv {
             model: optional_env("RAIN_AI_MODEL")?,
             timeout_seconds,
             master_key,
+            structured_output: StructuredOutputMode::parse(
+                optional_env("RAIN_AI_STRUCTURED_OUTPUT")?.as_deref(),
+            )?,
         };
         config.validate()?;
         Ok(config)
@@ -748,9 +780,27 @@ mod tests {
     use std::{path::Path, sync::Mutex};
 
     use super::{
-        AiProviderEnv, AppLimits, ArchiveConfig, AuthConfig, SkillRunLimits, decode_ai_master_key,
-        dotenv_path_for_executable, parse_byte_size, parse_issue_inactive_days,
+        AiProviderEnv, AppLimits, ArchiveConfig, AuthConfig, SkillRunLimits, StructuredOutputMode,
+        decode_ai_master_key, dotenv_path_for_executable, parse_byte_size,
+        parse_issue_inactive_days,
     };
+
+    #[test]
+    fn structured_output_mode_defaults_and_rejects_unknown_values() {
+        assert_eq!(
+            StructuredOutputMode::parse(None).unwrap(),
+            StructuredOutputMode::JsonObject
+        );
+        assert_eq!(
+            StructuredOutputMode::parse(Some("json_schema")).unwrap(),
+            StructuredOutputMode::JsonSchema
+        );
+        assert_eq!(
+            StructuredOutputMode::parse(Some("json_object")).unwrap(),
+            StructuredOutputMode::JsonObject
+        );
+        assert!(StructuredOutputMode::parse(Some("unsupported")).is_err());
+    }
 
     #[test]
     fn ai_provider_configuration_accepts_a_complete_provider() {
@@ -760,6 +810,7 @@ mod tests {
             model: Some("test-model".into()),
             timeout_seconds: 120,
             master_key: Some([7; 32]),
+            structured_output: StructuredOutputMode::JsonObject,
         };
 
         assert!(config.validate().is_ok());
