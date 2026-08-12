@@ -1,6 +1,9 @@
 import type { SkillReview } from '../../api/types';
 
-export function SkillReviewPanel({ review }: { review?: SkillReview | null }) {
+export function SkillReviewPanel({ review, reviewing = false }: { review?: SkillReview | null; reviewing?: boolean }) {
+  if (reviewing) {
+    return <div className="rounded-xl border border-cyan-100 bg-cyan-50/50 p-4 text-sm text-cyan-800" role="status" aria-live="polite">正在评估，请稍候…</div>;
+  }
   if (!review) return <p className="text-sm text-slate-500">当前版本尚未评估。</p>;
   return (
     <div className="space-y-3 rounded-xl border border-cyan-100 bg-cyan-50/50 p-4">
