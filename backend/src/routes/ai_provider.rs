@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use actix_web::{HttpRequest, HttpResponse, get, http::StatusCode, post, put, web};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -9,7 +11,7 @@ use crate::{
         config::{ProviderSource, ResolvedAiProvider, resolve_effective_config},
         crypto::SecretCipher,
         observability::ProviderRequestContext,
-        retry::complete_with_retry,
+        retry::complete_with_retry_until,
     },
     auth::extractor::{RequireAdmin, RequireBusinessUser},
     error::AppError,
@@ -317,7 +319,9 @@ pub async fn test_ai_provider(
     let model = provider.model.clone();
     let timeout_seconds = provider.timeout_seconds;
     let client = OpenAiChatClient::new(&provider).map_err(provider_error)?;
-    let outcome = complete_with_retry(
+    let context = ProviderRequestContext::provider_test(0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_seconds);
+    let outcome = complete_with_retry_until(
         &client,
         ChatRequest {
             model: model.clone(),
@@ -332,7 +336,8 @@ pub async fn test_ai_provider(
             tool_choice: None,
             response_format: None,
         },
-        ProviderRequestContext::provider_test(0),
+        context,
+        deadline,
     )
     .await;
     let audit_value = serde_json::json!({

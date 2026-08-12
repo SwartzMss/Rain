@@ -29,11 +29,39 @@ fn retry_delay(error: ProviderError, failed_attempt: usize) -> Duration {
 pub async fn complete_with_retry(
     client: &dyn ChatCompletionClient,
     request: ChatRequest,
+    context: ProviderRequestContext<'_>,
+    deadline: Instant,
+) -> Result<ChatResponse, ProviderError> {
+    complete_with_retry_inner(client, request, context, deadline, false).await
+}
+
+pub async fn complete_with_retry_until(
+    client: &dyn ChatCompletionClient,
+    request: ChatRequest,
+    context: ProviderRequestContext<'_>,
+    deadline: Instant,
+) -> Result<ChatResponse, ProviderError> {
+    complete_with_retry_inner(client, request, context, deadline, true).await
+}
+
+async fn complete_with_retry_inner(
+    client: &dyn ChatCompletionClient,
+    request: ChatRequest,
     mut context: ProviderRequestContext<'_>,
+    deadline: Instant,
+    enforce_request_deadline: bool,
 ) -> Result<ChatResponse, ProviderError> {
     let started = Instant::now();
     for attempt in 1..=MAX_PROVIDER_ATTEMPTS {
-        match client.complete(request.clone()).await {
+        let completion = client.complete(request.clone());
+        let outcome = if enforce_request_deadline {
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), completion)
+                .await
+                .unwrap_or(Err(ProviderError::Timeout))
+        } else {
+            completion.await
+        };
+        match outcome {
             Ok(response) => return Ok(response),
             Err(error) => {
                 context.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -41,6 +69,16 @@ pub async fn complete_with_retry(
                 let exhausted = retryable && attempt == MAX_PROVIDER_ATTEMPTS;
                 if retryable && !exhausted {
                     let backoff = retry_delay(error, attempt);
+                    if backoff >= deadline.saturating_duration_since(Instant::now()) {
+                        log_provider_failure_attempt(
+                            context,
+                            error,
+                            attempt,
+                            MAX_PROVIDER_ATTEMPTS,
+                            false,
+                        );
+                        return Err(error);
+                    }
                     log_provider_retry(context, error, attempt, MAX_PROVIDER_ATTEMPTS, backoff);
                     tokio::time::sleep(backoff).await;
                     continue;
@@ -64,7 +102,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         sync::{Arc, Mutex},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use async_trait::async_trait;
@@ -138,6 +176,10 @@ mod tests {
         }
     }
 
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+
     #[test]
     fn retries_only_the_transient_allow_list() {
         for status in [429, 502, 503, 504] {
@@ -190,7 +232,7 @@ mod tests {
             Ok(response()),
         ]);
 
-        let result = complete_with_retry(&client, request(), context()).await;
+        let result = complete_with_retry(&client, request(), context(), deadline()).await;
 
         assert_eq!(result.unwrap(), response());
         assert_eq!(client.attempts(), 2);
@@ -200,7 +242,7 @@ mod tests {
     async fn does_not_retry_a_non_retryable_failure() {
         let client = ScriptedClient::new([Err(ProviderError::http(400))]);
 
-        let result = complete_with_retry(&client, request(), context()).await;
+        let result = complete_with_retry(&client, request(), context(), deadline()).await;
 
         assert_eq!(result.unwrap_err(), ProviderError::http(400));
         assert_eq!(client.attempts(), 1);
@@ -211,9 +253,26 @@ mod tests {
         let failure = ProviderError::http_with_retry_after(503, Duration::ZERO);
         let client = ScriptedClient::new([Err(failure), Err(failure), Err(failure)]);
 
-        let result = complete_with_retry(&client, request(), context()).await;
+        let result = complete_with_retry(&client, request(), context(), deadline()).await;
 
         assert_eq!(result.unwrap_err(), failure);
         assert_eq!(client.attempts(), 3);
+    }
+
+    #[tokio::test]
+    async fn returns_current_error_when_retry_after_exceeds_remaining_budget() {
+        let failure = ProviderError::http_with_retry_after(429, Duration::from_millis(20));
+        let client = ScriptedClient::new([Err(failure), Ok(response())]);
+
+        let result = complete_with_retry(
+            &client,
+            request(),
+            context(),
+            Instant::now() + Duration::from_millis(5),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), failure);
+        assert_eq!(client.attempts(), 1);
     }
 }

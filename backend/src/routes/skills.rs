@@ -206,6 +206,7 @@ pub async fn review(
     let pool = state.db.pool.clone();
     let reviewer_model = provider.model.clone();
     let operation_user_id = user_id.clone();
+    let retry_deadline = std::time::Instant::now() + SKILL_REVIEW_TIMEOUT;
     let review = with_review_budget(
         &state.skill_reviews,
         &user_id,
@@ -215,6 +216,7 @@ pub async fn review(
                 &client,
                 request.clone(),
                 ProviderRequestContext::skill_review(false, 0),
+                retry_deadline,
             )
             .await
             .map_err(|_| review_failed())?;
@@ -234,6 +236,7 @@ pub async fn review(
                         &client,
                         repair,
                         ProviderRequestContext::skill_review(true, 0),
+                        retry_deadline,
                     )
                     .await
                     .map_err(|_| review_failed())?;

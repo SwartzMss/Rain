@@ -13,7 +13,6 @@ use thiserror::Error;
 use super::config::ResolvedAiProvider;
 
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024 * 1024;
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatFunctionCall {
@@ -231,7 +230,7 @@ fn parse_retry_after(value: Option<&HeaderValue>, now: SystemTime) -> Option<Dur
             .duration_since(now)
             .ok()?
     };
-    Some(duration.min(MAX_RETRY_AFTER))
+    Some(duration)
 }
 
 fn provider_request_error(error: reqwest::Error) -> ProviderError {
@@ -316,7 +315,7 @@ mod tests {
     use super::parse_retry_after;
 
     #[test]
-    fn retry_after_parses_seconds_and_caps_large_values() {
+    fn retry_after_preserves_valid_seconds() {
         let three = HeaderValue::from_static("3");
         let thirty = HeaderValue::from_static("30");
 
@@ -326,7 +325,7 @@ mod tests {
         );
         assert_eq!(
             parse_retry_after(Some(&thirty), SystemTime::UNIX_EPOCH),
-            Some(Duration::from_secs(10))
+            Some(Duration::from_secs(30))
         );
     }
 

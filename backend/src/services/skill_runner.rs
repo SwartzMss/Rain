@@ -22,6 +22,7 @@ use crate::{
 };
 
 const MAX_CONSECUTIVE_TOOL_ERRORS: usize = 3;
+const SKILL_RUN_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,10 +97,11 @@ impl SkillRunner {
         cancellation: CancellationToken,
     ) {
         let task_started = Instant::now();
+        let retry_deadline = task_started + SKILL_RUN_TIMEOUT;
         tracing::info!(run_id = %run_id, "skill run task accepted");
         let outcome = tokio::time::timeout(
-            Duration::from_secs(120),
-            Self::execute_inner(&state, &run_id, client, &cancellation),
+            SKILL_RUN_TIMEOUT,
+            Self::execute_inner(&state, &run_id, client, &cancellation, retry_deadline),
         )
         .await;
         match outcome {
@@ -162,6 +164,7 @@ impl SkillRunner {
         run_id: &str,
         client: Arc<dyn ChatCompletionClient>,
         cancellation: &CancellationToken,
+        retry_deadline: Instant,
     ) -> Result<(), (&'static str, &'static str)> {
         let run = skill_runs::find(&state.db.pool, run_id)
             .await
@@ -271,6 +274,7 @@ impl SkillRunner {
                         tool_choice: Some("auto"),
                         response_format: None,
                     },
+                    retry_deadline,
                 ) => response.map_err(runner_provider_error)?,
             };
             tracing::debug!(
@@ -288,6 +292,7 @@ impl SkillRunner {
                     response,
                     &executor.ledger,
                     cancellation,
+                    retry_deadline,
                 )
                 .await?;
                 let json = serde_json::to_string(&result)
@@ -606,6 +611,7 @@ impl SkillRunner {
                     tool_choice: None,
                     response_format: Some("json_object"),
                 },
+                retry_deadline,
             ) => response.map_err(runner_provider_error)?,
         };
         tracing::debug!(
@@ -621,6 +627,7 @@ impl SkillRunner {
             response,
             &executor.ledger,
             cancellation,
+            retry_deadline,
         )
         .await?;
         let json =
@@ -1336,6 +1343,7 @@ async fn parse_with_repair(
     response: ChatResponse,
     ledger: &EvidenceLedger,
     cancellation: &CancellationToken,
+    retry_deadline: Instant,
 ) -> Result<SkillRunResult, (&'static str, &'static str)> {
     let first_stage = match validate_result(response.message.content.as_deref(), ledger) {
         Ok(result) => return Ok(result),
@@ -1364,6 +1372,7 @@ async fn parse_with_repair(
                 tool_choice: None,
                 response_format: Some("json_object"),
             },
+            retry_deadline,
         ) => response.map_err(runner_provider_error)?,
     };
     match validate_result(response.message.content.as_deref(), ledger) {

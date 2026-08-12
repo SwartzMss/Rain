@@ -35,7 +35,7 @@
 
 - [ ] **Step 1: Write failing Retry-After parser tests**
 
-Add tests in `client.rs` for integer seconds, a future HTTP-date, invalid input, an expired date, and the 10-second cap. The helper contract is:
+Add tests in `client.rs` for integer seconds, a future HTTP-date, invalid input, an expired date, and preserving a valid long delay. The helper contract is:
 
 ```rust
 fn parse_retry_after(value: Option<&HeaderValue>, now: SystemTime) -> Option<Duration>;
@@ -44,7 +44,7 @@ let three = HeaderValue::from_static("3");
 let thirty = HeaderValue::from_static("30");
 let invalid = HeaderValue::from_static("invalid");
 assert_eq!(parse_retry_after(Some(&three), now), Some(Duration::from_secs(3)));
-assert_eq!(parse_retry_after(Some(&thirty), now), Some(Duration::from_secs(10)));
+assert_eq!(parse_retry_after(Some(&thirty), now), Some(Duration::from_secs(30)));
 assert_eq!(parse_retry_after(Some(&invalid), now), None);
 ```
 
@@ -238,6 +238,7 @@ pub async fn complete_with_retry(
     client: &dyn ChatCompletionClient,
     request: ChatRequest,
     mut context: ProviderRequestContext<'_>,
+    deadline: Instant,
 ) -> Result<ChatResponse, ProviderError> {
     let started = Instant::now();
     for attempt in 1..=MAX_PROVIDER_ATTEMPTS {
@@ -360,11 +361,11 @@ Use `FinalModelRequest` and `ResultRepair` with their existing safe shape fields
 
 - [ ] **Step 4: Migrate Skill Review calls**
 
-Replace both direct calls with `complete_with_retry(&client, request, ProviderRequestContext::skill_review(repair, 0))`. Keep both inside `with_review_budget`, so attempts and sleeps consume the existing review total timeout. Map the returned final error to the unchanged `review_failed()` response.
+Replace both direct calls with the deadline-aware `complete_with_retry`. Keep both inside `with_review_budget`, so attempts and sleeps consume the existing review total timeout. Map the returned final error to the unchanged `review_failed()` response.
 
 - [ ] **Step 5: Migrate Provider Test**
 
-Call `complete_with_retry(&client, request, ProviderRequestContext::provider_test(0))`. Remove the route-level failure logger; keep audit storage and `provider_error` mapping unchanged.
+Call the deadline-aware `complete_with_retry`, using the configured request timeout as the Provider Test operation deadline. Remove the route-level failure logger; keep audit storage and `provider_error` mapping unchanged.
 
 - [ ] **Step 6: Update existing integration assertions**
 

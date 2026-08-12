@@ -47,7 +47,7 @@ helper 继续调用现有 `ChatCompletionClient` trait，因此现有测试替�
 - 非负整数秒数；
 - 合法 HTTP-date，并换算为从当前时间开始的等待时长。
 
-合法的 `Retry-After` 优先于默认指数退避，但单次等待最多 10 秒。缺失、无效或已经过期的 HTTP-date 回退到默认退避。响应正文不会进入错误或日志。
+合法的 `Retry-After` 优先于默认指数退避，并保留 Provider 指定的完整等待时长。缺失、无效或已经过期的 HTTP-date 回退到默认退避。响应正文不会进入错误或日志。
 
 `ProviderError::HttpStatus` 增加内部 `retry_after` 元数据；该类型仍保持可复制，不影响公共 HTTP API。`httpdate` 作为直接依赖用于标准 HTTP-date 解析。
 
@@ -59,7 +59,7 @@ helper 继续调用现有 `ChatCompletionClient` trait，因此现有测试替�
 - Skill Review 的 `SKILL_REVIEW_TIMEOUT`；
 - Skill Run 各 Provider 请求现有的 cancellation `select!`。
 
-因此请求尝试和退避等待都计入原有总时限；外层超时或取消会直接丢弃 helper future，不能突破 Run 或 Review 的整体预算。Provider Test 没有 Run/Review 总时限，但仍受每次请求 timeout、3 次总尝试和 10 秒单次退避上限约束。
+因此请求尝试和退避等待都计入总时限。helper 同时接收调用方 deadline；如果完整 backoff 无法放进剩余预算，则不提前重试，直接返回当前 Provider 错误。外层超时和 Skill Run 取消仍是最终保护边界。Provider Test 使用其配置的 request timeout 作为本次测试操作的总 deadline。
 
 ## 安全可观测性
 
@@ -85,7 +85,8 @@ helper 继续调用现有 `ChatCompletionClient` trait，因此现有测试替�
 - 400、401、403、404、timeout、无效响应和超限响应不重试；
 - `connect_failed`、`connection_reset` 重试，DNS/TLS/一般请求错误不重试；
 - 1 秒/2 秒默认退避；
-- `Retry-After` 秒数、HTTP-date、无效值及 10 秒上限；
+- `Retry-After` 秒数、HTTP-date、无效值及长等待值不被缩短；
+- `Retry-After` 超过剩余总预算时不再重试；
 - 首次失败后成功，以及连续失败后第 3 次耗尽；
 - 重试和耗尽日志包含规定字段且不包含敏感数据。
 
