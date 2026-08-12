@@ -15,6 +15,7 @@ use crate::{
     },
     ai_provider::observability::{ProviderRequestContext, ProviderRequestStage},
     ai_provider::retry::complete_with_retry,
+    config::StructuredOutputMode,
     models::skill_runs::SkillRunRecord,
     repositories::skill_runs,
     services::skill_tools::{EvidenceLedger, SkillRunContext, SkillToolCall, SkillToolExecutor},
@@ -2035,14 +2036,122 @@ fn validate_evidence(
     }
 }
 
+fn skill_result_response_format(mode: StructuredOutputMode) -> Value {
+    match mode {
+        StructuredOutputMode::JsonObject => json!({"type": "json_object"}),
+        StructuredOutputMode::JsonSchema => json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "skill_run_result",
+                "strict": true,
+                "schema": skill_result_schema(),
+            }
+        }),
+    }
+}
+
+fn skill_result_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["summary", "observations", "inferences", "missing_context", "evidence"],
+        "properties": {
+            "summary": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["status", "text", "evidence_ids"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["SUPPORTED", "INSUFFICIENT_EVIDENCE"]
+                    },
+                    "text": {"type": "string", "maxLength": 16384},
+                    "evidence_ids": {
+                        "type": "array",
+                        "maxItems": 30,
+                        "items": {"type": "string", "maxLength": 128}
+                    }
+                }
+            },
+            "observations": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["text", "evidence_ids"],
+                    "properties": {
+                        "text": {"type": "string", "maxLength": 16384},
+                        "evidence_ids": {
+                            "type": "array",
+                            "maxItems": 30,
+                            "items": {"type": "string", "maxLength": 128}
+                        }
+                    }
+                }
+            },
+            "inferences": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["text", "confidence", "evidence_ids"],
+                    "properties": {
+                        "text": {"type": "string", "maxLength": 16384},
+                        "confidence": {
+                            "type": "string",
+                            "enum": ["LOW", "MEDIUM", "HIGH"]
+                        },
+                        "evidence_ids": {
+                            "type": "array",
+                            "maxItems": 30,
+                            "items": {"type": "string", "maxLength": 128}
+                        }
+                    }
+                }
+            },
+            "missing_context": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {"type": "string", "maxLength": 16384}
+            },
+            "evidence": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "id", "bundle_hash", "file_id", "path",
+                        "start_line", "end_line", "excerpt", "explanation"
+                    ],
+                    "properties": {
+                        "id": {"type": "string", "maxLength": 128},
+                        "bundle_hash": {"type": "string", "maxLength": 128},
+                        "file_id": {"type": "integer"},
+                        "path": {"type": "string", "maxLength": 4096},
+                        "start_line": {"type": "integer"},
+                        "end_line": {"type": "integer"},
+                        "excerpt": {"type": "string", "maxLength": 4096},
+                        "explanation": {"type": "string", "maxLength": 2000}
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ResultValidationReason, ToolCallError, ToolErrorCategory, ValidationField,
         classify_bootstrap_manifest_error, classify_tool_execution_error, parse_result,
-        parse_tool_call, tool_definitions, tool_error_output, validate_result,
+        parse_tool_call, skill_result_response_format, tool_definitions, tool_error_output,
+        validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
+    use crate::config::StructuredOutputMode;
     use crate::error::AppError;
     use crate::services::skill_tools::EvidenceLedger;
 
@@ -2368,5 +2477,41 @@ mod tests {
         let error = parse_result(Some(insufficient_context)).unwrap_err();
         assert_eq!(error.reason, ResultValidationReason::InvalidMissingContext);
         assert_eq!(error.field, Some(ValidationField::MissingContext));
+    }
+
+    #[test]
+    fn skill_result_response_format_exposes_schema_and_fallback() {
+        let schema = skill_result_response_format(StructuredOutputMode::JsonSchema);
+        assert_eq!(schema["type"], "json_schema");
+        assert_eq!(schema["json_schema"]["name"], "skill_run_result");
+        assert_eq!(schema["json_schema"]["strict"], true);
+        assert_eq!(
+            schema["json_schema"]["schema"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            schema["json_schema"]["schema"]["required"],
+            serde_json::json!([
+                "summary",
+                "observations",
+                "inferences",
+                "missing_context",
+                "evidence"
+            ])
+        );
+        assert_eq!(
+            schema["json_schema"]["schema"]["properties"]["summary"]["properties"]["status"]["enum"],
+            serde_json::json!(["SUPPORTED", "INSUFFICIENT_EVIDENCE"])
+        );
+        assert_eq!(
+            schema["json_schema"]["schema"]["properties"]["inferences"]["items"]["properties"]["confidence"]
+                ["enum"],
+            serde_json::json!(["LOW", "MEDIUM", "HIGH"])
+        );
+
+        assert_eq!(
+            skill_result_response_format(StructuredOutputMode::JsonObject),
+            serde_json::json!({"type":"json_object"})
+        );
     }
 }
