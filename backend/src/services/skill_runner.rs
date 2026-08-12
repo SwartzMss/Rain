@@ -13,6 +13,9 @@ use crate::{
     ai_provider::client::{
         ChatCompletionClient, ChatMessage, ChatRequest, ChatResponse, ChatToolCall, ProviderError,
     },
+    ai_provider::observability::{
+        ProviderRequestContext, ProviderRequestStage, log_provider_failure,
+    },
     models::skill_runs::SkillRunRecord,
     repositories::skill_runs,
     services::skill_tools::{EvidenceLedger, SkillRunContext, SkillToolCall, SkillToolExecutor},
@@ -257,7 +260,21 @@ impl SkillRunner {
                     tools: tools.clone(),
                     tool_choice: Some(json!("auto")),
                     response_format: None,
-                }) => response.map_err(runner_provider_error)?,
+                }) => response.map_err(|error| {
+                    log_provider_failure(
+                        ProviderRequestContext {
+                            stage: ProviderRequestStage::ModelRequest,
+                            run_id: Some(run_id),
+                            iteration: Some(iteration),
+                            elapsed_ms: model_started.elapsed().as_millis() as u64,
+                            tools_enabled: true,
+                            tool_choice: Some("auto"),
+                            response_format: None,
+                        },
+                        error,
+                    );
+                    runner_provider_error(error)
+                })?,
             };
             tracing::debug!(
                 run_id,
@@ -580,7 +597,21 @@ impl SkillRunner {
                 tools: Vec::new(),
                 tool_choice: None,
                 response_format: Some(json!({"type":"json_object"})),
-            }) => response.map_err(runner_provider_error)?,
+            }) => response.map_err(|error| {
+                log_provider_failure(
+                    ProviderRequestContext {
+                        stage: ProviderRequestStage::FinalModelRequest,
+                        run_id: Some(run_id),
+                        iteration: None,
+                        elapsed_ms: model_started.elapsed().as_millis() as u64,
+                        tools_enabled: false,
+                        tool_choice: None,
+                        response_format: Some("json_object"),
+                    },
+                    error,
+                );
+                runner_provider_error(error)
+            })?,
         };
         tracing::debug!(
             run_id,
@@ -643,7 +674,7 @@ fn runner_provider_error(error: ProviderError) -> (&'static str, &'static str) {
         ProviderError::Timeout => ("AI_PROVIDER_TIMEOUT", "模型服务请求超时"),
         ProviderError::ResponseTooLarge => ("AI_PROVIDER_RESPONSE_TOO_LARGE", "模型服务响应过大"),
         ProviderError::InvalidResponse => ("AI_PROVIDER_INVALID_RESPONSE", "模型服务响应无效"),
-        ProviderError::Transport | ProviderError::HttpStatus(_) => {
+        ProviderError::Transport(_) | ProviderError::HttpStatus(_) => {
             ("AI_PROVIDER_REQUEST_FAILED", "模型服务请求失败")
         }
     }
@@ -1324,9 +1355,24 @@ async fn parse_with_repair(
     let mut repair = messages.to_vec();
     repair.push(response.message);
     repair.push(ChatMessage { role: "user".into(), content: Some("The result was invalid or cited evidence that was not returned by read_file_lines. Return only JSON: summary as {status:SUPPORTED|INSUFFICIENT_EVIDENCE,text,evidence_ids[]}; observations as {text,evidence_ids[]} objects; inferences as {text,confidence:LOW|MEDIUM|HIGH,evidence_ids[]} objects; missing_context as strings; evidence as {id,bundle_hash,file_id,path,start_line,end_line,excerpt,explanation} objects. A SUPPORTED summary and every observation/inference need valid evidence IDs. An INSUFFICIENT_EVIDENCE summary needs empty evidence_ids and non-empty missing_context. Remove unsupported claims and citations.".into()), tool_calls: vec![], tool_call_id: None, name: None });
+    let repair_started = Instant::now();
     let response = tokio::select! {
         _ = cancellation.cancelled() => return Err(("SKILL_RUN_CANCELLED", "Skill 任务已取消")),
-        response = client.complete(ChatRequest { model: String::new(), messages: repair, tools: vec![], tool_choice: None, response_format: Some(json!({"type":"json_object"})) }) => response.map_err(runner_provider_error)?,
+        response = client.complete(ChatRequest { model: String::new(), messages: repair, tools: vec![], tool_choice: None, response_format: Some(json!({"type":"json_object"})) }) => response.map_err(|error| {
+            log_provider_failure(
+                ProviderRequestContext {
+                    stage: ProviderRequestStage::ResultRepair,
+                    run_id: Some(run_id),
+                    iteration: None,
+                    elapsed_ms: repair_started.elapsed().as_millis() as u64,
+                    tools_enabled: false,
+                    tool_choice: None,
+                    response_format: Some("json_object"),
+                },
+                error,
+            );
+            runner_provider_error(error)
+        })?,
     };
     match validate_result(response.message.content.as_deref(), ledger) {
         Ok(result) => Ok(result),

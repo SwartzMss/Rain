@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use actix_web::{HttpRequest, HttpResponse, get, http::StatusCode, post, put, web};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -8,6 +10,7 @@ use crate::{
         client::{ChatCompletionClient, ChatMessage, ChatRequest, OpenAiChatClient, ProviderError},
         config::{ProviderSource, ResolvedAiProvider, resolve_effective_config},
         crypto::SecretCipher,
+        observability::{ProviderRequestContext, log_provider_failure},
     },
     auth::extractor::{RequireAdmin, RequireBusinessUser},
     error::AppError,
@@ -315,6 +318,7 @@ pub async fn test_ai_provider(
     let model = provider.model.clone();
     let timeout_seconds = provider.timeout_seconds;
     let client = OpenAiChatClient::new(&provider).map_err(provider_error)?;
+    let request_started = Instant::now();
     let outcome = client
         .complete(ChatRequest {
             model: model.clone(),
@@ -342,7 +346,13 @@ pub async fn test_ai_provider(
         .bind(req.peer_addr().map(|address| address.ip().to_string()))
         .bind(req.headers().get("user-agent").and_then(|value| value.to_str().ok()))
         .execute(&state.db.pool).await.map_err(AppError::Database)?;
-    outcome.map_err(provider_error)?;
+    outcome.map_err(|error| {
+        log_provider_failure(
+            ProviderRequestContext::provider_test(request_started.elapsed().as_millis() as u64),
+            error,
+        );
+        provider_error(error)
+    })?;
     Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true, "model": model })))
 }
 
