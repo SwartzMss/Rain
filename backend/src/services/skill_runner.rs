@@ -584,7 +584,7 @@ impl SkillRunner {
 
         messages.push(ChatMessage {
             role: "system".into(),
-            content: Some(format!("Tool use stopped because {finalization_reason}. Do not request tools. Return the fixed JSON result now. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context.")),
+            content: Some(format!("Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now, with only these top-level fields: summary, observations, inferences, missing_context, evidence. summary must be {{status: SUPPORTED|INSUFFICIENT_EVIDENCE, text, evidence_ids[]}}. observations must contain {{text, evidence_ids[]}} objects. inferences must contain {{text, confidence: LOW|MEDIUM|HIGH, evidence_ids[]}} objects. evidence must contain only EvidenceLedger entries returned by read_file_lines, and every cited evidence id must exist in that array. SUPPORTED requires evidence_ids for the summary and every observation/inference; INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context.")),
             tool_calls: Vec::new(), tool_call_id: None, name: None,
         });
         let model_started = Instant::now();
@@ -1262,39 +1262,68 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidat
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResultValidationStage {
-    ParseJson,
-    Schema,
-    Evidence,
+enum ResultValidationReason {
+    InvalidJson,
+    MissingField,
+    InvalidSummaryStatus,
+    InvalidEvidenceReference,
+    UnsupportedClaim,
+    InvalidConfidence,
 }
 
-impl ResultValidationStage {
+impl ResultValidationReason {
     fn as_str(self) -> &'static str {
         match self {
-            Self::ParseJson => "parse_json",
-            Self::Schema => "schema",
-            Self::Evidence => "evidence",
+            Self::InvalidJson => "invalid_json",
+            Self::MissingField => "missing_field",
+            Self::InvalidSummaryStatus => "invalid_summary_status",
+            Self::InvalidEvidenceReference => "invalid_evidence_reference",
+            Self::UnsupportedClaim => "unsupported_claim",
+            Self::InvalidConfidence => "invalid_confidence",
         }
     }
 
     fn run_error(self) -> (&'static str, &'static str) {
         match self {
-            Self::Evidence => ("SKILL_EVIDENCE_INVALID", "模型引用了未读取的日志证据"),
-            Self::ParseJson | Self::Schema => ("SKILL_RESULT_INVALID", "模型结果无效"),
+            Self::InvalidEvidenceReference => {
+                ("SKILL_EVIDENCE_INVALID", "模型引用了未读取的日志证据")
+            }
+            Self::InvalidJson
+            | Self::MissingField
+            | Self::InvalidSummaryStatus
+            | Self::UnsupportedClaim
+            | Self::InvalidConfidence => ("SKILL_RESULT_INVALID", "模型结果无效"),
         }
     }
 }
 
-fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidationStage> {
-    let value: Value = serde_json::from_str(content.ok_or(ResultValidationStage::ParseJson)?)
-        .map_err(|_| ResultValidationStage::ParseJson)?;
+fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidationReason> {
+    let value: Value = serde_json::from_str(content.ok_or(ResultValidationReason::InvalidJson)?)
+        .map_err(|_| ResultValidationReason::InvalidJson)?;
+    if let Some(reason) = classify_schema_shape(&value) {
+        return Err(reason);
+    }
     let mut result: SkillRunResult =
-        serde_json::from_value(value).map_err(|_| ResultValidationStage::Schema)?;
+        serde_json::from_value(value).map_err(|_| ResultValidationReason::MissingField)?;
+    if result
+        .observations
+        .iter()
+        .any(|item| item.evidence_ids.is_empty())
+        || result
+            .inferences
+            .iter()
+            .any(|item| item.evidence_ids.is_empty())
+    {
+        return Err(ResultValidationReason::UnsupportedClaim);
+    }
+    if result.summary.status == SkillSummaryStatus::Supported
+        && result.summary.evidence_ids.is_empty()
+    {
+        return Err(ResultValidationReason::UnsupportedClaim);
+    }
     if result.summary.text.trim().is_empty()
         || result.summary.text.len() > 16 * 1024
         || result.summary.evidence_ids.len() > 30
-        || (result.summary.status == SkillSummaryStatus::Supported
-            && result.summary.evidence_ids.is_empty())
         || (result.summary.status == SkillSummaryStatus::InsufficientEvidence
             && (!result.summary.evidence_ids.is_empty() || result.missing_context.is_empty()))
         || result.observations.len() > 50
@@ -1328,12 +1357,52 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
             .any(|item| item.trim().is_empty() || item.len() > 16 * 1024)
         || serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > 256 * 1024)
     {
-        return Err(ResultValidationStage::Schema);
+        return Err(ResultValidationReason::MissingField);
     }
     if result.summary.status == SkillSummaryStatus::InsufficientEvidence {
         result.summary.text = "证据不足，无法得出诊断结论".into();
     }
     Ok(result)
+}
+
+fn classify_schema_shape(value: &Value) -> Option<ResultValidationReason> {
+    let object = value.as_object()?;
+    let summary = object.get("summary")?.as_object()?;
+    if ![
+        "summary",
+        "observations",
+        "inferences",
+        "missing_context",
+        "evidence",
+    ]
+    .iter()
+    .all(|field| object.contains_key(*field))
+        || !["status", "text", "evidence_ids"]
+            .iter()
+            .all(|field| summary.contains_key(*field))
+    {
+        return Some(ResultValidationReason::MissingField);
+    }
+    if !matches!(
+        summary.get("status").and_then(Value::as_str),
+        Some("SUPPORTED") | Some("INSUFFICIENT_EVIDENCE")
+    ) {
+        return Some(ResultValidationReason::InvalidSummaryStatus);
+    }
+    if let Some(inferences) = object.get("inferences").and_then(Value::as_array)
+        && inferences.iter().any(|inference| {
+            !matches!(
+                inference
+                    .as_object()
+                    .and_then(|item| item.get("confidence"))
+                    .and_then(Value::as_str),
+                Some("LOW") | Some("MEDIUM") | Some("HIGH")
+            )
+        })
+    {
+        return Some(ResultValidationReason::InvalidConfidence);
+    }
+    None
 }
 
 async fn parse_with_repair(
@@ -1345,19 +1414,28 @@ async fn parse_with_repair(
     cancellation: &CancellationToken,
     retry_deadline: Instant,
 ) -> Result<SkillRunResult, (&'static str, &'static str)> {
-    let first_stage = match validate_result(response.message.content.as_deref(), ledger) {
-        Ok(result) => return Ok(result),
-        Err(stage) => stage,
+    let first_reason = match validate_result(response.message.content.as_deref(), ledger) {
+        Ok(result) => {
+            tracing::info!(
+                run_id,
+                final_result_validation = "succeeded",
+                repair_used = false,
+                "skill final result validated"
+            );
+            return Ok(result);
+        }
+        Err(reason) => reason,
     };
     tracing::warn!(
         run_id,
-        result_validation_stage = first_stage.as_str(),
+        final_result_validation = "failed",
+        validation_reason = first_reason.as_str(),
         repair_attempt = 1_u8,
         "skill result validation failed; requesting repair"
     );
     let mut repair = messages.to_vec();
     repair.push(response.message);
-    repair.push(ChatMessage { role: "user".into(), content: Some("The result was invalid or cited evidence that was not returned by read_file_lines. Return only JSON: summary as {status:SUPPORTED|INSUFFICIENT_EVIDENCE,text,evidence_ids[]}; observations as {text,evidence_ids[]} objects; inferences as {text,confidence:LOW|MEDIUM|HIGH,evidence_ids[]} objects; missing_context as strings; evidence as {id,bundle_hash,file_id,path,start_line,end_line,excerpt,explanation} objects. A SUPPORTED summary and every observation/inference need valid evidence IDs. An INSUFFICIENT_EVIDENCE summary needs empty evidence_ids and non-empty missing_context. Remove unsupported claims and citations.".into()), tool_calls: vec![], tool_call_id: None, name: None });
+    repair.push(ChatMessage { role: "user".into(), content: Some("The previous final result failed validation. Return only one JSON object, with exactly these top-level fields: summary, observations, inferences, missing_context, evidence. summary.status must be SUPPORTED or INSUFFICIENT_EVIDENCE; summary has text and evidence_ids. observations have text and evidence_ids; inferences have text, confidence LOW/MEDIUM/HIGH, and evidence_ids. Every evidence_id must refer to an id in evidence, and every evidence item must match an EvidenceLedger entry returned by read_file_lines. SUPPORTED summaries and all observations/inferences require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Do not make unsupported claims. Do not use Markdown, code fences, extra prose, or tool calls.".into()), tool_calls: vec![], tool_call_id: None, name: None });
     let response = tokio::select! {
         _ = cancellation.cancelled() => return Err(("SKILL_RUN_CANCELLED", "Skill 任务已取消")),
         response = complete_with_retry(
@@ -1376,15 +1454,25 @@ async fn parse_with_repair(
         ) => response.map_err(runner_provider_error)?,
     };
     match validate_result(response.message.content.as_deref(), ledger) {
-        Ok(result) => Ok(result),
-        Err(stage) => {
+        Ok(result) => {
+            tracing::info!(
+                run_id,
+                final_result_validation = "succeeded",
+                repair_used = true,
+                repair_attempt = 1_u8,
+                "skill final result validated after repair"
+            );
+            Ok(result)
+        }
+        Err(reason) => {
             tracing::warn!(
                 run_id,
-                result_validation_stage = stage.as_str(),
+                final_result_validation = "failed",
+                validation_reason = reason.as_str(),
                 repair_attempt = 1_u8,
                 "skill result validation failed after repair"
             );
-            Err(stage.run_error())
+            Err(reason.run_error())
         }
     }
 }
@@ -1392,13 +1480,16 @@ async fn parse_with_repair(
 fn validate_result(
     content: Option<&str>,
     ledger: &EvidenceLedger,
-) -> Result<SkillRunResult, ResultValidationStage> {
+) -> Result<SkillRunResult, ResultValidationReason> {
     let result = parse_result(content)?;
-    validate_evidence(&result, ledger).map_err(|_| ResultValidationStage::Evidence)?;
+    validate_evidence(&result, ledger)?;
     Ok(result)
 }
 
-fn validate_evidence(result: &SkillRunResult, ledger: &EvidenceLedger) -> Result<(), ()> {
+fn validate_evidence(
+    result: &SkillRunResult,
+    ledger: &EvidenceLedger,
+) -> Result<(), ResultValidationReason> {
     let mut unique_ranges = std::collections::HashSet::new();
     let mut evidence_ids = std::collections::HashSet::new();
     let evidence_valid = result.evidence.iter().all(|item| {
@@ -1432,15 +1523,16 @@ fn validate_evidence(result: &SkillRunResult, ledger: &EvidenceLedger) -> Result
     if evidence_valid && claims_valid {
         Ok(())
     } else {
-        Err(())
+        Err(ResultValidationReason::InvalidEvidenceReference)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ResultValidationStage, ToolCallError, ToolErrorCategory, classify_bootstrap_manifest_error,
-        classify_tool_execution_error, parse_result, parse_tool_call, validate_result,
+        ResultValidationReason, ToolCallError, ToolErrorCategory,
+        classify_bootstrap_manifest_error, classify_tool_execution_error, parse_result,
+        parse_tool_call, validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
     use crate::error::AppError;
@@ -1586,24 +1678,38 @@ mod tests {
     }
 
     #[test]
-    fn result_validation_distinguishes_json_schema_and_evidence_stages() {
+    fn result_validation_returns_safe_reasons() {
         assert_eq!(
             parse_result(Some("not json")).unwrap_err(),
-            ResultValidationStage::ParseJson
+            ResultValidationReason::InvalidJson
         );
         assert_eq!(
             parse_result(Some("{}")).unwrap_err(),
-            ResultValidationStage::Schema
+            ResultValidationReason::MissingField
         );
         let schema_invalid = r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
         assert_eq!(
             parse_result(Some(schema_invalid)).unwrap_err(),
-            ResultValidationStage::Schema
+            ResultValidationReason::UnsupportedClaim
+        );
+        assert_eq!(
+            ResultValidationReason::UnsupportedClaim.run_error(),
+            ("SKILL_RESULT_INVALID", "模型结果无效")
+        );
+        let invalid_status = r#"{"summary":{"status":"MAYBE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
+        assert_eq!(
+            parse_result(Some(invalid_status)).unwrap_err(),
+            ResultValidationReason::InvalidSummaryStatus
+        );
+        let invalid_confidence = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[{"text":"claim","confidence":"CERTAIN","evidence_ids":["e1"]}],"missing_context":["gap"],"evidence":[]}"#;
+        assert_eq!(
+            parse_result(Some(invalid_confidence)).unwrap_err(),
+            ResultValidationReason::InvalidConfidence
         );
         let unsupported_evidence = r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":["e1"]},"observations":[],"inferences":[],"missing_context":[],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x"}]}"#;
         assert_eq!(
             validate_result(Some(unsupported_evidence), &EvidenceLedger::default()).unwrap_err(),
-            ResultValidationStage::Evidence
+            ResultValidationReason::InvalidEvidenceReference
         );
     }
 }

@@ -164,7 +164,13 @@ async fn runner_persists_a_valid_structured_result() {
         requests: Mutex::new(Vec::new()),
     });
 
-    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client.clone(),
+        cancellation,
+    ))
+    .await;
 
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
@@ -202,6 +208,11 @@ async fn runner_persists_a_valid_structured_result() {
     assert!(
         platform_rules.contains("cannot") && platform_rules.contains("weaken the Evidence Policy")
     );
+    assert!(
+        output.contains("final_result_validation=\"succeeded\""),
+        "{output}"
+    );
+    assert!(output.contains("repair_used=false"));
     assert!(!skill_instructions.contains("schema_version"));
     assert!(!skill_instructions.contains("---"));
     assert!(skill_instructions.contains("# 目标"));
@@ -303,7 +314,13 @@ async fn runner_repairs_a_structured_result_with_forged_evidence() {
     });
     let client = Arc::new(ScriptedClient(Mutex::new(VecDeque::from(responses))));
 
-    SkillRunner::execute(state, run.id.clone(), client, cancellation).await;
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client,
+        cancellation,
+    ))
+    .await;
 
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
@@ -313,6 +330,15 @@ async fn runner_repairs_a_structured_result_with_forged_evidence() {
             .unwrap()
             .contains("证据不足，无法得出诊断结论")
     );
+    assert!(
+        output.contains("final_result_validation=\"failed\""),
+        "{output}"
+    );
+    assert!(output.contains("validation_reason=\"invalid_evidence_reference\""));
+    assert!(output.contains("repair_attempt=1"));
+    assert!(output.contains("final_result_validation=\"succeeded\""));
+    assert!(output.contains("repair_used=true"));
+    assert!(!output.contains("forged-bundle"));
 }
 
 #[tokio::test]
@@ -1057,4 +1083,17 @@ async fn runner_forces_summary_after_three_consecutive_invalid_tool_calls() {
             .as_deref()
             .is_some_and(|content| content.contains("invalid tool call retry limit reached"))
     }));
+    let final_prompt = requests[3]
+        .messages
+        .iter()
+        .find_map(|message| {
+            message
+                .content
+                .as_deref()
+                .filter(|content| content.contains("Tool use stopped because"))
+        })
+        .unwrap();
+    assert!(final_prompt.contains("SUPPORTED|INSUFFICIENT_EVIDENCE"));
+    assert!(final_prompt.contains("EvidenceLedger"));
+    assert!(final_prompt.contains("Do not output Markdown"));
 }
