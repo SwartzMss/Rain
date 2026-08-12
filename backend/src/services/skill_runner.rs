@@ -1544,106 +1544,113 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
             Some(ValidationField::Evidence),
         ));
     }
-    if let Some(field) = result.observations.iter().find_map(|item| {
-        if item.text.trim().is_empty() || item.text.len() > 16 * 1024 {
-            Some(ValidationField::ObservationText)
+    if let Some(error) = result.observations.iter().find_map(|item| {
+        if item.text.trim().is_empty() {
+            Some(ResultValidationError::new(
+                ResultValidationReason::EmptyRequiredText,
+                Some(ValidationField::ObservationText),
+            ))
+        } else if item.text.len() > 16 * 1024 {
+            Some(ResultValidationError::new(
+                ResultValidationReason::ResultTooLarge,
+                Some(ValidationField::ObservationText),
+            ))
         } else if item.evidence_ids.len() > 30 {
-            Some(ValidationField::ObservationEvidenceIds)
+            Some(ResultValidationError::new(
+                ResultValidationReason::InvalidArraySize,
+                Some(ValidationField::ObservationEvidenceIds),
+            ))
         } else {
             None
         }
     }) {
-        return Err(ResultValidationError::new(
-            if result
-                .observations
-                .iter()
-                .any(|item| item.text.trim().is_empty())
-            {
-                ResultValidationReason::EmptyRequiredText
-            } else if result
-                .observations
-                .iter()
-                .any(|item| item.text.len() > 16 * 1024)
-            {
-                ResultValidationReason::ResultTooLarge
-            } else {
-                ResultValidationReason::InvalidArraySize
-            },
-            Some(field),
-        ));
+        return Err(error);
     }
-    if let Some(field) = result.inferences.iter().find_map(|item| {
-        if item.text.trim().is_empty() || item.text.len() > 16 * 1024 {
-            Some(ValidationField::InferenceText)
+    if let Some(error) = result.inferences.iter().find_map(|item| {
+        if item.text.trim().is_empty() {
+            Some(ResultValidationError::new(
+                ResultValidationReason::EmptyRequiredText,
+                Some(ValidationField::InferenceText),
+            ))
+        } else if item.text.len() > 16 * 1024 {
+            Some(ResultValidationError::new(
+                ResultValidationReason::ResultTooLarge,
+                Some(ValidationField::InferenceText),
+            ))
         } else if item.evidence_ids.len() > 30 {
-            Some(ValidationField::InferenceEvidenceIds)
+            Some(ResultValidationError::new(
+                ResultValidationReason::InvalidArraySize,
+                Some(ValidationField::InferenceEvidenceIds),
+            ))
         } else {
             None
         }
     }) {
-        return Err(ResultValidationError::new(
-            if result
-                .inferences
-                .iter()
-                .any(|item| item.text.trim().is_empty())
-            {
-                ResultValidationReason::EmptyRequiredText
-            } else if result
-                .inferences
-                .iter()
-                .any(|item| item.text.len() > 16 * 1024)
-            {
-                ResultValidationReason::ResultTooLarge
-            } else {
-                ResultValidationReason::InvalidArraySize
-            },
-            Some(field),
-        ));
+        return Err(error);
     }
-    if let Some(field) = result.missing_context.iter().find_map(|item| {
-        if item.trim().is_empty() || item.len() > 16 * 1024 {
-            Some(ValidationField::MissingContext)
+    if let Some(error) = result.missing_context.iter().find_map(|item| {
+        if item.trim().is_empty() {
+            Some(ResultValidationError::new(
+                ResultValidationReason::EmptyRequiredText,
+                Some(ValidationField::MissingContext),
+            ))
+        } else if item.len() > 16 * 1024 {
+            Some(ResultValidationError::new(
+                ResultValidationReason::ResultTooLarge,
+                Some(ValidationField::MissingContext),
+            ))
         } else {
             None
         }
     }) {
-        return Err(ResultValidationError::new(
-            if result
-                .missing_context
-                .iter()
-                .any(|item| item.trim().is_empty())
-            {
-                ResultValidationReason::EmptyRequiredText
-            } else {
-                ResultValidationReason::ResultTooLarge
-            },
-            Some(field),
-        ));
+        return Err(error);
     }
-    if let Some(field) = result.evidence.iter().find_map(|item| {
-        if item.id.is_empty() || item.id.len() > 128 {
-            Some(ValidationField::EvidenceId)
-        } else if item.bundle_hash.is_empty() || item.bundle_hash.len() > 128 {
-            Some(ValidationField::EvidenceBundleHash)
-        } else if item.path.is_empty() || item.path.len() > 4096 {
-            Some(ValidationField::EvidencePath)
+    if let Some(error) = result.evidence.iter().find_map(|item| {
+        if item.id.is_empty() {
+            Some(ResultValidationError::new(
+                ResultValidationReason::EmptyRequiredText,
+                Some(ValidationField::EvidenceId),
+            ))
+        } else if item.id.len() > 128 {
+            Some(ResultValidationError::new(
+                ResultValidationReason::ResultTooLarge,
+                Some(ValidationField::EvidenceId),
+            ))
+        } else if item.bundle_hash.is_empty() {
+            Some(ResultValidationError::new(
+                ResultValidationReason::EmptyRequiredText,
+                Some(ValidationField::EvidenceBundleHash),
+            ))
+        } else if item.bundle_hash.len() > 128 {
+            Some(ResultValidationError::new(
+                ResultValidationReason::ResultTooLarge,
+                Some(ValidationField::EvidenceBundleHash),
+            ))
+        } else if item.path.is_empty() {
+            Some(ResultValidationError::new(
+                ResultValidationReason::EmptyRequiredText,
+                Some(ValidationField::EvidencePath),
+            ))
+        } else if item.path.len() > 4096 {
+            Some(ResultValidationError::new(
+                ResultValidationReason::ResultTooLarge,
+                Some(ValidationField::EvidencePath),
+            ))
         } else if item.excerpt.len() > 4096 {
-            Some(ValidationField::EvidenceExcerpt)
+            Some(ResultValidationError::new(
+                ResultValidationReason::ResultTooLarge,
+                Some(ValidationField::EvidenceExcerpt),
+            ))
         } else if item.explanation.chars().count() > 2000 {
-            Some(ValidationField::EvidenceExplanation)
+            Some(ResultValidationError::new(
+                ResultValidationReason::ResultTooLarge,
+                Some(ValidationField::EvidenceExplanation),
+            ))
         } else {
             None
         }
     }) {
-        let reason =
-            if result.evidence.iter().any(|item| {
-                item.id.is_empty() || item.bundle_hash.is_empty() || item.path.is_empty()
-            }) {
-                ResultValidationReason::EmptyRequiredText
-            } else {
-                ResultValidationReason::ResultTooLarge
-            };
-        return Err(ResultValidationError::new(reason, Some(field)));
+        return Err(error);
     }
     if serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > 256 * 1024) {
         return Err(ResultValidationError::new(
@@ -2103,6 +2110,9 @@ fn skill_result_response_format(mode: StructuredOutputMode) -> Value {
 }
 
 fn skill_result_schema() -> Value {
+    // JSON Schema maxLength counts Unicode characters. The server-side limits for
+    // these fields are UTF-8 byte limits, so those limits stay enforced below in
+    // parse_result instead of being expressed as misleading schema constraints.
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -2117,7 +2127,7 @@ fn skill_result_schema() -> Value {
                         "type": "string",
                         "enum": ["SUPPORTED", "INSUFFICIENT_EVIDENCE"]
                     },
-                    "text": {"type": "string", "maxLength": 16384},
+                    "text": {"type": "string"},
                     "evidence_ids": {
                         "type": "array",
                         "maxItems": 30,
@@ -2133,7 +2143,7 @@ fn skill_result_schema() -> Value {
                     "additionalProperties": false,
                     "required": ["text", "evidence_ids"],
                     "properties": {
-                        "text": {"type": "string", "maxLength": 16384},
+                        "text": {"type": "string"},
                         "evidence_ids": {
                             "type": "array",
                             "maxItems": 30,
@@ -2150,7 +2160,7 @@ fn skill_result_schema() -> Value {
                     "additionalProperties": false,
                     "required": ["text", "confidence", "evidence_ids"],
                     "properties": {
-                        "text": {"type": "string", "maxLength": 16384},
+                        "text": {"type": "string"},
                         "confidence": {
                             "type": "string",
                             "enum": ["LOW", "MEDIUM", "HIGH"]
@@ -2166,7 +2176,7 @@ fn skill_result_schema() -> Value {
             "missing_context": {
                 "type": "array",
                 "maxItems": 50,
-                "items": {"type": "string", "maxLength": 16384}
+                "items": {"type": "string"}
             },
             "evidence": {
                 "type": "array",
@@ -2179,13 +2189,13 @@ fn skill_result_schema() -> Value {
                         "start_line", "end_line", "excerpt", "explanation"
                     ],
                     "properties": {
-                        "id": {"type": "string", "maxLength": 128},
-                        "bundle_hash": {"type": "string", "maxLength": 128},
+                        "id": {"type": "string"},
+                        "bundle_hash": {"type": "string"},
                         "file_id": {"type": "integer"},
-                        "path": {"type": "string", "maxLength": 4096},
+                        "path": {"type": "string"},
                         "start_line": {"type": "integer"},
                         "end_line": {"type": "integer"},
-                        "excerpt": {"type": "string", "maxLength": 4096},
+                        "excerpt": {"type": "string"},
                         "explanation": {"type": "string", "maxLength": 2000}
                     }
                 }
@@ -2529,6 +2539,81 @@ mod tests {
         let error = parse_result(Some(insufficient_context)).unwrap_err();
         assert_eq!(error.reason, ResultValidationReason::InvalidMissingContext);
         assert_eq!(error.field, Some(ValidationField::MissingContext));
+    }
+
+    #[test]
+    fn result_validation_keeps_reason_and_field_from_the_same_invalid_item() {
+        let mut observations = serde_json::json!({
+            "summary": {"status": "SUPPORTED", "text": "claim", "evidence_ids": ["e1"]},
+            "observations": [
+                {"text": "observation", "evidence_ids": (0..=30).map(|i| format!("e{i}")).collect::<Vec<_>>()},
+                {"text": "", "evidence_ids": ["e1"]}
+            ],
+            "inferences": [],
+            "missing_context": [],
+            "evidence": []
+        });
+        let error = parse_result(Some(&observations.to_string())).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::InvalidArraySize);
+        assert_eq!(error.field, Some(ValidationField::ObservationEvidenceIds));
+
+        observations["observations"] = serde_json::json!([]);
+        observations["inferences"] = serde_json::json!([
+            {"text": "inference", "confidence": "LOW", "evidence_ids": (0..=30).map(|i| format!("e{i}")).collect::<Vec<_>>()},
+            {"text": "", "confidence": "LOW", "evidence_ids": ["e1"]}
+        ]);
+        let error = parse_result(Some(&observations.to_string())).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::InvalidArraySize);
+        assert_eq!(error.field, Some(ValidationField::InferenceEvidenceIds));
+
+        observations["inferences"] = serde_json::json!([]);
+        observations["evidence"] = serde_json::json!([
+            {"id": "e1", "bundle_hash": "hash", "file_id": 1, "path": "/log", "start_line": 1, "end_line": 1, "excerpt": "x".repeat(4097), "explanation": "x"},
+            {"id": "", "bundle_hash": "hash", "file_id": 1, "path": "/log", "start_line": 1, "end_line": 1, "excerpt": "x", "explanation": "x"}
+        ]);
+        let error = parse_result(Some(&observations.to_string())).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::ResultTooLarge);
+        assert_eq!(error.field, Some(ValidationField::EvidenceExcerpt));
+    }
+
+    #[test]
+    fn byte_limited_result_fields_are_not_claimed_as_schema_character_limits() {
+        let schema = skill_result_response_format(StructuredOutputMode::JsonSchema)["json_schema"]
+            ["schema"]
+            .clone();
+        assert!(schema["properties"]["summary"]["properties"]["text"]["maxLength"].is_null());
+        assert!(
+            schema["properties"]["observations"]["items"]["properties"]["text"]["maxLength"]
+                .is_null()
+        );
+        assert!(
+            schema["properties"]["inferences"]["items"]["properties"]["text"]["maxLength"]
+                .is_null()
+        );
+        assert!(schema["properties"]["missing_context"]["items"]["maxLength"].is_null());
+        assert!(
+            schema["properties"]["evidence"]["items"]["properties"]["path"]["maxLength"].is_null()
+        );
+        assert!(
+            schema["properties"]["evidence"]["items"]["properties"]["excerpt"]["maxLength"]
+                .is_null()
+        );
+        assert_eq!(
+            schema["properties"]["evidence"]["items"]["properties"]["explanation"]["maxLength"],
+            2000
+        );
+
+        let oversized_multibyte_text = "界".repeat(16 * 1024 / 3 + 1);
+        let result = serde_json::json!({
+            "summary": {"status": "SUPPORTED", "text": oversized_multibyte_text, "evidence_ids": ["e1"]},
+            "observations": [],
+            "inferences": [],
+            "missing_context": [],
+            "evidence": []
+        });
+        let error = parse_result(Some(&result.to_string())).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::ResultTooLarge);
+        assert_eq!(error.field, Some(ValidationField::SummaryText));
     }
 
     #[test]

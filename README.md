@@ -168,6 +168,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_AI_API_KEY` | — | 环境变量 Provider 的 API Key |
 | `RAIN_AI_MODEL` | — | 环境变量 Provider 使用的模型 |
 | `RAIN_AI_TIMEOUT_SECONDS` | `120` | 单次模型请求超时，范围 1–300 秒 |
+| `RAIN_AI_STRUCTURED_OUTPUT` | `json_object` | Skill final result 和 repair 请求的结构化输出模式；可选 `json_object` 或 `json_schema`。管理员 Provider Test 始终使用 `response_format: null`，只验证连通性，不验证 strict schema 能力 |
 | `RAIN_AI_MASTER_KEY` | — | 32 字节随机主密钥的 Base64，用于加密管理员保存到数据库的 API Key |
 
 默认配置会使用：
