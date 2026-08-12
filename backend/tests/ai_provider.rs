@@ -694,7 +694,10 @@ async fn tls_handshake_failure_is_not_retried() {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     server_attempts.fetch_add(1, Ordering::SeqCst);
-                    let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+                    // Send a well-formed fatal TLS alert so the client observes a
+                    // handshake failure consistently on every supported platform.
+                    let _ = stream.write_all(b"\x15\x03\x03\x00\x02\x02\x28");
+                    std::thread::sleep(StdDuration::from_millis(100));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(StdDuration::from_millis(5));
