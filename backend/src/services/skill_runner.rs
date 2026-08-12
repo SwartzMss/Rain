@@ -1285,12 +1285,13 @@ impl ResultValidationReason {
 
     fn run_error(self) -> (&'static str, &'static str) {
         match self {
-            Self::InvalidEvidenceReference | Self::UnsupportedClaim => {
+            Self::InvalidEvidenceReference => {
                 ("SKILL_EVIDENCE_INVALID", "模型引用了未读取的日志证据")
             }
             Self::InvalidJson
             | Self::MissingField
             | Self::InvalidSummaryStatus
+            | Self::UnsupportedClaim
             | Self::InvalidConfidence => ("SKILL_RESULT_INVALID", "模型结果无效"),
         }
     }
@@ -1690,6 +1691,10 @@ mod tests {
         assert_eq!(
             parse_result(Some(schema_invalid)).unwrap_err(),
             ResultValidationReason::UnsupportedClaim
+        );
+        assert_eq!(
+            ResultValidationReason::UnsupportedClaim.run_error(),
+            ("SKILL_RESULT_INVALID", "模型结果无效")
         );
         let invalid_status = r#"{"summary":{"status":"MAYBE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
         assert_eq!(
