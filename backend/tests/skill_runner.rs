@@ -4,6 +4,7 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -736,7 +737,8 @@ async fn provider_failure_log_identifies_final_model_request() {
             "{}",
         )]));
     }
-    responses.push_back(Err(ProviderError::http(503)));
+    let exhausted = ProviderError::http_with_retry_after(503, Duration::ZERO);
+    responses.extend([Err(exhausted), Err(exhausted), Err(exhausted)]);
     let client = Arc::new(ScriptedClient(Mutex::new(responses)));
 
     let output = capture_logs(SkillRunner::execute(
@@ -760,6 +762,9 @@ async fn provider_failure_log_identifies_final_model_request() {
         "response_format=json_object",
         "error_category=http_status",
         "http_status=503",
+        "attempt=3",
+        "max_attempts=3",
+        "retry_exhausted=true",
     ] {
         assert!(output.contains(expected), "missing {expected} in {output}");
     }
@@ -778,6 +783,8 @@ async fn provider_failure_log_identifies_result_repair_transport_reason() {
                 name: None,
             },
         }),
+        Err(ProviderError::Transport(TransportReason::ConnectFailed)),
+        Err(ProviderError::Transport(TransportReason::ConnectFailed)),
         Err(ProviderError::Transport(TransportReason::ConnectFailed)),
     ]))));
 
@@ -801,6 +808,51 @@ async fn provider_failure_log_identifies_result_repair_transport_reason() {
         "response_format=json_object",
         "error_category=transport",
         "reason=connect_failed",
+        "attempt=3",
+        "max_attempts=3",
+        "retry_exhausted=true",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn result_repair_retries_a_transient_429() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some("not json".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            Err(ProviderError::http_with_retry_after(429, Duration::ZERO)),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client.clone(),
+        cancellation,
+    ))
+    .await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    assert_eq!(client.requests.lock().unwrap().len(), 3);
+    for expected in [
+        "stage=result_repair",
+        "attempt=1",
+        "max_attempts=3",
+        "error_category=http_status",
+        "http_status=429",
     ] {
         assert!(output.contains(expected), "missing {expected} in {output}");
     }
