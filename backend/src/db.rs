@@ -21,6 +21,13 @@ static HEAVY_CLEANUP_WRITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
 static QUEUED_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
 
+pub async fn capture_recovery_cutoff(pool: &SqlitePool) -> Result<String, AppError> {
+    sqlx::query_scalar("SELECT CURRENT_TIMESTAMP")
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Database)
+}
+
 struct CleanupQueueGuard {
     queued: bool,
 }
@@ -466,6 +473,30 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
         WHERE status IN ('PENDING', 'PROCESSING')
         "#,
     )
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(result.rows_affected())
+}
+
+pub async fn fail_stale_processing_bundles_before(
+    pool: &SqlitePool,
+    created_before: &str,
+) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE bundles
+        SET failure_stage = process_stage,
+            failure_code = 'PROCESS_INTERRUPTED',
+            retryable = 1,
+            status = 'FAILED',
+            failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
+        WHERE status IN ('PENDING', 'PROCESSING')
+          AND datetime(created_at) < datetime(?)
+        "#,
+    )
+    .bind(created_before)
     .execute(pool)
     .await
     .map_err(AppError::Database)?;

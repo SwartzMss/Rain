@@ -168,6 +168,13 @@ pub struct RecoveryRuntime {
 }
 
 impl RecoveryRuntime {
+    pub fn ready() -> Self {
+        Self {
+            stale_skill_runs_ready: AtomicBool::new(true),
+            stale_processing_bundles_ready: AtomicBool::new(true),
+        }
+    }
+
     pub fn invariant_recovery_ready(&self) -> bool {
         self.stale_skill_runs_ready.load(Ordering::Acquire)
             && self.stale_processing_bundles_ready.load(Ordering::Acquire)
@@ -462,7 +469,7 @@ impl AppState {
             ai_provider,
             skill_runs: SkillRunRuntime::default(),
             skill_reviews: SkillReviewRuntime::new(2, 5, Duration::from_secs(60 * 60)),
-            recovery: Arc::new(RecoveryRuntime::default()),
+            recovery: Arc::new(RecoveryRuntime::ready()),
             issue_inactive_days: AtomicUsize::new(0),
             limits,
         }

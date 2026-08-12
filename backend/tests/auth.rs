@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use actix_web::{
     App,
@@ -7,8 +7,51 @@ use actix_web::{
     middleware::from_fn,
     test, web,
 };
-use backend::{AppState, config::AppLimits, db, repositories::bootstrap_admin, routes};
+use backend::{
+    AppState, RecoveryRuntime, config::AppLimits, db, repositories::bootstrap_admin, routes,
+};
 use serde_json::{Value, json};
+
+#[actix_web::test]
+async fn recovery_gate_blocks_api_but_allows_health_endpoints() {
+    let pool = db::init_pool("sqlite::memory:").expect("pool");
+    db::prepare_schema(&pool, false).await.expect("schema");
+    let mut app_state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    app_state.recovery = Arc::new(RecoveryRuntime::default());
+    let state = web::Data::new(app_state);
+    let app = test::init_service(
+        App::new()
+            .app_data(state.clone())
+            .configure(routes::register),
+    )
+    .await;
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/auth/registration-status")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["code"], "SERVICE_RECOVERING");
+
+    let response =
+        test::call_service(&app, test::TestRequest::get().uri("/healthz").to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    state.recovery.mark_stale_skill_runs_ready();
+    state.recovery.mark_stale_processing_bundles_ready();
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/auth/registration-status")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
 
 #[actix_web::test]
 async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {

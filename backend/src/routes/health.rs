@@ -115,7 +115,7 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
 
     use super::{READINESS_CACHE, readiness_response};
-    use crate::{AppState, config::AppLimits, db};
+    use crate::{AppState, RecoveryRuntime, config::AppLimits, db};
 
     #[actix_web::test]
     async fn readiness_waits_for_invariant_recovery_and_reports_its_state() {
@@ -131,11 +131,9 @@ mod tests {
             .unwrap();
         db::prepare_schema(&pool, false).await.unwrap();
         let data_root = std::env::temp_dir().join(format!("rain-ready-{}", uuid::Uuid::new_v4()));
-        let state = web::Data::new(AppState::new(
-            pool,
-            PathBuf::from(&data_root),
-            AppLimits::default(),
-        ));
+        let mut app_state = AppState::new(pool, PathBuf::from(&data_root), AppLimits::default());
+        app_state.recovery = std::sync::Arc::new(RecoveryRuntime::default());
+        let state = web::Data::new(app_state);
 
         let response = readiness_response(state.as_ref()).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

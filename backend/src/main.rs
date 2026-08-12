@@ -12,8 +12,8 @@ use backend::{
     },
     config::AppConfig,
     db::{
-        cleanup_expired_bundles, fail_stale_processing_bundles, init_pool,
-        load_or_initialize_system_settings, prepare_schema, resume_deleting_bundles,
+        capture_recovery_cutoff, cleanup_expired_bundles, fail_stale_processing_bundles_before,
+        init_pool, load_or_initialize_system_settings, prepare_schema, resume_deleting_bundles,
     },
     routes::register,
 };
@@ -95,11 +95,14 @@ async fn main() -> std::io::Result<()> {
 
     let blob_store: std::sync::Arc<dyn BlobStore> =
         std::sync::Arc::new(LocalCasBlobStore::new(config.data_root.clone()));
+    let recovery_cutoff = capture_recovery_cutoff(&pool)
+        .await
+        .expect("failed to capture recovery cutoff");
     let recovery_runtime = Arc::new(RecoveryRuntime::default());
     if run_optional_recovery_stage(
         "stale-processing-bundles",
         STARTUP_RECOVERY_TIMEOUT,
-        fail_stale_processing_bundles(&pool),
+        fail_stale_processing_bundles_before(&pool, &recovery_cutoff),
     )
     .await
     {
@@ -108,7 +111,7 @@ async fn main() -> std::io::Result<()> {
     if run_optional_recovery_stage(
         "stale-skill-runs",
         STARTUP_RECOVERY_TIMEOUT,
-        backend::repositories::skill_runs::recover_active(&pool),
+        backend::repositories::skill_runs::recover_active_before(&pool, &recovery_cutoff),
     )
     .await
     {
@@ -201,6 +204,7 @@ async fn main() -> std::io::Result<()> {
         background_tasks.push(spawn_invariant_recovery_supervisor(
             shared_state.db.pool.clone(),
             recovery_runtime,
+            recovery_cutoff,
         ));
     }
     background_tasks.push(backend::upload::job::spawn_temp_cleanup_worker(
@@ -286,6 +290,7 @@ fn spawn_session_cleanup(pool: sqlx::SqlitePool) -> tokio::task::JoinHandle<()> 
 fn spawn_invariant_recovery_supervisor(
     pool: sqlx::SqlitePool,
     recovery: Arc<RecoveryRuntime>,
+    recovery_cutoff: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut attempt = 0usize;
@@ -301,7 +306,7 @@ fn spawn_invariant_recovery_supervisor(
                     "stale-processing-bundles",
                     attempt,
                     STARTUP_RECOVERY_TIMEOUT,
-                    fail_stale_processing_bundles(&pool),
+                    fail_stale_processing_bundles_before(&pool, &recovery_cutoff),
                 )
                 .await
             {
@@ -312,7 +317,10 @@ fn spawn_invariant_recovery_supervisor(
                     "stale-skill-runs",
                     attempt,
                     STARTUP_RECOVERY_TIMEOUT,
-                    backend::repositories::skill_runs::recover_active(&pool),
+                    backend::repositories::skill_runs::recover_active_before(
+                        &pool,
+                        &recovery_cutoff,
+                    ),
                 )
                 .await
             {

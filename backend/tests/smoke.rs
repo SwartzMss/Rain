@@ -1990,14 +1990,14 @@ async fn startup_recovery_marks_processing_bundle_failed_with_reason() {
         .await
         .expect("insert issue");
     sqlx::query(
-        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('stale', 'STALE', 'stale-hash', 'stale', 'PROCESSING')",
+        "INSERT INTO bundles (id, issue_code, hash, name, status, created_at) VALUES ('stale', 'STALE', 'stale-hash', 'stale', 'PROCESSING', '2020-01-01 00:00:00')",
     )
     .execute(&pool)
     .await
     .expect("insert stale bundle");
 
     assert_eq!(
-        db::fail_stale_processing_bundles(&pool)
+        db::fail_stale_processing_bundles_before(&pool, "2021-01-01 00:00:00")
             .await
             .expect("recover stale bundle"),
         1
@@ -2017,6 +2017,43 @@ async fn startup_recovery_marks_processing_bundle_failed_with_reason() {
     assert_eq!(recovered.0, "FAILED");
     assert_eq!(recovered.1, "PENDING");
     assert!(recovered.2.is_some_and(|reason| reason.contains("重启")));
+}
+
+#[actix_web::test]
+async fn stale_bundle_recovery_cutoff_preserves_new_processing_bundle() {
+    let test_dir = TestDir::new("rain-stale-recovery-cutoff");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues (code, name) VALUES ('CUTOFF', 'CUTOFF')")
+        .execute(&pool)
+        .await
+        .expect("insert issue");
+    sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status, created_at) VALUES ('old', 'CUTOFF', 'old-hash', 'old', 'PROCESSING', '2020-01-01 00:00:00'), ('new', 'CUTOFF', 'new-hash', 'new', 'PROCESSING', '2022-01-01 00:00:00')")
+        .execute(&pool)
+        .await
+        .expect("insert bundles");
+
+    assert_eq!(
+        db::fail_stale_processing_bundles_before(&pool, "2021-01-01 00:00:00")
+            .await
+            .expect("recover old bundle"),
+        1
+    );
+    let states: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, status FROM bundles WHERE id IN ('old', 'new') ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("read bundle states");
+    assert_eq!(
+        states,
+        vec![
+            ("new".into(), "PROCESSING".into()),
+            ("old".into(), "FAILED".into())
+        ]
+    );
 }
 
 #[actix_web::test]
