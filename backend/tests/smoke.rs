@@ -2002,6 +2002,12 @@ async fn startup_recovery_marks_processing_bundle_failed_with_reason() {
             .expect("recover stale bundle"),
         1
     );
+    assert_eq!(
+        db::fail_stale_processing_bundles(&pool)
+            .await
+            .expect("repeat stale bundle recovery"),
+        0
+    );
     let recovered: (String, String, Option<String>) = sqlx::query_as(
         "SELECT status, process_stage, failure_reason FROM bundles WHERE id = 'stale'",
     )

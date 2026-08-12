@@ -84,6 +84,51 @@ async fn run_state_is_atomic_concurrent_and_temporary() {
     );
 }
 
+#[tokio::test]
+async fn recover_active_is_idempotent_and_releases_the_active_slot() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('ISSUE','Issue')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run = skill_runs::create(
+        &pool,
+        &NewSkillRun {
+            user_id: "u".into(),
+            issue_code: "ISSUE".into(),
+            skill_id: "skill".into(),
+            skill_version: 1,
+            skill_name: "Skill".into(),
+            skill_snapshot_markdown: "# Skill".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(skill_runs::recover_active(&pool).await.unwrap(), 1);
+    assert_eq!(skill_runs::recover_active(&pool).await.unwrap(), 0);
+    assert!(
+        skill_runs::find_active_owned(&pool, "u")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let recovered: (String, String, String) =
+        sqlx::query_as("SELECT status, error_code, error_message FROM skill_runs WHERE id=?")
+            .bind(run.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(recovered.0, "FAILED");
+    assert_eq!(recovered.1, "SERVICE_RESTARTED");
+    assert_eq!(recovered.2, "服务重启导致任务中断");
+}
+
 #[actix_web::test]
 async fn run_creation_requires_a_valid_skill_and_configured_provider_but_not_issue_ownership() {
     let pool = db::init_pool("sqlite::memory:").unwrap();
