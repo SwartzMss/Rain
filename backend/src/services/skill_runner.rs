@@ -1319,24 +1319,111 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidat
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationField {
+    Summary,
+    SummaryStatus,
+    SummaryText,
+    SummaryEvidenceIds,
+    Observations,
+    ObservationText,
+    ObservationEvidenceIds,
+    Inferences,
+    InferenceText,
+    InferenceConfidence,
+    InferenceEvidenceIds,
+    MissingContext,
+    Evidence,
+    EvidenceId,
+    EvidenceBundleHash,
+    EvidenceFileId,
+    EvidencePath,
+    EvidenceStartLine,
+    EvidenceEndLine,
+    EvidenceExcerpt,
+    EvidenceExplanation,
+}
+
+impl ValidationField {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::SummaryStatus => "summary.status",
+            Self::SummaryText => "summary.text",
+            Self::SummaryEvidenceIds => "summary.evidence_ids",
+            Self::Observations => "observations",
+            Self::ObservationText => "observations[].text",
+            Self::ObservationEvidenceIds => "observations[].evidence_ids",
+            Self::Inferences => "inferences",
+            Self::InferenceText => "inferences[].text",
+            Self::InferenceConfidence => "inferences[].confidence",
+            Self::InferenceEvidenceIds => "inferences[].evidence_ids",
+            Self::MissingContext => "missing_context",
+            Self::Evidence => "evidence",
+            Self::EvidenceId => "evidence[].id",
+            Self::EvidenceBundleHash => "evidence[].bundle_hash",
+            Self::EvidenceFileId => "evidence[].file_id",
+            Self::EvidencePath => "evidence[].path",
+            Self::EvidenceStartLine => "evidence[].start_line",
+            Self::EvidenceEndLine => "evidence[].end_line",
+            Self::EvidenceExcerpt => "evidence[].excerpt",
+            Self::EvidenceExplanation => "evidence[].explanation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResultValidationReason {
     InvalidJson,
-    MissingField,
+    MissingTopLevelField,
+    MissingNestedField,
+    UnknownField,
+    InvalidFieldType,
     InvalidSummaryStatus,
+    InvalidConfidence,
+    EmptyRequiredText,
+    InvalidArraySize,
+    InvalidMissingContext,
     InvalidEvidenceReference,
     UnsupportedClaim,
-    InvalidConfidence,
+    ResultTooLarge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResultValidationError {
+    reason: ResultValidationReason,
+    field: Option<ValidationField>,
+}
+
+impl ResultValidationError {
+    fn new(reason: ResultValidationReason, field: Option<ValidationField>) -> Self {
+        Self { reason, field }
+    }
+
+    fn as_str(self) -> &'static str {
+        self.reason.as_str()
+    }
+
+    fn run_error(self) -> (&'static str, &'static str) {
+        self.reason.run_error()
+    }
 }
 
 impl ResultValidationReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::InvalidJson => "invalid_json",
-            Self::MissingField => "missing_field",
+            Self::MissingTopLevelField => "missing_top_level_field",
+            Self::MissingNestedField => "missing_nested_field",
+            Self::UnknownField => "unknown_field",
+            Self::InvalidFieldType => "invalid_field_type",
             Self::InvalidSummaryStatus => "invalid_summary_status",
+            Self::InvalidConfidence => "invalid_confidence",
+            Self::EmptyRequiredText => "empty_required_text",
+            Self::InvalidArraySize => "invalid_array_size",
+            Self::InvalidMissingContext => "invalid_missing_context",
             Self::InvalidEvidenceReference => "invalid_evidence_reference",
             Self::UnsupportedClaim => "unsupported_claim",
-            Self::InvalidConfidence => "invalid_confidence",
+            Self::ResultTooLarge => "result_too_large",
         }
     }
 
@@ -1346,75 +1433,233 @@ impl ResultValidationReason {
                 ("SKILL_EVIDENCE_INVALID", "模型引用了未读取的日志证据")
             }
             Self::InvalidJson
-            | Self::MissingField
+            | Self::MissingTopLevelField
+            | Self::MissingNestedField
+            | Self::UnknownField
+            | Self::InvalidFieldType
             | Self::InvalidSummaryStatus
+            | Self::InvalidConfidence
+            | Self::EmptyRequiredText
+            | Self::InvalidArraySize
+            | Self::InvalidMissingContext
             | Self::UnsupportedClaim
-            | Self::InvalidConfidence => ("SKILL_RESULT_INVALID", "模型结果无效"),
+            | Self::ResultTooLarge => ("SKILL_RESULT_INVALID", "模型结果无效"),
         }
     }
 }
 
-fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidationReason> {
-    let value: Value = serde_json::from_str(content.ok_or(ResultValidationReason::InvalidJson)?)
-        .map_err(|_| ResultValidationReason::InvalidJson)?;
-    if let Some(reason) = classify_schema_shape(&value) {
-        return Err(reason);
-    }
-    let mut result: SkillRunResult =
-        serde_json::from_value(value).map_err(|_| ResultValidationReason::MissingField)?;
+fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidationError> {
+    let content = content
+        .ok_or_else(|| ResultValidationError::new(ResultValidationReason::InvalidJson, None))?;
+    let value: Value = serde_json::from_str(content)
+        .map_err(|_| ResultValidationError::new(ResultValidationReason::InvalidJson, None))?;
+    validate_schema_shape(&value)?;
+    let mut result: SkillRunResult = serde_json::from_value(value)
+        .map_err(|_| ResultValidationError::new(ResultValidationReason::InvalidFieldType, None))?;
     if result
         .observations
         .iter()
         .any(|item| item.evidence_ids.is_empty())
-        || result
-            .inferences
-            .iter()
-            .any(|item| item.evidence_ids.is_empty())
     {
-        return Err(ResultValidationReason::UnsupportedClaim);
+        return Err(ResultValidationError::new(
+            ResultValidationReason::UnsupportedClaim,
+            Some(ValidationField::ObservationEvidenceIds),
+        ));
+    }
+    if result
+        .inferences
+        .iter()
+        .any(|item| item.evidence_ids.is_empty())
+    {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::UnsupportedClaim,
+            Some(ValidationField::InferenceEvidenceIds),
+        ));
     }
     if result.summary.status == SkillSummaryStatus::Supported
         && result.summary.evidence_ids.is_empty()
     {
-        return Err(ResultValidationReason::UnsupportedClaim);
+        return Err(ResultValidationError::new(
+            ResultValidationReason::UnsupportedClaim,
+            Some(ValidationField::SummaryEvidenceIds),
+        ));
     }
-    if result.summary.text.trim().is_empty()
-        || result.summary.text.len() > 16 * 1024
-        || result.summary.evidence_ids.len() > 30
-        || (result.summary.status == SkillSummaryStatus::InsufficientEvidence
-            && (!result.summary.evidence_ids.is_empty() || result.missing_context.is_empty()))
-        || result.observations.len() > 50
-        || result.inferences.len() > 50
-        || result.missing_context.len() > 50
-        || result.evidence.len() > 30
-        || result.evidence.iter().any(|item| {
-            item.id.is_empty()
-                || item.id.len() > 128
-                || item.bundle_hash.is_empty()
-                || item.bundle_hash.len() > 128
-                || item.path.len() > 4096
-                || item.excerpt.len() > 4096
-                || item.explanation.chars().count() > 2000
-        })
-        || result.observations.iter().any(|item| {
-            item.text.trim().is_empty()
-                || item.text.len() > 16 * 1024
-                || item.evidence_ids.is_empty()
-                || item.evidence_ids.len() > 30
-        })
-        || result.inferences.iter().any(|item| {
-            item.text.trim().is_empty()
-                || item.text.len() > 16 * 1024
-                || item.evidence_ids.is_empty()
-                || item.evidence_ids.len() > 30
-        })
-        || result
-            .missing_context
-            .iter()
-            .any(|item| item.trim().is_empty() || item.len() > 16 * 1024)
-        || serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > 256 * 1024)
+    if result.summary.text.trim().is_empty() {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::EmptyRequiredText,
+            Some(ValidationField::SummaryText),
+        ));
+    }
+    if result.summary.text.len() > 16 * 1024 {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::ResultTooLarge,
+            Some(ValidationField::SummaryText),
+        ));
+    }
+    if result.summary.evidence_ids.len() > 30 {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidArraySize,
+            Some(ValidationField::SummaryEvidenceIds),
+        ));
+    }
+    if result.summary.status == SkillSummaryStatus::InsufficientEvidence
+        && !result.summary.evidence_ids.is_empty()
     {
-        return Err(ResultValidationReason::MissingField);
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidMissingContext,
+            Some(ValidationField::SummaryEvidenceIds),
+        ));
+    }
+    if result.summary.status == SkillSummaryStatus::InsufficientEvidence
+        && result.missing_context.is_empty()
+    {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidMissingContext,
+            Some(ValidationField::MissingContext),
+        ));
+    }
+    if result.observations.len() > 50 {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidArraySize,
+            Some(ValidationField::Observations),
+        ));
+    }
+    if result.inferences.len() > 50 {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidArraySize,
+            Some(ValidationField::Inferences),
+        ));
+    }
+    if result.missing_context.len() > 50 {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidArraySize,
+            Some(ValidationField::MissingContext),
+        ));
+    }
+    if result.evidence.len() > 30 {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidArraySize,
+            Some(ValidationField::Evidence),
+        ));
+    }
+    if let Some(field) = result.observations.iter().find_map(|item| {
+        if item.text.trim().is_empty() {
+            Some(ValidationField::ObservationText)
+        } else if item.text.len() > 16 * 1024 {
+            Some(ValidationField::ObservationText)
+        } else if item.evidence_ids.len() > 30 {
+            Some(ValidationField::ObservationEvidenceIds)
+        } else {
+            None
+        }
+    }) {
+        return Err(ResultValidationError::new(
+            if result
+                .observations
+                .iter()
+                .any(|item| item.text.trim().is_empty())
+            {
+                ResultValidationReason::EmptyRequiredText
+            } else if result
+                .observations
+                .iter()
+                .any(|item| item.text.len() > 16 * 1024)
+            {
+                ResultValidationReason::ResultTooLarge
+            } else {
+                ResultValidationReason::InvalidArraySize
+            },
+            Some(field),
+        ));
+    }
+    if let Some(field) = result.inferences.iter().find_map(|item| {
+        if item.text.trim().is_empty() {
+            Some(ValidationField::InferenceText)
+        } else if item.text.len() > 16 * 1024 {
+            Some(ValidationField::InferenceText)
+        } else if item.evidence_ids.len() > 30 {
+            Some(ValidationField::InferenceEvidenceIds)
+        } else {
+            None
+        }
+    }) {
+        return Err(ResultValidationError::new(
+            if result
+                .inferences
+                .iter()
+                .any(|item| item.text.trim().is_empty())
+            {
+                ResultValidationReason::EmptyRequiredText
+            } else if result
+                .inferences
+                .iter()
+                .any(|item| item.text.len() > 16 * 1024)
+            {
+                ResultValidationReason::ResultTooLarge
+            } else {
+                ResultValidationReason::InvalidArraySize
+            },
+            Some(field),
+        ));
+    }
+    if let Some(field) = result.missing_context.iter().find_map(|item| {
+        if item.trim().is_empty() {
+            Some(ValidationField::MissingContext)
+        } else if item.len() > 16 * 1024 {
+            Some(ValidationField::MissingContext)
+        } else {
+            None
+        }
+    }) {
+        return Err(ResultValidationError::new(
+            if result
+                .missing_context
+                .iter()
+                .any(|item| item.trim().is_empty())
+            {
+                ResultValidationReason::EmptyRequiredText
+            } else {
+                ResultValidationReason::ResultTooLarge
+            },
+            Some(field),
+        ));
+    }
+    if let Some(field) = result.evidence.iter().find_map(|item| {
+        if item.id.is_empty() {
+            Some(ValidationField::EvidenceId)
+        } else if item.id.len() > 128 {
+            Some(ValidationField::EvidenceId)
+        } else if item.bundle_hash.is_empty() {
+            Some(ValidationField::EvidenceBundleHash)
+        } else if item.bundle_hash.len() > 128 {
+            Some(ValidationField::EvidenceBundleHash)
+        } else if item.path.is_empty() {
+            Some(ValidationField::EvidencePath)
+        } else if item.path.len() > 4096 {
+            Some(ValidationField::EvidencePath)
+        } else if item.excerpt.len() > 4096 {
+            Some(ValidationField::EvidenceExcerpt)
+        } else if item.explanation.chars().count() > 2000 {
+            Some(ValidationField::EvidenceExplanation)
+        } else {
+            None
+        }
+    }) {
+        let reason =
+            if result.evidence.iter().any(|item| {
+                item.id.is_empty() || item.bundle_hash.is_empty() || item.path.is_empty()
+            }) {
+                ResultValidationReason::EmptyRequiredText
+            } else {
+                ResultValidationReason::ResultTooLarge
+            };
+        return Err(ResultValidationError::new(reason, Some(field)));
+    }
+    if serde_json::to_vec(&result).map_or(true, |bytes| bytes.len() > 256 * 1024) {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::ResultTooLarge,
+            None,
+        ));
     }
     if result.summary.status == SkillSummaryStatus::InsufficientEvidence {
         result.summary.text = "证据不足，无法得出诊断结论".into();
@@ -1422,44 +1667,247 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
     Ok(result)
 }
 
-fn classify_schema_shape(value: &Value) -> Option<ResultValidationReason> {
-    let object = value.as_object()?;
-    let summary = object.get("summary")?.as_object()?;
-    if ![
-        "summary",
-        "observations",
-        "inferences",
-        "missing_context",
-        "evidence",
-    ]
-    .iter()
-    .all(|field| object.contains_key(*field))
-        || !["status", "text", "evidence_ids"]
-            .iter()
-            .all(|field| summary.contains_key(*field))
-    {
-        return Some(ResultValidationReason::MissingField);
+fn validate_schema_shape(value: &Value) -> Result<(), ResultValidationError> {
+    let object = value.as_object().ok_or_else(|| {
+        ResultValidationError::new(ResultValidationReason::InvalidFieldType, None)
+    })?;
+    let top_level = [
+        ("summary", ValidationField::Summary),
+        ("observations", ValidationField::Observations),
+        ("inferences", ValidationField::Inferences),
+        ("missing_context", ValidationField::MissingContext),
+        ("evidence", ValidationField::Evidence),
+    ];
+    for key in object.keys() {
+        if !top_level.iter().any(|(allowed, _)| allowed == key) {
+            return Err(ResultValidationError::new(
+                ResultValidationReason::UnknownField,
+                None,
+            ));
+        }
     }
+    for (key, field) in top_level {
+        if !object.contains_key(key) {
+            return Err(ResultValidationError::new(
+                ResultValidationReason::MissingTopLevelField,
+                Some(field),
+            ));
+        }
+    }
+    let summary = object["summary"].as_object().ok_or_else(|| {
+        ResultValidationError::new(
+            ResultValidationReason::InvalidFieldType,
+            Some(ValidationField::Summary),
+        )
+    })?;
+    validate_nested_object(
+        summary,
+        &[
+            ("status", ValidationField::SummaryStatus),
+            ("text", ValidationField::SummaryText),
+            ("evidence_ids", ValidationField::SummaryEvidenceIds),
+        ],
+        ValidationField::Summary,
+    )?;
+    require_string(summary, "status", ValidationField::SummaryStatus)?;
     if !matches!(
-        summary.get("status").and_then(Value::as_str),
+        summary["status"].as_str(),
         Some("SUPPORTED") | Some("INSUFFICIENT_EVIDENCE")
     ) {
-        return Some(ResultValidationReason::InvalidSummaryStatus);
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidSummaryStatus,
+            Some(ValidationField::SummaryStatus),
+        ));
     }
-    if let Some(inferences) = object.get("inferences").and_then(Value::as_array)
-        && inferences.iter().any(|inference| {
-            !matches!(
-                inference
-                    .as_object()
-                    .and_then(|item| item.get("confidence"))
-                    .and_then(Value::as_str),
-                Some("LOW") | Some("MEDIUM") | Some("HIGH")
+    require_string(summary, "text", ValidationField::SummaryText)?;
+    require_string_array(summary, "evidence_ids", ValidationField::SummaryEvidenceIds)?;
+
+    validate_observation_array(&object["observations"])?;
+    validate_inference_array(&object["inferences"])?;
+    require_string_array(object, "missing_context", ValidationField::MissingContext)?;
+    validate_evidence_array(&object["evidence"])?;
+    Ok(())
+}
+
+fn validate_nested_object(
+    object: &serde_json::Map<String, Value>,
+    fields: &[(&str, ValidationField)],
+    parent: ValidationField,
+) -> Result<(), ResultValidationError> {
+    for key in object.keys() {
+        if !fields.iter().any(|(allowed, _)| allowed == key) {
+            return Err(ResultValidationError::new(
+                ResultValidationReason::UnknownField,
+                Some(parent),
+            ));
+        }
+    }
+    for (key, field) in fields {
+        if !object.contains_key(*key) {
+            return Err(ResultValidationError::new(
+                ResultValidationReason::MissingNestedField,
+                Some(*field),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_string(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    field: ValidationField,
+) -> Result<(), ResultValidationError> {
+    if object.get(key).and_then(Value::as_str).is_none() {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidFieldType,
+            Some(field),
+        ));
+    }
+    Ok(())
+}
+
+fn require_integer(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    field: ValidationField,
+) -> Result<(), ResultValidationError> {
+    if object.get(key).and_then(Value::as_i64).is_none() {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidFieldType,
+            Some(field),
+        ));
+    }
+    Ok(())
+}
+
+fn require_string_array(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+    field: ValidationField,
+) -> Result<(), ResultValidationError> {
+    let values = object.get(key).and_then(Value::as_array).ok_or_else(|| {
+        ResultValidationError::new(ResultValidationReason::InvalidFieldType, Some(field))
+    })?;
+    if values.iter().any(|value| value.as_str().is_none()) {
+        return Err(ResultValidationError::new(
+            ResultValidationReason::InvalidFieldType,
+            Some(field),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_observation_array(value: &Value) -> Result<(), ResultValidationError> {
+    let items = value.as_array().ok_or_else(|| {
+        ResultValidationError::new(
+            ResultValidationReason::InvalidFieldType,
+            Some(ValidationField::Observations),
+        )
+    })?;
+    for item in items {
+        let object = item.as_object().ok_or_else(|| {
+            ResultValidationError::new(
+                ResultValidationReason::InvalidFieldType,
+                Some(ValidationField::Observations),
             )
-        })
-    {
-        return Some(ResultValidationReason::InvalidConfidence);
+        })?;
+        validate_nested_object(
+            object,
+            &[
+                ("text", ValidationField::ObservationText),
+                ("evidence_ids", ValidationField::ObservationEvidenceIds),
+            ],
+            ValidationField::Observations,
+        )?;
+        require_string(object, "text", ValidationField::ObservationText)?;
+        require_string_array(
+            object,
+            "evidence_ids",
+            ValidationField::ObservationEvidenceIds,
+        )?;
     }
-    None
+    Ok(())
+}
+
+fn validate_inference_array(value: &Value) -> Result<(), ResultValidationError> {
+    let items = value.as_array().ok_or_else(|| {
+        ResultValidationError::new(
+            ResultValidationReason::InvalidFieldType,
+            Some(ValidationField::Inferences),
+        )
+    })?;
+    for item in items {
+        let object = item.as_object().ok_or_else(|| {
+            ResultValidationError::new(
+                ResultValidationReason::InvalidFieldType,
+                Some(ValidationField::Inferences),
+            )
+        })?;
+        validate_nested_object(
+            object,
+            &[
+                ("text", ValidationField::InferenceText),
+                ("confidence", ValidationField::InferenceConfidence),
+                ("evidence_ids", ValidationField::InferenceEvidenceIds),
+            ],
+            ValidationField::Inferences,
+        )?;
+        require_string(object, "text", ValidationField::InferenceText)?;
+        require_string(object, "confidence", ValidationField::InferenceConfidence)?;
+        if !matches!(
+            object["confidence"].as_str(),
+            Some("LOW") | Some("MEDIUM") | Some("HIGH")
+        ) {
+            return Err(ResultValidationError::new(
+                ResultValidationReason::InvalidConfidence,
+                Some(ValidationField::InferenceConfidence),
+            ));
+        }
+        require_string_array(
+            object,
+            "evidence_ids",
+            ValidationField::InferenceEvidenceIds,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_evidence_array(value: &Value) -> Result<(), ResultValidationError> {
+    let items = value.as_array().ok_or_else(|| {
+        ResultValidationError::new(
+            ResultValidationReason::InvalidFieldType,
+            Some(ValidationField::Evidence),
+        )
+    })?;
+    let fields = [
+        ("id", ValidationField::EvidenceId),
+        ("bundle_hash", ValidationField::EvidenceBundleHash),
+        ("file_id", ValidationField::EvidenceFileId),
+        ("path", ValidationField::EvidencePath),
+        ("start_line", ValidationField::EvidenceStartLine),
+        ("end_line", ValidationField::EvidenceEndLine),
+        ("excerpt", ValidationField::EvidenceExcerpt),
+        ("explanation", ValidationField::EvidenceExplanation),
+    ];
+    for item in items {
+        let object = item.as_object().ok_or_else(|| {
+            ResultValidationError::new(
+                ResultValidationReason::InvalidFieldType,
+                Some(ValidationField::Evidence),
+            )
+        })?;
+        validate_nested_object(object, &fields, ValidationField::Evidence)?;
+        require_string(object, "id", ValidationField::EvidenceId)?;
+        require_string(object, "bundle_hash", ValidationField::EvidenceBundleHash)?;
+        require_integer(object, "file_id", ValidationField::EvidenceFileId)?;
+        require_string(object, "path", ValidationField::EvidencePath)?;
+        require_integer(object, "start_line", ValidationField::EvidenceStartLine)?;
+        require_integer(object, "end_line", ValidationField::EvidenceEndLine)?;
+        require_string(object, "excerpt", ValidationField::EvidenceExcerpt)?;
+        require_string(object, "explanation", ValidationField::EvidenceExplanation)?;
+    }
+    Ok(())
 }
 
 async fn parse_with_repair(
@@ -1537,7 +1985,7 @@ async fn parse_with_repair(
 fn validate_result(
     content: Option<&str>,
     ledger: &EvidenceLedger,
-) -> Result<SkillRunResult, ResultValidationReason> {
+) -> Result<SkillRunResult, ResultValidationError> {
     let result = parse_result(content)?;
     validate_evidence(&result, ledger)?;
     Ok(result)
@@ -1546,7 +1994,7 @@ fn validate_result(
 fn validate_evidence(
     result: &SkillRunResult,
     ledger: &EvidenceLedger,
-) -> Result<(), ResultValidationReason> {
+) -> Result<(), ResultValidationError> {
     let mut unique_ranges = std::collections::HashSet::new();
     let mut evidence_ids = std::collections::HashSet::new();
     let evidence_valid = result.evidence.iter().all(|item| {
@@ -1580,14 +2028,17 @@ fn validate_evidence(
     if evidence_valid && claims_valid {
         Ok(())
     } else {
-        Err(ResultValidationReason::InvalidEvidenceReference)
+        Err(ResultValidationError::new(
+            ResultValidationReason::InvalidEvidenceReference,
+            Some(ValidationField::Evidence),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ResultValidationReason, ToolCallError, ToolErrorCategory,
+        ResultValidationReason, ToolCallError, ToolErrorCategory, ValidationField,
         classify_bootstrap_manifest_error, classify_tool_execution_error, parse_result,
         parse_tool_call, tool_definitions, tool_error_output, validate_result,
     };
@@ -1822,16 +2273,16 @@ mod tests {
     #[test]
     fn result_validation_returns_safe_reasons() {
         assert_eq!(
-            parse_result(Some("not json")).unwrap_err(),
+            parse_result(Some("not json")).unwrap_err().reason,
             ResultValidationReason::InvalidJson
         );
         assert_eq!(
-            parse_result(Some("{}")).unwrap_err(),
-            ResultValidationReason::MissingField
+            parse_result(Some("{}")).unwrap_err().reason,
+            ResultValidationReason::MissingTopLevelField
         );
         let schema_invalid = r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
         assert_eq!(
-            parse_result(Some(schema_invalid)).unwrap_err(),
+            parse_result(Some(schema_invalid)).unwrap_err().reason,
             ResultValidationReason::UnsupportedClaim
         );
         assert_eq!(
@@ -1840,18 +2291,82 @@ mod tests {
         );
         let invalid_status = r#"{"summary":{"status":"MAYBE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
         assert_eq!(
-            parse_result(Some(invalid_status)).unwrap_err(),
+            parse_result(Some(invalid_status)).unwrap_err().reason,
             ResultValidationReason::InvalidSummaryStatus
         );
         let invalid_confidence = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[{"text":"claim","confidence":"CERTAIN","evidence_ids":["e1"]}],"missing_context":["gap"],"evidence":[]}"#;
         assert_eq!(
-            parse_result(Some(invalid_confidence)).unwrap_err(),
+            parse_result(Some(invalid_confidence)).unwrap_err().reason,
             ResultValidationReason::InvalidConfidence
         );
         let unsupported_evidence = r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":["e1"]},"observations":[],"inferences":[],"missing_context":[],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x"}]}"#;
         assert_eq!(
-            validate_result(Some(unsupported_evidence), &EvidenceLedger::default()).unwrap_err(),
+            validate_result(Some(unsupported_evidence), &EvidenceLedger::default())
+                .unwrap_err()
+                .reason,
             ResultValidationReason::InvalidEvidenceReference
         );
+    }
+
+    #[test]
+    fn result_validation_maps_fields() {
+        let cases = [
+            (
+                r#"{}"#,
+                ResultValidationReason::MissingTopLevelField,
+                Some(ValidationField::Summary),
+            ),
+            (
+                r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[]}"#,
+                ResultValidationReason::MissingTopLevelField,
+                Some(ValidationField::Evidence),
+            ),
+            (
+                r#"{"summary":{"status":"SUPPORTED","text":"claim"},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#,
+                ResultValidationReason::MissingNestedField,
+                Some(ValidationField::SummaryEvidenceIds),
+            ),
+            (
+                r#"{"summary":{"status":1,"text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#,
+                ResultValidationReason::InvalidFieldType,
+                Some(ValidationField::SummaryStatus),
+            ),
+            (
+                r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":[],"model_secret":true},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#,
+                ResultValidationReason::UnknownField,
+                Some(ValidationField::Summary),
+            ),
+            (
+                r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":"e1"},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#,
+                ResultValidationReason::InvalidFieldType,
+                Some(ValidationField::SummaryEvidenceIds),
+            ),
+        ];
+        for (content, reason, field) in cases {
+            let error = parse_result(Some(content)).unwrap_err();
+            assert_eq!(error.reason, reason, "unexpected reason for {content}");
+            assert_eq!(error.field, field, "unexpected field for {content}");
+        }
+
+        let mut too_many_observations = serde_json::json!({
+            "summary": {"status": "SUPPORTED", "text": "claim", "evidence_ids": ["e1"]},
+            "observations": [],
+            "inferences": [],
+            "missing_context": [],
+            "evidence": []
+        });
+        too_many_observations["observations"] = serde_json::json!(
+            (0..=50)
+                .map(|_| serde_json::json!({"text":"observation","evidence_ids":["e1"]}))
+                .collect::<Vec<_>>()
+        );
+        let error = parse_result(Some(&too_many_observations.to_string())).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::InvalidArraySize);
+        assert_eq!(error.field, Some(ValidationField::Observations));
+
+        let insufficient_context = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
+        let error = parse_result(Some(insufficient_context)).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::InvalidMissingContext);
+        assert_eq!(error.field, Some(ValidationField::MissingContext));
     }
 }
