@@ -265,9 +265,17 @@ fn classify_transport_reason(error: &reqwest::Error) -> TransportReason {
     } else if connection_reset {
         TransportReason::ConnectionReset
     } else if error.is_connect() {
-        TransportReason::ConnectFailed
+        classify_connect_failure(error.url())
     } else {
         TransportReason::RequestFailed
+    }
+}
+
+fn classify_connect_failure(url: Option<&reqwest::Url>) -> TransportReason {
+    if url.is_some_and(|url| url.scheme() == "https") {
+        TransportReason::TlsFailed
+    } else {
+        TransportReason::ConnectFailed
     }
 }
 
@@ -312,7 +320,7 @@ mod tests {
 
     use reqwest::header::HeaderValue;
 
-    use super::parse_retry_after;
+    use super::{TransportReason, classify_connect_failure, parse_retry_after};
 
     #[test]
     fn retry_after_preserves_valid_seconds() {
@@ -356,5 +364,23 @@ mod tests {
             None
         );
         assert_eq!(parse_retry_after(None, SystemTime::UNIX_EPOCH), None);
+    }
+
+    #[test]
+    fn https_connect_errors_without_specific_markers_are_tls_failures() {
+        let https = reqwest::Url::parse("https://127.0.0.1:443/v1").unwrap();
+        let http = reqwest::Url::parse("http://127.0.0.1:80/v1").unwrap();
+        assert_eq!(
+            classify_connect_failure(Some(&https)),
+            TransportReason::TlsFailed
+        );
+        assert_eq!(
+            classify_connect_failure(Some(&http)),
+            TransportReason::ConnectFailed
+        );
+        assert_eq!(
+            classify_connect_failure(None),
+            TransportReason::ConnectFailed
+        );
     }
 }
