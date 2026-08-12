@@ -45,7 +45,7 @@ pub enum SkillToolCall {
     ReadFileLines {
         file_id: i64,
         start: i64,
-        end: i64,
+        limit: i64,
     },
 }
 
@@ -240,8 +240,8 @@ impl<'a> SkillToolExecutor<'a> {
             SkillToolCall::ReadFileLines {
                 file_id,
                 start,
-                end,
-            } => self.read_file_lines(file_id, start, end).await,
+                limit,
+            } => self.read_file_lines(file_id, start, limit).await,
         }
     }
 
@@ -577,11 +577,14 @@ impl<'a> SkillToolExecutor<'a> {
         &mut self,
         file_id: i64,
         start: i64,
-        end: i64,
+        limit: i64,
     ) -> Result<Value, AppError> {
-        if start < 0 || end < start || end.saturating_sub(start) >= MAX_READ_LINES {
+        if file_id <= 0 || start < 0 || !(1..=MAX_READ_LINES).contains(&limit) {
             return Err(AppError::BadRequest("invalid file line range".into()));
         }
+        let end = start
+            .checked_add(limit - 1)
+            .ok_or_else(|| AppError::BadRequest("invalid file line range".into()))?;
         let unseen = self.ledger.unseen_ranges(file_id, start, end);
         if self.ledger.already_read(file_id, start, end) {
             return Ok(json!({ "duplicate": true, "lines": [] }));

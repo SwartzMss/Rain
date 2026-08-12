@@ -981,7 +981,7 @@ async fn runner_preserves_all_tool_responses_when_one_call_is_invalid() {
                 tool_call(
                     "invalid-range",
                     "read_file_lines",
-                    r#"{"file_id":123,"start":100,"end":400}"#,
+                    r#"{"file_id":123,"start":100,"limit":201}"#,
                 ),
                 tool_call("valid-list", "list_files", r#"{}"#),
             ]),
@@ -1006,6 +1006,112 @@ async fn runner_preserves_all_tool_responses_when_one_call_is_invalid() {
 }
 
 #[tokio::test]
+async fn runner_counts_multiple_invalid_calls_once_per_iteration() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            tool_response(vec![
+                tool_call(
+                    "invalid-range-1",
+                    "read_file_lines",
+                    r#"{"file_id":123,"start":100,"limit":201}"#,
+                ),
+                tool_call(
+                    "invalid-range-2",
+                    "read_file_lines",
+                    r#"{"file_id":123,"start":200,"limit":201}"#,
+                ),
+                tool_call(
+                    "invalid-range-3",
+                    "read_file_lines",
+                    r#"{"file_id":123,"start":300,"limit":201}"#,
+                ),
+            ]),
+            tool_response(vec![tool_call("valid-list", "list_files", r#"{}"#)]),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    assert_eq!(stored.tool_call_count, 4);
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[1].tools.is_empty());
+    let first_iteration_tool_ids = requests[1]
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_iteration_tool_ids,
+        ["invalid-range-1", "invalid-range-2", "invalid-range-3"]
+    );
+    for id in ["invalid-range-1", "invalid-range-2", "invalid-range-3"] {
+        let error_message = requests[1]
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some(id))
+            .and_then(|message| message.content.as_deref())
+            .unwrap();
+        assert!(error_message.contains("INVALID_ARGUMENT"));
+        assert!(error_message.contains("limit"));
+        let error_json = error_message
+            .strip_prefix("UNTRUSTED TOOL DATA:\n")
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .unwrap();
+        assert_eq!(error_json["field"], "limit");
+    }
+    assert!(requests[2].messages.iter().any(|message| {
+        message
+            .tool_call_id
+            .as_deref()
+            .is_some_and(|id| id == "valid-list")
+    }));
+}
+
+#[tokio::test]
+async fn runner_treats_a_mixed_iteration_with_a_successful_call_as_recovered() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            tool_response(vec![
+                tool_call(
+                    "mixed-invalid",
+                    "read_file_lines",
+                    r#"{"file_id":123,"start":100,"limit":201}"#,
+                ),
+                tool_call("mixed-valid", "list_files", r#"{}"#),
+            ]),
+            tool_response(vec![tool_call(
+                "invalid-after-mixed-1",
+                "read_file_lines",
+                r#"{"file_id":123,"start":100,"limit":201}"#,
+            )]),
+            tool_response(vec![tool_call(
+                "invalid-after-mixed-2",
+                "read_file_lines",
+                r#"{"file_id":123,"start":100,"limit":201}"#,
+            )]),
+            tool_response(vec![tool_call("recovered", "list_files", r#"{}"#)]),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    assert_eq!(stored.tool_call_count, 5);
+    assert_eq!(client.requests.lock().unwrap().len(), 5);
+}
+
+#[tokio::test]
 async fn runner_returns_recoverable_execution_errors_to_the_model() {
     let (pool, state, run, cancellation) = create_recovery_test_run().await;
     let client = Arc::new(RecordingClient {
@@ -1013,7 +1119,7 @@ async fn runner_returns_recoverable_execution_errors_to_the_model() {
             tool_response(vec![tool_call(
                 "missing-file",
                 "read_file_lines",
-                r#"{"file_id":999,"start":0,"end":10}"#,
+                r#"{"file_id":999,"start":0,"limit":10}"#,
             )]),
             insufficient_evidence_response(),
         ])),

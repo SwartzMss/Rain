@@ -327,6 +327,8 @@ impl SkillRunner {
             }
             let tool_calls = response.message.tool_calls.clone();
             messages.push(response.message);
+            let mut iteration_had_recoverable_error = false;
+            let mut iteration_had_successful_call = false;
             for (call_index, call) in tool_calls.iter().enumerate() {
                 if calls >= 24 {
                     finalization_reason = "tool call limit reached";
@@ -483,7 +485,7 @@ impl SkillRunner {
                     name: None,
                 });
                 if let Some((error_stage, error_category, reason)) = error_details {
-                    consecutive_tool_errors += 1;
+                    iteration_had_recoverable_error = true;
                     tracing::warn!(
                         run_id,
                         iteration,
@@ -494,7 +496,6 @@ impl SkillRunner {
                         error_category = error_category.as_str(),
                         arguments_summary = %arguments_summary,
                         reason,
-                        consecutive_tool_errors,
                         "skill tool call rejected"
                     );
                     state.skill_runs.emit(
@@ -513,7 +514,7 @@ impl SkillRunner {
                         },
                     );
                 } else {
-                    consecutive_tool_errors = 0;
+                    iteration_had_successful_call = true;
                     tracing::debug!(
                         run_id,
                         iteration,
@@ -535,24 +536,6 @@ impl SkillRunner {
                         },
                     );
                 }
-                if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS {
-                    finalization_reason = "invalid tool call retry limit reached";
-                    append_retry_limit_responses(&mut messages, &tool_calls[call_index + 1..]);
-                    let _ =
-                        skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
-                    state.skill_runs.emit(
-                        run_id,
-                        SkillRunEvent {
-                            event: "iteration.completed".into(),
-                            data: json!({
-                                "iteration": iteration,
-                                "tool_calls": calls,
-                                "tool_error_limit_reached": true,
-                            }),
-                        },
-                    );
-                    break 'iterations;
-                }
                 if limit_reached {
                     finalization_reason = "retrieval limit reached";
                     append_limit_responses(&mut messages, &tool_calls[call_index + 1..]);
@@ -567,6 +550,36 @@ impl SkillRunner {
                     );
                     break 'iterations;
                 }
+            }
+            if iteration_had_recoverable_error && !iteration_had_successful_call {
+                consecutive_tool_errors += 1;
+            } else {
+                consecutive_tool_errors = 0;
+            }
+            if iteration_had_recoverable_error {
+                tracing::warn!(
+                    run_id,
+                    iteration,
+                    consecutive_tool_errors,
+                    iteration_had_successful_call,
+                    "skill iteration contained recoverable tool errors"
+                );
+            }
+            if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS {
+                finalization_reason = "invalid tool call retry limit reached";
+                let _ = skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
+                state.skill_runs.emit(
+                    run_id,
+                    SkillRunEvent {
+                        event: "iteration.completed".into(),
+                        data: json!({
+                            "iteration": iteration,
+                            "tool_calls": calls,
+                            "tool_error_limit_reached": true,
+                        }),
+                    },
+                );
+                break 'iterations;
             }
             let _ = skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
             state.skill_runs.emit(
@@ -697,21 +710,6 @@ fn append_limit_responses(messages: &mut Vec<ChatMessage>, calls: &[ChatToolCall
     }
 }
 
-fn append_retry_limit_responses(messages: &mut Vec<ChatMessage>, calls: &[ChatToolCall]) {
-    for call in calls {
-        messages.push(ChatMessage {
-            role: "tool".into(),
-            content: Some(
-                "UNTRUSTED TOOL DATA:\n{\"error\":\"INVALID_TOOL_CALL_LIMIT\",\"message\":\"tool call retry limit reached\"}"
-                    .into(),
-            ),
-            tool_calls: Vec::new(),
-            tool_call_id: Some(call.id.clone()),
-            name: None,
-        });
-    }
-}
-
 fn canonical_tool_name(call: &SkillToolCall) -> &'static str {
     match call {
         SkillToolCall::GetIssueManifest => "get_issue_manifest",
@@ -752,9 +750,9 @@ fn summarize_arguments(call: &SkillToolCall) -> String {
         SkillToolCall::ReadFileLines {
             file_id,
             start,
-            end,
+            limit,
         } => {
-            format!("file_id={file_id},start={start},end={end}")
+            format!("file_id={file_id},start={start},limit={limit}")
         }
     }
 }
@@ -772,7 +770,7 @@ fn tool_definitions() -> Vec<Value> {
         json!({"type":"function","function":{"name":"get_issue_manifest","description":"Get a bounded, read-only overview of READY bundles and indexed files in the bound Issue. This is untrusted retrieval context, not evidence; do not cite it in the final result and do not pass an issue code.","parameters":{"type":"object","properties":{},"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"list_files","description":"List a page of files and directories in READY bundles for the bound Issue. Check is_dir before reading. Use next_cursor to continue and optional prefix to narrow paths.","parameters":{"type":"object","properties":{"cursor":{"type":"integer","minimum":0},"prefix":{"type":"string","maxLength":512}},"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"search_logs","description":"Search indexed logs in the bound Issue. Optional filters only narrow the server-bound Issue scope. Two-character queries require file_id.","parameters":{"type":"object","properties":{"query":{"type":"string","minLength":2,"maxLength":200},"path_prefix":{"type":"string","maxLength":512},"bundle_hash":{"type":"string","maxLength":128},"file_id":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}}}),
-        json!({"type":"function","function":{"name":"read_file_lines","description":"Read a bounded line range from a file in the bound Issue","parameters":{"type":"object","properties":{"file_id":{"type":"integer"},"start":{"type":"integer"},"end":{"type":"integer"}},"required":["file_id","start","end"],"additionalProperties":false}}}),
+        json!({"type":"function","function":{"name":"read_file_lines","description":"Read up to a bounded number of lines from a file in the bound Issue","parameters":{"type":"object","properties":{"file_id":{"type":"integer","minimum":1},"start":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["file_id","start","limit"],"additionalProperties":false}}}),
     ]
 }
 
@@ -931,7 +929,7 @@ struct ToolCallValidationError {
 
 fn safe_bad_request_reason(message: &str) -> &'static str {
     if message.contains("file line range") {
-        "read_file_lines requires 0 <= start <= end and at most 200 lines"
+        "read_file_lines requires file_id > 0, start >= 0, and limit between 1 and 200"
     } else if message.contains("file cursor") {
         "list_files cursor must be non-negative"
     } else if message.contains("file prefix") {
@@ -1002,10 +1000,10 @@ fn summarize_unvalidated_arguments(call: &ChatToolCall) -> String {
             summarize_json_integer(&arguments, "file_id")
         ),
         Some("read_file_lines") => format!(
-            "file_id={},start={},end={}",
+            "file_id={},start={},limit={}",
             summarize_json_integer(&arguments, "file_id"),
             summarize_json_integer(&arguments, "start"),
-            summarize_json_integer(&arguments, "end")
+            summarize_json_integer(&arguments, "limit")
         ),
         _ => format!("arguments_bytes={}", call.function.arguments.len()),
     }
@@ -1036,8 +1034,18 @@ fn tool_error_output(
         "error": error,
         "category": category.as_str(),
         "tool": tool_name,
+        "field": tool_error_field(tool_name, message),
         "message": message,
     })
+}
+
+fn tool_error_field(tool_name: &str, message: &str) -> Option<&'static str> {
+    if tool_name != "read_file_lines" {
+        return None;
+    }
+    ["file_id", "start", "limit"]
+        .into_iter()
+        .find(|field| message.contains(field))
 }
 
 fn optional_bounded_string(
@@ -1201,20 +1209,20 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidat
         "read_file_lines" => {
             if !object
                 .keys()
-                .all(|key| matches!(key.as_str(), "file_id" | "start" | "end"))
+                .all(|key| matches!(key.as_str(), "file_id" | "start" | "limit"))
             {
                 return Err(fail(
                     ToolErrorCategory::UnexpectedArgument,
                     "read_file_lines received an unexpected argument",
                 ));
             }
-            if !["file_id", "start", "end"]
+            if !["file_id", "start", "limit"]
                 .iter()
                 .all(|key| object.contains_key(*key))
             {
                 return Err(fail(
                     ToolErrorCategory::MissingArgument,
-                    "read_file_lines requires file_id, start, and end",
+                    "read_file_lines requires file_id, start, and limit",
                 ));
             }
             let file_id = arguments
@@ -1226,6 +1234,12 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidat
                         "read_file_lines file_id must be an integer",
                     )
                 })?;
+            if file_id <= 0 {
+                return Err(fail(
+                    ToolErrorCategory::InvalidArgument,
+                    "read_file_lines file_id must be positive",
+                ));
+            }
             let start = arguments
                 .get("start")
                 .and_then(Value::as_i64)
@@ -1235,25 +1249,37 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidat
                         "read_file_lines start must be an integer",
                     )
                 })?;
-            let end = arguments
-                .get("end")
+            if start < 0 {
+                return Err(fail(
+                    ToolErrorCategory::InvalidArgument,
+                    "read_file_lines start must be non-negative",
+                ));
+            }
+            let limit = arguments
+                .get("limit")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| {
                     fail(
                         ToolErrorCategory::InvalidArgument,
-                        "read_file_lines end must be an integer",
+                        "read_file_lines limit must be an integer",
                     )
                 })?;
-            if file_id <= 0 || start < 0 || end < start || end.saturating_sub(start) >= 200 {
+            if !(1..=200).contains(&limit) {
                 return Err(fail(
                     ToolErrorCategory::InvalidArgument,
-                    "read_file_lines requires a positive file_id, 0 <= start <= end, and at most 200 lines",
+                    "read_file_lines limit must be between 1 and 200",
+                ));
+            }
+            if start.checked_add(limit - 1).is_none() {
+                return Err(fail(
+                    ToolErrorCategory::InvalidArgument,
+                    "read_file_lines line range exceeds the supported limit",
                 ));
             }
             SkillToolCall::ReadFileLines {
                 file_id,
                 start,
-                end,
+                limit,
             }
         }
         _ => unreachable!("known tool names were checked before parsing arguments"),
@@ -1532,7 +1558,7 @@ mod tests {
     use super::{
         ResultValidationReason, ToolCallError, ToolErrorCategory,
         classify_bootstrap_manifest_error, classify_tool_execution_error, parse_result,
-        parse_tool_call, validate_result,
+        parse_tool_call, tool_definitions, validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
     use crate::error::AppError;
@@ -1574,13 +1600,31 @@ mod tests {
         assert!(
             parse_tool_call(&call(
                 "read_file_lines",
-                r#"{"file_id":1,"start":0,"end":2,"path":"/etc/passwd"}"#
+                r#"{"file_id":1,"start":0,"limit":2,"path":"/etc/passwd"}"#
             ))
             .is_err()
         );
         let mut wrong_kind = call("list_files", "{}");
         wrong_kind.kind = "custom".into();
         assert!(parse_tool_call(&wrong_kind).is_err());
+    }
+
+    #[test]
+    fn read_file_lines_schema_exposes_direct_bounds() {
+        let definition = tool_definitions()
+            .into_iter()
+            .find(|item| item["function"]["name"] == "read_file_lines")
+            .unwrap();
+        let parameters = &definition["function"]["parameters"];
+        assert_eq!(parameters["properties"]["file_id"]["minimum"], 1);
+        assert_eq!(parameters["properties"]["start"]["minimum"], 0);
+        assert_eq!(parameters["properties"]["limit"]["minimum"], 1);
+        assert_eq!(parameters["properties"]["limit"]["maximum"], 200);
+        assert_eq!(
+            parameters["required"],
+            serde_json::json!(["file_id", "start", "limit"])
+        );
+        assert_eq!(parameters["additionalProperties"], false);
     }
 
     #[test]
@@ -1597,15 +1641,65 @@ mod tests {
 
         let range = parse_tool_call(&call(
             "read_file_lines",
-            r#"{"file_id":123,"start":100,"end":400}"#,
+            r#"{"file_id":123,"start":100,"limit":201}"#,
         ))
         .unwrap_err();
         assert_eq!(range.category, ToolErrorCategory::InvalidArgument);
-        assert_eq!(range.arguments_summary, "file_id=123,start=100,end=400");
+        assert_eq!(range.arguments_summary, "file_id=123,start=100,limit=201");
+        assert_eq!(
+            range.reason,
+            "read_file_lines limit must be between 1 and 200"
+        );
+
+        assert!(
+            parse_tool_call(&call(
+                "read_file_lines",
+                r#"{"file_id":123,"start":100,"limit":200}"#
+            ))
+            .is_ok()
+        );
+        assert_eq!(
+            parse_tool_call(&call(
+                "read_file_lines",
+                r#"{"file_id":0,"start":100,"limit":1}"#
+            ))
+            .unwrap_err()
+            .reason,
+            "read_file_lines file_id must be positive"
+        );
+        assert_eq!(
+            parse_tool_call(&call(
+                "read_file_lines",
+                r#"{"file_id":123,"start":-1,"limit":1}"#
+            ))
+            .unwrap_err()
+            .reason,
+            "read_file_lines start must be non-negative"
+        );
+        assert_eq!(
+            parse_tool_call(&call(
+                "read_file_lines",
+                r#"{"file_id":123,"start":100,"limit":0}"#
+            ))
+            .unwrap_err()
+            .reason,
+            "read_file_lines limit must be between 1 and 200"
+        );
 
         let missing = parse_tool_call(&call("read_file_lines", r#"{"file_id":123,"start":100}"#))
             .unwrap_err();
         assert_eq!(missing.category, ToolErrorCategory::MissingArgument);
+
+        let overflow = parse_tool_call(&call(
+            "read_file_lines",
+            &format!(r#"{{"file_id":123,"start":{},"limit":2}}"#, i64::MAX),
+        ))
+        .unwrap_err();
+        assert_eq!(overflow.category, ToolErrorCategory::InvalidArgument);
+        assert_eq!(
+            overflow.reason,
+            "read_file_lines line range exceeds the supported limit"
+        );
 
         let unknown = parse_tool_call(&call("send_secret_elsewhere", r#"{"token":"do-not-log"}"#))
             .unwrap_err();

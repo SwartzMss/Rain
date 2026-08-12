@@ -607,8 +607,15 @@ async fn read_file_lines_exposes_bounded_long_lines_and_records_only_returned_ev
             issue_code: "A".into(),
         },
     );
-    assert!(executor.read_file_lines(file_id, 0, 200).await.is_err());
-    assert!(executor.read_file_lines(file_id, 5, 4).await.is_err());
+    assert!(executor.read_file_lines(0, 0, 1).await.is_err());
+    assert!(executor.read_file_lines(file_id, 0, 201).await.is_err());
+    assert!(executor.read_file_lines(file_id, 5, 0).await.is_err());
+    assert!(
+        executor
+            .read_file_lines(file_id, i64::MAX, 2)
+            .await
+            .is_err()
+    );
 
     let result = executor.read_file_lines(file_id, 0, 15).await.unwrap();
     let result_bytes = serde_json::to_vec(&result).unwrap();
@@ -654,13 +661,13 @@ async fn read_file_lines_exposes_bounded_long_lines_and_records_only_returned_ev
         &format!("DROPPED_MARKER_{first_dropped}")
     ));
 
-    let max_range = executor.read_file_lines(file_id, 16, 215).await.unwrap();
+    let max_range = executor.read_file_lines(file_id, 16, 200).await.unwrap();
     assert_eq!(max_range["lines"][0]["content"], "short complete");
     assert_eq!(max_range["lines"][0]["truncated"], false);
     assert!(max_range["lines"][0].get("original_length").is_none());
 
     let duplicate = executor
-        .read_file_lines(file_id, 0, last_returned)
+        .read_file_lines(file_id, 0, last_returned + 1)
         .await
         .unwrap();
     assert_eq!(duplicate["duplicate"], true);
