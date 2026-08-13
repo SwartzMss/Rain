@@ -676,11 +676,12 @@ async fn runner_repairs_a_structured_result_with_forged_evidence() {
 }
 
 #[tokio::test]
-async fn runner_repairs_an_evidence_object_with_an_unknown_field() {
+async fn runner_normalizes_a_top_level_unknown_field() {
     let (pool, state, run, cancellation) = create_recovery_test_run().await;
-    let invalid = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No verified evidence"],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/ivi.log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x","source":"model-generated"}]}"#;
-    let repaired = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No verified evidence"],"evidence":[]}"#;
-    let responses = ["The evidence review is complete.", invalid, repaired].map(|content| {
+    let responses = [
+        "The evidence review is complete.",
+        r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No verified evidence"],"evidence":[],"recommendations":["restart service"]}"#,
+    ].map(|content| {
         Ok(ChatResponse {
             message: ChatMessage {
                 role: "assistant".into(),
@@ -708,22 +709,21 @@ async fn runner_repairs_an_evidence_object_with_an_unknown_field() {
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
     assert!(
-        output.contains("validation_reason=\"unknown_field\""),
-        "{output}"
-    );
-    assert!(output.contains("validation_field=\"evidence\""), "{output}");
-    assert!(
-        output.contains("validation_allowed_fields=\"id,bundle_hash,file_id,path,start_line,end_line,excerpt,explanation\""),
+        output.contains("final_result_normalization=\"applied\""),
         "{output}"
     );
     assert!(
-        output.contains("validation_unknown_field_count=1"),
+        output.contains("normalization_scope=\"top_level\""),
         "{output}"
     );
-    assert!(!output.contains("model-generated"), "{output}");
+    assert!(
+        output.contains("normalization_removed_field_count=1"),
+        "{output}"
+    );
+    assert!(!output.contains("recommendations"), "{output}");
 
     let requests = client.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
     let finalization_prompt = requests[1]
         .messages
         .last()
@@ -732,25 +732,7 @@ async fn runner_repairs_an_evidence_object_with_an_unknown_field() {
     assert!(finalization_prompt.contains(
         "evidence objects contain exactly: id (string), bundle_hash (string), file_id (integer), path (string), start_line (integer), end_line (integer), excerpt (string), explanation (string)"
     ));
-    let repair_prompt = requests[2]
-        .messages
-        .last()
-        .and_then(|message| message.content.as_deref())
-        .unwrap();
-    assert!(repair_prompt.contains(
-        "evidence object may contain exactly these fields: id (string), bundle_hash (string), file_id (integer), path (string), start_line (integer), end_line (integer), excerpt (string), explanation (string)"
-    ));
-    assert!(
-        repair_prompt.contains("Do not copy the read_file_lines response object into evidence")
-    );
-    assert!(repair_prompt.contains("file_id: copy from the read_file_lines tool-call argument"));
-    assert!(repair_prompt.contains(
-        "Each evidence must use a unique verified range. Construct each evidence object from that selected verified line range"
-    ));
-    assert!(repair_prompt.contains(
-        "For multiple lines, join their content in order with a literal newline (\\n); do not join with spaces"
-    ));
-    assert!(!repair_prompt.contains("source"));
+    assert!(!output.contains("final_result_validation=\"failed\""));
 }
 
 #[tokio::test]
