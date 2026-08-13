@@ -1,6 +1,8 @@
 # Rain `SKILL.md` v1
 
-Rain 的用户 Skill 是一个结构化诊断 Playbook。格式是否合法由服务端确定性校验，内容质量由 AI Reviewer 在格式合法之后单独评价。
+Rain 的用户 Skill 是一份面向诊断 Agent 的领域知识模型。平台统一提供检索、证据、日志不足、停止条件、输出格式和工具权限策略；Skill 只描述平台无法自行推导的业务知识、日志语义和故障关系。
+
+`schema_version` 仍为 `1`，本版本直接切换到新的 v1 定义，不提供旧内测格式的兼容或迁移。
 
 ## 最小模板
 
@@ -11,62 +13,129 @@ schema_version: 1
 
 # 目标
 
-描述该 Skill 需要诊断的问题和最终目标。
+描述需要诊断的问题和期望回答的核心问题。
 
 # 分析范围
 
-描述重点关注的模块、日志类型和边界。
+描述重点关注的模块、文件、日志域或业务边界。
 
-# 检索策略
+# 关键流程
 
-描述如何逐步定位相关日志、缩小范围和读取上下文。
+描述正常业务流程、关键步骤及前置依赖。
 
-# 证据规则
+# 关键日志
 
-描述哪些信息可以作为结论证据，以及哪些信息只能用于定位。
+描述重要日志模式，以及这些日志分别代表什么业务事件或状态。
 
-# 日志不完整处理
+# 关系与影响
 
-描述日志缺失、截断或证据不足时应该如何处理。
-
-# 停止条件
-
-描述什么时候认为证据已经充分，以及什么时候应停止并报告证据不足。
+描述事件之间的依赖、先后、因果、影响和故障传播关系。
 ```
 
 ## 结构规则
 
 - 内容必须是有效 UTF-8，且不超过 64 KiB。
-- 文件必须以 YAML front matter 开始，并声明 `schema_version: 1`。v1 不接受其他版本。
-- Front Matter 结束标记与第一个一级标题之间只允许空白；任何正文、注释、列表或代码块都会返回 `SKILL_FORMAT_INVALID`，确保 Reviewer 与 Runner 看到的指令内容一致。
-- 以下六个一级标题必须使用固定中文名称、各出现一次且正文非空；顺序可以自由调整。
+- 文件必须以 YAML front matter 开始，并声明 `schema_version: 1`。
+- Front Matter 结束标记与第一个一级标题之间只允许空白。
+- 以下五个一级标题必须使用固定中文名称、各出现一次且正文非空；顺序可以自由调整。
 - fenced code block 中形似标题的文本不参与章节识别。
-- 可以添加 `输出重点`、`领域知识`、`已知模式`、`已知错误码`、`示例` 或其他自定义章节。
-- 英文标题或中文别名不能替代标准章节，例如 `# Goal`、`# 任务目标` 和 `# 目的` 都不能替代 `# 目标`。
+- 可以添加 `定位提示`、`特殊判定`、`排除项`、`已知错误码`、`示例`、`领域知识` 或其他自定义章节。
+- 英文标题或中文别名不能替代标准章节，例如 `# Goal` 和 `# 任务目标` 都不能替代 `# 目标`。
 
 | 标准章节 | 内部 key | AI 评分维度 |
 | --- | --- | --- |
 | `目标` | `goal` | `task_scope` |
 | `分析范围` | `scope` | `task_scope` |
-| `检索策略` | `retrieval_strategy` | `retrieval_strategy` |
-| `证据规则` | `evidence_rules` | `evidence_constraints` |
-| `日志不完整处理` | `incomplete_logs` | `incomplete_logs` |
-| `停止条件` | `stop_conditions` | `stopping_conditions` |
+| `关键流程` | `key_process` | `business_flow` |
+| `关键日志` | `key_logs` | `signal_semantics` |
+| `关系与影响` | `relationships` | `causal_relationships` |
 
-Reviewer 的第六个维度 `clarity` 根据全部章节整体评价。章节存在只代表结构完整；内容空泛仍会得到低分。
+## 章节语义
 
-## 校验、评分与运行
+### `# 目标`
 
-创建或修改 Skill 时，服务端先解析并校验结构。格式错误返回 HTTP 400、稳定错误码 `SKILL_FORMAT_INVALID` 和具体中文原因；非法内容不会保存。
+说明这个 Skill 最终想诊断什么，以及期望回答的核心问题。
 
-质量评估只接受合法 v1 Skill，继续返回固定的六个英文维度 key。格式非法时不会请求 AI Provider。
+### `# 分析范围`
 
-Runner 只注入 front matter 之后的 Playbook 正文，`schema_version` 不会成为诊断指令。Skill 描述 What/Strategy，不能授予 shell、网络、文件写入、SQL、跨 Issue 或额外工具权限；当前 Issue 绑定、只读工具和证据规则始终由平台强制执行。
+说明相关模块、文件、日志域、时间范围或业务边界。这里描述业务范围，不是 Agent 的逐步搜索算法。
+
+### `# 关键流程`
+
+说明正常业务流程、关键步骤和前置依赖。例如：公钥获取 → 数据解密 → 后续连接；并明确解密依赖公钥获取成功。
+
+### `# 关键日志`
+
+说明日志模式分别代表什么业务事件或状态。可以区分 locator、state、success、failure 和 symptom；关键日志不等于异常日志。
+
+### `# 关系与影响`
+
+说明事件之间的依赖、先后、因果、影响和故障传播关系，例如某上游失败可能导致哪个下游表现，以及某成功事件可以排除哪些原因。
+
+## 平台诊断策略
+
+Skill Runner 默认执行以下策略，不要求用户在 Skill 中重复编写：
+
+- `get_issue_manifest`、`list_files`、`search_logs` 只用于定位候选文件、事件和时间窗口。
+- 搜索命中、文件名和 manifest 不是最终事实证据；最终事实、事件顺序和故障关系必须通过 `read_file_lines` 原始日志验证，并读取必要上下文。
+- Agent 根据 Skill 提供的流程、日志语义和关系向上游或下游追踪，不进行无目的全量扫描。
+- 日志不足时不猜测确定根因，输出已验证事实、待验证关系和缺失上下文，并使用 `INSUFFICIENT_EVIDENCE`。
+- 证据充分，或已合理检查相关范围但日志不足以继续验证时停止。
+- ResultObjectContract、EvidenceLedger、UnknownField canonicalization、简体中文输出、Repair、Tool scope 和 Issue scope 由平台统一控制。
+
+Skill 不能授予 shell、网络、文件写入、SQL、脚本、跨 Issue 或额外工具权限，也不能放宽平台证据规则。
+
+## Reviewer
+
+质量评估继续返回六个固定英文维度：
+
+| 维度 | 权重 | 评价重点 |
+| --- | ---: | --- |
+| `task_scope` | 15% | 目标和分析范围是否明确 |
+| `business_flow` | 20% | 正常业务流程和前置依赖是否清晰 |
+| `signal_semantics` | 20% | 关键日志是否准确表达业务事件和状态 |
+| `causal_relationships` | 20% | 因果、依赖、影响和故障传播是否清晰 |
+| `diagnostic_usefulness` | 15% | 是否足以支撑 Agent 还原故障链 |
+| `clarity` | 10% | 全部章节是否清晰、具体、无冲突 |
+
+章节存在只代表结构完整；内容空泛仍会得到低分。Reviewer 不再要求 Skill 重复描述平台通用检索策略、证据规则、日志不完整处理或停止条件。
+
+## IVI 蓝牙示例
+
+```markdown
+---
+schema_version: 1
+---
+
+# 目标
+
+定位 IVI 蓝牙连接失败的直接原因，并尽可能还原故障传播链。
+
+# 分析范围
+
+主要关注 IVI 相关日志，优先关注文件名以 `ivi` 开头的日志。
+
+# 关键流程
+
+公钥获取 → 蓝牙数据解密 → 后续蓝牙连接/业务处理。
+
+蓝牙数据解密依赖前面成功获取到的公钥。
+
+# 关键日志
+
+`LPSEC_IVI_BLE` 表示 IVI 蓝牙相关函数或流程日志，仅用于定位业务调用，本身不表示异常。
+
+`TeeFileRead_CB:187|[lpSec]TeeFileRead_CB req NULL error` 表示公钥相关数据获取失败。
+
+`LPSEC_IVI_BLE_Decrypt ret = 0` 表示解密成功；`ret = 1` 表示解密失败。
+
+# 关系与影响
+
+公钥获取是蓝牙数据解密的前置依赖。公钥获取失败可能直接导致后续解密失败。
+
+如果同一次业务调用中的原始日志确认公钥获取失败 → `LPSEC_IVI_BLE_Decrypt ret = 1` → 后续连接失败，则优先将公钥获取失败识别为上游根因，将解密失败识别为直接后果。
+```
 
 ## 兼容策略
 
-Rain 当前仍处于内测阶段，`SKILL.md` v1 不提供历史自由格式 Skill 的迁移或兼容模式。产品与 API 统一假设持久化 Skill 都满足 v1 Schema。
-
-升级到该版本前，应清理或重建内测环境中旧的 `user_skills` / `skill_reviews` 数据。旧格式 Skill 不会以“未识别”“需迁移”等状态继续暴露，也不会保留 legacy prompt mode、标题 alias 或旧评分兼容逻辑。
-
-服务端在 Create、Update、Review 和 Run 路径仍保留格式校验，作为数据完整性与防御性边界；这不构成旧格式兼容能力。
+Rain 尚未正式发布，本次不引入 `schema_version: 2`，也不实现旧 v1 兼容、迁移层、legacy prompt mode 或旧评分兼容。升级开发环境时允许直接清理或重建当前内测阶段的旧 Skill 数据。

@@ -185,7 +185,7 @@ describe('skills page detail loading', () => {
   it('keeps the editor open and displays a SKILL_FORMAT_INVALID Chinese message exactly', async () => {
     const user = userEvent.setup();
     vi.mocked(rainApi.fetchSkills).mockResolvedValue([]);
-    vi.mocked(rainApi.createSkill).mockRejectedValue(new ApiError('缺少必填章节：证据规则', 400, 'SKILL_FORMAT_INVALID'));
+    vi.mocked(rainApi.createSkill).mockRejectedValue(new ApiError('缺少必填章节：关键日志', 400, 'SKILL_FORMAT_INVALID'));
 
     render(<SkillsPage />);
 
@@ -193,7 +193,7 @@ describe('skills page detail loading', () => {
     await user.type(screen.getByLabelText('名称'), '蓝牙诊断');
     await user.click(screen.getByRole('button', { name: '保存' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(/^缺少必填章节：证据规则$/);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/^缺少必填章节：关键日志$/);
     expect(screen.getByRole('heading', { name: '新建 Skill' })).toBeInTheDocument();
     expect(rainApi.createSkill).toHaveBeenCalledWith(expect.objectContaining({ skill_markdown: expect.stringContaining('schema_version: 1') }));
   });
