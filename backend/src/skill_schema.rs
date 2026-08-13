@@ -7,30 +7,27 @@ pub const MAX_SKILL_MARKDOWN_BYTES: usize = 64 * 1024;
 pub enum StandardSectionKey {
     Goal,
     Scope,
-    RetrievalStrategy,
-    EvidenceRules,
-    IncompleteLogs,
-    StopConditions,
+    KeyProcess,
+    KeyLogs,
+    Relationships,
 }
 
 impl StandardSectionKey {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::Goal,
         Self::Scope,
-        Self::RetrievalStrategy,
-        Self::EvidenceRules,
-        Self::IncompleteLogs,
-        Self::StopConditions,
+        Self::KeyProcess,
+        Self::KeyLogs,
+        Self::Relationships,
     ];
 
     pub const fn internal_key(self) -> &'static str {
         match self {
             Self::Goal => "goal",
             Self::Scope => "scope",
-            Self::RetrievalStrategy => "retrieval_strategy",
-            Self::EvidenceRules => "evidence_rules",
-            Self::IncompleteLogs => "incomplete_logs",
-            Self::StopConditions => "stop_conditions",
+            Self::KeyProcess => "key_process",
+            Self::KeyLogs => "key_logs",
+            Self::Relationships => "relationships",
         }
     }
 
@@ -38,10 +35,9 @@ impl StandardSectionKey {
         match self {
             Self::Goal => "目标",
             Self::Scope => "分析范围",
-            Self::RetrievalStrategy => "检索策略",
-            Self::EvidenceRules => "证据规则",
-            Self::IncompleteLogs => "日志不完整处理",
-            Self::StopConditions => "停止条件",
+            Self::KeyProcess => "关键流程",
+            Self::KeyLogs => "关键日志",
+            Self::Relationships => "关系与影响",
         }
     }
 
@@ -49,10 +45,9 @@ impl StandardSectionKey {
         match self {
             Self::Goal => 0,
             Self::Scope => 1,
-            Self::RetrievalStrategy => 2,
-            Self::EvidenceRules => 3,
-            Self::IncompleteLogs => 4,
-            Self::StopConditions => 5,
+            Self::KeyProcess => 2,
+            Self::KeyLogs => 3,
+            Self::Relationships => 4,
         }
     }
 
@@ -65,10 +60,9 @@ impl StandardSectionKey {
 pub struct StandardSections {
     pub goal: String,
     pub scope: String,
-    pub retrieval_strategy: String,
-    pub evidence_rules: String,
-    pub incomplete_logs: String,
-    pub stop_conditions: String,
+    pub key_process: String,
+    pub key_logs: String,
+    pub relationships: String,
 }
 
 impl StandardSections {
@@ -76,10 +70,9 @@ impl StandardSections {
         match key {
             StandardSectionKey::Goal => &self.goal,
             StandardSectionKey::Scope => &self.scope,
-            StandardSectionKey::RetrievalStrategy => &self.retrieval_strategy,
-            StandardSectionKey::EvidenceRules => &self.evidence_rules,
-            StandardSectionKey::IncompleteLogs => &self.incomplete_logs,
-            StandardSectionKey::StopConditions => &self.stop_conditions,
+            StandardSectionKey::KeyProcess => &self.key_process,
+            StandardSectionKey::KeyLogs => &self.key_logs,
+            StandardSectionKey::Relationships => &self.relationships,
         }
     }
 }
@@ -127,6 +120,8 @@ pub enum SkillFormatError {
     EmptyRequiredSection(&'static str),
     #[error("重复定义必填章节：{0}")]
     DuplicateRequiredSection(&'static str),
+    #[error("章节标题已退役：{found}；该行为已由平台提供，请删除该章节")]
+    RetiredSectionTitle { found: String },
     #[error("不支持的章节标题：{found}，请使用“{expected}”")]
     UnsupportedSectionTitle {
         found: String,
@@ -167,9 +162,14 @@ pub fn parse_skill_markdown(markdown: &str) -> Result<ParsedSkill, SkillFormatEr
     }
 
     let headings = collect_headings(front_matter.body);
-    let mut required_indexes: [Option<usize>; 6] = [None; 6];
+    let mut required_indexes: [Option<usize>; 5] = [None; 5];
 
     for (index, heading) in headings.iter().enumerate() {
+        if is_retired_standard_title(&heading.title) {
+            return Err(SkillFormatError::RetiredSectionTitle {
+                found: heading.title.clone(),
+            });
+        }
         if let Some(expected) = unsupported_standard_title(&heading.title) {
             return Err(SkillFormatError::UnsupportedSectionTitle {
                 found: heading.title.clone(),
@@ -227,10 +227,9 @@ pub fn parse_skill_markdown(markdown: &str) -> Result<ParsedSkill, SkillFormatEr
     let standard_sections = StandardSections {
         goal: body_for(StandardSectionKey::Goal),
         scope: body_for(StandardSectionKey::Scope),
-        retrieval_strategy: body_for(StandardSectionKey::RetrievalStrategy),
-        evidence_rules: body_for(StandardSectionKey::EvidenceRules),
-        incomplete_logs: body_for(StandardSectionKey::IncompleteLogs),
-        stop_conditions: body_for(StandardSectionKey::StopConditions),
+        key_process: body_for(StandardSectionKey::KeyProcess),
+        key_logs: body_for(StandardSectionKey::KeyLogs),
+        relationships: body_for(StandardSectionKey::Relationships),
     };
 
     Ok(ParsedSkill {
@@ -398,35 +397,46 @@ fn unsupported_standard_title(title: &str) -> Option<&'static str> {
     let expected = match title {
         "任务目标" | "目的" => "目标",
         "分析边界" => "分析范围",
-        "搜索策略" => "检索策略",
-        "证据要求" | "证据约束" => "证据规则",
-        "日志缺失处理" | "不完整日志处理" => "日志不完整处理",
-        "终止条件" | "结束条件" => "停止条件",
         _ if title.eq_ignore_ascii_case("goal") => "目标",
         _ if title.eq_ignore_ascii_case("analysis scope")
             || title.eq_ignore_ascii_case("scope") =>
         {
             "分析范围"
         }
-        _ if title.eq_ignore_ascii_case("retrieval strategy") => "检索策略",
-        _ if title.eq_ignore_ascii_case("evidence rules")
-            || title.eq_ignore_ascii_case("evidence policy") =>
-        {
-            "证据规则"
-        }
-        _ if title.eq_ignore_ascii_case("incomplete logs")
-            || title.eq_ignore_ascii_case("incomplete log handling") =>
-        {
-            "日志不完整处理"
-        }
-        _ if title.eq_ignore_ascii_case("stop conditions")
-            || title.eq_ignore_ascii_case("stopping conditions") =>
-        {
-            "停止条件"
-        }
         _ => return None,
     };
     Some(expected)
+}
+
+fn is_retired_standard_title(title: &str) -> bool {
+    match title {
+        "检索策略"
+        | "搜索策略"
+        | "证据规则"
+        | "证据要求"
+        | "证据约束"
+        | "日志不完整处理"
+        | "日志缺失处理"
+        | "不完整日志处理"
+        | "停止条件"
+        | "终止条件"
+        | "结束条件" => true,
+        _ if title.eq_ignore_ascii_case("retrieval strategy")
+            || title.eq_ignore_ascii_case("retrieval_strategy")
+            || title.eq_ignore_ascii_case("evidence rules")
+            || title.eq_ignore_ascii_case("evidence policy")
+            || title.eq_ignore_ascii_case("evidence_constraints")
+            || title.eq_ignore_ascii_case("incomplete logs")
+            || title.eq_ignore_ascii_case("incomplete log handling")
+            || title.eq_ignore_ascii_case("incomplete_logs")
+            || title.eq_ignore_ascii_case("stop conditions")
+            || title.eq_ignore_ascii_case("stopping conditions")
+            || title.eq_ignore_ascii_case("stopping_conditions") =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -448,21 +458,17 @@ schema_version: 1
 
 关注 framework 与 HAL。
 
-# 检索策略
+# 关键流程
 
-先定位事件，再读取原始上下文。
+描述正常业务流程及步骤之间的依赖关系。
 
-# 证据规则
+# 关键日志
 
-结论必须由原始日志行支持。
+描述关键日志分别代表的业务事件和状态。
 
-# 日志不完整处理
+# 关系与影响
 
-证据不足时说明缺失日志，不猜测。
-
-# 停止条件
-
-证据充分或现有日志不足时停止。
+描述事件之间的因果、依赖和故障影响。
 "#
         .into()
     }
@@ -482,10 +488,8 @@ schema_version: 1
             "定位 failure，并解释 the direct cause。"
         );
         assert_eq!(
-            parsed
-                .standard_sections
-                .get(StandardSectionKey::EvidenceRules),
-            "结论必须由原始日志行支持。"
+            parsed.standard_sections.get(StandardSectionKey::KeyLogs),
+            "描述关键日志分别代表的业务事件和状态。"
         );
         assert_eq!(
             parsed.sections.last().map(|section| section.title.as_str()),
@@ -497,7 +501,7 @@ schema_version: 1
 
     #[test]
     fn permits_free_required_section_order_and_crlf() {
-        let markdown = "---\r\nschema_version: 1\r\n---\r\n# 停止条件\r\nstop\r\n# 目标\r\ngoal\r\n# 证据规则\r\nevidence\r\n# 检索策略\r\nretrieve\r\n# 日志不完整处理\r\nincomplete\r\n# 分析范围\r\nscope\r\n";
+        let markdown = "---\r\nschema_version: 1\r\n---\r\n# 关系与影响\r\nrelations\r\n# 目标\r\ngoal\r\n# 关键日志\r\nlogs\r\n# 关键流程\r\nprocess\r\n# 分析范围\r\nscope\r\n";
         assert!(parse_skill_markdown(markdown).is_ok());
     }
 
@@ -581,6 +585,32 @@ schema_version: 1
                 Err(SkillFormatError::UnsupportedSectionTitle {
                     found: alias.into(),
                     expected: "目标",
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_retired_v1_sections_without_mapping_them_to_domain_sections() {
+        for retired in [
+            "检索策略",
+            "搜索策略",
+            "证据规则",
+            "证据要求",
+            "日志不完整处理",
+            "日志缺失处理",
+            "停止条件",
+            "终止条件",
+            "retrieval strategy",
+            "evidence policy",
+            "incomplete logs",
+            "stopping conditions",
+        ] {
+            let markdown = valid_skill().replace("# 关键流程", &format!("# {retired}"));
+            assert_eq!(
+                parse_skill_markdown(&markdown),
+                Err(SkillFormatError::RetiredSectionTitle {
+                    found: retired.into()
                 })
             );
         }

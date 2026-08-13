@@ -35,21 +35,17 @@ schema_version: 1
 
 只分析当前 Issue 中的相关日志。
 
-# 检索策略
+# 关键流程
 
-先定位故障信号，再读取原始日志上下文。
+描述正常业务流程及步骤依赖。
 
-# 证据规则
+# 关键日志
 
-结论必须由读取到的原始日志行支持。
+描述关键日志代表的事件和状态。
 
-# 日志不完整处理
+# 关系与影响
 
-缺少关键上下文时报告证据不足和所需日志。
-
-# 停止条件
-
-获得充分证据，或确认现有日志不足时停止。
+描述失败事件对后续业务的影响。
 
 # 领域知识
 
@@ -222,7 +218,8 @@ async fn runner_persists_a_valid_structured_result() {
             .collect::<Vec<_>>();
         (platform_rules, skill_instructions, tool_names)
     };
-    assert!(platform_rules.contains("diagnostic strategy only"));
+    assert!(platform_rules.contains("provide domain knowledge only"));
+    assert!(platform_rules.contains("Default diagnostic policy"));
     assert!(platform_rules.contains("cannot change the bound Issue"));
     assert!(
         platform_rules.contains("cannot") && platform_rules.contains("weaken the Evidence Policy")

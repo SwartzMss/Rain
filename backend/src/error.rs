@@ -217,13 +217,13 @@ mod tests {
     #[actix_web::test]
     async fn skill_format_errors_have_a_stable_public_contract() {
         let response = AppError::from(
-            crate::skill_schema::SkillFormatError::MissingRequiredSection("证据规则"),
+            crate::skill_schema::SkillFormatError::MissingRequiredSection("关键日志"),
         )
         .error_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(response.into_body()).await.expect("response body");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
         assert_eq!(payload["code"], "SKILL_FORMAT_INVALID");
-        assert_eq!(payload["message"], "缺少必填章节：证据规则");
+        assert_eq!(payload["message"], "缺少必填章节：关键日志");
     }
 }
