@@ -2112,9 +2112,24 @@ fn validate_evidence(
     }
 }
 
+fn finalization_skeleton() -> Value {
+    json!({
+        "summary": {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "text": "Evidence is insufficient to reach a supported conclusion.",
+            "evidence_ids": []
+        },
+        "observations": [],
+        "inferences": [],
+        "missing_context": ["describe the missing evidence or context here"],
+        "evidence": []
+    })
+}
+
 fn finalization_prompt(finalization_reason: &str) -> String {
+    let skeleton = finalization_skeleton();
     format!(
-        "Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now. The result contract is: summary is an object with status (string enum SUPPORTED or INSUFFICIENT_EVIDENCE), text (string), and evidence_ids (array of strings); observations is an array of objects with text (string) and evidence_ids (array of strings); inferences is an array of objects with text (string), confidence (string enum LOW, MEDIUM, or HIGH), and evidence_ids (array of strings); missing_context MUST be a JSON array of strings (string[]), use [] when there is no missing context, and never return it as a string, object, or null; evidence is an array of evidence objects returned by read_file_lines. Every evidence item must match a verified EvidenceLedger entry returned by read_file_lines, and every evidence_id must refer to an id in evidence. SUPPORTED summaries and every observation/inference require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Use this structural skeleton as a guide: {{\"summary\":{{\"status\":\"INSUFFICIENT_EVIDENCE\",\"text\":\"\",\"evidence_ids\":[]}},\"observations\":[],\"inferences\":[],\"missing_context\":[\"describe the missing evidence or context here\"],\"evidence\":[]}}. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context."
+        "Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now. The result contract is: summary is an object with status (string enum SUPPORTED or INSUFFICIENT_EVIDENCE), text (string), and evidence_ids (array of strings); observations is an array of objects with text (string) and evidence_ids (array of strings); inferences is an array of objects with text (string), confidence (string enum LOW, MEDIUM, or HIGH), and evidence_ids (array of strings); missing_context MUST be a JSON array of strings (string[]), use [] when there is no missing context, and never return it as a string, object, or null; evidence is an array of evidence objects returned by read_file_lines. Every evidence item must match a verified EvidenceLedger entry returned by read_file_lines, and every evidence_id must refer to an id in evidence. SUPPORTED summaries and every observation/inference require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Use this structural skeleton as a guide: {skeleton}. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context."
     )
 }
 
@@ -2232,8 +2247,8 @@ mod tests {
     use super::{
         ResultValidationReason, ToolCallError, ToolErrorCategory, ValidationField,
         classify_bootstrap_manifest_error, classify_tool_execution_error, finalization_prompt,
-        parse_result, parse_tool_call, repair_prompt, skill_result_response_format,
-        tool_definitions, tool_error_output, validate_result,
+        finalization_skeleton, parse_result, parse_tool_call, repair_prompt,
+        skill_result_response_format, tool_definitions, tool_error_output, validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
     use crate::config::StructuredOutputMode;
@@ -2504,13 +2519,12 @@ mod tests {
 
     #[test]
     fn finalization_prompt_skeleton_is_semantically_valid() {
+        let skeleton = finalization_skeleton().to_string();
+        parse_result(Some(&skeleton)).expect("finalization skeleton must be semantically valid");
+
         let prompt = finalization_prompt("model_stopped_requesting_tools");
         assert!(prompt.contains("missing_context MUST be a JSON array of strings"));
-        assert!(
-            prompt
-                .contains(r#""missing_context":["describe the missing evidence or context here"]"#)
-        );
-        assert!(!prompt.contains(r#""missing_context":[]"#));
+        assert!(prompt.contains(&skeleton));
     }
 
     #[test]
