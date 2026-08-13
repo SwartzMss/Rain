@@ -21,6 +21,7 @@ use backend::{
     services::skill_runner::SkillRunner,
 };
 use tracing_subscriber::fmt::MakeWriter;
+use uuid::Uuid;
 
 const VALID_SKILL_V1: &str = r#"---
 schema_version: 1
@@ -294,6 +295,142 @@ async fn runner_uses_dedicated_finalization_after_no_tool_response() {
 }
 
 #[tokio::test]
+async fn finalization_explains_how_real_read_file_lines_output_becomes_evidence() {
+    let data_root = std::env::temp_dir().join(format!(
+        "rain-skill-runner-evidence-contract-{}",
+        Uuid::new_v4().simple()
+    ));
+    let (pool, state, run, cancellation) = create_recovery_test_run_at(data_root.clone()).await;
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('bundle','ISSUE','hash-a','logs','READY','PUBLISHING')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let source = "LPSEC_IVI_BLE connect start\nLPSEC_IVI_BLE_Decrypt ret = 1\nTeeFileRead_CB:187 req NULL error\nBluetooth connection failed";
+    let storage_key = "blobs/ha/hash-a";
+    let blob_path = data_root.join(storage_key);
+    tokio::fs::create_dir_all(blob_path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&blob_path, source).await.unwrap();
+    let blob_id: i64 = sqlx::query_scalar("INSERT INTO blobs(content_hash,size_bytes,storage_backend,storage_key,state) VALUES('hash-a',?,'local',?,'READY') RETURNING id")
+        .bind(source.len() as i64)
+        .bind(storage_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let file_id: i64 = sqlx::query_scalar("INSERT INTO files(bundle_id,name,path,is_dir,size_bytes,line_count,mime_type,blob_id) VALUES('bundle','ivi.log','/ivi.log',0,?,2,'text/plain',?) RETURNING id")
+        .bind(source.len() as i64)
+        .bind(blob_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let client = Arc::new(ModeRecordingClient {
+        mode: StructuredOutputMode::JsonObject,
+        responses: Mutex::new(VecDeque::from([
+            tool_response(vec![tool_call(
+                "read-evidence",
+                "read_file_lines",
+                &format!(r#"{{"file_id":{file_id},"start":0,"limit":4}}"#),
+            )]),
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some("The evidence review is complete.".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(format!(
+                        r#"{{"summary":{{"status":"SUPPORTED","text":"The Bluetooth connection failed after the security read error.","evidence_ids":["e1","e2"]}},"observations":[],"inferences":[],"missing_context":[],"evidence":[{{"id":"e1","bundle_hash":"hash-a","file_id":{file_id},"path":"/ivi.log","start_line":0,"end_line":1,"excerpt":"LPSEC_IVI_BLE connect start\nLPSEC_IVI_BLE_Decrypt ret = 1","explanation":"The decrypt operation returned failure during the Bluetooth connection."}},{{"id":"e2","bundle_hash":"hash-a","file_id":{file_id},"path":"/ivi.log","start_line":2,"end_line":3,"excerpt":"TeeFileRead_CB:187 req NULL error\nBluetooth connection failed","explanation":"The public-key read error is followed by the connection failure."}}]}}"#
+                    )),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    let result: serde_json::Value = serde_json::from_str(&stored.result_json.unwrap()).unwrap();
+    assert_eq!(result["summary"]["status"], "SUPPORTED");
+    assert_eq!(
+        result["summary"]["evidence_ids"],
+        serde_json::json!(["e1", "e2"])
+    );
+    assert_eq!(result["evidence"].as_array().unwrap().len(), 2);
+    assert_eq!(result["evidence"][0]["start_line"], 0);
+    assert_eq!(result["evidence"][0]["end_line"], 1);
+    assert_eq!(
+        result["evidence"][0]["excerpt"],
+        "LPSEC_IVI_BLE connect start\nLPSEC_IVI_BLE_Decrypt ret = 1"
+    );
+    assert_eq!(result["evidence"][1]["start_line"], 2);
+    assert_eq!(result["evidence"][1]["end_line"], 3);
+    assert_eq!(
+        result["evidence"][1]["excerpt"],
+        "TeeFileRead_CB:187 req NULL error\nBluetooth connection failed"
+    );
+    assert!(result["evidence"][0]["start_line"] != result["evidence"][1]["start_line"]);
+    {
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let tool_output = requests[1]
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("read-evidence"))
+            .and_then(|message| message.content.as_deref())
+            .unwrap();
+        for actual_tool_field in [
+            "\"bundle_hash\":\"hash-a\"",
+            "\"path\":\"/ivi.log\"",
+            "\"is_dir\":false",
+            "\"lines\":[",
+            "\"line_number\":0",
+            "\"content\":\"LPSEC_IVI_BLE connect start\"",
+            "\"truncated\":false",
+        ] {
+            assert!(tool_output.contains(actual_tool_field), "{tool_output}");
+        }
+        let finalization_prompt = requests[2]
+            .messages
+            .last()
+            .and_then(|message| message.content.as_deref())
+            .unwrap();
+        for required_instruction in [
+            "Do not copy the read_file_lines response object into evidence",
+            "id: create a unique result-local evidence id used by evidence_ids",
+            "bundle_hash: copy from the read_file_lines output",
+            "file_id: copy from the read_file_lines tool-call argument",
+            "path: copy from the read_file_lines output",
+            "start_line: use the first included lines[].line_number",
+            "end_line: use the last included lines[].line_number",
+            "excerpt: copy exact text from the included lines[].content values",
+            "explanation: write a concise explanation of how this range supports the claim",
+            "For each evidence, choose the smallest continuous subrange of lines from one read_file_lines response that supports the claim",
+            "start_line and end_line must be the first and last line number of that selected subrange",
+            "For multiple lines, join their content in order with a literal newline (\\n); do not join with spaces",
+            "Each evidence must use a unique verified range",
+            "Never include Tool-response envelope fields in evidence objects: is_dir, lines, truncated, line_number, content",
+        ] {
+            assert!(
+                finalization_prompt.contains(required_instruction),
+                "missing {required_instruction} in {finalization_prompt}"
+            );
+        }
+    }
+    tokio::fs::remove_dir_all(data_root).await.unwrap();
+}
+
+#[tokio::test]
 async fn runner_logs_safe_types_for_invalid_missing_context() {
     let (_pool, state, run, cancellation) = create_recovery_test_run().await;
     let invalid = serde_json::json!({
@@ -536,6 +673,84 @@ async fn runner_repairs_a_structured_result_with_forged_evidence() {
     assert_eq!(requests.len(), 3);
     assert!(requests[1].tools.is_empty());
     assert!(requests[2].tools.is_empty());
+}
+
+#[tokio::test]
+async fn runner_repairs_an_evidence_object_with_an_unknown_field() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let invalid = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No verified evidence"],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/ivi.log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x","source":"model-generated"}]}"#;
+    let repaired = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No verified evidence"],"evidence":[]}"#;
+    let responses = ["The evidence review is complete.", invalid, repaired].map(|content| {
+        Ok(ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
+                content: Some(content.into()),
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+            },
+        })
+    });
+    let client = Arc::new(ModeRecordingClient {
+        mode: StructuredOutputMode::JsonObject,
+        responses: Mutex::new(VecDeque::from(responses)),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client.clone(),
+        cancellation,
+    ))
+    .await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    assert!(
+        output.contains("validation_reason=\"unknown_field\""),
+        "{output}"
+    );
+    assert!(output.contains("validation_field=\"evidence\""), "{output}");
+    assert!(
+        output.contains("validation_allowed_fields=\"id,bundle_hash,file_id,path,start_line,end_line,excerpt,explanation\""),
+        "{output}"
+    );
+    assert!(
+        output.contains("validation_unknown_field_count=1"),
+        "{output}"
+    );
+    assert!(!output.contains("model-generated"), "{output}");
+
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let finalization_prompt = requests[1]
+        .messages
+        .last()
+        .and_then(|message| message.content.as_deref())
+        .unwrap();
+    assert!(finalization_prompt.contains(
+        "evidence objects contain exactly: id (string), bundle_hash (string), file_id (integer), path (string), start_line (integer), end_line (integer), excerpt (string), explanation (string)"
+    ));
+    let repair_prompt = requests[2]
+        .messages
+        .last()
+        .and_then(|message| message.content.as_deref())
+        .unwrap();
+    assert!(repair_prompt.contains(
+        "evidence object may contain exactly these fields: id (string), bundle_hash (string), file_id (integer), path (string), start_line (integer), end_line (integer), excerpt (string), explanation (string)"
+    ));
+    assert!(
+        repair_prompt.contains("Do not copy the read_file_lines response object into evidence")
+    );
+    assert!(repair_prompt.contains("file_id: copy from the read_file_lines tool-call argument"));
+    assert!(repair_prompt.contains(
+        "Each evidence must use a unique verified range. Construct each evidence object from that selected verified line range"
+    ));
+    assert!(repair_prompt.contains(
+        "For multiple lines, join their content in order with a literal newline (\\n); do not join with spaces"
+    ));
+    assert!(!repair_prompt.contains("source"));
 }
 
 #[tokio::test]
@@ -926,6 +1141,17 @@ async fn create_recovery_test_run() -> (
     backend::models::skill_runs::SkillRunRecord,
     tokio_util::sync::CancellationToken,
 ) {
+    create_recovery_test_run_at(PathBuf::from("data")).await
+}
+
+async fn create_recovery_test_run_at(
+    data_root: PathBuf,
+) -> (
+    sqlx::SqlitePool,
+    actix_web::web::Data<AppState>,
+    backend::models::skill_runs::SkillRunRecord,
+    tokio_util::sync::CancellationToken,
+) {
     let pool = db::init_pool("sqlite::memory:").unwrap();
     db::prepare_schema(&pool, false).await.unwrap();
     sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
@@ -949,11 +1175,8 @@ async fn create_recovery_test_run() -> (
     )
     .await
     .unwrap();
-    let state = actix_web::web::Data::new(AppState::new(
-        pool.clone(),
-        PathBuf::from("data"),
-        AppLimits::default(),
-    ));
+    let state =
+        actix_web::web::Data::new(AppState::new(pool.clone(), data_root, AppLimits::default()));
     let (cancellation, _) = state.skill_runs.register(&run.id);
     (pool, state, run, cancellation)
 }
