@@ -244,7 +244,7 @@ impl SkillRunner {
         let tools = tool_definitions();
         let mut calls = 0_usize;
         let mut consecutive_tool_errors = 0_usize;
-        let mut finalization_reason = "iteration limit reached";
+        let mut finalization_reason = "iteration_limit_reached";
 
         'iterations: for iteration in 1..=8_usize {
             if cancellation.is_cancelled() {
@@ -286,45 +286,9 @@ impl SkillRunner {
                 "skill model response received"
             );
             if response.message.tool_calls.is_empty() {
-                let result = parse_with_repair(
-                    run_id,
-                    client.as_ref(),
-                    &messages,
-                    response,
-                    &executor.ledger,
-                    cancellation,
-                    retry_deadline,
-                )
-                .await?;
-                let json = serde_json::to_string(&result)
-                    .map_err(|_| ("SKILL_RESULT_INVALID", "模型结果无效"))?;
-                if skill_runs::complete(&state.db.pool, run_id, &json)
-                    .await
-                    .map_err(|_| ("SKILL_RUN_STORAGE_ERROR", "无法保存 Skill 结果"))?
-                {
-                    state.skill_runs.emit(
-                        run_id,
-                        SkillRunEvent {
-                            event: "run.completed".into(),
-                            data: json!({"status": "SUCCEEDED"}),
-                        },
-                    );
-                    tracing::info!(
-                        run_id,
-                        iteration,
-                        tool_calls = calls,
-                        retrieval_bytes = executor.ledger.total_bytes(),
-                        evidence_ranges = executor.ledger.evidence().len(),
-                        elapsed_ms = run_started.elapsed().as_millis() as u64,
-                        "skill run completed"
-                    );
-                } else {
-                    tracing::debug!(
-                        run_id,
-                        "skill result was not saved because the run is no longer active"
-                    );
-                }
-                return Ok(());
+                finalization_reason = "model_stopped_requesting_tools";
+                messages.push(response.message);
+                break 'iterations;
             }
             let tool_calls = response.message.tool_calls.clone();
             messages.push(response.message);
@@ -332,7 +296,7 @@ impl SkillRunner {
             let mut iteration_had_successful_call = false;
             for (call_index, call) in tool_calls.iter().enumerate() {
                 if calls >= 24 {
-                    finalization_reason = "tool call limit reached";
+                    finalization_reason = "tool_call_limit_reached";
                     append_limit_responses(&mut messages, &tool_calls[call_index..]);
                     break 'iterations;
                 }
@@ -540,7 +504,7 @@ impl SkillRunner {
                     );
                 }
                 if limit_reached {
-                    finalization_reason = "retrieval limit reached";
+                    finalization_reason = "retrieval_limit_reached";
                     append_limit_responses(&mut messages, &tool_calls[call_index + 1..]);
                     let _ =
                         skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
@@ -569,7 +533,7 @@ impl SkillRunner {
                 );
             }
             if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS {
-                finalization_reason = "invalid tool call retry limit reached";
+                finalization_reason = "invalid_tool_call_retry_limit_reached";
                 let _ = skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
                 state.skill_runs.emit(
                     run_id,
@@ -593,15 +557,17 @@ impl SkillRunner {
                 },
             );
             if calls >= 24 {
-                finalization_reason = "tool call limit reached";
+                finalization_reason = "tool_call_limit_reached";
                 break;
             }
         }
 
         messages.push(ChatMessage {
             role: "system".into(),
-            content: Some(format!("Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now, with only these top-level fields: summary, observations, inferences, missing_context, evidence. summary must be {{status: SUPPORTED|INSUFFICIENT_EVIDENCE, text, evidence_ids[]}}. observations must contain {{text, evidence_ids[]}} objects. inferences must contain {{text, confidence: LOW|MEDIUM|HIGH, evidence_ids[]}} objects. evidence must contain only EvidenceLedger entries returned by read_file_lines, and every cited evidence id must exist in that array. SUPPORTED requires evidence_ids for the summary and every observation/inference; INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context.")),
-            tool_calls: Vec::new(), tool_call_id: None, name: None,
+            content: Some(finalization_prompt(finalization_reason)),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
         });
         let structured_output_mode = client.structured_output_mode();
         let model_started = Instant::now();
@@ -651,7 +617,7 @@ impl SkillRunner {
             serde_json::to_string(&result).map_err(|_| ("SKILL_RESULT_INVALID", "模型结果无效"))?;
         if skill_runs::complete(&state.db.pool, run_id, &json)
             .await
-            .unwrap_or(false)
+            .map_err(|_| ("SKILL_RUN_STORAGE_ERROR", "无法保存 Skill 结果"))?
         {
             state.skill_runs.emit(
                 run_id,
@@ -662,11 +628,12 @@ impl SkillRunner {
             );
             tracing::info!(
                 run_id,
+                finalization_reason,
                 tool_calls = calls,
                 retrieval_bytes = executor.ledger.total_bytes(),
                 evidence_ranges = executor.ledger.evidence().len(),
                 elapsed_ms = run_started.elapsed().as_millis() as u64,
-                retrieval_limits_exhausted = true,
+                retrieval_limits_exhausted = finalization_reason == "retrieval_limit_reached",
                 "skill run completed"
             );
         } else {
@@ -1371,6 +1338,32 @@ impl ValidationField {
             Self::EvidenceExplanation => "evidence[].explanation",
         }
     }
+
+    fn expected_type(self) -> &'static str {
+        match self {
+            Self::Summary => "object",
+            Self::SummaryStatus => "string enum",
+            Self::SummaryText => "string",
+            Self::SummaryEvidenceIds => "array<string>",
+            Self::Observations => "array<object>",
+            Self::ObservationText => "string",
+            Self::ObservationEvidenceIds => "array<string>",
+            Self::Inferences => "array<object>",
+            Self::InferenceText => "string",
+            Self::InferenceConfidence => "string enum",
+            Self::InferenceEvidenceIds => "array<string>",
+            Self::MissingContext => "array<string>",
+            Self::Evidence => "array<object>",
+            Self::EvidenceId => "string",
+            Self::EvidenceBundleHash => "string",
+            Self::EvidenceFileId => "integer",
+            Self::EvidencePath => "string",
+            Self::EvidenceStartLine => "integer",
+            Self::EvidenceEndLine => "integer",
+            Self::EvidenceExcerpt => "string",
+            Self::EvidenceExplanation => "string",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1394,11 +1387,27 @@ enum ResultValidationReason {
 struct ResultValidationError {
     reason: ResultValidationReason,
     field: Option<ValidationField>,
+    expected_type: Option<&'static str>,
+    actual_type: Option<&'static str>,
 }
 
 impl ResultValidationError {
     fn new(reason: ResultValidationReason, field: Option<ValidationField>) -> Self {
-        Self { reason, field }
+        Self {
+            reason,
+            field,
+            expected_type: None,
+            actual_type: None,
+        }
+    }
+
+    fn invalid_field_type(field: Option<ValidationField>, value: Option<&Value>) -> Self {
+        Self {
+            reason: ResultValidationReason::InvalidFieldType,
+            expected_type: field.map(ValidationField::expected_type),
+            actual_type: Some(json_value_type(value)),
+            field,
+        }
     }
 
     fn as_str(self) -> &'static str {
@@ -1407,6 +1416,19 @@ impl ResultValidationError {
 
     fn run_error(self) -> (&'static str, &'static str) {
         self.reason.run_error()
+    }
+}
+
+fn json_value_type(value: Option<&Value>) -> &'static str {
+    match value {
+        None => "missing",
+        Some(value) if value.is_null() => "null",
+        Some(value) if value.is_boolean() => "boolean",
+        Some(value) if value.is_number() => "number",
+        Some(value) if value.is_string() => "string",
+        Some(value) if value.is_array() => "array",
+        Some(value) if value.is_object() => "object",
+        Some(_) => "unknown",
     }
 }
 
@@ -1665,9 +1687,9 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
 }
 
 fn validate_schema_shape(value: &Value) -> Result<(), ResultValidationError> {
-    let object = value.as_object().ok_or_else(|| {
-        ResultValidationError::new(ResultValidationReason::InvalidFieldType, None)
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| ResultValidationError::invalid_field_type(None, Some(value)))?;
     let top_level = [
         ("summary", ValidationField::Summary),
         ("observations", ValidationField::Observations),
@@ -1692,9 +1714,9 @@ fn validate_schema_shape(value: &Value) -> Result<(), ResultValidationError> {
         }
     }
     let summary = object["summary"].as_object().ok_or_else(|| {
-        ResultValidationError::new(
-            ResultValidationReason::InvalidFieldType,
+        ResultValidationError::invalid_field_type(
             Some(ValidationField::Summary),
+            Some(&object["summary"]),
         )
     })?;
     validate_nested_object(
@@ -1756,9 +1778,9 @@ fn require_string(
     field: ValidationField,
 ) -> Result<(), ResultValidationError> {
     if object.get(key).and_then(Value::as_str).is_none() {
-        return Err(ResultValidationError::new(
-            ResultValidationReason::InvalidFieldType,
+        return Err(ResultValidationError::invalid_field_type(
             Some(field),
+            object.get(key),
         ));
     }
     Ok(())
@@ -1770,9 +1792,9 @@ fn require_integer(
     field: ValidationField,
 ) -> Result<(), ResultValidationError> {
     if object.get(key).and_then(Value::as_i64).is_none() {
-        return Err(ResultValidationError::new(
-            ResultValidationReason::InvalidFieldType,
+        return Err(ResultValidationError::invalid_field_type(
             Some(field),
+            object.get(key),
         ));
     }
     Ok(())
@@ -1783,13 +1805,14 @@ fn require_string_array(
     key: &str,
     field: ValidationField,
 ) -> Result<(), ResultValidationError> {
-    let values = object.get(key).and_then(Value::as_array).ok_or_else(|| {
-        ResultValidationError::new(ResultValidationReason::InvalidFieldType, Some(field))
-    })?;
+    let values = object
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| ResultValidationError::invalid_field_type(Some(field), object.get(key)))?;
     if values.iter().any(|value| value.as_str().is_none()) {
-        return Err(ResultValidationError::new(
-            ResultValidationReason::InvalidFieldType,
+        return Err(ResultValidationError::invalid_field_type(
             Some(field),
+            object.get(key),
         ));
     }
     Ok(())
@@ -1797,16 +1820,13 @@ fn require_string_array(
 
 fn validate_observation_array(value: &Value) -> Result<(), ResultValidationError> {
     let items = value.as_array().ok_or_else(|| {
-        ResultValidationError::new(
-            ResultValidationReason::InvalidFieldType,
-            Some(ValidationField::Observations),
-        )
+        ResultValidationError::invalid_field_type(Some(ValidationField::Observations), Some(value))
     })?;
     for item in items {
         let object = item.as_object().ok_or_else(|| {
-            ResultValidationError::new(
-                ResultValidationReason::InvalidFieldType,
+            ResultValidationError::invalid_field_type(
                 Some(ValidationField::Observations),
+                Some(item),
             )
         })?;
         validate_nested_object(
@@ -1829,17 +1849,11 @@ fn validate_observation_array(value: &Value) -> Result<(), ResultValidationError
 
 fn validate_inference_array(value: &Value) -> Result<(), ResultValidationError> {
     let items = value.as_array().ok_or_else(|| {
-        ResultValidationError::new(
-            ResultValidationReason::InvalidFieldType,
-            Some(ValidationField::Inferences),
-        )
+        ResultValidationError::invalid_field_type(Some(ValidationField::Inferences), Some(value))
     })?;
     for item in items {
         let object = item.as_object().ok_or_else(|| {
-            ResultValidationError::new(
-                ResultValidationReason::InvalidFieldType,
-                Some(ValidationField::Inferences),
-            )
+            ResultValidationError::invalid_field_type(Some(ValidationField::Inferences), Some(item))
         })?;
         validate_nested_object(
             object,
@@ -1872,10 +1886,7 @@ fn validate_inference_array(value: &Value) -> Result<(), ResultValidationError> 
 
 fn validate_evidence_array(value: &Value) -> Result<(), ResultValidationError> {
     let items = value.as_array().ok_or_else(|| {
-        ResultValidationError::new(
-            ResultValidationReason::InvalidFieldType,
-            Some(ValidationField::Evidence),
-        )
+        ResultValidationError::invalid_field_type(Some(ValidationField::Evidence), Some(value))
     })?;
     let fields = [
         ("id", ValidationField::EvidenceId),
@@ -1889,10 +1900,7 @@ fn validate_evidence_array(value: &Value) -> Result<(), ResultValidationError> {
     ];
     for item in items {
         let object = item.as_object().ok_or_else(|| {
-            ResultValidationError::new(
-                ResultValidationReason::InvalidFieldType,
-                Some(ValidationField::Evidence),
-            )
+            ResultValidationError::invalid_field_type(Some(ValidationField::Evidence), Some(item))
         })?;
         validate_nested_object(object, &fields, ValidationField::Evidence)?;
         require_string(object, "id", ValidationField::EvidenceId)?;
@@ -1925,10 +1933,15 @@ fn repair_prompt(error: ResultValidationError) -> String {
             "The previous JSON contained an unsupported field within `{}`. Remove fields not in the schema.",
             field.unwrap_or("the result")
         ),
-        ResultValidationReason::InvalidFieldType => format!(
-            "The field `{}` has the wrong type. Return the field using the type required by the schema.",
-            field.unwrap_or("the invalid field")
-        ),
+        ResultValidationReason::InvalidFieldType => match error.field {
+            Some(field) => format!(
+                "The field `{}` has the wrong type. It must be `{}`; the previous value was classified as `{}`. Return that field using the required type and do not return a string, object, or null when the expected type is an array.",
+                field.as_str(),
+                field.expected_type(),
+                error.actual_type.unwrap_or("unknown")
+            ),
+            None => "The previous response contained a field with the wrong type. Return every field using the type required by the schema.".into(),
+        },
         ResultValidationReason::InvalidSummaryStatus => {
             "`summary.status` must be either `SUPPORTED` or `INSUFFICIENT_EVIDENCE`.".into()
         }
@@ -1987,6 +2000,8 @@ async fn parse_with_repair(
         final_result_validation = "failed",
         validation_reason = first_reason.as_str(),
         validation_field = first_reason.field.map(ValidationField::as_str),
+        validation_expected_type = first_reason.expected_type.unwrap_or("unknown"),
+        validation_actual_type = first_reason.actual_type.unwrap_or("unknown"),
         repair_attempt = 1_u8,
         "skill result validation failed; requesting repair"
     );
@@ -2034,6 +2049,8 @@ async fn parse_with_repair(
                 final_result_validation = "failed",
                 validation_reason = reason.as_str(),
                 validation_field = reason.field.map(ValidationField::as_str),
+                validation_expected_type = reason.expected_type.unwrap_or("unknown"),
+                validation_actual_type = reason.actual_type.unwrap_or("unknown"),
                 repair_attempt = 1_u8,
                 "skill result validation failed after repair"
             );
@@ -2093,6 +2110,27 @@ fn validate_evidence(
             Some(ValidationField::Evidence),
         ))
     }
+}
+
+fn finalization_skeleton() -> Value {
+    json!({
+        "summary": {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "text": "Evidence is insufficient to reach a supported conclusion.",
+            "evidence_ids": []
+        },
+        "observations": [],
+        "inferences": [],
+        "missing_context": ["describe the missing evidence or context here"],
+        "evidence": []
+    })
+}
+
+fn finalization_prompt(finalization_reason: &str) -> String {
+    let skeleton = finalization_skeleton();
+    format!(
+        "Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now. The result contract is: summary is an object with status (string enum SUPPORTED or INSUFFICIENT_EVIDENCE), text (string), and evidence_ids (array of strings); observations is an array of objects with text (string) and evidence_ids (array of strings); inferences is an array of objects with text (string), confidence (string enum LOW, MEDIUM, or HIGH), and evidence_ids (array of strings); missing_context MUST be a JSON array of strings (string[]), use [] when there is no missing context, and never return it as a string, object, or null; evidence is an array of evidence objects returned by read_file_lines. Every evidence item must match a verified EvidenceLedger entry returned by read_file_lines, and every evidence_id must refer to an id in evidence. SUPPORTED summaries and every observation/inference require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Use this structural skeleton as a guide: {skeleton}. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context."
+    )
 }
 
 fn skill_result_response_format(mode: StructuredOutputMode) -> Value {
@@ -2208,9 +2246,9 @@ fn skill_result_schema() -> Value {
 mod tests {
     use super::{
         ResultValidationReason, ToolCallError, ToolErrorCategory, ValidationField,
-        classify_bootstrap_manifest_error, classify_tool_execution_error, parse_result,
-        parse_tool_call, skill_result_response_format, tool_definitions, tool_error_output,
-        validate_result,
+        classify_bootstrap_manifest_error, classify_tool_execution_error, finalization_prompt,
+        finalization_skeleton, parse_result, parse_tool_call, repair_prompt,
+        skill_result_response_format, tool_definitions, tool_error_output, validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
     use crate::config::StructuredOutputMode;
@@ -2480,6 +2518,16 @@ mod tests {
     }
 
     #[test]
+    fn finalization_prompt_skeleton_is_semantically_valid() {
+        let skeleton = finalization_skeleton().to_string();
+        parse_result(Some(&skeleton)).expect("finalization skeleton must be semantically valid");
+
+        let prompt = finalization_prompt("model_stopped_requesting_tools");
+        assert!(prompt.contains("missing_context MUST be a JSON array of strings"));
+        assert!(prompt.contains(&skeleton));
+    }
+
+    #[test]
     fn result_validation_maps_fields() {
         let cases = [
             (
@@ -2517,6 +2565,26 @@ mod tests {
             let error = parse_result(Some(content)).unwrap_err();
             assert_eq!(error.reason, reason, "unexpected reason for {content}");
             assert_eq!(error.field, field, "unexpected field for {content}");
+        }
+
+        for (missing_context, actual_type) in [
+            (serde_json::json!("missing context"), "string"),
+            (serde_json::Value::Null, "null"),
+            (serde_json::json!({"reason": "missing context"}), "object"),
+        ] {
+            let result = serde_json::json!({
+                "summary": {"status": "INSUFFICIENT_EVIDENCE", "text": "claim", "evidence_ids": []},
+                "observations": [],
+                "inferences": [],
+                "missing_context": missing_context,
+                "evidence": []
+            });
+            let error = parse_result(Some(&result.to_string())).unwrap_err();
+            assert_eq!(error.reason, ResultValidationReason::InvalidFieldType);
+            assert_eq!(error.field, Some(ValidationField::MissingContext));
+            assert_eq!(error.expected_type, Some("array<string>"));
+            assert_eq!(error.actual_type, Some(actual_type));
+            assert!(repair_prompt(error).contains("array<string>"));
         }
 
         let mut too_many_observations = serde_json::json!({
