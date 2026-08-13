@@ -178,7 +178,7 @@ async fn runner_persists_a_valid_structured_result() {
                 content: Some(r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No matching evidence","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No logs"],"evidence":[]}"#.into()),
                 tool_calls: vec![], tool_call_id: None, name: None,
             }
-        })])),
+        }), insufficient_evidence_response()])),
         requests: Mutex::new(Vec::new()),
     });
 
@@ -244,6 +244,105 @@ async fn runner_persists_a_valid_structured_result() {
             "read_file_lines",
         ]
     );
+}
+
+#[tokio::test]
+async fn runner_uses_dedicated_finalization_after_no_tool_response() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(ModeRecordingClient {
+        mode: StructuredOutputMode::JsonObject,
+        responses: Mutex::new(VecDeque::from([
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"The available evidence is insufficient.","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No verified evidence"],"evidence":[]}"#.into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].tools.is_empty());
+    assert!(requests[0].response_format.is_none());
+    assert!(requests[1].tools.is_empty());
+    assert!(requests[1].tool_choice.is_none());
+    assert_eq!(
+        requests[1].response_format,
+        Some(serde_json::json!({"type": "json_object"}))
+    );
+    let finalization_prompt = requests[1]
+        .messages
+        .iter()
+        .find_map(|message| {
+            message
+                .content
+                .as_deref()
+                .filter(|content| content.starts_with("Tool use stopped"))
+        })
+        .unwrap();
+    assert!(finalization_prompt.contains("array of strings"));
+}
+
+#[tokio::test]
+async fn runner_logs_safe_types_for_invalid_missing_context() {
+    let (_pool, state, run, cancellation) = create_recovery_test_run().await;
+    let invalid = serde_json::json!({
+        "summary": {"status": "INSUFFICIENT_EVIDENCE", "text": "No conclusion", "evidence_ids": []},
+        "observations": [],
+        "inferences": [],
+        "missing_context": "missing context",
+        "evidence": []
+    });
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some("The evidence review is complete.".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(invalid.to_string()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client,
+        cancellation,
+    ))
+    .await;
+
+    assert!(
+        output.contains("validation_field=\"missing_context\""),
+        "{output}"
+    );
+    assert!(output.contains("validation_expected_type=\"array<string>\""));
+    assert!(output.contains("validation_actual_type=\"string\""));
+    assert!(!output.contains("missing context"));
 }
 
 #[tokio::test]
@@ -319,7 +418,12 @@ async fn runner_repairs_a_structured_result_with_forged_evidence() {
     let (cancellation, _) = state.skill_runs.register(&run.id);
     let forged = r#"{"summary":{"status":"SUPPORTED","text":"forged","evidence_ids":["e1"]},"observations":[],"inferences":[],"missing_context":[],"evidence":[{"id":"e1","bundle_hash":"forged-bundle","file_id":999,"path":"/other.log","start_line":1,"end_line":2,"excerpt":"x","explanation":"x"}]}"#;
     let repaired = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"insufficient evidence","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No logs were read"],"evidence":[]}"#;
-    let responses = [forged, repaired].map(|content| {
+    let responses = [
+        "The retrieved context needs a final evidence check.",
+        forged,
+        repaired,
+    ]
+    .map(|content| {
         Ok(ChatResponse {
             message: ChatMessage {
                 role: "assistant".into(),
@@ -406,6 +510,7 @@ async fn runner_keeps_log_instructions_untrusted_and_persists_only_step_metadata
             Ok(ChatResponse { message: ChatMessage { role: "assistant".into(),
                 content: Some(r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"untrusted text ignored","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No file lines were read"],"evidence":[]}"#.into()),
                 tool_calls: vec![], tool_call_id: None, name: None } }),
+            insufficient_evidence_response(),
         ])),
         requests: Mutex::new(Vec::new()),
     });
@@ -807,6 +912,15 @@ async fn repair_prompt_targets_validation_field() {
     let client = Arc::new(ModeRecordingClient {
         mode: StructuredOutputMode::JsonObject,
         responses: Mutex::new(VecDeque::from([
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some("The evidence review is complete.".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
             missing_evidence,
             insufficient_evidence_response(),
         ])),
@@ -818,7 +932,7 @@ async fn repair_prompt_targets_validation_field() {
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
     let requests = client.requests.lock().unwrap();
-    let repair_prompt = requests[1]
+    let repair_prompt = requests[2]
         .messages
         .last()
         .unwrap()
@@ -914,6 +1028,15 @@ async fn provider_failure_log_identifies_result_repair_transport_reason() {
         Ok(ChatResponse {
             message: ChatMessage {
                 role: "assistant".into(),
+                content: Some("The evidence review is complete.".into()),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                name: None,
+            },
+        }),
+        Ok(ChatResponse {
+            message: ChatMessage {
+                role: "assistant".into(),
                 content: Some("not json".into()),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
@@ -961,6 +1084,15 @@ async fn result_repair_retries_a_transient_429() {
             Ok(ChatResponse {
                 message: ChatMessage {
                     role: "assistant".into(),
+                    content: Some("The evidence review is complete.".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
                     content: Some("not json".into()),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
@@ -983,7 +1115,7 @@ async fn result_repair_retries_a_transient_429() {
 
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
-    assert_eq!(client.requests.lock().unwrap().len(), 3);
+    assert_eq!(client.requests.lock().unwrap().len(), 4);
     for expected in [
         "stage=result_repair",
         "attempt=1",
@@ -1049,6 +1181,7 @@ async fn runner_returns_parse_errors_and_allows_a_corrected_call() {
                 r#"{"query":"timeout"}"#,
             )]),
             insufficient_evidence_response(),
+            insufficient_evidence_response(),
         ])),
         requests: Mutex::new(Vec::new()),
     });
@@ -1097,6 +1230,7 @@ async fn runner_preserves_all_tool_responses_when_one_call_is_invalid() {
                 tool_call("valid-list", "list_files", r#"{}"#),
             ]),
             insufficient_evidence_response(),
+            insufficient_evidence_response(),
         ])),
         requests: Mutex::new(Vec::new()),
     });
@@ -1140,6 +1274,7 @@ async fn runner_counts_multiple_invalid_calls_once_per_iteration() {
             ]),
             tool_response(vec![tool_call("valid-list", "list_files", r#"{}"#)]),
             insufficient_evidence_response(),
+            insufficient_evidence_response(),
         ])),
         requests: Mutex::new(Vec::new()),
     });
@@ -1150,7 +1285,7 @@ async fn runner_counts_multiple_invalid_calls_once_per_iteration() {
     assert_eq!(stored.status, "SUCCEEDED");
     assert_eq!(stored.tool_call_count, 4);
     let requests = client.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     assert!(!requests[1].tools.is_empty());
     let first_iteration_tool_ids = requests[1]
         .messages
@@ -1210,6 +1345,7 @@ async fn runner_treats_a_mixed_iteration_with_a_successful_call_as_recovered() {
             )]),
             tool_response(vec![tool_call("recovered", "list_files", r#"{}"#)]),
             insufficient_evidence_response(),
+            insufficient_evidence_response(),
         ])),
         requests: Mutex::new(Vec::new()),
     });
@@ -1219,7 +1355,7 @@ async fn runner_treats_a_mixed_iteration_with_a_successful_call_as_recovered() {
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
     assert_eq!(stored.tool_call_count, 5);
-    assert_eq!(client.requests.lock().unwrap().len(), 5);
+    assert_eq!(client.requests.lock().unwrap().len(), 6);
 }
 
 #[tokio::test]
@@ -1232,6 +1368,7 @@ async fn runner_returns_recoverable_execution_errors_to_the_model() {
                 "read_file_lines",
                 r#"{"file_id":999,"start":0,"limit":10}"#,
             )]),
+            insufficient_evidence_response(),
             insufficient_evidence_response(),
         ])),
         requests: Mutex::new(Vec::new()),
@@ -1310,7 +1447,7 @@ async fn runner_forces_summary_after_three_consecutive_invalid_tool_calls() {
                 .filter(|content| content.contains("Tool use stopped because"))
         })
         .unwrap();
-    assert!(final_prompt.contains("SUPPORTED|INSUFFICIENT_EVIDENCE"));
+    assert!(final_prompt.contains("SUPPORTED or INSUFFICIENT_EVIDENCE"));
     assert!(final_prompt.contains("EvidenceLedger"));
     assert!(final_prompt.contains("Do not output Markdown"));
 }
