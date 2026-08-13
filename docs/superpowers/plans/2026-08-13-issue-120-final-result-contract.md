@@ -31,6 +31,7 @@
 - [ ] Change shape validation to derive required/allowed fields and unknown-field metadata from the contracts.
 - [ ] Generate nested strict JSON Schema properties and required arrays from the same contracts.
 - [ ] Render exact finalization and `unknown_field` repair instructions from the contracts.
+- [ ] Render an explicit `read_file_lines` call/response to final evidence conversion policy from the evidence contract.
 - [ ] Add safe `validation_allowed_fields` and `validation_unknown_field_count` log fields without logging unknown keys or values.
 
 ### Task 3: Verify behavior and preserved security properties
