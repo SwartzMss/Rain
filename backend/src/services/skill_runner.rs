@@ -2344,7 +2344,7 @@ fn evidence_construction_policy() -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Do not copy the read_file_lines response object into evidence. Construct each evidence object from a verified returned line range:\n{rules}\nNever include Tool-response envelope fields in evidence objects: is_dir, lines, truncated, line_number, content, or any other field."
+        "Do not copy the read_file_lines response object into evidence. For each evidence, choose the smallest continuous subrange of lines from one read_file_lines response that supports the claim. start_line and end_line must be the first and last line number of that selected subrange. For multiple lines, join their content in order with a literal newline (\\n); do not join with spaces. Each evidence must use a unique verified range. Construct each evidence object from that selected verified line range:\n{rules}\nNever include Tool-response envelope fields in evidence objects: is_dir, lines, truncated, line_number, content, or any other field."
     )
 }
 

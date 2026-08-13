@@ -305,7 +305,7 @@ async fn finalization_explains_how_real_read_file_lines_output_becomes_evidence(
         .execute(&pool)
         .await
         .unwrap();
-    let source = "LPSEC_IVI_BLE connect start\nLPSEC_IVI_BLE_Decrypt ret = 1";
+    let source = "LPSEC_IVI_BLE connect start\nLPSEC_IVI_BLE_Decrypt ret = 1\nTeeFileRead_CB:187 req NULL error\nBluetooth connection failed";
     let storage_key = "blobs/ha/hash-a";
     let blob_path = data_root.join(storage_key);
     tokio::fs::create_dir_all(blob_path.parent().unwrap())
@@ -330,7 +330,7 @@ async fn finalization_explains_how_real_read_file_lines_output_becomes_evidence(
             tool_response(vec![tool_call(
                 "read-evidence",
                 "read_file_lines",
-                &format!(r#"{{"file_id":{file_id},"start":0,"limit":2}}"#),
+                &format!(r#"{{"file_id":{file_id},"start":0,"limit":4}}"#),
             )]),
             Ok(ChatResponse {
                 message: ChatMessage {
@@ -341,7 +341,17 @@ async fn finalization_explains_how_real_read_file_lines_output_becomes_evidence(
                     name: None,
                 },
             }),
-            insufficient_evidence_response(),
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(format!(
+                        r#"{{"summary":{{"status":"SUPPORTED","text":"The Bluetooth connection failed after the security read error.","evidence_ids":["e1","e2"]}},"observations":[],"inferences":[],"missing_context":[],"evidence":[{{"id":"e1","bundle_hash":"hash-a","file_id":{file_id},"path":"/ivi.log","start_line":0,"end_line":1,"excerpt":"LPSEC_IVI_BLE connect start\nLPSEC_IVI_BLE_Decrypt ret = 1","explanation":"The decrypt operation returned failure during the Bluetooth connection."}},{{"id":"e2","bundle_hash":"hash-a","file_id":{file_id},"path":"/ivi.log","start_line":2,"end_line":3,"excerpt":"TeeFileRead_CB:187 req NULL error\nBluetooth connection failed","explanation":"The public-key read error is followed by the connection failure."}}]}}"#
+                    )),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
         ])),
         requests: Mutex::new(Vec::new()),
     });
@@ -350,6 +360,26 @@ async fn finalization_explains_how_real_read_file_lines_output_becomes_evidence(
 
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
+    let result: serde_json::Value = serde_json::from_str(&stored.result_json.unwrap()).unwrap();
+    assert_eq!(result["summary"]["status"], "SUPPORTED");
+    assert_eq!(
+        result["summary"]["evidence_ids"],
+        serde_json::json!(["e1", "e2"])
+    );
+    assert_eq!(result["evidence"].as_array().unwrap().len(), 2);
+    assert_eq!(result["evidence"][0]["start_line"], 0);
+    assert_eq!(result["evidence"][0]["end_line"], 1);
+    assert_eq!(
+        result["evidence"][0]["excerpt"],
+        "LPSEC_IVI_BLE connect start\nLPSEC_IVI_BLE_Decrypt ret = 1"
+    );
+    assert_eq!(result["evidence"][1]["start_line"], 2);
+    assert_eq!(result["evidence"][1]["end_line"], 3);
+    assert_eq!(
+        result["evidence"][1]["excerpt"],
+        "TeeFileRead_CB:187 req NULL error\nBluetooth connection failed"
+    );
+    assert!(result["evidence"][0]["start_line"] != result["evidence"][1]["start_line"]);
     {
         let requests = client.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
@@ -385,6 +415,10 @@ async fn finalization_explains_how_real_read_file_lines_output_becomes_evidence(
             "end_line: use the last included lines[].line_number",
             "excerpt: copy exact text from the included lines[].content values",
             "explanation: write a concise explanation of how this range supports the claim",
+            "For each evidence, choose the smallest continuous subrange of lines from one read_file_lines response that supports the claim",
+            "start_line and end_line must be the first and last line number of that selected subrange",
+            "For multiple lines, join their content in order with a literal newline (\\n); do not join with spaces",
+            "Each evidence must use a unique verified range",
             "Never include Tool-response envelope fields in evidence objects: is_dir, lines, truncated, line_number, content",
         ] {
             assert!(
@@ -710,6 +744,12 @@ async fn runner_repairs_an_evidence_object_with_an_unknown_field() {
         repair_prompt.contains("Do not copy the read_file_lines response object into evidence")
     );
     assert!(repair_prompt.contains("file_id: copy from the read_file_lines tool-call argument"));
+    assert!(repair_prompt.contains(
+        "Each evidence must use a unique verified range. Construct each evidence object from that selected verified line range"
+    ));
+    assert!(repair_prompt.contains(
+        "For multiple lines, join their content in order with a literal newline (\\n); do not join with spaces"
+    ));
     assert!(!repair_prompt.contains("source"));
 }
 
