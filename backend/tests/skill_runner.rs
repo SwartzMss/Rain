@@ -346,6 +346,74 @@ async fn runner_logs_safe_types_for_invalid_missing_context() {
 }
 
 #[tokio::test]
+async fn runner_fails_the_run_when_final_result_storage_fails() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    sqlx::query(
+        "CREATE TRIGGER fail_skill_result_completion BEFORE UPDATE OF status ON skill_runs WHEN NEW.status = 'SUCCEEDED' BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some("The evidence review is complete.".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client, cancellation).await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "FAILED");
+    assert_eq!(
+        stored.error_code.as_deref(),
+        Some("SKILL_RUN_STORAGE_ERROR")
+    );
+}
+
+#[tokio::test]
+async fn runner_logs_model_finalization_without_retrieval_exhaustion() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some("The evidence review is complete.".into()),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client,
+        cancellation,
+    ))
+    .await;
+
+    let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, "SUCCEEDED");
+    assert!(output.contains("finalization_reason=\"model_stopped_requesting_tools\""));
+    assert!(output.contains("retrieval_limits_exhausted=false"));
+}
+
+#[tokio::test]
 async fn runner_rejects_an_invalid_snapshot_before_model_work() {
     let pool = db::init_pool("sqlite::memory:").unwrap();
     db::prepare_schema(&pool, false).await.unwrap();
@@ -1435,7 +1503,7 @@ async fn runner_forces_summary_after_three_consecutive_invalid_tool_calls() {
         message
             .content
             .as_deref()
-            .is_some_and(|content| content.contains("invalid tool call retry limit reached"))
+            .is_some_and(|content| content.contains("invalid_tool_call_retry_limit_reached"))
     }));
     let final_prompt = requests[3]
         .messages

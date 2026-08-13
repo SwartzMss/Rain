@@ -244,7 +244,7 @@ impl SkillRunner {
         let tools = tool_definitions();
         let mut calls = 0_usize;
         let mut consecutive_tool_errors = 0_usize;
-        let mut finalization_reason = "iteration limit reached";
+        let mut finalization_reason = "iteration_limit_reached";
 
         'iterations: for iteration in 1..=8_usize {
             if cancellation.is_cancelled() {
@@ -286,7 +286,7 @@ impl SkillRunner {
                 "skill model response received"
             );
             if response.message.tool_calls.is_empty() {
-                finalization_reason = "model stopped requesting tools";
+                finalization_reason = "model_stopped_requesting_tools";
                 messages.push(response.message);
                 break 'iterations;
             }
@@ -296,7 +296,7 @@ impl SkillRunner {
             let mut iteration_had_successful_call = false;
             for (call_index, call) in tool_calls.iter().enumerate() {
                 if calls >= 24 {
-                    finalization_reason = "tool call limit reached";
+                    finalization_reason = "tool_call_limit_reached";
                     append_limit_responses(&mut messages, &tool_calls[call_index..]);
                     break 'iterations;
                 }
@@ -504,7 +504,7 @@ impl SkillRunner {
                     );
                 }
                 if limit_reached {
-                    finalization_reason = "retrieval limit reached";
+                    finalization_reason = "retrieval_limit_reached";
                     append_limit_responses(&mut messages, &tool_calls[call_index + 1..]);
                     let _ =
                         skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
@@ -533,7 +533,7 @@ impl SkillRunner {
                 );
             }
             if consecutive_tool_errors >= MAX_CONSECUTIVE_TOOL_ERRORS {
-                finalization_reason = "invalid tool call retry limit reached";
+                finalization_reason = "invalid_tool_call_retry_limit_reached";
                 let _ = skill_runs::update_progress(&state.db.pool, run_id, iteration, calls).await;
                 state.skill_runs.emit(
                     run_id,
@@ -557,7 +557,7 @@ impl SkillRunner {
                 },
             );
             if calls >= 24 {
-                finalization_reason = "tool call limit reached";
+                finalization_reason = "tool_call_limit_reached";
                 break;
             }
         }
@@ -617,7 +617,7 @@ impl SkillRunner {
             serde_json::to_string(&result).map_err(|_| ("SKILL_RESULT_INVALID", "模型结果无效"))?;
         if skill_runs::complete(&state.db.pool, run_id, &json)
             .await
-            .unwrap_or(false)
+            .map_err(|_| ("SKILL_RUN_STORAGE_ERROR", "无法保存 Skill 结果"))?
         {
             state.skill_runs.emit(
                 run_id,
@@ -628,11 +628,12 @@ impl SkillRunner {
             );
             tracing::info!(
                 run_id,
+                finalization_reason,
                 tool_calls = calls,
                 retrieval_bytes = executor.ledger.total_bytes(),
                 evidence_ranges = executor.ledger.evidence().len(),
                 elapsed_ms = run_started.elapsed().as_millis() as u64,
-                retrieval_limits_exhausted = true,
+                retrieval_limits_exhausted = finalization_reason == "retrieval_limit_reached",
                 "skill run completed"
             );
         } else {
@@ -2113,7 +2114,7 @@ fn validate_evidence(
 
 fn finalization_prompt(finalization_reason: &str) -> String {
     format!(
-        "Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now. The result contract is: summary is an object with status (string enum SUPPORTED or INSUFFICIENT_EVIDENCE), text (string), and evidence_ids (array of strings); observations is an array of objects with text (string) and evidence_ids (array of strings); inferences is an array of objects with text (string), confidence (string enum LOW, MEDIUM, or HIGH), and evidence_ids (array of strings); missing_context MUST be a JSON array of strings (string[]), use [] when there is no missing context, and never return it as a string, object, or null; evidence is an array of evidence objects returned by read_file_lines. Every evidence item must match a verified EvidenceLedger entry returned by read_file_lines, and every evidence_id must refer to an id in evidence. SUPPORTED summaries and every observation/inference require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Use this structural skeleton as a guide: {{\"summary\":{{\"status\":\"INSUFFICIENT_EVIDENCE\",\"text\":\"\",\"evidence_ids\":[]}},\"observations\":[],\"inferences\":[],\"missing_context\":[],\"evidence\":[]}}. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context."
+        "Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now. The result contract is: summary is an object with status (string enum SUPPORTED or INSUFFICIENT_EVIDENCE), text (string), and evidence_ids (array of strings); observations is an array of objects with text (string) and evidence_ids (array of strings); inferences is an array of objects with text (string), confidence (string enum LOW, MEDIUM, or HIGH), and evidence_ids (array of strings); missing_context MUST be a JSON array of strings (string[]), use [] when there is no missing context, and never return it as a string, object, or null; evidence is an array of evidence objects returned by read_file_lines. Every evidence item must match a verified EvidenceLedger entry returned by read_file_lines, and every evidence_id must refer to an id in evidence. SUPPORTED summaries and every observation/inference require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Use this structural skeleton as a guide: {{\"summary\":{{\"status\":\"INSUFFICIENT_EVIDENCE\",\"text\":\"\",\"evidence_ids\":[]}},\"observations\":[],\"inferences\":[],\"missing_context\":[\"describe the missing evidence or context here\"],\"evidence\":[]}}. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context."
     )
 }
 
@@ -2230,9 +2231,9 @@ fn skill_result_schema() -> Value {
 mod tests {
     use super::{
         ResultValidationReason, ToolCallError, ToolErrorCategory, ValidationField,
-        classify_bootstrap_manifest_error, classify_tool_execution_error, parse_result,
-        parse_tool_call, repair_prompt, skill_result_response_format, tool_definitions,
-        tool_error_output, validate_result,
+        classify_bootstrap_manifest_error, classify_tool_execution_error, finalization_prompt,
+        parse_result, parse_tool_call, repair_prompt, skill_result_response_format,
+        tool_definitions, tool_error_output, validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
     use crate::config::StructuredOutputMode;
@@ -2499,6 +2500,17 @@ mod tests {
                 .reason,
             ResultValidationReason::InvalidEvidenceReference
         );
+    }
+
+    #[test]
+    fn finalization_prompt_skeleton_is_semantically_valid() {
+        let prompt = finalization_prompt("model_stopped_requesting_tools");
+        assert!(prompt.contains("missing_context MUST be a JSON array of strings"));
+        assert!(
+            prompt
+                .contains(r#""missing_context":["describe the missing evidence or context here"]"#)
+        );
+        assert!(!prompt.contains(r#""missing_context":[]"#));
     }
 
     #[test]
