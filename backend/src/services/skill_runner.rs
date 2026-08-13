@@ -1367,6 +1367,168 @@ impl ValidationField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResultContractField {
+    name: &'static str,
+    validation_field: ValidationField,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ResultObjectContract {
+    label: &'static str,
+    parent: Option<ValidationField>,
+    fields: &'static [ResultContractField],
+}
+
+impl ResultObjectContract {
+    fn allowed_fields(&self) -> String {
+        self.fields
+            .iter()
+            .map(|field| field.name)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn typed_fields(&self) -> String {
+        self.fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "{} ({})",
+                    field.name,
+                    field.validation_field.expected_type()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+const TOP_LEVEL_CONTRACT_FIELDS: &[ResultContractField] = &[
+    ResultContractField {
+        name: "summary",
+        validation_field: ValidationField::Summary,
+    },
+    ResultContractField {
+        name: "observations",
+        validation_field: ValidationField::Observations,
+    },
+    ResultContractField {
+        name: "inferences",
+        validation_field: ValidationField::Inferences,
+    },
+    ResultContractField {
+        name: "missing_context",
+        validation_field: ValidationField::MissingContext,
+    },
+    ResultContractField {
+        name: "evidence",
+        validation_field: ValidationField::Evidence,
+    },
+];
+
+const SUMMARY_CONTRACT_FIELDS: &[ResultContractField] = &[
+    ResultContractField {
+        name: "status",
+        validation_field: ValidationField::SummaryStatus,
+    },
+    ResultContractField {
+        name: "text",
+        validation_field: ValidationField::SummaryText,
+    },
+    ResultContractField {
+        name: "evidence_ids",
+        validation_field: ValidationField::SummaryEvidenceIds,
+    },
+];
+
+const OBSERVATION_CONTRACT_FIELDS: &[ResultContractField] = &[
+    ResultContractField {
+        name: "text",
+        validation_field: ValidationField::ObservationText,
+    },
+    ResultContractField {
+        name: "evidence_ids",
+        validation_field: ValidationField::ObservationEvidenceIds,
+    },
+];
+
+const INFERENCE_CONTRACT_FIELDS: &[ResultContractField] = &[
+    ResultContractField {
+        name: "text",
+        validation_field: ValidationField::InferenceText,
+    },
+    ResultContractField {
+        name: "confidence",
+        validation_field: ValidationField::InferenceConfidence,
+    },
+    ResultContractField {
+        name: "evidence_ids",
+        validation_field: ValidationField::InferenceEvidenceIds,
+    },
+];
+
+const EVIDENCE_CONTRACT_FIELDS: &[ResultContractField] = &[
+    ResultContractField {
+        name: "id",
+        validation_field: ValidationField::EvidenceId,
+    },
+    ResultContractField {
+        name: "bundle_hash",
+        validation_field: ValidationField::EvidenceBundleHash,
+    },
+    ResultContractField {
+        name: "file_id",
+        validation_field: ValidationField::EvidenceFileId,
+    },
+    ResultContractField {
+        name: "path",
+        validation_field: ValidationField::EvidencePath,
+    },
+    ResultContractField {
+        name: "start_line",
+        validation_field: ValidationField::EvidenceStartLine,
+    },
+    ResultContractField {
+        name: "end_line",
+        validation_field: ValidationField::EvidenceEndLine,
+    },
+    ResultContractField {
+        name: "excerpt",
+        validation_field: ValidationField::EvidenceExcerpt,
+    },
+    ResultContractField {
+        name: "explanation",
+        validation_field: ValidationField::EvidenceExplanation,
+    },
+];
+
+const TOP_LEVEL_CONTRACT: ResultObjectContract = ResultObjectContract {
+    label: "top-level result",
+    parent: None,
+    fields: TOP_LEVEL_CONTRACT_FIELDS,
+};
+const SUMMARY_CONTRACT: ResultObjectContract = ResultObjectContract {
+    label: "summary",
+    parent: Some(ValidationField::Summary),
+    fields: SUMMARY_CONTRACT_FIELDS,
+};
+const OBSERVATION_CONTRACT: ResultObjectContract = ResultObjectContract {
+    label: "observation",
+    parent: Some(ValidationField::Observations),
+    fields: OBSERVATION_CONTRACT_FIELDS,
+};
+const INFERENCE_CONTRACT: ResultObjectContract = ResultObjectContract {
+    label: "inference",
+    parent: Some(ValidationField::Inferences),
+    fields: INFERENCE_CONTRACT_FIELDS,
+};
+const EVIDENCE_CONTRACT: ResultObjectContract = ResultObjectContract {
+    label: "evidence",
+    parent: Some(ValidationField::Evidence),
+    fields: EVIDENCE_CONTRACT_FIELDS,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResultValidationReason {
     InvalidJson,
     MissingTopLevelField,
@@ -1389,6 +1551,8 @@ struct ResultValidationError {
     field: Option<ValidationField>,
     expected_type: Option<&'static str>,
     actual_type: Option<&'static str>,
+    contract: Option<&'static ResultObjectContract>,
+    unknown_field_count: Option<usize>,
 }
 
 impl ResultValidationError {
@@ -1398,6 +1562,8 @@ impl ResultValidationError {
             field,
             expected_type: None,
             actual_type: None,
+            contract: None,
+            unknown_field_count: None,
         }
     }
 
@@ -1407,7 +1573,24 @@ impl ResultValidationError {
             expected_type: field.map(ValidationField::expected_type),
             actual_type: Some(json_value_type(value)),
             field,
+            contract: None,
+            unknown_field_count: None,
         }
+    }
+
+    fn unknown_fields(contract: &'static ResultObjectContract, count: usize) -> Self {
+        Self {
+            reason: ResultValidationReason::UnknownField,
+            field: contract.parent,
+            expected_type: None,
+            actual_type: None,
+            contract: Some(contract),
+            unknown_field_count: Some(count),
+        }
+    }
+
+    fn allowed_fields(self) -> Option<String> {
+        self.contract.map(ResultObjectContract::allowed_fields)
     }
 
     fn as_str(self) -> &'static str {
@@ -1690,43 +1873,21 @@ fn validate_schema_shape(value: &Value) -> Result<(), ResultValidationError> {
     let object = value
         .as_object()
         .ok_or_else(|| ResultValidationError::invalid_field_type(None, Some(value)))?;
-    let top_level = [
-        ("summary", ValidationField::Summary),
-        ("observations", ValidationField::Observations),
-        ("inferences", ValidationField::Inferences),
-        ("missing_context", ValidationField::MissingContext),
-        ("evidence", ValidationField::Evidence),
-    ];
-    for key in object.keys() {
-        if !top_level.iter().any(|(allowed, _)| allowed == key) {
-            return Err(ResultValidationError::new(
-                ResultValidationReason::UnknownField,
-                None,
-            ));
-        }
-    }
-    for (key, field) in top_level {
-        if !object.contains_key(key) {
-            return Err(ResultValidationError::new(
-                ResultValidationReason::MissingTopLevelField,
-                Some(field),
-            ));
-        }
-    }
+    validate_object_shape(
+        object,
+        &TOP_LEVEL_CONTRACT,
+        ResultValidationReason::MissingTopLevelField,
+    )?;
     let summary = object["summary"].as_object().ok_or_else(|| {
         ResultValidationError::invalid_field_type(
             Some(ValidationField::Summary),
             Some(&object["summary"]),
         )
     })?;
-    validate_nested_object(
+    validate_object_shape(
         summary,
-        &[
-            ("status", ValidationField::SummaryStatus),
-            ("text", ValidationField::SummaryText),
-            ("evidence_ids", ValidationField::SummaryEvidenceIds),
-        ],
-        ValidationField::Summary,
+        &SUMMARY_CONTRACT,
+        ResultValidationReason::MissingNestedField,
     )?;
     require_string(summary, "status", ValidationField::SummaryStatus)?;
     if !matches!(
@@ -1748,24 +1909,26 @@ fn validate_schema_shape(value: &Value) -> Result<(), ResultValidationError> {
     Ok(())
 }
 
-fn validate_nested_object(
+fn validate_object_shape(
     object: &serde_json::Map<String, Value>,
-    fields: &[(&str, ValidationField)],
-    parent: ValidationField,
+    contract: &'static ResultObjectContract,
+    missing_reason: ResultValidationReason,
 ) -> Result<(), ResultValidationError> {
-    for key in object.keys() {
-        if !fields.iter().any(|(allowed, _)| allowed == key) {
-            return Err(ResultValidationError::new(
-                ResultValidationReason::UnknownField,
-                Some(parent),
-            ));
-        }
+    let unknown_field_count = object
+        .keys()
+        .filter(|key| !contract.fields.iter().any(|field| field.name == *key))
+        .count();
+    if unknown_field_count > 0 {
+        return Err(ResultValidationError::unknown_fields(
+            contract,
+            unknown_field_count,
+        ));
     }
-    for (key, field) in fields {
-        if !object.contains_key(*key) {
+    for field in contract.fields {
+        if !object.contains_key(field.name) {
             return Err(ResultValidationError::new(
-                ResultValidationReason::MissingNestedField,
-                Some(*field),
+                missing_reason,
+                Some(field.validation_field),
             ));
         }
     }
@@ -1829,13 +1992,10 @@ fn validate_observation_array(value: &Value) -> Result<(), ResultValidationError
                 Some(item),
             )
         })?;
-        validate_nested_object(
+        validate_object_shape(
             object,
-            &[
-                ("text", ValidationField::ObservationText),
-                ("evidence_ids", ValidationField::ObservationEvidenceIds),
-            ],
-            ValidationField::Observations,
+            &OBSERVATION_CONTRACT,
+            ResultValidationReason::MissingNestedField,
         )?;
         require_string(object, "text", ValidationField::ObservationText)?;
         require_string_array(
@@ -1855,14 +2015,10 @@ fn validate_inference_array(value: &Value) -> Result<(), ResultValidationError> 
         let object = item.as_object().ok_or_else(|| {
             ResultValidationError::invalid_field_type(Some(ValidationField::Inferences), Some(item))
         })?;
-        validate_nested_object(
+        validate_object_shape(
             object,
-            &[
-                ("text", ValidationField::InferenceText),
-                ("confidence", ValidationField::InferenceConfidence),
-                ("evidence_ids", ValidationField::InferenceEvidenceIds),
-            ],
-            ValidationField::Inferences,
+            &INFERENCE_CONTRACT,
+            ResultValidationReason::MissingNestedField,
         )?;
         require_string(object, "text", ValidationField::InferenceText)?;
         require_string(object, "confidence", ValidationField::InferenceConfidence)?;
@@ -1888,21 +2044,15 @@ fn validate_evidence_array(value: &Value) -> Result<(), ResultValidationError> {
     let items = value.as_array().ok_or_else(|| {
         ResultValidationError::invalid_field_type(Some(ValidationField::Evidence), Some(value))
     })?;
-    let fields = [
-        ("id", ValidationField::EvidenceId),
-        ("bundle_hash", ValidationField::EvidenceBundleHash),
-        ("file_id", ValidationField::EvidenceFileId),
-        ("path", ValidationField::EvidencePath),
-        ("start_line", ValidationField::EvidenceStartLine),
-        ("end_line", ValidationField::EvidenceEndLine),
-        ("excerpt", ValidationField::EvidenceExcerpt),
-        ("explanation", ValidationField::EvidenceExplanation),
-    ];
     for item in items {
         let object = item.as_object().ok_or_else(|| {
             ResultValidationError::invalid_field_type(Some(ValidationField::Evidence), Some(item))
         })?;
-        validate_nested_object(object, &fields, ValidationField::Evidence)?;
+        validate_object_shape(
+            object,
+            &EVIDENCE_CONTRACT,
+            ResultValidationReason::MissingNestedField,
+        )?;
         require_string(object, "id", ValidationField::EvidenceId)?;
         require_string(object, "bundle_hash", ValidationField::EvidenceBundleHash)?;
         require_integer(object, "file_id", ValidationField::EvidenceFileId)?;
@@ -1929,10 +2079,19 @@ fn repair_prompt(error: ResultValidationError) -> String {
             "The previous JSON omitted the required field `{}`.",
             field.unwrap_or("a required nested field")
         ),
-        ResultValidationReason::UnknownField => format!(
-            "The previous JSON contained an unsupported field within `{}`. Remove fields not in the schema.",
-            field.unwrap_or("the result")
-        ),
+        ResultValidationReason::UnknownField => match error.contract {
+            Some(contract) => format!(
+                "The previous JSON contained {} unsupported field(s) in the {} object. The {} object may contain exactly these fields: {}. Remove every other field.",
+                error.unknown_field_count.unwrap_or(1),
+                contract.label,
+                contract.label,
+                contract.typed_fields()
+            ),
+            None => format!(
+                "The previous JSON contained an unsupported field within `{}`. Remove fields not in the schema.",
+                field.unwrap_or("the result")
+            ),
+        },
         ResultValidationReason::InvalidFieldType => match error.field {
             Some(field) => format!(
                 "The field `{}` has the wrong type. It must be `{}`; the previous value was classified as `{}`. Return that field using the required type and do not return a string, object, or null when the expected type is an array.",
@@ -1995,6 +2154,7 @@ async fn parse_with_repair(
         }
         Err(reason) => reason,
     };
+    let validation_allowed_fields = first_reason.allowed_fields();
     tracing::warn!(
         run_id,
         final_result_validation = "failed",
@@ -2002,6 +2162,8 @@ async fn parse_with_repair(
         validation_field = first_reason.field.map(ValidationField::as_str),
         validation_expected_type = first_reason.expected_type.unwrap_or("unknown"),
         validation_actual_type = first_reason.actual_type.unwrap_or("unknown"),
+        validation_allowed_fields = validation_allowed_fields.as_deref().unwrap_or("unknown"),
+        validation_unknown_field_count = first_reason.unknown_field_count.unwrap_or(0),
         repair_attempt = 1_u8,
         "skill result validation failed; requesting repair"
     );
@@ -2044,6 +2206,7 @@ async fn parse_with_repair(
             Ok(result)
         }
         Err(reason) => {
+            let validation_allowed_fields = reason.allowed_fields();
             tracing::warn!(
                 run_id,
                 final_result_validation = "failed",
@@ -2051,6 +2214,9 @@ async fn parse_with_repair(
                 validation_field = reason.field.map(ValidationField::as_str),
                 validation_expected_type = reason.expected_type.unwrap_or("unknown"),
                 validation_actual_type = reason.actual_type.unwrap_or("unknown"),
+                validation_allowed_fields =
+                    validation_allowed_fields.as_deref().unwrap_or("unknown"),
+                validation_unknown_field_count = reason.unknown_field_count.unwrap_or(0),
                 repair_attempt = 1_u8,
                 "skill result validation failed after repair"
             );
@@ -2129,7 +2295,12 @@ fn finalization_skeleton() -> Value {
 fn finalization_prompt(finalization_reason: &str) -> String {
     let skeleton = finalization_skeleton();
     format!(
-        "Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now. The result contract is: summary is an object with status (string enum SUPPORTED or INSUFFICIENT_EVIDENCE), text (string), and evidence_ids (array of strings); observations is an array of objects with text (string) and evidence_ids (array of strings); inferences is an array of objects with text (string), confidence (string enum LOW, MEDIUM, or HIGH), and evidence_ids (array of strings); missing_context MUST be a JSON array of strings (string[]), use [] when there is no missing context, and never return it as a string, object, or null; evidence is an array of evidence objects returned by read_file_lines. Every evidence item must match a verified EvidenceLedger entry returned by read_file_lines, and every evidence_id must refer to an id in evidence. SUPPORTED summaries and every observation/inference require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Use this structural skeleton as a guide: {skeleton}. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context."
+        "Tool use stopped because {finalization_reason}. Do not request tools. Return exactly one JSON object now. The top-level result object contains exactly: {}. The exact nested contracts are: summary object contains exactly: {}; observation objects contain exactly: {}; inference objects contain exactly: {}; evidence objects contain exactly: {}. No other fields are allowed in any object. summary.status is SUPPORTED or INSUFFICIENT_EVIDENCE; inferences[].confidence is LOW, MEDIUM, or HIGH. missing_context MUST be a JSON array of strings (string[]), use [] when there is no missing context, and never return it as a string, object, or null. Evidence objects must come from read_file_lines. Every evidence item must match a verified EvidenceLedger entry returned by read_file_lines, and every evidence_id must refer to an id in evidence. SUPPORTED summaries and every observation/inference require supporting evidence IDs. INSUFFICIENT_EVIDENCE requires empty summary evidence_ids and non-empty missing_context. Use this structural skeleton as a guide: {skeleton}. Do not make unsupported claims. Do not output Markdown, code fences, extra prose, or tool calls. If verified evidence is insufficient, use INSUFFICIENT_EVIDENCE and record the gap in missing_context.",
+        TOP_LEVEL_CONTRACT.typed_fields(),
+        SUMMARY_CONTRACT.typed_fields(),
+        OBSERVATION_CONTRACT.typed_fields(),
+        INFERENCE_CONTRACT.typed_fields(),
+        EVIDENCE_CONTRACT.typed_fields(),
     )
 }
 
@@ -2151,103 +2322,95 @@ fn skill_result_schema() -> Value {
     // JSON Schema maxLength counts Unicode characters. The server-side limits for
     // these fields are UTF-8 byte limits, so those limits stay enforced below in
     // parse_result instead of being expressed as misleading schema constraints.
+    object_contract_schema(&TOP_LEVEL_CONTRACT)
+}
+
+fn object_contract_schema(contract: &ResultObjectContract) -> Value {
+    let required = contract
+        .fields
+        .iter()
+        .map(|field| field.name)
+        .collect::<Vec<_>>();
+    let properties = contract
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                field.name.to_owned(),
+                validation_field_schema(field.validation_field),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>();
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["summary", "observations", "inferences", "missing_context", "evidence"],
-        "properties": {
-            "summary": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["status", "text", "evidence_ids"],
-                "properties": {
-                    "status": {
-                        "type": "string",
-                        "enum": ["SUPPORTED", "INSUFFICIENT_EVIDENCE"]
-                    },
-                    "text": {"type": "string"},
-                    "evidence_ids": {
-                        "type": "array",
-                        "maxItems": 30,
-                        "items": {"type": "string", "maxLength": 128}
-                    }
-                }
-            },
-            "observations": {
-                "type": "array",
-                "maxItems": 50,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["text", "evidence_ids"],
-                    "properties": {
-                        "text": {"type": "string"},
-                        "evidence_ids": {
-                            "type": "array",
-                            "maxItems": 30,
-                            "items": {"type": "string", "maxLength": 128}
-                        }
-                    }
-                }
-            },
-            "inferences": {
-                "type": "array",
-                "maxItems": 50,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["text", "confidence", "evidence_ids"],
-                    "properties": {
-                        "text": {"type": "string"},
-                        "confidence": {
-                            "type": "string",
-                            "enum": ["LOW", "MEDIUM", "HIGH"]
-                        },
-                        "evidence_ids": {
-                            "type": "array",
-                            "maxItems": 30,
-                            "items": {"type": "string", "maxLength": 128}
-                        }
-                    }
-                }
-            },
-            "missing_context": {
-                "type": "array",
-                "maxItems": 50,
-                "items": {"type": "string"}
-            },
-            "evidence": {
-                "type": "array",
-                "maxItems": 30,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                        "id", "bundle_hash", "file_id", "path",
-                        "start_line", "end_line", "excerpt", "explanation"
-                    ],
-                    "properties": {
-                        "id": {"type": "string"},
-                        "bundle_hash": {"type": "string"},
-                        "file_id": {"type": "integer"},
-                        "path": {"type": "string"},
-                        "start_line": {"type": "integer"},
-                        "end_line": {"type": "integer"},
-                        "excerpt": {"type": "string"},
-                        "explanation": {"type": "string", "maxLength": 2000}
-                    }
-                }
-            }
-        }
+        "required": required,
+        "properties": properties,
     })
+}
+
+fn validation_field_schema(field: ValidationField) -> Value {
+    match field {
+        ValidationField::Summary => object_contract_schema(&SUMMARY_CONTRACT),
+        ValidationField::SummaryStatus => json!({
+            "type": "string",
+            "enum": ["SUPPORTED", "INSUFFICIENT_EVIDENCE"]
+        }),
+        ValidationField::SummaryText
+        | ValidationField::ObservationText
+        | ValidationField::InferenceText
+        | ValidationField::EvidenceId
+        | ValidationField::EvidenceBundleHash
+        | ValidationField::EvidencePath
+        | ValidationField::EvidenceExcerpt => json!({"type": "string"}),
+        ValidationField::SummaryEvidenceIds
+        | ValidationField::ObservationEvidenceIds
+        | ValidationField::InferenceEvidenceIds => json!({
+            "type": "array",
+            "maxItems": 30,
+            "items": {"type": "string", "maxLength": 128}
+        }),
+        ValidationField::Observations => json!({
+            "type": "array",
+            "maxItems": 50,
+            "items": object_contract_schema(&OBSERVATION_CONTRACT)
+        }),
+        ValidationField::Inferences => json!({
+            "type": "array",
+            "maxItems": 50,
+            "items": object_contract_schema(&INFERENCE_CONTRACT)
+        }),
+        ValidationField::InferenceConfidence => json!({
+            "type": "string",
+            "enum": ["LOW", "MEDIUM", "HIGH"]
+        }),
+        ValidationField::MissingContext => json!({
+            "type": "array",
+            "maxItems": 50,
+            "items": {"type": "string"}
+        }),
+        ValidationField::Evidence => json!({
+            "type": "array",
+            "maxItems": 30,
+            "items": object_contract_schema(&EVIDENCE_CONTRACT)
+        }),
+        ValidationField::EvidenceFileId
+        | ValidationField::EvidenceStartLine
+        | ValidationField::EvidenceEndLine => json!({"type": "integer"}),
+        ValidationField::EvidenceExplanation => {
+            json!({"type": "string", "maxLength": 2000})
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ResultValidationReason, ToolCallError, ToolErrorCategory, ValidationField,
-        classify_bootstrap_manifest_error, classify_tool_execution_error, finalization_prompt,
-        finalization_skeleton, parse_result, parse_tool_call, repair_prompt,
+        EVIDENCE_CONTRACT, INFERENCE_CONTRACT, OBSERVATION_CONTRACT, ResultObjectContract,
+        ResultValidationReason, SUMMARY_CONTRACT, TOP_LEVEL_CONTRACT, ToolCallError,
+        ToolErrorCategory, ValidationField, classify_bootstrap_manifest_error,
+        classify_tool_execution_error, finalization_prompt, finalization_skeleton,
+        object_contract_schema, parse_result, parse_tool_call, repair_prompt,
         skill_result_response_format, tool_definitions, tool_error_output, validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
@@ -2524,7 +2687,97 @@ mod tests {
 
         let prompt = finalization_prompt("model_stopped_requesting_tools");
         assert!(prompt.contains("missing_context MUST be a JSON array of strings"));
+        assert!(prompt.contains(
+            "evidence objects contain exactly: id (string), bundle_hash (string), file_id (integer), path (string), start_line (integer), end_line (integer), excerpt (string), explanation (string)"
+        ));
+        assert!(prompt.contains("No other fields are allowed"));
         assert!(prompt.contains(&skeleton));
+    }
+
+    #[test]
+    fn unknown_field_repairs_name_the_complete_parent_contract() {
+        let cases = [
+            (
+                r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[],"source":"model"}"#,
+                None,
+                "top-level result object may contain exactly these fields: summary (object), observations (array<object>), inferences (array<object>), missing_context (array<string>), evidence (array<object>)",
+            ),
+            (
+                r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[],"source":"model"},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[]}"#,
+                Some(ValidationField::Summary),
+                "summary object may contain exactly these fields: status (string enum), text (string), evidence_ids (array<string>)",
+            ),
+            (
+                r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[{"text":"claim","evidence_ids":["e1"],"source":"model"}],"inferences":[],"missing_context":["gap"],"evidence":[]}"#,
+                Some(ValidationField::Observations),
+                "observation object may contain exactly these fields: text (string), evidence_ids (array<string>)",
+            ),
+            (
+                r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[{"text":"claim","confidence":"LOW","evidence_ids":["e1"],"source":"model"}],"missing_context":["gap"],"evidence":[]}"#,
+                Some(ValidationField::Inferences),
+                "inference object may contain exactly these fields: text (string), confidence (string enum), evidence_ids (array<string>)",
+            ),
+            (
+                r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x","source":"model"}]}"#,
+                Some(ValidationField::Evidence),
+                "evidence object may contain exactly these fields: id (string), bundle_hash (string), file_id (integer), path (string), start_line (integer), end_line (integer), excerpt (string), explanation (string)",
+            ),
+        ];
+
+        for (content, field, expected_contract) in cases {
+            let error = parse_result(Some(content)).unwrap_err();
+            assert_eq!(error.reason, ResultValidationReason::UnknownField);
+            assert_eq!(error.field, field);
+            let prompt = repair_prompt(error);
+            assert!(prompt.contains(expected_contract), "{prompt}");
+            assert!(prompt.contains("Remove every other field"), "{prompt}");
+            assert!(!prompt.contains("source"), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn generated_schema_uses_every_contract_field_exactly_once() {
+        for contract in [
+            &TOP_LEVEL_CONTRACT,
+            &SUMMARY_CONTRACT,
+            &OBSERVATION_CONTRACT,
+            &INFERENCE_CONTRACT,
+            &EVIDENCE_CONTRACT,
+        ] {
+            assert_schema_matches_contract(contract);
+        }
+    }
+
+    fn assert_schema_matches_contract(contract: &'static ResultObjectContract) {
+        let schema = object_contract_schema(contract);
+        let expected_fields = contract
+            .fields
+            .iter()
+            .map(|field| field.name)
+            .collect::<Vec<_>>();
+        assert_eq!(schema["required"], serde_json::json!(expected_fields));
+        assert_eq!(schema["additionalProperties"], false);
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(properties.len(), contract.fields.len());
+        assert!(
+            contract
+                .fields
+                .iter()
+                .all(|field| properties.contains_key(field.name))
+        );
+    }
+
+    #[test]
+    fn unknown_field_validation_counts_all_unknown_keys() {
+        let content = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x","source":"model","line":"1"}]}"#;
+        let error = parse_result(Some(content)).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::UnknownField);
+        assert_eq!(error.field, Some(ValidationField::Evidence));
+        assert_eq!(error.unknown_field_count, Some(2));
+        assert_eq!(
+            error.allowed_fields(),
+            Some("id,bundle_hash,file_id,path,start_line,end_line,excerpt,explanation".into())
+        );
     }
 
     #[test]
