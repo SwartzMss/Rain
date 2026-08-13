@@ -26,6 +26,10 @@ pub async fn health() -> HttpResponse {
 
 #[get("/readyz")]
 pub async fn readiness(state: web::Data<AppState>) -> HttpResponse {
+    readiness_response(&state).await
+}
+
+async fn readiness_response(state: &AppState) -> HttpResponse {
     let snapshot = if let Some(snapshot) = cached_readiness() {
         snapshot
     } else {
@@ -41,7 +45,8 @@ pub async fn readiness(state: web::Data<AppState>) -> HttpResponse {
     };
     let database_ok = snapshot.database_ok;
     let storage_ok = snapshot.storage_ok;
-    let ready = database_ok && storage_ok;
+    let recovery_ok = state.recovery.invariant_recovery_ready();
+    let ready = database_ok && storage_ok && recovery_ok;
     HttpResponse::build(if ready {
         StatusCode::OK
     } else {
@@ -51,6 +56,7 @@ pub async fn readiness(state: web::Data<AppState>) -> HttpResponse {
         "status": if ready { "ready" } else { "not_ready" },
         "database": database_ok,
         "storage": storage_ok,
+        "recovery": recovery_ok,
         "service": "rain-backend",
         "version": env!("CARGO_PKG_VERSION")
     }))
@@ -99,6 +105,49 @@ async fn check_database(pool: &sqlx::SqlitePool) -> bool {
     }
     .await;
     result.is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use actix_web::{body::to_bytes, http::StatusCode, web};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use super::{READINESS_CACHE, readiness_response};
+    use crate::{AppState, RecoveryRuntime, config::AppLimits, db};
+
+    #[actix_web::test]
+    async fn readiness_waits_for_invariant_recovery_and_reports_its_state() {
+        if let Ok(mut cache) = READINESS_CACHE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+        {
+            *cache = None;
+        }
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let data_root = std::env::temp_dir().join(format!("rain-ready-{}", uuid::Uuid::new_v4()));
+        let mut app_state = AppState::new(pool, PathBuf::from(&data_root), AppLimits::default());
+        app_state.recovery = std::sync::Arc::new(RecoveryRuntime::default());
+        let state = web::Data::new(app_state);
+
+        let response = readiness_response(state.as_ref()).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
+        assert_eq!(body["recovery"], false);
+
+        state.recovery.mark_stale_skill_runs_ready();
+        state.recovery.mark_stale_processing_bundles_ready();
+        let response = readiness_response(state.as_ref()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let _ = tokio::fs::remove_dir_all(data_root).await;
+    }
 }
 use std::{
     sync::{Mutex, OnceLock},

@@ -161,6 +161,43 @@ pub struct SkillRunRuntime {
     runs: Mutex<HashMap<String, SkillRunHandle>>,
 }
 
+#[derive(Default)]
+pub struct RecoveryRuntime {
+    stale_skill_runs_ready: AtomicBool,
+    stale_processing_bundles_ready: AtomicBool,
+}
+
+impl RecoveryRuntime {
+    pub fn ready() -> Self {
+        Self {
+            stale_skill_runs_ready: AtomicBool::new(true),
+            stale_processing_bundles_ready: AtomicBool::new(true),
+        }
+    }
+
+    pub fn invariant_recovery_ready(&self) -> bool {
+        self.stale_skill_runs_ready.load(Ordering::Acquire)
+            && self.stale_processing_bundles_ready.load(Ordering::Acquire)
+    }
+
+    pub fn stale_skill_runs_ready(&self) -> bool {
+        self.stale_skill_runs_ready.load(Ordering::Acquire)
+    }
+
+    pub fn stale_processing_bundles_ready(&self) -> bool {
+        self.stale_processing_bundles_ready.load(Ordering::Acquire)
+    }
+
+    pub fn mark_stale_skill_runs_ready(&self) {
+        self.stale_skill_runs_ready.store(true, Ordering::Release);
+    }
+
+    pub fn mark_stale_processing_bundles_ready(&self) {
+        self.stale_processing_bundles_ready
+            .store(true, Ordering::Release);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillReviewAdmissionError {
     AlreadyRunning,
@@ -320,6 +357,7 @@ pub struct AppState {
     pub ai_provider: AiProviderEnv,
     pub skill_runs: SkillRunRuntime,
     pub skill_reviews: SkillReviewRuntime,
+    pub recovery: Arc<RecoveryRuntime>,
     pub issue_inactive_days: AtomicUsize,
     pub limits: AppLimits,
 }
@@ -431,6 +469,7 @@ impl AppState {
             ai_provider,
             skill_runs: SkillRunRuntime::default(),
             skill_reviews: SkillReviewRuntime::new(2, 5, Duration::from_secs(60 * 60)),
+            recovery: Arc::new(RecoveryRuntime::ready()),
             issue_inactive_days: AtomicUsize::new(0),
             limits,
         }
@@ -445,7 +484,7 @@ mod tests {
 
     use crate::config::AppLimits;
 
-    use super::AppState;
+    use super::{AppState, RecoveryRuntime};
 
     #[tokio::test]
     async fn state_uses_configured_processing_concurrency() {
@@ -492,6 +531,20 @@ mod tests {
                 .unwrap_err(),
             super::SkillReviewAdmissionError::RateLimited
         );
+    }
+
+    #[test]
+    fn recovery_runtime_requires_both_invariants() {
+        let recovery = RecoveryRuntime::default();
+        assert!(!recovery.invariant_recovery_ready());
+
+        recovery.mark_stale_skill_runs_ready();
+        assert!(recovery.stale_skill_runs_ready());
+        assert!(!recovery.invariant_recovery_ready());
+
+        recovery.mark_stale_processing_bundles_ready();
+        assert!(recovery.stale_processing_bundles_ready());
+        assert!(recovery.invariant_recovery_ready());
     }
 }
 pub mod blob_store;

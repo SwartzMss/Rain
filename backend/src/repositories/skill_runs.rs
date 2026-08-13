@@ -129,6 +129,15 @@ pub async fn recover_active(pool: &SqlitePool) -> Result<u64, AppError> {
         .execute(pool).await.map_err(AppError::Database)?.rows_affected())
 }
 
+pub async fn recover_active_before(
+    pool: &SqlitePool,
+    created_before: &str,
+) -> Result<u64, AppError> {
+    Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code='SERVICE_RESTARTED',error_message='服务重启导致任务中断',completed_at=CURRENT_TIMESTAMP WHERE status IN ('QUEUED','RUNNING') AND datetime(created_at) <= datetime(?)")
+        .bind(created_before)
+        .execute(pool).await.map_err(AppError::Database)?.rows_affected())
+}
+
 pub async fn cleanup_expired(pool: &SqlitePool, retention_seconds: u64) -> Result<u64, AppError> {
     let modifier = format!("-{retention_seconds} seconds");
     Ok(sqlx::query("DELETE FROM skill_runs WHERE status IN ('SUCCEEDED','FAILED','CANCELLED') AND datetime(completed_at) <= datetime('now', ?)")

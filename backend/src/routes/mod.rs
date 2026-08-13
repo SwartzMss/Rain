@@ -1,11 +1,12 @@
 use actix_web::{
-    Error,
-    body::MessageBody,
+    Error, HttpResponse,
+    body::{BoxBody, MessageBody},
     dev::{ServiceRequest, ServiceResponse},
     http::header::{CACHE_CONTROL, HeaderValue},
     middleware::{Next, from_fn},
     web,
 };
+use serde_json::json;
 
 mod ai_provider;
 mod auth;
@@ -111,11 +112,31 @@ async fn prevent_session_response_caching(
     Ok(response)
 }
 
+async fn reject_requests_during_recovery(
+    request: ServiceRequest,
+    next: Next<impl MessageBody + 'static>,
+) -> Result<ServiceResponse<BoxBody>, Error> {
+    let recovery_pending = request
+        .app_data::<web::Data<crate::AppState>>()
+        .is_some_and(|state| !state.recovery.invariant_recovery_ready());
+    if recovery_pending && request.path() != "/api/auth/me" {
+        return Ok(
+            request.into_response(HttpResponse::ServiceUnavailable().json(json!({
+                "code": "SERVICE_RECOVERING",
+                "message": "服务正在恢复关键状态，请稍后重试"
+            }))),
+        );
+    }
+
+    Ok(next.call(request).await?.map_into_boxed_body())
+}
+
 pub fn register(cfg: &mut web::ServiceConfig) {
     cfg.service(health::health)
         .service(health::readiness)
         .service(
             web::scope("/api")
+                .wrap(from_fn(reject_requests_during_recovery))
                 .wrap(from_fn(prevent_session_response_caching))
                 .service(auth::register_user)
                 .service(auth::registration_status)

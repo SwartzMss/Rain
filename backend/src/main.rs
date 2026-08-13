@@ -1,19 +1,19 @@
 mod embedded_frontend;
 mod http_access_log;
 
-use std::{fmt::Display, fs, future::Future, path::PathBuf, time::Duration};
+use std::{fmt::Display, fs, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use actix_web::{App, HttpServer, middleware::from_fn, web};
 use backend::{
-    AppState,
+    AppState, RecoveryRuntime,
     blob_store::{
         BlobStore, LocalCasBlobStore, recover_pending_blobs, spawn_blob_audit, spawn_blob_gc,
         spawn_blob_recovery,
     },
     config::AppConfig,
     db::{
-        cleanup_expired_bundles, fail_stale_processing_bundles, init_pool,
-        load_or_initialize_system_settings, prepare_schema, resume_deleting_bundles,
+        capture_recovery_cutoff, cleanup_expired_bundles, fail_stale_processing_bundles_before,
+        init_pool, load_or_initialize_system_settings, prepare_schema, resume_deleting_bundles,
     },
     routes::register,
 };
@@ -95,18 +95,28 @@ async fn main() -> std::io::Result<()> {
 
     let blob_store: std::sync::Arc<dyn BlobStore> =
         std::sync::Arc::new(LocalCasBlobStore::new(config.data_root.clone()));
-    run_optional_recovery_stage(
+    let recovery_cutoff = capture_recovery_cutoff(&pool)
+        .await
+        .expect("failed to capture recovery cutoff");
+    let recovery_runtime = Arc::new(RecoveryRuntime::default());
+    if run_optional_recovery_stage(
         "stale-processing-bundles",
         STARTUP_RECOVERY_TIMEOUT,
-        fail_stale_processing_bundles(&pool),
+        fail_stale_processing_bundles_before(&pool, &recovery_cutoff),
     )
-    .await;
-    run_optional_recovery_stage(
+    .await
+    {
+        recovery_runtime.mark_stale_processing_bundles_ready();
+    }
+    if run_optional_recovery_stage(
         "stale-skill-runs",
         STARTUP_RECOVERY_TIMEOUT,
-        backend::repositories::skill_runs::recover_active(&pool),
+        backend::repositories::skill_runs::recover_active_before(&pool, &recovery_cutoff),
     )
-    .await;
+    .await
+    {
+        recovery_runtime.mark_stale_skill_runs_ready();
+    }
 
     run_optional_recovery_stage(
         "temporary-upload-cleanup",
@@ -145,14 +155,7 @@ async fn main() -> std::io::Result<()> {
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     info!(limits = ?config.limits, "effective application limits");
-    let mut background_tasks = vec![
-        spawn_blob_gc(pool.clone(), blob_store.clone()),
-        spawn_blob_audit(pool.clone(), blob_store.clone()),
-        spawn_blob_recovery(pool.clone(), blob_store.clone()),
-    ];
-    background_tasks.push(spawn_deleting_bundle_cleanup(pool.clone()));
-    background_tasks.push(spawn_session_cleanup(pool.clone()));
-    let app_state = AppState::with_blob_store_auth_and_ai(
+    let mut app_state = AppState::with_blob_store_auth_and_ai(
         pool,
         config.data_root.clone(),
         config.limits.clone(),
@@ -160,6 +163,7 @@ async fn main() -> std::io::Result<()> {
         config.ai_provider.clone(),
         blob_store,
     );
+    app_state.recovery = recovery_runtime.clone();
     app_state
         .auth_runtime
         .set_registration_allowed(registration_allowed);
@@ -180,6 +184,29 @@ async fn main() -> std::io::Result<()> {
         .issue_inactive_days
         .store(issue_inactive_days, std::sync::atomic::Ordering::Release);
     let shared_state = web::Data::new(app_state);
+    let mut background_tasks = vec![
+        spawn_blob_gc(
+            shared_state.db.pool.clone(),
+            shared_state.storage.blob_store.clone(),
+        ),
+        spawn_blob_audit(
+            shared_state.db.pool.clone(),
+            shared_state.storage.blob_store.clone(),
+        ),
+        spawn_blob_recovery(
+            shared_state.db.pool.clone(),
+            shared_state.storage.blob_store.clone(),
+        ),
+    ];
+    background_tasks.push(spawn_deleting_bundle_cleanup(shared_state.db.pool.clone()));
+    background_tasks.push(spawn_session_cleanup(shared_state.db.pool.clone()));
+    if !recovery_runtime.invariant_recovery_ready() {
+        background_tasks.push(spawn_invariant_recovery_supervisor(
+            shared_state.db.pool.clone(),
+            recovery_runtime,
+            recovery_cutoff,
+        ));
+    }
     background_tasks.push(backend::upload::job::spawn_temp_cleanup_worker(
         shared_state.upload.temp_cleanup_queue.clone(),
     ));
@@ -260,6 +287,68 @@ fn spawn_session_cleanup(pool: sqlx::SqlitePool) -> tokio::task::JoinHandle<()> 
     )
 }
 
+fn spawn_invariant_recovery_supervisor(
+    pool: sqlx::SqlitePool,
+    recovery: Arc<RecoveryRuntime>,
+    recovery_cutoff: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut attempt = 0usize;
+        loop {
+            if recovery.invariant_recovery_ready() {
+                info!("invariant recovery supervisor completed");
+                return;
+            }
+
+            attempt = attempt.saturating_add(1);
+            if !recovery.stale_processing_bundles_ready()
+                && run_recovery_stage(
+                    "stale-processing-bundles",
+                    attempt,
+                    STARTUP_RECOVERY_TIMEOUT,
+                    fail_stale_processing_bundles_before(&pool, &recovery_cutoff),
+                )
+                .await
+            {
+                recovery.mark_stale_processing_bundles_ready();
+            }
+            if !recovery.stale_skill_runs_ready()
+                && run_recovery_stage(
+                    "stale-skill-runs",
+                    attempt,
+                    STARTUP_RECOVERY_TIMEOUT,
+                    backend::repositories::skill_runs::recover_active_before(
+                        &pool,
+                        &recovery_cutoff,
+                    ),
+                )
+                .await
+            {
+                recovery.mark_stale_skill_runs_ready();
+            }
+
+            if recovery.invariant_recovery_ready() {
+                info!(attempt, "invariant recovery supervisor completed");
+                return;
+            }
+
+            let retry_delay = match attempt {
+                1 => Duration::from_secs(1),
+                2 => Duration::from_secs(2),
+                3 => Duration::from_secs(5),
+                4 => Duration::from_secs(10),
+                _ => Duration::from_secs(30),
+            };
+            warn!(
+                attempt,
+                retry_in_ms = retry_delay.as_millis() as u64,
+                "invariant recovery incomplete; scheduling retry"
+            );
+            tokio::time::sleep(retry_delay).await;
+        }
+    })
+}
+
 async fn cleanup_temp_uploads(data_root: &std::path::Path) -> std::io::Result<u64> {
     let temp_root = data_root.join(".tmp");
     match tokio::fs::metadata(&temp_root).await {
@@ -300,37 +389,56 @@ where
     F: Future<Output = Result<u64, E>>,
     E: Display,
 {
+    run_recovery_stage(stage, 0, timeout, future).await
+}
+
+async fn run_recovery_stage<F, E>(
+    stage: &'static str,
+    attempt: usize,
+    timeout: Duration,
+    future: F,
+) -> bool
+where
+    F: Future<Output = Result<u64, E>>,
+    E: Display,
+{
     let started = std::time::Instant::now();
     info!(
         stage,
+        attempt,
         timeout_ms = timeout.as_millis(),
-        "startup recovery stage started"
+        "recovery stage started"
     );
     match tokio::time::timeout(timeout, future).await {
         Ok(Ok(affected)) => {
             info!(
                 stage,
+                attempt,
                 affected,
                 elapsed_ms = started.elapsed().as_millis(),
-                "startup recovery stage completed"
+                "recovery stage completed"
             );
             true
         }
         Ok(Err(stage_error)) => {
             error!(
                 stage,
+                attempt,
+                error_category = "operation_failed",
                 error = %stage_error,
                 elapsed_ms = started.elapsed().as_millis(),
-                "startup recovery stage failed; continuing startup"
+                "recovery stage failed; continuing"
             );
             false
         }
         Err(_) => {
             error!(
                 stage,
+                attempt,
+                error_category = "timeout",
                 timeout_ms = timeout.as_millis(),
                 elapsed_ms = started.elapsed().as_millis(),
-                "startup recovery stage timed out; continuing startup"
+                "recovery stage timed out; continuing"
             );
             false
         }
