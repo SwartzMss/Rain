@@ -502,12 +502,15 @@ async fn runner_repairs_a_structured_result_with_forged_evidence() {
             },
         })
     });
-    let client = Arc::new(ScriptedClient(Mutex::new(VecDeque::from(responses))));
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from(responses)),
+        requests: Mutex::new(Vec::new()),
+    });
 
     let output = capture_logs(SkillRunner::execute(
         state,
         run.id.clone(),
-        client,
+        client.clone(),
         cancellation,
     ))
     .await;
@@ -529,6 +532,10 @@ async fn runner_repairs_a_structured_result_with_forged_evidence() {
     assert!(output.contains("final_result_validation=\"succeeded\""));
     assert!(output.contains("repair_used=true"));
     assert!(!output.contains("forged-bundle"));
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].tools.is_empty());
+    assert!(requests[2].tools.is_empty());
 }
 
 #[tokio::test]
@@ -659,7 +666,12 @@ async fn runner_repairs_observations_without_verified_evidence_references() {
     let (cancellation, _) = state.skill_runs.register(&run.id);
     let unsupported = r#"{"summary":{"status":"SUPPORTED","text":"root cause","evidence_ids":[]},"observations":[{"text":"private key is malformed","evidence_ids":[]}],"inferences":[{"text":"replace the key","confidence":"HIGH","evidence_ids":[]}],"missing_context":[],"evidence":[]}"#;
     let repaired = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"insufficient evidence","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No log lines were read"],"evidence":[]}"#;
-    let responses = [unsupported, repaired].map(|content| {
+    let responses = [
+        "The retrieved context needs a final evidence check.",
+        unsupported,
+        repaired,
+    ]
+    .map(|content| {
         Ok(ChatResponse {
             message: ChatMessage {
                 role: "assistant".into(),
@@ -670,9 +682,18 @@ async fn runner_repairs_observations_without_verified_evidence_references() {
             },
         })
     });
-    let client = Arc::new(ScriptedClient(Mutex::new(VecDeque::from(responses))));
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from(responses)),
+        requests: Mutex::new(Vec::new()),
+    });
 
-    SkillRunner::execute(state, run.id.clone(), client, cancellation).await;
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client.clone(),
+        cancellation,
+    ))
+    .await;
 
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
@@ -682,6 +703,13 @@ async fn runner_repairs_observations_without_verified_evidence_references() {
             .unwrap()
             .contains("证据不足，无法得出诊断结论")
     );
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].tools.is_empty());
+    assert!(requests[2].tools.is_empty());
+    assert!(output.contains("validation_reason=\"unsupported_claim\""));
+    assert!(output.contains("repair_attempt=1"));
+    assert!(output.contains("repair_used=true"));
 }
 
 #[tokio::test]
@@ -712,9 +740,14 @@ async fn runner_repairs_an_unsupported_summary_without_evidence() {
         AppLimits::default(),
     ));
     let (cancellation, _) = state.skill_runs.register(&run.id);
-    let unsupported = r#"{"summary":"Root cause confirmed: malformed private key","observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
+    let unsupported = r#"{"summary":{"status":"SUPPORTED","text":"Root cause confirmed: malformed private key","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#;
     let repaired = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No log lines were read"],"evidence":[]}"#;
-    let responses = [unsupported, repaired].map(|content| {
+    let responses = [
+        "The retrieved context needs a final evidence check.",
+        unsupported,
+        repaired,
+    ]
+    .map(|content| {
         Ok(ChatResponse {
             message: ChatMessage {
                 role: "assistant".into(),
@@ -725,15 +758,31 @@ async fn runner_repairs_an_unsupported_summary_without_evidence() {
             },
         })
     });
-    let client = Arc::new(ScriptedClient(Mutex::new(VecDeque::from(responses))));
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from(responses)),
+        requests: Mutex::new(Vec::new()),
+    });
 
-    SkillRunner::execute(state, run.id.clone(), client, cancellation).await;
+    let output = capture_logs(SkillRunner::execute(
+        state,
+        run.id.clone(),
+        client.clone(),
+        cancellation,
+    ))
+    .await;
 
     let stored = skill_runs::find(&pool, &run.id).await.unwrap().unwrap();
     assert_eq!(stored.status, "SUCCEEDED");
     let result: serde_json::Value = serde_json::from_str(&stored.result_json.unwrap()).unwrap();
     assert_eq!(result["summary"]["status"], "INSUFFICIENT_EVIDENCE");
     assert_eq!(result["summary"]["text"], "证据不足，无法得出诊断结论");
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].tools.is_empty());
+    assert!(requests[2].tools.is_empty());
+    assert!(output.contains("validation_reason=\"unsupported_claim\""));
+    assert!(output.contains("repair_attempt=1"));
+    assert!(output.contains("repair_used=true"));
 }
 
 #[tokio::test]
