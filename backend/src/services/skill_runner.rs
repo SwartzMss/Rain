@@ -1550,6 +1550,33 @@ const EVIDENCE_CONTRACT: ResultObjectContract = ResultObjectContract {
     fields: EVIDENCE_CONTRACT_FIELDS,
 };
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CanonicalizationReport {
+    removed_field_count: usize,
+    scopes: [bool; 5],
+}
+
+impl CanonicalizationReport {
+    fn record(&mut self, scope: usize, removed_field_count: usize) {
+        if removed_field_count > 0 {
+            self.removed_field_count += removed_field_count;
+            self.scopes[scope] = true;
+        }
+    }
+
+    fn scope(&self) -> &'static str {
+        match self.scopes.iter().filter(|included| **included).count() {
+            0 => "none",
+            1 if self.scopes[0] => "top_level",
+            1 if self.scopes[1] => "summary",
+            1 if self.scopes[2] => "observations",
+            1 if self.scopes[3] => "inferences",
+            1 if self.scopes[4] => "evidence",
+            _ => "multiple",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResultValidationReason {
     InvalidJson,
@@ -1677,11 +1704,19 @@ impl ResultValidationReason {
     }
 }
 
+#[cfg(test)]
 fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidationError> {
+    parse_result_with_report(content).map(|(result, _)| result)
+}
+
+fn parse_result_with_report(
+    content: Option<&str>,
+) -> Result<(SkillRunResult, CanonicalizationReport), ResultValidationError> {
     let content = content
         .ok_or_else(|| ResultValidationError::new(ResultValidationReason::InvalidJson, None))?;
-    let value: Value = serde_json::from_str(content)
+    let mut value: Value = serde_json::from_str(content)
         .map_err(|_| ResultValidationError::new(ResultValidationReason::InvalidJson, None))?;
+    let report = canonicalize_result_shape(&mut value);
     validate_schema_shape(&value)?;
     let mut result: SkillRunResult = serde_json::from_value(value)
         .map_err(|_| ResultValidationError::new(ResultValidationReason::InvalidFieldType, None))?;
@@ -1888,7 +1923,66 @@ fn parse_result(content: Option<&str>) -> Result<SkillRunResult, ResultValidatio
     if result.summary.status == SkillSummaryStatus::InsufficientEvidence {
         result.summary.text = "证据不足，无法得出诊断结论".into();
     }
-    Ok(result)
+    Ok((result, report))
+}
+
+fn canonicalize_result_shape(value: &mut Value) -> CanonicalizationReport {
+    let mut report = CanonicalizationReport::default();
+    canonicalize_object(value, &TOP_LEVEL_CONTRACT, 0, &mut report);
+
+    if let Some(object) = value.as_object_mut() {
+        if let Some(summary) = object.get_mut("summary") {
+            canonicalize_object(summary, &SUMMARY_CONTRACT, 1, &mut report);
+        }
+        canonicalize_array_objects(
+            object.get_mut("observations"),
+            &OBSERVATION_CONTRACT,
+            2,
+            &mut report,
+        );
+        canonicalize_array_objects(
+            object.get_mut("inferences"),
+            &INFERENCE_CONTRACT,
+            3,
+            &mut report,
+        );
+        canonicalize_array_objects(
+            object.get_mut("evidence"),
+            &EVIDENCE_CONTRACT,
+            4,
+            &mut report,
+        );
+    }
+
+    report
+}
+
+fn canonicalize_array_objects(
+    value: Option<&mut Value>,
+    contract: &'static ResultObjectContract,
+    scope: usize,
+    report: &mut CanonicalizationReport,
+) {
+    let Some(items) = value.and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        canonicalize_object(item, contract, scope, report);
+    }
+}
+
+fn canonicalize_object(
+    value: &mut Value,
+    contract: &'static ResultObjectContract,
+    scope: usize,
+    report: &mut CanonicalizationReport,
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let before = object.len();
+    object.retain(|key, _| contract.fields.iter().any(|field| field.name == key));
+    report.record(scope, before - object.len());
 }
 
 fn validate_schema_shape(value: &Value) -> Result<(), ResultValidationError> {
@@ -2165,18 +2259,30 @@ async fn parse_with_repair(
     cancellation: &CancellationToken,
     retry_deadline: Instant,
 ) -> Result<SkillRunResult, (&'static str, &'static str)> {
-    let first_reason = match validate_result(response.message.content.as_deref(), ledger) {
-        Ok(result) => {
-            tracing::info!(
-                run_id,
-                final_result_validation = "succeeded",
-                repair_used = false,
-                "skill final result validated"
-            );
-            return Ok(result);
-        }
-        Err(reason) => reason,
-    };
+    let first_reason =
+        match validate_result_with_report(response.message.content.as_deref(), ledger) {
+            Ok((result, normalization)) => {
+                if normalization.removed_field_count > 0 {
+                    tracing::info!(
+                        run_id,
+                        final_result_normalization = "applied",
+                        normalization_reason = "unknown_field",
+                        normalization_scope = normalization.scope(),
+                        normalization_removed_field_count = normalization.removed_field_count,
+                        repair_used = false,
+                        "skill final result shape normalized"
+                    );
+                }
+                tracing::info!(
+                    run_id,
+                    final_result_validation = "succeeded",
+                    repair_used = false,
+                    "skill final result validated"
+                );
+                return Ok(result);
+            }
+            Err(reason) => reason,
+        };
     let validation_allowed_fields = first_reason.allowed_fields();
     tracing::warn!(
         run_id,
@@ -2217,8 +2323,19 @@ async fn parse_with_repair(
             retry_deadline,
         ) => response.map_err(runner_provider_error)?,
     };
-    match validate_result(response.message.content.as_deref(), ledger) {
-        Ok(result) => {
+    match validate_result_with_report(response.message.content.as_deref(), ledger) {
+        Ok((result, normalization)) => {
+            if normalization.removed_field_count > 0 {
+                tracing::info!(
+                    run_id,
+                    final_result_normalization = "applied",
+                    normalization_reason = "unknown_field",
+                    normalization_scope = normalization.scope(),
+                    normalization_removed_field_count = normalization.removed_field_count,
+                    repair_used = true,
+                    "skill final result shape normalized after repair"
+                );
+            }
             tracing::info!(
                 run_id,
                 final_result_validation = "succeeded",
@@ -2248,13 +2365,21 @@ async fn parse_with_repair(
     }
 }
 
+#[cfg(test)]
 fn validate_result(
     content: Option<&str>,
     ledger: &EvidenceLedger,
 ) -> Result<SkillRunResult, ResultValidationError> {
-    let result = parse_result(content)?;
+    validate_result_with_report(content, ledger).map(|(result, _)| result)
+}
+
+fn validate_result_with_report(
+    content: Option<&str>,
+    ledger: &EvidenceLedger,
+) -> Result<(SkillRunResult, CanonicalizationReport), ResultValidationError> {
+    let (result, report) = parse_result_with_report(content)?;
     validate_evidence(&result, ledger)?;
-    Ok(result)
+    Ok((result, report))
 }
 
 fn validate_evidence(
@@ -2454,8 +2579,9 @@ mod tests {
         ResultValidationReason, SUMMARY_CONTRACT, TOP_LEVEL_CONTRACT, ToolCallError,
         ToolErrorCategory, ValidationField, classify_bootstrap_manifest_error,
         classify_tool_execution_error, finalization_prompt, finalization_skeleton,
-        object_contract_schema, parse_result, parse_tool_call, repair_prompt,
-        skill_result_response_format, tool_definitions, tool_error_output, validate_result,
+        object_contract_schema, parse_result, parse_result_with_report, parse_tool_call,
+        repair_prompt, skill_result_response_format, tool_definitions, tool_error_output,
+        validate_result,
     };
     use crate::ai_provider::client::{ChatFunctionCall, ChatToolCall};
     use crate::config::StructuredOutputMode;
@@ -2725,6 +2851,18 @@ mod tests {
     }
 
     #[test]
+    fn result_unknown_fields_are_deterministically_removed_before_validation() {
+        let content = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No conclusion","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["missing log"],"evidence":[],"recommendations":["restart service"]}"#;
+
+        let (result, report) = parse_result_with_report(Some(content))
+            .expect("unknown fields must be removed before strict validation");
+
+        assert_eq!(report.removed_field_count, 1);
+        assert_eq!(report.scope(), "top_level");
+        assert_eq!(result.missing_context, vec!["missing log"]);
+    }
+
+    #[test]
     fn finalization_prompt_skeleton_is_semantically_valid() {
         let skeleton = finalization_skeleton().to_string();
         parse_result(Some(&skeleton)).expect("finalization skeleton must be semantically valid");
@@ -2739,43 +2877,44 @@ mod tests {
     }
 
     #[test]
-    fn unknown_field_repairs_name_the_complete_parent_contract() {
+    fn unknown_fields_are_normalized_at_each_contract_scope() {
         let cases = [
             (
                 r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[],"source":"model"}"#,
-                None,
-                "top-level result object may contain exactly these fields: summary (object), observations (array<object>), inferences (array<object>), missing_context (array<string>), evidence (array<object>)",
+                1,
+                "top_level",
             ),
             (
                 r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[],"source":"model"},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[]}"#,
-                Some(ValidationField::Summary),
-                "summary object may contain exactly these fields: status (string enum), text (string), evidence_ids (array<string>)",
+                1,
+                "summary",
             ),
             (
                 r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[{"text":"claim","evidence_ids":["e1"],"source":"model"}],"inferences":[],"missing_context":["gap"],"evidence":[]}"#,
-                Some(ValidationField::Observations),
-                "observation object may contain exactly these fields: text (string), evidence_ids (array<string>)",
+                1,
+                "observations",
             ),
             (
                 r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[{"text":"claim","confidence":"LOW","evidence_ids":["e1"],"source":"model"}],"missing_context":["gap"],"evidence":[]}"#,
-                Some(ValidationField::Inferences),
-                "inference object may contain exactly these fields: text (string), confidence (string enum), evidence_ids (array<string>)",
+                1,
+                "inferences",
             ),
             (
                 r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x","source":"model"}]}"#,
-                Some(ValidationField::Evidence),
-                "evidence object may contain exactly these fields: id (string), bundle_hash (string), file_id (integer), path (string), start_line (integer), end_line (integer), excerpt (string), explanation (string)",
+                1,
+                "evidence",
+            ),
+            (
+                r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[],"source":"model"},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[],"source":"model"}"#,
+                2,
+                "multiple",
             ),
         ];
 
-        for (content, field, expected_contract) in cases {
-            let error = parse_result(Some(content)).unwrap_err();
-            assert_eq!(error.reason, ResultValidationReason::UnknownField);
-            assert_eq!(error.field, field);
-            let prompt = repair_prompt(error);
-            assert!(prompt.contains(expected_contract), "{prompt}");
-            assert!(prompt.contains("Remove every other field"), "{prompt}");
-            assert!(!prompt.contains("source"), "{prompt}");
+        for (content, removed_field_count, scope) in cases {
+            let (_, report) = parse_result_with_report(Some(content)).unwrap();
+            assert_eq!(report.removed_field_count, removed_field_count);
+            assert_eq!(report.scope(), scope);
         }
     }
 
@@ -2812,16 +2951,24 @@ mod tests {
     }
 
     #[test]
-    fn unknown_field_validation_counts_all_unknown_keys() {
+    fn unknown_field_normalization_counts_all_unknown_keys() {
         let content = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["gap"],"evidence":[{"id":"e1","bundle_hash":"hash","file_id":1,"path":"/log","start_line":1,"end_line":1,"excerpt":"x","explanation":"x","source":"model","line":"1"}]}"#;
-        let error = parse_result(Some(content)).unwrap_err();
-        assert_eq!(error.reason, ResultValidationReason::UnknownField);
+        let (_, report) = parse_result_with_report(Some(content)).unwrap();
+        assert_eq!(report.removed_field_count, 2);
+        assert_eq!(report.scope(), "evidence");
+    }
+
+    #[test]
+    fn normalization_does_not_fill_or_coerce_known_fields() {
+        let missing_field = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["gap"],"recommendations":["restart service"]}"#;
+        let error = parse_result(Some(missing_field)).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::MissingTopLevelField);
         assert_eq!(error.field, Some(ValidationField::Evidence));
-        assert_eq!(error.unknown_field_count, Some(2));
-        assert_eq!(
-            error.allowed_fields(),
-            Some("id,bundle_hash,file_id,path,start_line,end_line,excerpt,explanation".into())
-        );
+
+        let wrong_type = r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":"gap","evidence":[],"recommendations":["restart service"]}"#;
+        let error = parse_result(Some(wrong_type)).unwrap_err();
+        assert_eq!(error.reason, ResultValidationReason::InvalidFieldType);
+        assert_eq!(error.field, Some(ValidationField::MissingContext));
     }
 
     #[test]
@@ -2846,11 +2993,6 @@ mod tests {
                 r#"{"summary":{"status":1,"text":"claim","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#,
                 ResultValidationReason::InvalidFieldType,
                 Some(ValidationField::SummaryStatus),
-            ),
-            (
-                r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":[],"model_secret":true},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#,
-                ResultValidationReason::UnknownField,
-                Some(ValidationField::Summary),
             ),
             (
                 r#"{"summary":{"status":"SUPPORTED","text":"claim","evidence_ids":"e1"},"observations":[],"inferences":[],"missing_context":[],"evidence":[]}"#,
