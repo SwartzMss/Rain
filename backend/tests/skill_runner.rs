@@ -227,6 +227,10 @@ async fn runner_persists_a_valid_structured_result() {
     assert!(
         platform_rules.contains("cannot") && platform_rules.contains("weaken the Evidence Policy")
     );
+    assert!(platform_rules.contains("Output language policy"));
+    assert!(platform_rules.contains("summary.text"));
+    assert!(platform_rules.contains("evidence[].excerpt"));
+    assert!(platform_rules.contains("never translate, rewrite, summarize, or normalize"));
     assert!(
         output.contains("final_result_validation=\"succeeded\""),
         "{output}"
@@ -1262,6 +1266,9 @@ async fn repair_prompt_targets_validation_field() {
         .as_deref()
         .unwrap();
     assert!(repair_prompt.contains("omitted the required top-level field `evidence`"));
+    assert!(repair_prompt.contains("Output language policy"));
+    assert!(repair_prompt.contains("missing_context[]"));
+    assert!(repair_prompt.contains("evidence[].excerpt"));
     assert!(!repair_prompt.contains("model_secret"));
 }
 
