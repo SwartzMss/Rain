@@ -120,6 +120,8 @@ pub enum SkillFormatError {
     EmptyRequiredSection(&'static str),
     #[error("重复定义必填章节：{0}")]
     DuplicateRequiredSection(&'static str),
+    #[error("章节标题已退役：{found}；该行为已由平台提供，请删除该章节")]
+    RetiredSectionTitle { found: String },
     #[error("不支持的章节标题：{found}，请使用“{expected}”")]
     UnsupportedSectionTitle {
         found: String,
@@ -163,6 +165,11 @@ pub fn parse_skill_markdown(markdown: &str) -> Result<ParsedSkill, SkillFormatEr
     let mut required_indexes: [Option<usize>; 5] = [None; 5];
 
     for (index, heading) in headings.iter().enumerate() {
+        if is_retired_standard_title(&heading.title) {
+            return Err(SkillFormatError::RetiredSectionTitle {
+                found: heading.title.clone(),
+            });
+        }
         if let Some(expected) = unsupported_standard_title(&heading.title) {
             return Err(SkillFormatError::UnsupportedSectionTitle {
                 found: heading.title.clone(),
@@ -390,35 +397,46 @@ fn unsupported_standard_title(title: &str) -> Option<&'static str> {
     let expected = match title {
         "任务目标" | "目的" => "目标",
         "分析边界" => "分析范围",
-        "搜索策略" => "关键流程",
-        "证据要求" | "证据约束" => "关键日志",
-        "日志缺失处理" | "不完整日志处理" => "关系与影响",
-        "终止条件" | "结束条件" => "关系与影响",
         _ if title.eq_ignore_ascii_case("goal") => "目标",
         _ if title.eq_ignore_ascii_case("analysis scope")
             || title.eq_ignore_ascii_case("scope") =>
         {
             "分析范围"
         }
-        _ if title.eq_ignore_ascii_case("retrieval strategy") => "关键流程",
-        _ if title.eq_ignore_ascii_case("evidence rules")
-            || title.eq_ignore_ascii_case("evidence policy") =>
-        {
-            "关键日志"
-        }
-        _ if title.eq_ignore_ascii_case("incomplete logs")
-            || title.eq_ignore_ascii_case("incomplete log handling") =>
-        {
-            "关系与影响"
-        }
-        _ if title.eq_ignore_ascii_case("stop conditions")
-            || title.eq_ignore_ascii_case("stopping conditions") =>
-        {
-            "关系与影响"
-        }
         _ => return None,
     };
     Some(expected)
+}
+
+fn is_retired_standard_title(title: &str) -> bool {
+    match title {
+        "检索策略"
+        | "搜索策略"
+        | "证据规则"
+        | "证据要求"
+        | "证据约束"
+        | "日志不完整处理"
+        | "日志缺失处理"
+        | "不完整日志处理"
+        | "停止条件"
+        | "终止条件"
+        | "结束条件" => true,
+        _ if title.eq_ignore_ascii_case("retrieval strategy")
+            || title.eq_ignore_ascii_case("retrieval_strategy")
+            || title.eq_ignore_ascii_case("evidence rules")
+            || title.eq_ignore_ascii_case("evidence policy")
+            || title.eq_ignore_ascii_case("evidence_constraints")
+            || title.eq_ignore_ascii_case("incomplete logs")
+            || title.eq_ignore_ascii_case("incomplete log handling")
+            || title.eq_ignore_ascii_case("incomplete_logs")
+            || title.eq_ignore_ascii_case("stop conditions")
+            || title.eq_ignore_ascii_case("stopping conditions")
+            || title.eq_ignore_ascii_case("stopping_conditions") =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -567,6 +585,32 @@ schema_version: 1
                 Err(SkillFormatError::UnsupportedSectionTitle {
                     found: alias.into(),
                     expected: "目标",
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_retired_v1_sections_without_mapping_them_to_domain_sections() {
+        for retired in [
+            "检索策略",
+            "搜索策略",
+            "证据规则",
+            "证据要求",
+            "日志不完整处理",
+            "日志缺失处理",
+            "停止条件",
+            "终止条件",
+            "retrieval strategy",
+            "evidence policy",
+            "incomplete logs",
+            "stopping conditions",
+        ] {
+            let markdown = valid_skill().replace("# 关键流程", &format!("# {retired}"));
+            assert_eq!(
+                parse_skill_markdown(&markdown),
+                Err(SkillFormatError::RetiredSectionTitle {
+                    found: retired.into()
                 })
             );
         }
