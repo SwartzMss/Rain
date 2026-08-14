@@ -4,7 +4,7 @@
 
 **Goal:** Remove UTC/RFC3339/timezone semantics from the Skill Run time scope while preserving server-bound filtering, indexing coverage, persistence, and bounded expansion.
 
-**Architecture:** Parse API and log timestamps as `chrono::NaiveDateTime`, encode them as deterministic wall-clock comparison keys, and keep the existing nullable `*_ms` database columns only as storage names. The Run still owns the immutable scope and `search_logs` remains the sole place that applies it.
+**Architecture:** Parse API and log timestamps through one shared `chrono::NaiveDateTime` wall-clock module, encode them as deterministic comparison keys, and keep the existing nullable `*_ms` database columns only as storage names. Incident window arithmetic stays in Rust; the frontend only sends incident/range input. The Run still owns the immutable scope and `search_logs` remains the sole place that applies it.
 
 **Tech Stack:** Rust, Axum, SQLx/SQLite, Chrono `NaiveDateTime`, React/TypeScript, Vitest.
 
@@ -15,7 +15,7 @@
 **Files:** `backend/src/services/skill_time_scope.rs`, its unit tests, `backend/src/routes/skill_runs.rs`, `backend/src/models/skill_runs.rs`, `backend/src/repositories/skill_runs.rs`, `backend/src/services/skill_runner.rs`, related backend tests.
 
 - [ ] Add failing tests for space/T-separated values without timezone, fractional seconds, frontend minute precision, `start < end`, 24-hour maximum, and expansion across calendar boundaries.
-- [ ] Replace `DateTime<Utc>`/`timestamp_millis()` with `NaiveDateTime` parsing and a documented monotonic wall-clock key encoder. Use checked `NaiveDateTime` duration arithmetic for validation and expansion.
+- [ ] Replace `DateTime<Utc>`/`timestamp_millis()` with one shared `NaiveDateTime` wall-clock parser/formatter/key encoder. Use checked duration arithmetic for incident validation and expansion.
 - [ ] Preserve persisted strings, nullable Run binding, Trusted Run Scope, and existing API error code; change messages and test fixtures away from RFC3339/UTC.
 - [ ] Run focused backend tests, then commit.
 
@@ -38,10 +38,10 @@
 
 ### Task 4: Remove frontend UTC conversion
 
-**Files:** `frontend/src/features/skill-runs/timeScope.ts`, frontend behavior tests, affected UI copy/types if needed.
+**Files:** `frontend/src/features/skill-runs/timeScope.ts`, `frontend/src/api/types.ts`, `frontend/src/api/client.ts`, `frontend/src/features/skill-runs/useSkillRun.ts`, frontend behavior tests.
 
-- [ ] Add failing tests asserting that `datetime-local` values become local wall-clock strings with no `Z`, offset, or `toISOString()` conversion, while range and 24-hour validation remain unchanged.
-- [ ] Implement local field formatting and calendar arithmetic without UTC serialization.
+- [ ] Add failing tests asserting incident/range request passthrough without `Z`, offsets, `toISOString()`, or frontend date arithmetic.
+- [ ] Implement the small request adapter and let the backend own date ordering and 24-hour validation.
 - [ ] Run focused frontend tests and lint, then commit.
 
 ### Task 5: Align documentation and full verification

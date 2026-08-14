@@ -10,7 +10,7 @@
 
 ## File map
 
-- Create `backend/src/services/skill_time_scope.rs`: local wall-clock parsing, comparison-key encoding, validation, and bounded expansion.
+- Create `backend/src/services/wall_clock.rs`: shared local wall-clock parsing, formatting, and comparison-key encoding; use it from `skill_time_scope.rs` and `ingest.rs`.
 - Modify `backend/src/models/skill_runs.rs`, `backend/src/repositories/skill_runs.rs`, and `backend/src/db.rs`: persist the optional Run scope and retain the existing `*_ms` columns.
 - Modify `backend/src/ingest.rs`: parse dated wall-clock timestamps and persist per-segment event-time bounds.
 - Modify `backend/src/routes/skill_runs.rs`: accept and validate `time_scope`, map validation errors to the API contract, and create the Run snapshot.
@@ -59,7 +59,7 @@ Focused checks: `cargo test --test skill_tools -- --nocapture && cargo test --te
 
 ### Task 6: Preserve wall-clock semantics in frontend request plumbing
 
-Keep `datetime-local` values in their entered local-clock meaning. Generate the incident window using local calendar fields and explicit formatting; do not call `toISOString()` or convert to UTC. Send the resulting no-timezone text through `createSkillRun`, and display the saved Run values rather than transient form state.
+Keep `datetime-local` values in their entered local-clock meaning. Send incident mode as `{incident_time,before_minutes,after_minutes}` and direct range mode as `{start,end}`; the backend performs calendar arithmetic and canonicalization. Do not call `toISOString()` or maintain a frontend calendar implementation. Display the saved Run values rather than transient form state.
 
 Focused checks: the time-scope helper and Issue Skill Runner Vitest suites, plus frontend lint.
 

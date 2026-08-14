@@ -30,13 +30,14 @@
 {
   "skill_id": "skill-id",
   "time_scope": {
-    "start": "2026-08-14 09:27:15.123",
-    "end": "2026-08-14T09:37:15.456"
+    "incident_time": "2026-08-14T09:32",
+    "before_minutes": 5,
+    "after_minutes": 10
   }
 }
 ```
 
-`time_scope` 为 `null` 或省略时表示不限制时间。服务端接受空格或 `T` 分隔的本地日期时间、可选小数秒，以及 `datetime-local` 的分钟精度（例如 `2026-08-14T09:27`）；不要求也不解释 timezone。服务端以稳定的无时区 wall-clock 文本保存 Run 快照，并要求 `start < end`、窗口不超过 24 小时。
+直接范围也支持 `{ "start": "2026-08-14T09:27", "end": "2026-08-14T09:37" }`。`time_scope` 为 `null` 或省略时表示不限制时间。前端只转发输入的 wall-clock 文本和分钟参数；服务端使用共享 wall-clock 解析器完成日期运算、canonicalization、`start < end` 和 24 小时校验，再以稳定的无时区文本保存 Run 快照。
 
 内部整数值只用于同一 wall-clock 编码之间的排序和范围比较。数据库继续保留 `analysis_*_ms` 和 `event_time_*_ms` 这些兼容性列名，但其值不是 Unix epoch、UTC、真实经过的毫秒数或跨时区绝对时间；不能把它们交给需要绝对时间语义的调用方。
 
@@ -72,13 +73,13 @@ Prioritize events inside this window. You may request only bounded context near 
 
 ### Frontend interaction
 
-默认选择“不限制时间”。“指定故障时间”使用 `datetime-local`、故障前分钟数和故障后分钟数，前端按浏览器输入的 wall-clock 语义生成无时区范围，不调用 `toISOString()` 或进行 UTC 转换。“指定时间范围”使用开始和结束 `datetime-local`。运行期间这些控件和 Skill 选择保持禁用。Run 状态和结果区域展示保存的分析范围；空范围显示“不限制时间”。
+默认选择“不限制时间”。“指定故障时间”使用 `datetime-local`、故障前分钟数和故障后分钟数，前端只提交 incident 输入，日期运算由后端完成；“指定时间范围”提交开始和结束 `datetime-local` 原值。运行期间这些控件和 Skill 选择保持禁用。Run 状态和结果区域展示保存的分析范围；空范围显示“不限制时间”。
 
 ## Data flow
 
 ```text
 UI wall-clock time mode
-  -> useSkillRun(start payload)
+  -> useSkillRun(incident/range input)
   -> POST /issues/:issue/skill-runs { skill_id, time_scope }
   -> validate local wall-clock range + persist Run snapshot
   -> SkillRunner loads snapshot

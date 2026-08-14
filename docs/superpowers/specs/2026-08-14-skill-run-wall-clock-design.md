@@ -10,7 +10,7 @@
 
 ## Time model
 
-API 接受没有时区的本地 wall-clock 文本：日期、小时、分钟、秒，可选小数秒；日期和时间之间允许空格或 `T`。前端 `datetime-local` 的分钟值补为零秒后原样保留其墙上时间语义。服务端只做格式规范化，不做 `toISOString()`、UTC 转换或 RFC3339 时区校验。
+API 接受没有时区的本地 wall-clock 文本：日期、小时、分钟、秒，可选小数秒；日期和时间之间允许空格或 `T`。incident 模式接收 `incident_time`、`before_minutes`、`after_minutes`，由后端完成日期运算和 canonicalization；range 模式接收 `start`/`end`。前端不做 `toISOString()`、UTC 转换或 Gregorian Calendar 运算。
 
 内部时间使用 `NaiveDateTime` 做日历运算，并编码成单调可比较的 wall-clock comparison key。整数值只服务于 `start <= event_time <= end` 的比较和 SQLite 索引，不代表 Unix epoch、UTC 或任何跨设备绝对时间。现有数据库 `*_ms` 列名保留，以避免不必要的 schema rename；代码注释、错误信息、文档和工具输出不得再暗示其为 epoch milliseconds。
 
