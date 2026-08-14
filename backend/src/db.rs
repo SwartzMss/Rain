@@ -862,6 +862,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_logs_bundle_timeline ON log_segments (bundle_id, timeline)",
         "CREATE INDEX IF NOT EXISTS idx_logs_file_chunk ON log_segments (file_id, chunk_index)",
         "CREATE INDEX IF NOT EXISTS idx_logs_file_event_time ON log_segments (file_id, event_time_start_ms, event_time_end_ms)",
+        "CREATE INDEX IF NOT EXISTS idx_logs_event_time_indexed ON log_segments (event_time_indexed, id)",
         "CREATE INDEX IF NOT EXISTS idx_line_offsets_file_line ON log_line_offsets (file_id, line_number)",
         "CREATE INDEX IF NOT EXISTS idx_temp_results_expiry ON temp_results (expires_at)",
         "CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions (user_id)",
@@ -1440,6 +1441,24 @@ mod tests {
         .await
         .expect("inspect event time index");
         assert!(index_exists);
+
+        let backfill_index_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_logs_event_time_indexed')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect event time backfill index");
+        assert!(backfill_index_exists);
+        let backfill_index_columns: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT seqno, name FROM pragma_index_info('idx_logs_event_time_indexed') ORDER BY seqno",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("inspect event time backfill index columns");
+        assert_eq!(
+            backfill_index_columns,
+            vec![(0, "event_time_indexed".to_owned()), (1, "id".to_owned())]
+        );
     }
 
     #[tokio::test]
