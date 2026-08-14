@@ -509,6 +509,16 @@ async fn invalid_skill_run_time_scopes_are_rejected_before_downstream_work() {
         serde_json::json!({}),
         serde_json::json!({"start": "2026-08-14T01:27:15Z"}),
         serde_json::json!({"end": "2026-08-14T01:37:15Z"}),
+        serde_json::json!({
+            "start": 1723602435,
+            "end": "2026-08-14T01:37:15Z"
+        }),
+        serde_json::json!({
+            "start": "2026-08-14T01:27:15Z",
+            "end": ["2026-08-14T01:37:15Z"]
+        }),
+        serde_json::json!([]),
+        serde_json::json!("not-an-object"),
     ];
     for time_scope in invalid_scopes {
         let response = test::call_service(

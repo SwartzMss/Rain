@@ -3,6 +3,7 @@ use std::sync::Arc;
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, get, http::StatusCode, post, web};
 use async_stream::stream;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::{
     AppState, RequestLogId,
@@ -19,7 +20,7 @@ use crate::{
 #[derive(Deserialize)]
 pub struct CreateSkillRun {
     skill_id: String,
-    time_scope: Option<TimeScopeInput>,
+    time_scope: Option<Value>,
 }
 
 fn invalid_time_scope(error: TimeScopeError) -> AppError {
@@ -52,7 +53,15 @@ pub async fn create(
     request: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = issue_code.trim().to_ascii_uppercase();
-    let time_scope = parse_time_scope(body.time_scope.clone()).map_err(invalid_time_scope)?;
+    let time_scope_input = body
+        .time_scope
+        .clone()
+        .map(|value| {
+            serde_json::from_value::<TimeScopeInput>(value)
+                .map_err(|_| invalid_time_scope(TimeScopeError::InvalidTimestamp))
+        })
+        .transpose()?;
+    let time_scope = parse_time_scope(time_scope_input).map_err(invalid_time_scope)?;
     let issue_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issues WHERE code=? AND status='ACTIVE')")
             .bind(&issue_code)
