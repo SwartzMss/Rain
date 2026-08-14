@@ -368,7 +368,7 @@ async fn current_rubric_controls_review_visibility() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(rubric_version, "skill-quality-v2");
+    assert_eq!(rubric_version, "skill-quality-v1");
     assert!(
         skills::find_response(&pool, "u", &created.id)
             .await

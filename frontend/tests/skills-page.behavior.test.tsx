@@ -17,8 +17,15 @@ function deferred<T>() {
 
 const existingReview = {
   overall_score: 86,
-  grade: '良好',
-  dimensions: { 完整性: 88, 可执行性: 84 },
+  grade: 'EXCELLENT',
+  dimensions: {
+    task_scope: 88,
+    business_flow: 84,
+    signal_semantics: 86,
+    causal_relationships: 82,
+    diagnostic_usefulness: 87,
+    clarity: 90
+  },
   warnings: [],
   suggestions: ['补充失败场景'],
   evaluated_at: '2026-08-12T00:00:00Z'
@@ -118,7 +125,7 @@ describe('skills page detail loading', () => {
 
     render(<SkillsPage />);
 
-    expect(await screen.findByText('86')).toBeInTheDocument();
+    expect(await screen.findByLabelText('总分')).toHaveTextContent('86');
     await user.click(screen.getByRole('button', { name: '质量评估' }));
 
     expect(screen.queryByText('86')).not.toBeInTheDocument();
@@ -129,8 +136,24 @@ describe('skills page detail loading', () => {
     pending.reject(new Error('AI 服务暂时不可用'));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('AI 服务暂时不可用');
-    expect(screen.getByText('86')).toBeInTheDocument();
+    expect(screen.getByLabelText('总分')).toHaveTextContent('86');
     expect(screen.getByRole('button', { name: '质量评估' })).toBeEnabled();
+  });
+
+  it('shows fixed Chinese dimension labels, weights, and diagnostic-quality guidance', async () => {
+    mockSingleSkill(existingReview);
+
+    render(<SkillsPage />);
+
+    expect(await screen.findByText('任务范围')).toBeInTheDocument();
+    expect(screen.getByText('业务流程')).toBeInTheDocument();
+    expect(screen.getByText('信号语义')).toBeInTheDocument();
+    expect(screen.getByText('因果关系')).toBeInTheDocument();
+    expect(screen.getByText('诊断有效性')).toBeInTheDocument();
+    expect(screen.getByText('表达清晰度')).toBeInTheDocument();
+    expect(screen.getByText('当前评分评价的是 Skill 文档提供的领域知识质量，不代表某次 Skill Run 的实际诊断准确率。')).toBeInTheDocument();
+    expect(screen.getAllByText('15%', { exact: true })).toHaveLength(2);
+    expect(screen.getAllByText('20%', { exact: true })).toHaveLength(3);
   });
 
   it('refreshes the Skill detail and exits the loading state after assessment succeeds', async () => {
@@ -145,7 +168,7 @@ describe('skills page detail loading', () => {
     pending.resolve(existingReview);
 
     expect(await screen.findByRole('button', { name: '质量评估' })).toBeEnabled();
-    expect(screen.getByText('86')).toBeInTheDocument();
+    expect(screen.getByLabelText('总分')).toHaveTextContent('86');
     expect(rainApi.fetchSkills).toHaveBeenCalledTimes(1);
     expect(rainApi.fetchSkill).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
