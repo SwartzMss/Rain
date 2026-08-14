@@ -553,7 +553,7 @@ impl<'a> SkillToolExecutor<'a> {
         {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
             let marker: Option<i64> = sqlx::query_scalar(
-                "SELECT 1 FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE LIMIT 1",
+                "SELECT 1 FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (ls.event_time_indexed != 1 OR ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE LIMIT 1",
             )
             .bind(&self.context.issue_code)
             .bind(file_id.expect("short search file_id was validated"))
@@ -569,7 +569,7 @@ impl<'a> SkillToolExecutor<'a> {
         } else if applied_scope.is_some() {
             let fts = format!("\"{}\"", query.replace('"', "\"\""));
             let marker: Option<i64> = sqlx::query_scalar(
-                "SELECT 1 FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) LIMIT 1",
+                "SELECT 1 FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (ls.event_time_indexed != 1 OR ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) LIMIT 1",
             )
             .bind(fts)
             .bind(&self.context.issue_code)
@@ -589,7 +589,7 @@ impl<'a> SkillToolExecutor<'a> {
         let rows: Vec<HitRow> = if search_mode == SearchMode::ShortLiteral {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
             sqlx::query_as(
-                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR (ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR (ls.event_time_indexed = 1 AND ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
             )
             .bind(query)
             .bind(&self.context.issue_code)
@@ -609,7 +609,7 @@ impl<'a> SkillToolExecutor<'a> {
         } else {
             let fts = format!("\"{}\"", query.replace('"', "\"\""));
             sqlx::query_as(
-                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,snippet(log_segments_fts,0,'','','',64) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (? IS NULL OR (ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) ORDER BY rank LIMIT ?",
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,snippet(log_segments_fts,0,'','','',64) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (? IS NULL OR (ls.event_time_indexed = 1 AND ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) ORDER BY rank LIMIT ?",
             )
             .bind(fts)
             .bind(&self.context.issue_code)
@@ -865,8 +865,6 @@ fn time_scope_json(scope: &SkillTimeScope) -> Value {
     json!({
         "start": scope.start,
         "end": scope.end,
-        "start_ms": scope.start_ms,
-        "end_ms": scope.end_ms,
         "time_basis": "wall_clock",
     })
 }

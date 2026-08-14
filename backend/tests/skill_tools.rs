@@ -635,8 +635,10 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
         scoped_fts["time_index_coverage"]["excluded_unindexed_matches"],
         true
     );
-    assert_eq!(scoped_fts["time_scope"]["start_ms"], scope.start_ms);
-    assert_eq!(scoped_fts["time_scope"]["end_ms"], scope.end_ms);
+    assert_eq!(scoped_fts["time_scope"]["start"], scope.start);
+    assert_eq!(scoped_fts["time_scope"]["end"], scope.end);
+    assert!(scoped_fts["time_scope"].get("start_ms").is_none());
+    assert!(scoped_fts["time_scope"].get("end_ms").is_none());
     assert_eq!(scoped_fts["time_scope"]["time_basis"], "wall_clock");
 
     let no_timezone = scoped
@@ -654,10 +656,19 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
         .search_logs_with_expansion("pending", None, None, None, None)
         .await
         .unwrap();
-    assert_eq!(non_null_pending_index["hits"].as_array().unwrap().len(), 1);
+    assert!(
+        non_null_pending_index["hits"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        non_null_pending_index["time_index_coverage"]["complete"],
+        false
+    );
     assert_eq!(
         non_null_pending_index["time_index_coverage"]["excluded_unindexed_matches"],
-        false
+        true
     );
 
     let only_unindexed = scoped
@@ -675,7 +686,7 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
         .search_logs_with_expansion("in", None, None, Some(file_id), None)
         .await
         .unwrap();
-    assert_eq!(scoped_short["hits"].as_array().unwrap().len(), 1);
+    assert!(scoped_short["hits"].as_array().unwrap().is_empty());
     assert_eq!(scoped_short["time_index_coverage"]["complete"], false);
     assert_eq!(
         scoped_short["time_index_coverage"]["excluded_unindexed_matches"],
@@ -697,10 +708,9 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
         .unwrap();
     let expanded_scope = scope.expanded(10).unwrap();
     assert_eq!(expanded_result["hits"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        expanded_result["time_scope"]["end_ms"],
-        expanded_scope.end_ms
-    );
+    assert_eq!(expanded_result["time_scope"]["end"], expanded_scope.end);
+    assert!(expanded_result["time_scope"].get("start_ms").is_none());
+    assert!(expanded_result["time_scope"].get("end_ms").is_none());
     assert!(
         expanded
             .search_logs_with_expansion("timeout", None, None, None, Some(16))
