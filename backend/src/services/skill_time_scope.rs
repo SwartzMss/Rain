@@ -8,8 +8,8 @@ const MILLIS_PER_MINUTE: i64 = 60 * 1000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TimeScopeInput {
-    pub start: String,
-    pub end: String,
+    pub start: Option<String>,
+    pub end: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,8 +41,8 @@ pub fn parse_time_scope(
         return Ok(None);
     };
 
-    let start = parse_timestamp(&input.start)?;
-    let end = parse_timestamp(&input.end)?;
+    let start = parse_timestamp(input.start.as_deref())?;
+    let end = parse_timestamp(input.end.as_deref())?;
     let start_ms = start.timestamp_millis();
     let end_ms = end.timestamp_millis();
 
@@ -92,7 +92,10 @@ impl SkillTimeScope {
     }
 }
 
-fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, TimeScopeError> {
+fn parse_timestamp(value: Option<&str>) -> Result<DateTime<Utc>, TimeScopeError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Err(TimeScopeError::InvalidTimestamp);
+    };
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc))
         .map_err(|_| TimeScopeError::InvalidTimestamp)
@@ -115,16 +118,16 @@ mod tests {
 
     fn valid_input() -> TimeScopeInput {
         TimeScopeInput {
-            start: "2026-08-14T01:27:15Z".into(),
-            end: "2026-08-14T01:37:15Z".into(),
+            start: Some("2026-08-14T01:27:15Z".into()),
+            end: Some("2026-08-14T01:37:15Z".into()),
         }
     }
 
     #[test]
     fn canonicalizes_offsets_to_utc_and_milliseconds() {
         let scope = parse_time_scope(Some(TimeScopeInput {
-            start: "2026-08-14T09:27:15+08:00".into(),
-            end: "2026-08-14T09:37:15+08:00".into(),
+            start: Some("2026-08-14T09:27:15+08:00".into()),
+            end: Some("2026-08-14T09:37:15+08:00".into()),
         }))
         .unwrap()
         .unwrap();
@@ -137,24 +140,47 @@ mod tests {
     #[test]
     fn rejects_invalid_timestamps() {
         let invalid = parse_time_scope(Some(TimeScopeInput {
-            start: "not-a-timestamp".into(),
-            end: "2026-08-14T01:37:15Z".into(),
+            start: Some("not-a-timestamp".into()),
+            end: Some("2026-08-14T01:37:15Z".into()),
         }));
 
         assert!(matches!(invalid, Err(TimeScopeError::InvalidTimestamp)));
     }
 
     #[test]
+    fn rejects_missing_or_empty_timestamp_endpoints() {
+        for input in [
+            TimeScopeInput {
+                start: None,
+                end: Some("2026-08-14T01:37:15Z".into()),
+            },
+            TimeScopeInput {
+                start: Some("2026-08-14T01:27:15Z".into()),
+                end: None,
+            },
+            TimeScopeInput {
+                start: Some("  ".into()),
+                end: Some("2026-08-14T01:37:15Z".into()),
+            },
+        ] {
+            assert!(matches!(
+                parse_time_scope(Some(input)),
+                Err(TimeScopeError::InvalidTimestamp)
+            ));
+        }
+    }
+
+    #[test]
     fn rejects_invalid_order_and_windows_over_24_hours() {
         let reversed = parse_time_scope(Some(TimeScopeInput {
-            start: "2026-08-14T02:00:00Z".into(),
-            end: "2026-08-14T01:00:00Z".into(),
+            start: Some("2026-08-14T02:00:00Z".into()),
+            end: Some("2026-08-14T01:00:00Z".into()),
         }));
         assert!(matches!(reversed, Err(TimeScopeError::InvalidRange)));
 
         let too_large = parse_time_scope(Some(TimeScopeInput {
-            start: "2026-08-14T00:00:00Z".into(),
-            end: "2026-08-15T00:00:01Z".into(),
+            start: Some("2026-08-14T00:00:00Z".into()),
+            end: Some("2026-08-15T00:00:01Z".into()),
         }));
         assert!(matches!(too_large, Err(TimeScopeError::TooLarge)));
     }

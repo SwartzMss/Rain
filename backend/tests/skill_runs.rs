@@ -49,8 +49,8 @@ async fn scoped_skill_run_persists_canonical_analysis_window() {
         skill_snapshot_markdown: "# Skill".into(),
     };
     let scope = parse_time_scope(Some(TimeScopeInput {
-        start: "2026-08-14T09:27:15+08:00".into(),
-        end: "2026-08-14T09:37:15+08:00".into(),
+        start: Some("2026-08-14T09:27:15+08:00".into()),
+        end: Some("2026-08-14T09:37:15+08:00".into()),
     }))
     .unwrap()
     .unwrap();
@@ -490,12 +490,27 @@ async fn invalid_skill_run_time_scopes_are_rejected_before_downstream_work() {
     .await;
 
     let invalid_scopes = [
-        ("not-a-timestamp", "2026-08-14T01:37:15Z"),
-        ("2026-08-14T01:37:15Z", "2026-08-14T01:27:15Z"),
-        ("2026-08-14T01:27:15Z", "2026-08-14T01:27:15Z"),
-        ("2026-08-14T00:00:00Z", "2026-08-15T01:00:01Z"),
+        serde_json::json!({
+            "start": "not-a-timestamp",
+            "end": "2026-08-14T01:37:15Z"
+        }),
+        serde_json::json!({
+            "start": "2026-08-14T01:37:15Z",
+            "end": "2026-08-14T01:27:15Z"
+        }),
+        serde_json::json!({
+            "start": "2026-08-14T01:27:15Z",
+            "end": "2026-08-14T01:27:15Z"
+        }),
+        serde_json::json!({
+            "start": "2026-08-14T00:00:00Z",
+            "end": "2026-08-15T01:00:01Z"
+        }),
+        serde_json::json!({}),
+        serde_json::json!({"start": "2026-08-14T01:27:15Z"}),
+        serde_json::json!({"end": "2026-08-14T01:37:15Z"}),
     ];
-    for (start, end) in invalid_scopes {
+    for time_scope in invalid_scopes {
         let response = test::call_service(
             &app,
             test::TestRequest::post()
@@ -503,18 +518,17 @@ async fn invalid_skill_run_time_scopes_are_rejected_before_downstream_work() {
                 .cookie(Cookie::new(SESSION_COOKIE_NAME, token.clone()))
                 .set_json(serde_json::json!({
                     "skill_id": "missing-skill",
-                    "time_scope": {"start": start, "end": end}
+                    "time_scope": time_scope
                 }))
                 .to_request(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body: serde_json::Value = test::read_body_json(response).await;
-        assert_eq!(body["code"], "INVALID_TIME_SCOPE");
+        let body = test::read_body(response).await;
+        let body = String::from_utf8_lossy(&body);
         assert!(
-            body["message"]
-                .as_str()
-                .is_some_and(|message| !message.is_empty())
+            body.contains("\"code\":\"INVALID_TIME_SCOPE\""),
+            "unexpected invalid time scope response: {body}"
         );
     }
 
