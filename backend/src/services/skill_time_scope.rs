@@ -69,10 +69,10 @@ pub fn parse_time_scope(
             return Err(TimeScopeError::InvalidExpansion);
         }
 
-        let before = Duration::try_minutes(before_minutes)
-            .ok_or(TimeScopeError::ArithmeticOverflow)?;
-        let after = Duration::try_minutes(after_minutes)
-            .ok_or(TimeScopeError::ArithmeticOverflow)?;
+        let before =
+            Duration::try_minutes(before_minutes).ok_or(TimeScopeError::ArithmeticOverflow)?;
+        let after =
+            Duration::try_minutes(after_minutes).ok_or(TimeScopeError::ArithmeticOverflow)?;
         let start = incident
             .checked_sub_signed(before)
             .ok_or(TimeScopeError::ArithmeticOverflow)?;
@@ -114,15 +114,15 @@ impl SkillTimeScope {
 
         let start = wall_clock::parse(&self.start).ok_or(TimeScopeError::InvalidTimestamp)?;
         let end = wall_clock::parse(&self.end).ok_or(TimeScopeError::InvalidTimestamp)?;
-        let expansion = Duration::try_minutes(minutes)
-            .ok_or(TimeScopeError::ArithmeticOverflow)?;
+        let expansion = Duration::try_minutes(minutes).ok_or(TimeScopeError::ArithmeticOverflow)?;
         let start = start
             .checked_sub_signed(expansion)
             .ok_or(TimeScopeError::ArithmeticOverflow)?;
         let end = end
             .checked_add_signed(expansion)
             .ok_or(TimeScopeError::ArithmeticOverflow)?;
-        let start_ms = wall_clock::comparison_key(start).ok_or(TimeScopeError::ArithmeticOverflow)?;
+        let start_ms =
+            wall_clock::comparison_key(start).ok_or(TimeScopeError::ArithmeticOverflow)?;
         let end_ms = wall_clock::comparison_key(end).ok_or(TimeScopeError::ArithmeticOverflow)?;
 
         Ok(Self {

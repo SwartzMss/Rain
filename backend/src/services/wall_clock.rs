@@ -14,9 +14,7 @@ pub(crate) fn parse(value: &str) -> Option<NaiveDateTime> {
     ]
     .into_iter()
     .find_map(|format| NaiveDateTime::parse_from_str(&value, format).ok())
-    .and_then(|datetime| {
-        datetime.with_nanosecond((datetime.nanosecond() / 1_000_000) * 1_000_000)
-    })
+    .and_then(|datetime| datetime.with_nanosecond((datetime.nanosecond() / 1_000_000) * 1_000_000))
 }
 /// Formats a wall-clock value canonically without adding timezone information.
 pub(crate) fn format(value: NaiveDateTime) -> String {
