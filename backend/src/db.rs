@@ -779,17 +779,12 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             error_message TEXT,
             started_at TEXT,
             completed_at TEXT,
+            analysis_start_time TEXT,
+            analysis_end_time TEXT,
+            analysis_start_ms INTEGER,
+            analysis_end_ms INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
-        "#,
-        r#"
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_runs_one_active_per_user
-        ON skill_runs(user_id)
-        WHERE status IN ('QUEUED', 'RUNNING')
-        "#,
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_skill_runs_terminal_cleanup
-        ON skill_runs(status, completed_at)
         "#,
         r#"
         CREATE TABLE IF NOT EXISTS skill_run_steps (
@@ -839,6 +834,20 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             INSERT INTO log_segments_fts(rowid, content) VALUES (new.id, new.content);
         END
         "#,
+    ];
+
+    for statement in statements {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+
+    ensure_skill_run_optional_columns(pool).await?;
+
+    let index_statements = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_runs_one_active_per_user ON skill_runs(user_id) WHERE status IN ('QUEUED', 'RUNNING')",
+        "CREATE INDEX IF NOT EXISTS idx_skill_runs_terminal_cleanup ON skill_runs(status, completed_at)",
         "CREATE INDEX IF NOT EXISTS idx_bundles_issue ON bundles (issue_code, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_issues_activity ON issues (status, last_activity_at)",
         "CREATE INDEX IF NOT EXISTS idx_files_parent ON files (parent_id)",
@@ -856,8 +865,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_admin_audit_target ON admin_audit_logs (target_user_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_saved_searches_user ON saved_searches (user_id, is_pinned DESC, sort_order, updated_at DESC)",
     ];
-
-    for statement in statements {
+    for statement in index_statements {
         sqlx::query(statement)
             .execute(pool)
             .await
@@ -877,6 +885,41 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         .execute(pool)
         .await
         .map_err(AppError::Database)?;
+    Ok(())
+}
+
+async fn ensure_skill_run_optional_columns(pool: &SqlitePool) -> Result<(), AppError> {
+    let existing: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('skill_runs')")
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Database)?;
+    let columns = [
+        (
+            "analysis_start_time",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_start_time TEXT",
+        ),
+        (
+            "analysis_end_time",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_end_time TEXT",
+        ),
+        (
+            "analysis_start_ms",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_start_ms INTEGER",
+        ),
+        (
+            "analysis_end_ms",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_end_ms INTEGER",
+        ),
+    ];
+    for (column, statement) in columns {
+        if !existing.iter().any(|name| name == column) {
+            sqlx::query(statement)
+                .execute(pool)
+                .await
+                .map_err(AppError::Database)?;
+        }
+    }
     Ok(())
 }
 
@@ -1086,6 +1129,79 @@ mod tests {
                     .await
                     .expect("inspect schema");
             assert!(!exists, "{object} should not exist");
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_schema_upgrades_legacy_skill_run_tables_idempotently() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        sqlx::query(
+            r#"
+            CREATE TABLE skill_runs (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                issue_code TEXT NOT NULL,
+                skill_id TEXT NOT NULL,
+                skill_version INTEGER NOT NULL,
+                skill_name TEXT NOT NULL,
+                skill_snapshot_markdown TEXT NOT NULL,
+                status TEXT NOT NULL,
+                iteration_count INTEGER NOT NULL DEFAULT 0,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                result_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy skill_runs");
+        sqlx::query(
+            r#"
+            CREATE TABLE log_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bundle_id TEXT,
+                file_id INTEGER,
+                timeline TEXT,
+                content TEXT NOT NULL,
+                line_offset INTEGER,
+                line_end INTEGER,
+                chunk_index INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy log_segments");
+
+        super::prepare_schema(&pool, false)
+            .await
+            .expect("upgrade schema");
+        super::prepare_schema(&pool, false)
+            .await
+            .expect("repeat schema upgrade");
+
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('skill_runs')")
+                .fetch_all(&pool)
+                .await
+                .expect("inspect upgraded columns");
+        for column in [
+            "analysis_start_time",
+            "analysis_end_time",
+            "analysis_start_ms",
+            "analysis_end_ms",
+        ] {
+            assert!(
+                names.iter().any(|name| name == column),
+                "skill_runs.{column}"
+            );
         }
     }
 

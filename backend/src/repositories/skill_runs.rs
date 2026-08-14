@@ -4,15 +4,28 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     models::skill_runs::{NewSkillRun, SkillRunRecord},
+    services::skill_time_scope::SkillTimeScope,
 };
 
-const COLUMNS: &str = "id,user_id,issue_code,skill_id,skill_version,skill_name,skill_snapshot_markdown,status,iteration_count,tool_call_count,cancel_requested,result_json,error_code,error_message,started_at,completed_at,created_at";
+const COLUMNS: &str = "id,user_id,issue_code,skill_id,skill_version,skill_name,skill_snapshot_markdown,status,iteration_count,tool_call_count,cancel_requested,result_json,error_code,error_message,started_at,completed_at,analysis_start_time,analysis_end_time,analysis_start_ms,analysis_end_ms,created_at";
 
 pub async fn create(pool: &SqlitePool, value: &NewSkillRun) -> Result<SkillRunRecord, AppError> {
+    create_with_scope(pool, value, None).await
+}
+
+pub async fn create_with_scope(
+    pool: &SqlitePool,
+    value: &NewSkillRun,
+    scope: Option<&SkillTimeScope>,
+) -> Result<SkillRunRecord, AppError> {
     let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO skill_runs(id,user_id,issue_code,skill_id,skill_version,skill_name,skill_snapshot_markdown,status) VALUES(?,?,?,?,?,?,?,'QUEUED')")
+    sqlx::query("INSERT INTO skill_runs(id,user_id,issue_code,skill_id,skill_version,skill_name,skill_snapshot_markdown,status,analysis_start_time,analysis_end_time,analysis_start_ms,analysis_end_ms) VALUES(?,?,?,?,?,?,?,'QUEUED',?,?,?,?)")
         .bind(&id).bind(&value.user_id).bind(&value.issue_code).bind(&value.skill_id)
         .bind(value.skill_version).bind(&value.skill_name).bind(&value.skill_snapshot_markdown)
+        .bind(scope.map(|scope| scope.start.as_str()))
+        .bind(scope.map(|scope| scope.end.as_str()))
+        .bind(scope.map(|scope| scope.start_ms))
+        .bind(scope.map(|scope| scope.end_ms))
         .execute(pool).await.map_err(AppError::Database)?;
     find(pool, &id)
         .await?

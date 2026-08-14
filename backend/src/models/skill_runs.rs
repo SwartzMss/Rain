@@ -31,5 +31,11 @@ pub struct SkillRunRecord {
     pub error_message: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    pub analysis_start_time: Option<String>,
+    pub analysis_end_time: Option<String>,
+    #[serde(skip_serializing)]
+    pub analysis_start_ms: Option<i64>,
+    #[serde(skip_serializing)]
+    pub analysis_end_ms: Option<i64>,
     pub created_at: String,
 }

@@ -9,6 +9,7 @@ use backend::{
     models::skill_runs::NewSkillRun,
     repositories::{sessions, skill_runs},
     routes,
+    services::skill_time_scope::{TimeScopeInput, parse_time_scope},
 };
 use chrono::{Duration, Utc};
 
@@ -26,6 +27,85 @@ schema_version: 1
 # 关系与影响
 描述故障对后续流程的影响。
 "#;
+
+#[tokio::test]
+async fn scoped_skill_run_persists_canonical_analysis_window() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('ISSUE','Issue')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let new_run = NewSkillRun {
+        user_id: "u".into(),
+        issue_code: "ISSUE".into(),
+        skill_id: "skill".into(),
+        skill_version: 1,
+        skill_name: "Skill".into(),
+        skill_snapshot_markdown: "# Skill".into(),
+    };
+    let scope = parse_time_scope(Some(TimeScopeInput {
+        start: "2026-08-14T09:27:15+08:00".into(),
+        end: "2026-08-14T09:37:15+08:00".into(),
+    }))
+    .unwrap()
+    .unwrap();
+
+    let run = skill_runs::create_with_scope(&pool, &new_run, Some(&scope))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        run.analysis_start_time.as_deref(),
+        Some("2026-08-14T01:27:15.000Z")
+    );
+    assert_eq!(
+        run.analysis_end_time.as_deref(),
+        Some("2026-08-14T01:37:15.000Z")
+    );
+    assert_eq!(run.analysis_start_ms, Some(scope.start_ms));
+    assert_eq!(run.analysis_end_ms, Some(scope.end_ms));
+    let serialized = serde_json::to_value(&run).unwrap();
+    assert!(serialized.get("analysis_start_ms").is_none());
+    assert!(serialized.get("analysis_end_ms").is_none());
+}
+
+#[tokio::test]
+async fn unscoped_skill_run_has_no_analysis_window() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('ISSUE','Issue')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let run = skill_runs::create(
+        &pool,
+        &NewSkillRun {
+            user_id: "u".into(),
+            issue_code: "ISSUE".into(),
+            skill_id: "skill".into(),
+            skill_version: 1,
+            skill_name: "Skill".into(),
+            skill_snapshot_markdown: "# Skill".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(run.analysis_start_time.is_none());
+    assert!(run.analysis_end_time.is_none());
+    assert!(run.analysis_start_ms.is_none());
+    assert!(run.analysis_end_ms.is_none());
+}
 
 #[tokio::test]
 async fn run_state_is_atomic_concurrent_and_temporary() {
