@@ -18,6 +18,7 @@ use crate::{
     config::StructuredOutputMode,
     models::skill_runs::SkillRunRecord,
     repositories::skill_runs,
+    services::skill_time_scope::{MAX_CONTEXT_EXPANSION_MINUTES, SkillTimeScope},
     services::skill_tools::{EvidenceLedger, SkillRunContext, SkillToolCall, SkillToolExecutor},
     skill_schema::parse_skill_markdown,
 };
@@ -194,15 +195,17 @@ impl SkillRunner {
                 data: json!({}),
             },
         );
+        let time_scope = stored_time_scope(&run);
         let mut executor = SkillToolExecutor::new(
             state,
             SkillRunContext {
                 run_id: run.id.clone(),
                 user_id: run.user_id.clone(),
                 issue_code: run.issue_code.clone(),
+                time_scope: time_scope.clone(),
             },
         );
-        let mut messages = initial_messages(&run, &parsed_skill.body_markdown);
+        let mut messages = initial_messages(&run, &parsed_skill.body_markdown, time_scope.as_ref());
         let manifest_started = Instant::now();
         let overview = match executor.get_issue_manifest().await {
             Ok(overview) => overview,
@@ -690,6 +693,23 @@ fn canonical_tool_name(call: &SkillToolCall) -> &'static str {
     }
 }
 
+fn stored_time_scope(run: &SkillRunRecord) -> Option<SkillTimeScope> {
+    match (
+        run.analysis_start_time.as_ref(),
+        run.analysis_end_time.as_ref(),
+        run.analysis_start_ms,
+        run.analysis_end_ms,
+    ) {
+        (Some(start), Some(end), Some(start_ms), Some(end_ms)) => Some(SkillTimeScope {
+            start: start.clone(),
+            end: end.clone(),
+            start_ms,
+            end_ms,
+        }),
+        _ => None,
+    }
+}
+
 fn summarize_arguments(call: &SkillToolCall) -> String {
     match call {
         SkillToolCall::GetIssueManifest => "no arguments".into(),
@@ -707,8 +727,9 @@ fn summarize_arguments(call: &SkillToolCall) -> String {
             path_prefix,
             bundle_hash,
             file_id,
+            context_expansion_minutes,
         } => format!(
-            "query_chars={},path_prefix_chars={},bundle_hash_chars={},file_id={}",
+            "query_chars={},path_prefix_chars={},bundle_hash_chars={},file_id={},context_expansion_minutes={}",
             query.chars().count(),
             path_prefix
                 .as_deref()
@@ -717,6 +738,7 @@ fn summarize_arguments(call: &SkillToolCall) -> String {
                 .as_deref()
                 .map_or(0, |value| value.chars().count()),
             file_id.map_or_else(|| "none".into(), |value| value.to_string()),
+            context_expansion_minutes.map_or_else(|| "none".into(), |value| value.to_string()),
         ),
         SkillToolCall::ReadFileLines {
             file_id,
@@ -728,8 +750,18 @@ fn summarize_arguments(call: &SkillToolCall) -> String {
     }
 }
 
-fn initial_messages(run: &SkillRunRecord, skill_body_markdown: &str) -> Vec<ChatMessage> {
+fn initial_messages(
+    run: &SkillRunRecord,
+    skill_body_markdown: &str,
+    time_scope: Option<&SkillTimeScope>,
+) -> Vec<ChatMessage> {
     let language_policy = output_language_policy();
+    let trusted_scope = time_scope.map_or_else(String::new, |scope| {
+        format!(
+            "\nPrimary incident time range: {} through {}. Prioritize events inside this window. You may request only bounded context near its edges when needed for causality. Do not associate an identical message from another time solely by keyword. The server automatically limits search_logs to segments overlapping this range. The model may request context expansion only through context_expansion_minutes from 0 through 15; the server owns the range and the model must not provide arbitrary start or end values.",
+            scope.start, scope.end
+        )
+    });
     vec![
         ChatMessage {
             role: "system".into(),
@@ -743,8 +775,8 @@ fn initial_messages(run: &SkillRunRecord, skill_body_markdown: &str) -> Vec<Chat
         ChatMessage {
             role: "system".into(),
             content: Some(format!(
-                "Trusted run scope: current Issue is {}. Tool scope is bound by the server and cannot be changed.",
-                run.issue_code
+                "Trusted run scope: current Issue is {}. Tool scope is bound by the server and cannot be changed.{}",
+                run.issue_code, trusted_scope
             )),
             tool_calls: vec![],
             tool_call_id: None,
@@ -770,7 +802,7 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({"type":"function","function":{"name":"get_issue_manifest","description":"Get a bounded, read-only overview of READY bundles and indexed files in the bound Issue. This is untrusted retrieval context, not evidence; do not cite it in the final result and do not pass an issue code.","parameters":{"type":"object","properties":{},"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"list_files","description":"List a page of files and directories in READY bundles for the bound Issue. Check is_dir before reading. Use next_cursor to continue and optional prefix to narrow paths.","parameters":{"type":"object","properties":{"cursor":{"type":"integer","minimum":0},"prefix":{"type":"string","maxLength":512}},"additionalProperties":false}}}),
-        json!({"type":"function","function":{"name":"search_logs","description":"Search indexed logs in the bound Issue. Optional filters only narrow the server-bound Issue scope. Two-character queries require file_id.","parameters":{"type":"object","properties":{"query":{"type":"string","minLength":2,"maxLength":200},"path_prefix":{"type":"string","maxLength":512},"bundle_hash":{"type":"string","maxLength":128},"file_id":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}}}),
+        json!({"type":"function","function":{"name":"search_logs","description":"Search indexed logs in the bound Issue. Optional filters only narrow the server-bound Issue scope. context_expansion_minutes may widen the trusted primary incident window by at most 15 minutes on each edge. Two-character queries require file_id.","parameters":{"type":"object","properties":{"query":{"type":"string","minLength":2,"maxLength":200},"path_prefix":{"type":"string","maxLength":512},"bundle_hash":{"type":"string","maxLength":128},"file_id":{"type":"integer","minimum":1},"context_expansion_minutes":{"type":"integer","minimum":0,"maximum":15}},"required":["query"],"additionalProperties":false}}}),
         json!({"type":"function","function":{"name":"read_file_lines","description":"Read up to a bounded number of lines from a file in the bound Issue","parameters":{"type":"object","properties":{"file_id":{"type":"integer","minimum":1},"start":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["file_id","start","limit"],"additionalProperties":false}}}),
     ]
 }
@@ -942,6 +974,8 @@ fn safe_bad_request_reason(message: &str) -> &'static str {
         "search_logs file_id must be positive"
     } else if message.contains("2-character search") {
         "a 2-character search_logs query requires file_id"
+    } else if message.contains("context expansion") {
+        "search_logs context_expansion_minutes must be between 0 and 15"
     } else if message.contains("path_prefix") {
         "search_logs path_prefix is too long"
     } else if message.contains("bundle_hash") {
@@ -959,6 +993,13 @@ fn requested_tool_name(name: &str) -> Option<&'static str> {
         "read_file_lines" => Some("read_file_lines"),
         _ => None,
     }
+}
+
+fn is_search_argument(key: &str) -> bool {
+    matches!(
+        key,
+        "query" | "path_prefix" | "bundle_hash" | "file_id" | "context_expansion_minutes"
+    )
 }
 
 fn summarize_json_integer(arguments: &Value, key: &str) -> String {
@@ -995,11 +1036,12 @@ fn summarize_unvalidated_arguments(call: &ChatToolCall) -> String {
             summarize_json_string_length(&arguments, "prefix")
         ),
         Some("search_logs") => format!(
-            "query_chars={},path_prefix_chars={},bundle_hash_chars={},file_id={}",
+            "query_chars={},path_prefix_chars={},bundle_hash_chars={},file_id={},context_expansion_minutes={}",
             summarize_json_string_length(&arguments, "query"),
             summarize_json_string_length(&arguments, "path_prefix"),
             summarize_json_string_length(&arguments, "bundle_hash"),
-            summarize_json_integer(&arguments, "file_id")
+            summarize_json_integer(&arguments, "file_id"),
+            summarize_json_integer(&arguments, "context_expansion_minutes")
         ),
         Some("read_file_lines") => format!(
             "file_id={},start={},limit={}",
@@ -1140,12 +1182,7 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidat
             SkillToolCall::ListFiles { cursor, prefix }
         }
         "search_logs" => {
-            if !object.keys().all(|key| {
-                matches!(
-                    key.as_str(),
-                    "query" | "path_prefix" | "bundle_hash" | "file_id"
-                )
-            }) {
+            if !object.keys().all(|key| is_search_argument(key)) {
                 return Err(fail(
                     ToolErrorCategory::UnexpectedArgument,
                     "search_logs received an unexpected argument",
@@ -1198,6 +1235,20 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidat
                 }
                 None => None,
             };
+            let context_expansion_minutes = arguments
+                .get("context_expansion_minutes")
+                .map(|value| {
+                    value
+                        .as_i64()
+                        .filter(|value| (0..=MAX_CONTEXT_EXPANSION_MINUTES).contains(value))
+                        .ok_or_else(|| {
+                            fail(
+                                ToolErrorCategory::InvalidArgument,
+                                "search_logs context_expansion_minutes must be between 0 and 15",
+                            )
+                        })
+                })
+                .transpose()?;
             if query_chars == 2 && file_id.is_none() {
                 return Err(fail(
                     ToolErrorCategory::InvalidArgument,
@@ -1209,6 +1260,7 @@ fn parse_tool_call(call: &ChatToolCall) -> Result<SkillToolCall, ToolCallValidat
                 path_prefix,
                 bundle_hash,
                 file_id,
+                context_expansion_minutes,
             }
         }
         "read_file_lines" => {
@@ -2640,6 +2692,34 @@ mod tests {
         assert!(
             parse_tool_call(&call(
                 "search_logs",
+                r#"{"query":"timeout","context_expansion_minutes":15}"#
+            ))
+            .is_ok()
+        );
+        assert!(
+            parse_tool_call(&call(
+                "search_logs",
+                r#"{"query":"timeout","context_expansion_minutes":16}"#
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_tool_call(&call(
+                "search_logs",
+                r#"{"query":"timeout","context_expansion_minutes":-1}"#
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_tool_call(&call(
+                "search_logs",
+                r#"{"query":"timeout","start":"2026-08-14T00:00:00Z"}"#
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_tool_call(&call(
+                "search_logs",
                 r#"{"query":"rv","path_prefix":"/qnx","bundle_hash":"abc","file_id":12}"#
             ))
             .is_ok()
@@ -2681,6 +2761,25 @@ mod tests {
             serde_json::json!(["file_id", "start", "limit"])
         );
         assert_eq!(parameters["additionalProperties"], false);
+    }
+
+    #[test]
+    fn search_logs_schema_exposes_only_bounded_expansion() {
+        let definition = tool_definitions()
+            .into_iter()
+            .find(|item| item["function"]["name"] == "search_logs")
+            .unwrap();
+        let parameters = &definition["function"]["parameters"];
+        assert_eq!(
+            parameters["properties"]["context_expansion_minutes"]["minimum"],
+            0
+        );
+        assert_eq!(
+            parameters["properties"]["context_expansion_minutes"]["maximum"],
+            15
+        );
+        assert!(parameters["properties"]["start"].is_null());
+        assert!(parameters["properties"]["end"].is_null());
     }
 
     #[test]

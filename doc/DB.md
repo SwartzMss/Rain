@@ -63,13 +63,17 @@
 - `id` INTEGER PK AUTOINCREMENT。
 - `bundle_id` TEXT：关联 `bundles.id`，级联删除。
 - `file_id` INTEGER：关联 `files.id`，级联删除。
-- `timeline` TEXT：时间轴标签，当前固定为 `all`。
+- `timeline` TEXT：旧的时间轴展示标签，当前固定为 `all`，不参与时间比较。
+- `event_time_start_ms` INTEGER NULL：chunk 中可解析 wall-clock 事件时间的最早比较键。`_ms` 是兼容性列名，不表示 Unix epoch、UTC 或真实经过的毫秒数。
+- `event_time_end_ms` INTEGER NULL：chunk 中可解析 wall-clock 事件时间的最晚比较键；无法从日志日期时间建立比较键时保持 NULL。支持普通 `YYYY-MM-DD HH:mm:ss[.fraction]`、`[日期时间]` 和 `[E][日期时间][...]` 行首格式；只有 `HH:mm:ss` 时不推断日期。
+- `event_time_indexed` INTEGER NOT NULL DEFAULT 0：事件时间索引处理状态。新写入的 chunk 在完成时间范围提取后为 `1`；历史回填即使无法解析时间也会置为 `1`，因此 `NULL` 边界表示“没有可比较的 wall-clock 时间”，不表示尚未尝试。
 - `content` TEXT：日志 chunk 内容，通常最多 200 行，已去空行和空字节。
 - `line_offset` INTEGER：chunk 起始原始行号，从 0 开始。
 - `line_end` INTEGER：chunk 结束原始行号，从 0 开始。
 - `chunk_index` INTEGER：文件内 chunk 序号，从 0 开始。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
-- 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`；全文检索走 `log_segments_fts`。
+- 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`、`idx_logs_file_event_time`、`idx_logs_event_time_indexed (event_time_indexed, id)`；全文检索走 `log_segments_fts`。带时间范围的 Skill Run 仅选择两个 wall-clock 事件时间边界均已知且与主窗口相交的 chunk。
+- 旧数据库启动时通过幂等 schema ensure 补列，`event_time_indexed` 默认 `0`；历史回填按 `id` keyset 分批，每批使用独立事务，只处理状态为 `0` 的记录。事务失败会回滚该批，下一次启动可继续；成功处理但无法解析的记录保留 NULL 边界并标记为 `1`。回填使用 `COALESCE`，不会覆盖已有部分边界，也不会更新正文，因此不触发 FTS 内容重建。
 
 ## 表：log_line_offsets
 
@@ -84,7 +88,7 @@
 - SQLite FTS5 虚表。
 - 使用 `content='log_segments'` 与 `content_rowid='id'` 的 external-content 模式，FTS 仅维护倒排索引，不保存日志正文副本。
 - 唯一索引列为 `content`；FTS `rowid` 对应 `log_segments.id`。
-- bundle、Issue、文件与 timeline 范围过滤通过 `rowid` 关联 `log_segments`、`bundles` 和 `files` 完成。
+- bundle、Issue、文件与 timeline 范围过滤通过 `rowid` 关联 `log_segments`、`bundles` 和 `files` 完成；Skill Run 的事件时间过滤也通过 `log_segments` 的标准化边界完成。
 - `log_segments` 的插入、更新与删除触发器负责同步维护索引。
 
 ## 表：blobs
@@ -126,7 +130,8 @@
 - `skill_reviews` 以 `skill_id` 为主键，只保存当前版本的一次质量评估。重新评估使用 upsert 覆盖；正文变更会在同一事务中删除旧评估。
 - `ai_provider_settings` 是单例管理员配置。Base URL、模型和超时为普通字段，API Key 是带版本与随机 nonce 的 AES-256-GCM 密文；主密钥只来自 `RAIN_AI_MASTER_KEY`，不进入数据库。有效数据库配置优先于环境变量配置。
 - 修改数据库 Provider 的 Base URL 时必须同时替换 API Key；候选配置测试也必须提交完整配置，空请求才会测试当前生效配置。
-- `skill_runs` 保存发起用户、Issue、Skill 身份、版本和临时正文快照，以及状态、计数器、取消标记、最终 JSON 和净化后的错误。`skill_id` 不设外键，因此删除源 Skill 不会破坏已开始的任务；用户和 Issue 删除会级联删除任务。
+- `skill_runs` 保存发起用户、Issue、Skill 身份、版本和临时正文快照，以及状态、计数器、取消标记、最终 JSON 和净化后的错误。可选的 `analysis_start_time`/`analysis_end_time` 保存无时区 wall-clock 文本；内部 `*_ms` 边界只是同一 wall-clock 编码的比较键，用于恢复 Runner 的不可变分析范围。输入支持空格或 `T` 分隔、可选小数秒和 `datetime-local` 分钟精度；要求 `start < end`，范围最大 24 小时。未设置范围的 Run 保持兼容。`skill_id` 不设外键，因此删除源 Skill 不会破坏已开始的任务；用户和 Issue 删除会级联删除任务。
+- `search_logs` 的 `context_expansion_minutes` 只能在 `0..=15` 内扩展已保存的主窗口；它不能替换 Run 范围，也不能让没有 wall-clock 事件时间索引的 chunk 进入有范围搜索。服务端响应保留 applied scope 与 coverage 信息，区分没有命中和命中但因未建立时间索引而被排除。
 - 部分唯一索引 `idx_skill_runs_one_active_per_user` 保证每个用户最多一个 `QUEUED/RUNNING` 任务。终态更新带状态和取消条件，迟到的模型响应不能覆盖 `CANCELLED`。
 - `skill_run_steps` 只保存工具名、去敏参数摘要、命中数、证据引用元数据、耗时和状态，不保存完整日志输出。
 - 最终观察和推断使用类型化结构并引用已验证证据 ID；证据包含 Bundle hash、文件 ID、路径和行区间，避免同路径 Bundle 的跳转歧义。

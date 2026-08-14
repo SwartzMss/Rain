@@ -17,6 +17,7 @@ use crate::error::AppError;
 
 pub const CLEANUP_BATCH_SIZE: u64 = 1_000;
 const LARGE_CLEANUP_CHECKPOINT_ROWS: u64 = 10_000;
+const LOG_SEGMENT_BACKFILL_BATCH_SIZE: i64 = 500;
 static HEAVY_CLEANUP_WRITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
 static QUEUED_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
@@ -696,6 +697,9 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             line_offset INTEGER,
             line_end INTEGER,
             chunk_index INTEGER,
+            event_time_start_ms INTEGER,
+            event_time_end_ms INTEGER,
+            event_time_indexed INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#,
@@ -779,17 +783,12 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             error_message TEXT,
             started_at TEXT,
             completed_at TEXT,
+            analysis_start_time TEXT,
+            analysis_end_time TEXT,
+            analysis_start_ms INTEGER,
+            analysis_end_ms INTEGER,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
-        "#,
-        r#"
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_runs_one_active_per_user
-        ON skill_runs(user_id)
-        WHERE status IN ('QUEUED', 'RUNNING')
-        "#,
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_skill_runs_terminal_cleanup
-        ON skill_runs(status, completed_at)
         "#,
         r#"
         CREATE TABLE IF NOT EXISTS skill_run_steps (
@@ -839,6 +838,23 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
             INSERT INTO log_segments_fts(rowid, content) VALUES (new.id, new.content);
         END
         "#,
+    ];
+
+    for statement in statements {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+
+    ensure_skill_run_optional_columns(pool).await?;
+    ensure_log_segment_optional_columns(pool).await?;
+    ensure_log_segment_event_time_indexes(pool).await?;
+    backfill_log_segment_event_times(pool).await?;
+
+    let index_statements = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_runs_one_active_per_user ON skill_runs(user_id) WHERE status IN ('QUEUED', 'RUNNING')",
+        "CREATE INDEX IF NOT EXISTS idx_skill_runs_terminal_cleanup ON skill_runs(status, completed_at)",
         "CREATE INDEX IF NOT EXISTS idx_bundles_issue ON bundles (issue_code, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_issues_activity ON issues (status, last_activity_at)",
         "CREATE INDEX IF NOT EXISTS idx_files_parent ON files (parent_id)",
@@ -846,6 +862,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)",
         "CREATE INDEX IF NOT EXISTS idx_logs_bundle_timeline ON log_segments (bundle_id, timeline)",
         "CREATE INDEX IF NOT EXISTS idx_logs_file_chunk ON log_segments (file_id, chunk_index)",
+        "CREATE INDEX IF NOT EXISTS idx_logs_file_event_time ON log_segments (file_id, event_time_start_ms, event_time_end_ms)",
         "CREATE INDEX IF NOT EXISTS idx_line_offsets_file_line ON log_line_offsets (file_id, line_number)",
         "CREATE INDEX IF NOT EXISTS idx_temp_results_expiry ON temp_results (expires_at)",
         "CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions (user_id)",
@@ -856,8 +873,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_admin_audit_target ON admin_audit_logs (target_user_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_saved_searches_user ON saved_searches (user_id, is_pinned DESC, sort_order, updated_at DESC)",
     ];
-
-    for statement in statements {
+    for statement in index_statements {
         sqlx::query(statement)
             .execute(pool)
             .await
@@ -877,6 +893,132 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         .execute(pool)
         .await
         .map_err(AppError::Database)?;
+    Ok(())
+}
+
+async fn ensure_skill_run_optional_columns(pool: &SqlitePool) -> Result<(), AppError> {
+    let existing: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('skill_runs')")
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Database)?;
+    let columns = [
+        (
+            "analysis_start_time",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_start_time TEXT",
+        ),
+        (
+            "analysis_end_time",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_end_time TEXT",
+        ),
+        (
+            "analysis_start_ms",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_start_ms INTEGER",
+        ),
+        (
+            "analysis_end_ms",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_end_ms INTEGER",
+        ),
+    ];
+    for (column, statement) in columns {
+        if !existing.iter().any(|name| name == column) {
+            sqlx::query(statement)
+                .execute(pool)
+                .await
+                .map_err(AppError::Database)?;
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_log_segment_optional_columns(pool: &SqlitePool) -> Result<(), AppError> {
+    let existing: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('log_segments')")
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Database)?;
+    let columns = [
+        (
+            "event_time_start_ms",
+            "ALTER TABLE log_segments ADD COLUMN event_time_start_ms INTEGER",
+        ),
+        (
+            "event_time_end_ms",
+            "ALTER TABLE log_segments ADD COLUMN event_time_end_ms INTEGER",
+        ),
+        (
+            "event_time_indexed",
+            "ALTER TABLE log_segments ADD COLUMN event_time_indexed INTEGER NOT NULL DEFAULT 0",
+        ),
+    ];
+    for (column, statement) in columns {
+        if !existing.iter().any(|name| name == column) {
+            sqlx::query(statement)
+                .execute(pool)
+                .await
+                .map_err(AppError::Database)?;
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_log_segment_event_time_indexes(pool: &SqlitePool) -> Result<(), AppError> {
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_logs_event_time_indexed ON log_segments (event_time_indexed, id)",
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(())
+}
+
+async fn backfill_log_segment_event_times(pool: &SqlitePool) -> Result<(), AppError> {
+    // The legacy *_ms columns store deterministic wall-clock comparison keys,
+    // not Unix milliseconds or absolute timestamps.
+    let mut last_id = 0_i64;
+    loop {
+        let mut tx = pool.begin().await.map_err(AppError::Database)?;
+        let segments: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, content FROM log_segments WHERE id > ? AND event_time_indexed = 0 ORDER BY id LIMIT ?",
+        )
+        .bind(last_id)
+        .bind(LOG_SEGMENT_BACKFILL_BATCH_SIZE)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+        if segments.is_empty() {
+            tx.commit().await.map_err(AppError::Database)?;
+            break;
+        }
+
+        let batch_last_id = segments
+            .last()
+            .map(|(id, _)| *id)
+            .expect("non-empty segment batch has a last id");
+        for (id, content) in segments {
+            let (Some(start_ms), Some(end_ms)) = crate::ingest::event_time_range(&content) else {
+                sqlx::query(
+                    "UPDATE log_segments SET event_time_indexed = 1 WHERE id = ? AND event_time_indexed = 0",
+                )
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(AppError::Database)?;
+                continue;
+            };
+            sqlx::query(
+                "UPDATE log_segments SET event_time_start_ms = COALESCE(event_time_start_ms, ?), event_time_end_ms = COALESCE(event_time_end_ms, ?), event_time_indexed = 1 WHERE id = ? AND event_time_indexed = 0",
+            )
+            .bind(start_ms)
+            .bind(end_ms)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+        }
+        tx.commit().await.map_err(AppError::Database)?;
+        last_id = batch_last_id;
+    }
     Ok(())
 }
 
@@ -1087,6 +1229,342 @@ mod tests {
                     .expect("inspect schema");
             assert!(!exists, "{object} should not exist");
         }
+    }
+
+    #[tokio::test]
+    async fn prepare_schema_upgrades_legacy_skill_run_tables_idempotently() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        sqlx::query(
+            r#"
+            CREATE TABLE skill_runs (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                issue_code TEXT NOT NULL,
+                skill_id TEXT NOT NULL,
+                skill_version INTEGER NOT NULL,
+                skill_name TEXT NOT NULL,
+                skill_snapshot_markdown TEXT NOT NULL,
+                status TEXT NOT NULL,
+                iteration_count INTEGER NOT NULL DEFAULT 0,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                result_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy skill_runs");
+        sqlx::query(
+            r#"
+            CREATE TABLE log_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bundle_id TEXT,
+                file_id INTEGER,
+                timeline TEXT,
+                content TEXT NOT NULL,
+                line_offset INTEGER,
+                line_end INTEGER,
+                chunk_index INTEGER,
+                event_time_start_ms INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy log_segments");
+
+        sqlx::query("INSERT INTO log_segments (content) VALUES (?)")
+            .bind("2026-08-14T09:32:15 first\nnoise\n2026-08-14T09:33:15 second")
+            .execute(&pool)
+            .await
+            .expect("insert backfillable segment");
+        sqlx::query("INSERT INTO log_segments (content) VALUES (?)")
+            .bind("not a dated log line")
+            .execute(&pool)
+            .await
+            .expect("insert unparseable segment");
+        sqlx::query("INSERT INTO log_segments (content, event_time_start_ms) VALUES (?, ?)")
+            .bind("2026-08-14T09:34:15 partial")
+            .bind(111_i64)
+            .execute(&pool)
+            .await
+            .expect("insert partially bounded segment");
+
+        super::prepare_schema(&pool, false)
+            .await
+            .expect("upgrade schema");
+
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('skill_runs')")
+                .fetch_all(&pool)
+                .await
+                .expect("inspect upgraded columns");
+        for column in [
+            "analysis_start_time",
+            "analysis_end_time",
+            "analysis_start_ms",
+            "analysis_end_ms",
+        ] {
+            assert!(
+                names.iter().any(|name| name == column),
+                "skill_runs.{column}"
+            );
+        }
+
+        let log_segment_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('log_segments')")
+                .fetch_all(&pool)
+                .await
+                .expect("inspect upgraded log segment columns");
+        for column in [
+            "event_time_start_ms",
+            "event_time_end_ms",
+            "event_time_indexed",
+        ] {
+            assert!(
+                log_segment_columns.iter().any(|name| name == column),
+                "log_segments.{column}"
+            );
+        }
+
+        let bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE content LIKE '2026-%'",
+        )
+        .fetch_one(&pool)
+            .await
+            .expect("inspect backfilled segment");
+        assert!(bounds.0.is_some(), "wall-clock timestamp should be indexed");
+        assert_eq!(
+            bounds,
+            (
+                crate::ingest::parse_event_time_ms("2026-08-14T09:32:15 first"),
+                crate::ingest::parse_event_time_ms("2026-08-14T09:33:15 second")
+            )
+        );
+
+        let partial_bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE content LIKE '%partial'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect partially bounded segment");
+        assert_eq!(
+            partial_bounds,
+            (
+                Some(111),
+                crate::ingest::parse_event_time_ms("2026-08-14T09:34:15 partial")
+            )
+        );
+
+        sqlx::query(
+            "UPDATE log_segments SET event_time_start_ms = 111, event_time_end_ms = 222 WHERE content LIKE '2026-%'",
+        )
+        .execute(&pool)
+        .await
+        .expect("mark populated segment");
+        super::prepare_schema(&pool, false)
+            .await
+            .expect("repeat backfill schema");
+        let preserved_bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE content LIKE '2026-%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect preserved segment");
+        assert_eq!(preserved_bounds, (Some(111), Some(222)));
+
+        sqlx::query("INSERT INTO log_segments (content) VALUES (?)")
+            .bind("2026-08-14T09:35:15 added after upgrade")
+            .execute(&pool)
+            .await
+            .expect("insert segment after upgrade");
+        super::prepare_schema(&pool, false)
+            .await
+            .expect("do not repeat completed backfill");
+        let late_bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE content LIKE '%added after upgrade'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect late segment");
+        assert_eq!(
+            late_bounds,
+            (
+                crate::ingest::parse_event_time_ms("2026-08-14T09:35:15 added after upgrade"),
+                crate::ingest::parse_event_time_ms("2026-08-14T09:35:15 added after upgrade")
+            )
+        );
+
+        let null_bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE content = 'not a dated log line'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect unparseable segment");
+        assert_eq!(null_bounds, (None, None));
+
+        let unparseable_indexed: i64 = sqlx::query_scalar(
+            "SELECT event_time_indexed FROM log_segments WHERE content = 'not a dated log line'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect unparseable indexed state");
+        assert_eq!(unparseable_indexed, 1);
+
+        sqlx::query(
+            "UPDATE log_segments SET content = '2026-08-14T09:36:15 now parseable' WHERE content = 'not a dated log line'",
+        )
+        .execute(&pool)
+        .await
+        .expect("change completed unparseable segment");
+        super::prepare_schema(&pool, false)
+            .await
+            .expect("skip completed event time indexing");
+        let skipped_bounds: (Option<i64>, Option<i64>, i64) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms, event_time_indexed FROM log_segments WHERE content = '2026-08-14T09:36:15 now parseable'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect skipped completed segment");
+        assert_eq!(skipped_bounds, (None, None, 1));
+
+        sqlx::query(
+            "INSERT INTO log_segments (content, event_time_start_ms, event_time_end_ms) VALUES (?, ?, ?)",
+        )
+        .bind("2026-08-14T09:37:15 interrupted")
+        .bind(111_i64)
+        .bind(222_i64)
+        .execute(&pool)
+        .await
+        .expect("insert interrupted segment");
+        let pending_indexed: i64 = sqlx::query_scalar(
+            "SELECT event_time_indexed FROM log_segments WHERE content LIKE '%interrupted%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect pending interrupted segment");
+        assert_eq!(pending_indexed, 0);
+        super::backfill_log_segment_event_times(&pool)
+            .await
+            .expect("resume interrupted event time indexing");
+        let resumed: (Option<i64>, Option<i64>, i64) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms, event_time_indexed FROM log_segments WHERE content LIKE '%interrupted%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect resumed segment");
+        assert_eq!(resumed, (Some(111), Some(222), 1));
+
+        let index_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_logs_file_event_time')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect event time index");
+        assert!(index_exists);
+
+        let backfill_index_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_logs_event_time_indexed')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect event time backfill index");
+        assert!(backfill_index_exists);
+        let backfill_index_columns: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT seqno, name FROM pragma_index_info('idx_logs_event_time_indexed') ORDER BY seqno",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("inspect event time backfill index columns");
+        assert_eq!(
+            backfill_index_columns,
+            vec![(0, "event_time_indexed".to_owned()), (1, "id".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn event_time_backfill_preserves_fts_content() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('BACKFILLFTS', 'Backfill FTS')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query(
+            "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('backfill-fts-bundle', 'BACKFILLFTS', 'hash', 'Backfill FTS', 'READY')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('backfill-fts-bundle', 'app.log', '/app.log', 0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert file");
+        sqlx::query(
+            "INSERT INTO log_segments (bundle_id, file_id, content, event_time_start_ms, event_time_end_ms) VALUES (?, ?, ?, NULL, NULL)",
+        )
+        .bind("backfill-fts-bundle")
+        .bind(file_id)
+        .bind("2026-08-14T09:32:15 requestId=backfill123")
+        .execute(&pool)
+        .await
+        .expect("insert segment");
+
+        let before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'backfill123'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("search FTS before backfill");
+        super::backfill_log_segment_event_times(&pool)
+            .await
+            .expect("backfill event time");
+        let after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'backfill123'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("search FTS after backfill");
+
+        assert_eq!(before, 1);
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn event_time_backfill_query_uses_pending_index() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        sqlx::query(
+            "CREATE TABLE log_segments (id INTEGER PRIMARY KEY, content TEXT NOT NULL, event_time_indexed INTEGER NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create log segments table");
+
+        super::ensure_log_segment_event_time_indexes(&pool)
+            .await
+            .expect("create event time indexes before backfill");
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT id, content FROM log_segments WHERE id > 0 AND event_time_indexed = 0 ORDER BY id LIMIT 500",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("explain event time backfill query");
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.contains("idx_logs_event_time_indexed")),
+            "backfill query plan did not use pending index: {plan:?}"
+        );
     }
 
     #[tokio::test]

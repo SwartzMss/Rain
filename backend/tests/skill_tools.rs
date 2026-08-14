@@ -5,7 +5,10 @@ use backend::{
     config::AppLimits,
     db,
     error::AppError,
-    services::skill_tools::{SkillRunContext, SkillToolExecutor},
+    services::{
+        skill_time_scope::{TimeScopeInput, parse_time_scope},
+        skill_tools::{SkillRunContext, SkillToolExecutor},
+    },
 };
 use uuid::Uuid;
 
@@ -28,6 +31,7 @@ async fn list_files_is_bound_to_ready_bundles_in_the_run_issue() {
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
 
@@ -92,6 +96,7 @@ async fn list_files_can_continue_with_a_cursor() {
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
 
@@ -130,6 +135,7 @@ async fn issue_manifest_is_bounded_to_ready_bundles_and_does_not_record_evidence
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
 
@@ -191,6 +197,7 @@ async fn issue_manifest_groups_last_extensions_and_root_level_paths() {
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
 
@@ -244,6 +251,7 @@ async fn issue_manifest_limits_large_result_sets() {
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
     let manifest = executor.get_issue_manifest().await.unwrap();
@@ -342,6 +350,7 @@ async fn search_logs_supports_scoped_filters_short_terms_and_bounded_snippets() 
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
 
@@ -461,6 +470,7 @@ async fn search_logs_caps_hits_and_marks_truncation() {
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
 
@@ -495,6 +505,7 @@ async fn search_logs_duplicate_key_includes_normalized_filters() {
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
 
@@ -545,6 +556,188 @@ async fn search_logs_duplicate_key_includes_normalized_filters() {
         .await
         .unwrap();
     assert_ne!(separator_in_bundle["duplicate"], true);
+}
+
+#[tokio::test]
+async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('A','A')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status,process_stage) VALUES('a','A','hash-a','a','READY','PUBLISHING')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let file_id: i64 = sqlx::query_scalar(
+        "INSERT INTO files(bundle_id,name,path,is_dir) VALUES('a','app.log','/app.log',0) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let scope = parse_time_scope(Some(TimeScopeInput {
+        start: Some("2026-08-14 09:30:00".into()),
+        end: Some("2026-08-14 09:40:00".into()),
+        ..Default::default()
+    }))
+    .unwrap()
+    .unwrap();
+    let timeout_inside = parse_time_scope(Some(TimeScopeInput {
+        start: Some("2026-08-14 09:32:15".into()),
+        end: Some("2026-08-14 09:32:16".into()),
+        ..Default::default()
+    }))
+    .unwrap()
+    .unwrap();
+    let timeout_outside = parse_time_scope(Some(TimeScopeInput {
+        start: Some("2026-08-14 09:50:00".into()),
+        end: Some("2026-08-14 09:50:01".into()),
+        ..Default::default()
+    }))
+    .unwrap()
+    .unwrap();
+    let pending_inside = parse_time_scope(Some(TimeScopeInput {
+        start: Some("2026-08-14 09:35:00".into()),
+        end: Some("2026-08-14 09:35:01".into()),
+        ..Default::default()
+    }))
+    .unwrap()
+    .unwrap();
+    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index,event_time_start_ms,event_time_end_ms,event_time_indexed) VALUES('a',?,'[E][2026-08-14 09:32:15][worker] timeout wallclock no timezone',0,0,0,?,?,1),('a',?,'2026-08-14 09:50:00 timeout outside',1,1,1,?,?,1),('a',?,'timeout unknown time',2,2,2,NULL,NULL,1),('a',?,'zz unindexed',3,3,3,NULL,NULL,1),('a',?,'2026-08-14 09:35:00 pending key',4,4,4,?,?,0)")
+        .bind(file_id)
+        .bind(timeout_inside.start_ms)
+        .bind(timeout_inside.end_ms)
+        .bind(file_id)
+        .bind(timeout_outside.start_ms)
+        .bind(timeout_outside.end_ms)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(pending_inside.start_ms)
+        .bind(pending_inside.end_ms)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
+    let mut scoped = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "scoped".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+            time_scope: Some(scope.clone()),
+        },
+    );
+    let scoped_fts = scoped
+        .search_logs_with_expansion("timeout", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(scoped_fts["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(scoped_fts["time_index_coverage"]["complete"], false);
+    assert_eq!(
+        scoped_fts["time_index_coverage"]["excluded_unindexed_matches"],
+        true
+    );
+    assert_eq!(scoped_fts["time_scope"]["start"], scope.start);
+    assert_eq!(scoped_fts["time_scope"]["end"], scope.end);
+    assert!(scoped_fts["time_scope"].get("start_ms").is_none());
+    assert!(scoped_fts["time_scope"].get("end_ms").is_none());
+    assert_eq!(scoped_fts["time_scope"]["time_basis"], "wall_clock");
+
+    let no_timezone = scoped
+        .search_logs_with_expansion("wallclock", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(no_timezone["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(no_timezone["time_index_coverage"]["complete"], true);
+    assert_eq!(
+        no_timezone["time_index_coverage"]["excluded_unindexed_matches"],
+        false
+    );
+
+    let non_null_pending_index = scoped
+        .search_logs_with_expansion("pending", None, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        non_null_pending_index["hits"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        non_null_pending_index["time_index_coverage"]["complete"],
+        false
+    );
+    assert_eq!(
+        non_null_pending_index["time_index_coverage"]["excluded_unindexed_matches"],
+        true
+    );
+
+    let only_unindexed = scoped
+        .search_logs_with_expansion("unknown", None, None, None, None)
+        .await
+        .unwrap();
+    assert!(only_unindexed["hits"].as_array().unwrap().is_empty());
+    assert_eq!(only_unindexed["time_index_coverage"]["complete"], false);
+    assert_eq!(
+        only_unindexed["time_index_coverage"]["excluded_unindexed_matches"],
+        true
+    );
+
+    let scoped_short = scoped
+        .search_logs_with_expansion("in", None, None, Some(file_id), None)
+        .await
+        .unwrap();
+    assert!(scoped_short["hits"].as_array().unwrap().is_empty());
+    assert_eq!(scoped_short["time_index_coverage"]["complete"], false);
+    assert_eq!(
+        scoped_short["time_index_coverage"]["excluded_unindexed_matches"],
+        true
+    );
+
+    let mut expanded = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "expanded".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+            time_scope: Some(scope.clone()),
+        },
+    );
+    let expanded_result = expanded
+        .search_logs_with_expansion("timeout", None, None, None, Some(10))
+        .await
+        .unwrap();
+    let expanded_scope = scope.expanded(10).unwrap();
+    assert_eq!(expanded_result["hits"].as_array().unwrap().len(), 2);
+    assert_eq!(expanded_result["time_scope"]["end"], expanded_scope.end);
+    assert!(expanded_result["time_scope"].get("start_ms").is_none());
+    assert!(expanded_result["time_scope"].get("end_ms").is_none());
+    assert!(
+        expanded
+            .search_logs_with_expansion("timeout", None, None, None, Some(16))
+            .await
+            .is_err()
+    );
+
+    let mut unscoped = SkillToolExecutor::new(
+        &state,
+        SkillRunContext {
+            run_id: "unscoped".into(),
+            user_id: "user".into(),
+            issue_code: "A".into(),
+            time_scope: None,
+        },
+    );
+    let unscoped_result = unscoped
+        .search_logs_with_expansion("timeout", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(unscoped_result["hits"].as_array().unwrap().len(), 3);
+    assert!(unscoped_result["time_scope"].is_null());
+    assert!(unscoped_result["time_index_coverage"].is_null());
 }
 
 #[tokio::test]
@@ -605,6 +798,7 @@ async fn read_file_lines_exposes_bounded_long_lines_and_records_only_returned_ev
             run_id: "run".into(),
             user_id: "user".into(),
             issue_code: "A".into(),
+            time_scope: None,
         },
     );
     assert!(executor.read_file_lines(0, 0, 1).await.is_err());

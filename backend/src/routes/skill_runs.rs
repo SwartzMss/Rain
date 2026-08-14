@@ -3,6 +3,7 @@ use std::sync::Arc;
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, get, http::StatusCode, post, web};
 use async_stream::stream;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::{
     AppState, RequestLogId,
@@ -12,12 +13,31 @@ use crate::{
     models::skill_runs::NewSkillRun,
     repositories::{skill_runs, skills},
     services::skill_runner::SkillRunner,
+    services::skill_time_scope::{TimeScopeError, TimeScopeInput, parse_time_scope},
     skill_schema::parse_skill_markdown,
 };
 
 #[derive(Deserialize)]
 pub struct CreateSkillRun {
     skill_id: String,
+    time_scope: Option<Value>,
+}
+
+fn invalid_time_scope(error: TimeScopeError) -> AppError {
+    let message = match error {
+        TimeScopeError::InvalidTimestamp => {
+            "time_scope 支持 {start,end} 或 {incident_time,before_minutes,after_minutes}；时间必须是本地日志时间，例如 2026-08-14 09:32:15"
+        }
+        TimeScopeError::InvalidRange => {
+            "time_scope 的 range 必须 start 早于 end，incident window 必须覆盖正向时间范围"
+        }
+        TimeScopeError::TooLarge => "time_scope 的时间跨度不能超过 24 小时",
+        TimeScopeError::InvalidExpansion => {
+            "time_scope 的 incident before_minutes 和 after_minutes 必须为非负分钟数"
+        }
+        TimeScopeError::ArithmeticOverflow => "time_scope 的时间范围超出支持的时间边界",
+    };
+    AppError::public(StatusCode::BAD_REQUEST, "INVALID_TIME_SCOPE", message)
 }
 
 fn not_found() -> AppError {
@@ -37,6 +57,15 @@ pub async fn create(
     request: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = issue_code.trim().to_ascii_uppercase();
+    let time_scope_input = body
+        .time_scope
+        .clone()
+        .map(|value| {
+            serde_json::from_value::<TimeScopeInput>(value)
+                .map_err(|_| invalid_time_scope(TimeScopeError::InvalidTimestamp))
+        })
+        .transpose()?;
+    let time_scope = parse_time_scope(time_scope_input).map_err(invalid_time_scope)?;
     let issue_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issues WHERE code=? AND status='ACTIVE')")
             .bind(&issue_code)
@@ -77,7 +106,7 @@ pub async fn create(
             "模型服务不可用",
         )
     })?;
-    let run = skill_runs::create(
+    let run = skill_runs::create_with_scope(
         &state.db.pool,
         &NewSkillRun {
             user_id: user.0.id.clone(),
@@ -87,6 +116,7 @@ pub async fn create(
             skill_name: skill.name,
             skill_snapshot_markdown: skill.skill_markdown,
         },
+        time_scope.as_ref(),
     )
     .await
     .map_err(|error| {

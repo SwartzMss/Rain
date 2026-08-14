@@ -1,3 +1,5 @@
+use once_cell::sync::Lazy;
+use regex::Regex;
 use sqlx::{QueryBuilder, Sqlite};
 use std::{
     collections::HashMap,
@@ -13,6 +15,7 @@ use crate::{
     config::IndexingConfig,
     error::AppError,
     file_classification::{PreviewKind, classify_file, effective_mime_type},
+    services::wall_clock,
     upload::lifecycle::set_bundle_stage,
 };
 
@@ -34,7 +37,35 @@ use limits::{
 
 const LINE_OFFSET_BATCH_SIZE: usize = 500;
 const SEGMENT_BATCH_SIZE: usize = 100;
+static EVENT_TIMESTAMP_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"^(?:\[[^\]\r\n]*\]\s*)*(?:\[(?P<bracket>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?)\](?:\s|\[|$)|(?P<plain>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?)(?:\s|$))",
+    )
+    .expect("valid event timestamp pattern")
+});
 pub use quota::IssueQuota;
+
+pub(crate) fn parse_event_time_ms(line: &str) -> Option<i64> {
+    let timestamp = EVENT_TIMESTAMP_PATTERN
+        .captures(line)
+        .and_then(|captures| captures.name("bracket").or_else(|| captures.name("plain")))?
+        .as_str()
+        .replace('T', " ")
+        .replace(',', ".");
+    wall_clock::parse(&timestamp).and_then(wall_clock::comparison_key)
+}
+
+pub(crate) fn event_time_range(content: &str) -> (Option<i64>, Option<i64>) {
+    content
+        .lines()
+        .filter_map(parse_event_time_ms)
+        .fold((None, None), |(start, end), timestamp| {
+            (
+                Some(start.map_or(timestamp, |current: i64| current.min(timestamp))),
+                Some(end.map_or(timestamp, |current: i64| current.max(timestamp))),
+            )
+        })
+}
 
 pub struct ProcessFileOptions<'a> {
     pub pool: &'a sqlx::SqlitePool,
@@ -631,6 +662,8 @@ struct LogChunk {
     chunk_index: i64,
     line_start: Option<i64>,
     line_end: Option<i64>,
+    event_time_start_ms: Option<i64>,
+    event_time_end_ms: Option<i64>,
     content: String,
     content_bytes: usize,
     line_count: usize,
@@ -668,6 +701,8 @@ impl LogChunk {
             chunk_index,
             line_start: None,
             line_end: None,
+            event_time_start_ms: None,
+            event_time_end_ms: None,
             content: String::with_capacity(content_capacity),
             content_bytes: 0,
             line_count: 0,
@@ -675,6 +710,16 @@ impl LogChunk {
     }
 
     fn push(&mut self, line_number: i64, content: String) {
+        if let Some(event_time_ms) = parse_event_time_ms(&content) {
+            self.event_time_start_ms = Some(
+                self.event_time_start_ms
+                    .map_or(event_time_ms, |current| current.min(event_time_ms)),
+            );
+            self.event_time_end_ms = Some(
+                self.event_time_end_ms
+                    .map_or(event_time_ms, |current| current.max(event_time_ms)),
+            );
+        }
         if self.line_start.is_none() {
             self.line_start = Some(line_number);
         }
@@ -718,7 +763,7 @@ async fn flush_log_chunks(
 ) -> Result<(), AppError> {
     for batch in chunks.chunks(SEGMENT_BATCH_SIZE) {
         let mut segments = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index) ",
+            "INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index, event_time_start_ms, event_time_end_ms, event_time_indexed) ",
         );
         segments.push_values(batch, |mut row, chunk| {
             row.push_bind(bundle_id)
@@ -727,7 +772,10 @@ async fn flush_log_chunks(
                 .push_bind(chunk.content())
                 .push_bind(chunk.line_start)
                 .push_bind(chunk.line_end)
-                .push_bind(chunk.chunk_index);
+                .push_bind(chunk.chunk_index)
+                .push_bind(chunk.event_time_start_ms)
+                .push_bind(chunk.event_time_end_ms)
+                .push_bind(1_i64);
         });
         segments.push(" RETURNING id, chunk_index");
         let returned = segments
@@ -790,10 +838,46 @@ mod tests {
     };
     use super::{
         ArchiveBudget, IndexBatchBudget, IssueQuota, LogChunk, PreparedDirectoryEntry,
-        archive_parent_depth, extract_gzip_file, extracted_directory_meta, extracted_entry_meta,
-        flush_log_chunks, gzip_output_name, insert_directory_children, insert_line_offsets,
-        sanitize_archive_path, uploaded_file_meta, validate_extracted_path,
+        archive_parent_depth, event_time_range, extract_gzip_file, extracted_directory_meta,
+        extracted_entry_meta, flush_log_chunks, gzip_output_name, insert_directory_children,
+        insert_line_offsets, parse_event_time_ms, sanitize_archive_path, uploaded_file_meta,
+        validate_extracted_path,
     };
+
+    #[test]
+    fn parses_wall_clock_event_timestamps_in_common_log_prefixes() {
+        let plain = parse_event_time_ms("2026-08-14 09:32:15.123 error");
+        let bracketed = parse_event_time_ms("[2026-08-14T09:32:15.123] error");
+        let level_prefixed = parse_event_time_ms("[E][2026-08-14 09:32:15.123][worker] error");
+
+        assert!(plain.is_some());
+        assert_eq!(bracketed, plain);
+        assert_eq!(level_prefixed, plain);
+        assert!(parse_event_time_ms("2026-08-14 09:32:15.124 error") > plain);
+    }
+
+    #[test]
+    fn ignores_timestamps_without_a_date_or_with_absolute_time_syntax() {
+        assert_eq!(parse_event_time_ms("09:32:15 error"), None);
+        assert_eq!(parse_event_time_ms("[E][09:32:15][worker] error"), None);
+        assert_eq!(parse_event_time_ms("2026-08-14T09:32:15Z message"), None);
+        assert_eq!(parse_event_time_ms("[2026-08-14 09:32:15 error"), None);
+        assert_eq!(
+            parse_event_time_ms("prefix 2026-08-14T09:32:15 message"),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_the_minimum_and_maximum_event_time_from_segment_content() {
+        let first = parse_event_time_ms("2026-08-14T09:32:15 first");
+        let second = parse_event_time_ms("2026-08-14T09:33:15 second");
+        let (start, end) =
+            event_time_range("2026-08-14T09:32:15 first\nnoise\n2026-08-14T09:33:15 second");
+
+        assert_eq!(start, first);
+        assert_eq!(end, second);
+    }
 
     #[test]
     fn index_batch_budget_commits_at_byte_target_and_resets() {
@@ -957,6 +1041,42 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(mapped, 125);
+    }
+
+    #[tokio::test]
+    async fn flush_persists_event_time_bounds_for_fresh_segments() {
+        let pool = quota_fixture("SEGMENTTIMES", &["bundle"]).await;
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('bundle', 'app.log', '/bundle-hash/app.log', 0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut chunk = LogChunk::new(0, 128);
+        chunk.push(0, "2026-08-14T09:32:15 first".into());
+        chunk.push(1, "2026-08-14T09:33:15 second".into());
+        let mut tx = pool.begin().await.unwrap();
+
+        flush_log_chunks(&mut tx, "bundle", file_id, &[chunk])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let bounds: (Option<i64>, Option<i64>, i64) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms, event_time_indexed FROM log_segments WHERE file_id = ?",
+        )
+        .bind(file_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            bounds,
+            (
+                parse_event_time_ms("2026-08-14T09:32:15 first"),
+                parse_event_time_ms("2026-08-14T09:33:15 second"),
+                1
+            )
+        );
     }
 
     #[tokio::test]
