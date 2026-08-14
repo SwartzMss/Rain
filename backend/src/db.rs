@@ -847,10 +847,8 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
     }
 
     ensure_skill_run_optional_columns(pool).await?;
-    let log_segment_columns_added = ensure_log_segment_optional_columns(pool).await?;
-    if log_segment_columns_added {
-        backfill_log_segment_event_times(pool).await?;
-    }
+    ensure_log_segment_optional_columns(pool).await?;
+    backfill_log_segment_event_times(pool).await?;
 
     let index_statements = [
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_runs_one_active_per_user ON skill_runs(user_id) WHERE status IN ('QUEUED', 'RUNNING')",
@@ -931,7 +929,7 @@ async fn ensure_skill_run_optional_columns(pool: &SqlitePool) -> Result<(), AppE
     Ok(())
 }
 
-async fn ensure_log_segment_optional_columns(pool: &SqlitePool) -> Result<bool, AppError> {
+async fn ensure_log_segment_optional_columns(pool: &SqlitePool) -> Result<(), AppError> {
     let existing: Vec<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info('log_segments')")
             .fetch_all(pool)
@@ -947,17 +945,15 @@ async fn ensure_log_segment_optional_columns(pool: &SqlitePool) -> Result<bool, 
             "ALTER TABLE log_segments ADD COLUMN event_time_end_ms INTEGER",
         ),
     ];
-    let mut added = false;
     for (column, statement) in columns {
         if !existing.iter().any(|name| name == column) {
             sqlx::query(statement)
                 .execute(pool)
                 .await
                 .map_err(AppError::Database)?;
-            added = true;
         }
     }
-    Ok(added)
+    Ok(())
 }
 
 async fn backfill_log_segment_event_times(pool: &SqlitePool) -> Result<(), AppError> {
@@ -1349,7 +1345,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("inspect late segment");
-        assert_eq!(late_bounds, (None, None));
+        assert_eq!(
+            late_bounds,
+            (Some(1_786_700_115_000), Some(1_786_700_115_000))
+        );
 
         let null_bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
             "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE content = 'not a dated log line'",
