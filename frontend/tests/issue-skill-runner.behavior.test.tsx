@@ -128,13 +128,47 @@ describe('issue skill runner', () => {
     expect(rainApi.cancelSkillRun).toHaveBeenCalledWith('run-1');
   });
 
-  it('shows the persisted analysis range for a completed run', async () => {
-    vi.mocked(rainApi.fetchSkills).mockResolvedValue([]);
+  it('shows the persisted canonical range for a completed scoped run', async () => {
+    vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '' }]);
     vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
-    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue({ id: 'run-1', user_id: 'user-1', issue_code: 'ISSUE-1', skill_id: 'skill-1', skill_version: 1, skill_name: '诊断', status: 'SUCCEEDED', iteration_count: 1, tool_call_count: 1, cancel_requested: false, created_at: '', analysis_start_time: '2026-08-14 09:27:15.000', analysis_end_time: '2026-08-14 09:37:15.000' });
+    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(null);
+    vi.mocked(rainApi.createSkillRun).mockResolvedValue({ id: 'run-1', user_id: 'user-1', issue_code: 'ISSUE-1', skill_id: 'skill-1', skill_version: 1, skill_name: '诊断', status: 'SUCCEEDED', iteration_count: 1, tool_call_count: 1, cancel_requested: false, created_at: '', analysis_start_time: '2026-08-14 18:01:00', analysis_end_time: '2026-08-14 18:11:00' });
 
+    const user = userEvent.setup();
     render(<IssueSkillRunner issueCode="ISSUE-1" onRevealEvidence={vi.fn()} />);
 
-    expect(await screen.findByText('分析范围：2026-08-14 09:27:15.000 至 2026-08-14 09:37:15.000')).toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: '事故时间' }));
+    await user.type(screen.getByLabelText('故障时间'), '2026-08-14T18:05');
+    await user.type(screen.getByLabelText('故障前分钟数'), '4');
+    await user.type(screen.getByLabelText('故障后分钟数'), '6');
+    await user.click(screen.getByRole('button', { name: '运行 Skill' }));
+
+    expect(rainApi.createSkillRun).toHaveBeenCalledWith('ISSUE-1', 'skill-1', {
+      incident_time: '2026-08-14T18:05',
+      before_minutes: 4,
+      after_minutes: 6
+    });
+    expect(await screen.findByText('上次运行分析范围：2026-08-14 18:01:00 至 2026-08-14 18:11:00')).toBeInTheDocument();
+  });
+
+  it('keeps an unscoped completed run separate from a newly edited incident configuration', async () => {
+    vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '' }]);
+    vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
+    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(null);
+    vi.mocked(rainApi.createSkillRun).mockResolvedValue({ id: 'run-1', user_id: 'user-1', issue_code: 'ISSUE-1', skill_id: 'skill-1', skill_version: 1, skill_name: '诊断', status: 'SUCCEEDED', iteration_count: 1, tool_call_count: 1, cancel_requested: false, created_at: '' });
+
+    const user = userEvent.setup();
+    render(<IssueSkillRunner issueCode="ISSUE-1" onRevealEvidence={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: '运行 Skill' }));
+    expect(await screen.findByText('上次运行分析范围：不限制时间')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('radio', { name: '事故时间' }));
+    await user.type(screen.getByLabelText('故障时间'), '2026-08-14T18:05');
+    await user.type(screen.getByLabelText('故障前分钟数'), '4');
+    await user.type(screen.getByLabelText('故障后分钟数'), '6');
+
+    expect(screen.getByText('上次运行分析范围：不限制时间')).toBeInTheDocument();
+    expect(rainApi.createSkillRun).toHaveBeenCalledWith('ISSUE-1', 'skill-1', undefined);
   });
 });

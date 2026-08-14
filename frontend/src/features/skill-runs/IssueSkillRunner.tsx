@@ -49,10 +49,11 @@ export function IssueSkillRunner({ issueCode, onRevealEvidence }: { issueCode: s
     return null;
   };
 
+  const analysisRangeLabel = state.active ? '本次运行分析范围' : '上次运行分析范围';
   const analysisRange = state.run
     ? state.run.analysis_start_time && state.run.analysis_end_time
-      ? `分析范围：${state.run.analysis_start_time} 至 ${state.run.analysis_end_time}`
-      : '分析范围：不限制时间'
+      ? `${analysisRangeLabel}：${state.run.analysis_start_time} 至 ${state.run.analysis_end_time}`
+      : `${analysisRangeLabel}：不限制时间`
     : null;
 
   return (
@@ -65,7 +66,7 @@ export function IssueSkillRunner({ issueCode, onRevealEvidence }: { issueCode: s
         </div>
       </div>
       <fieldset className="mt-4" disabled={state.active}>
-        <legend className="text-xs font-medium text-slate-600">分析时间范围</legend>
+        <legend className="text-xs font-medium text-slate-600">下一次 Run 的待提交时间范围</legend>
         <div className="mt-2 flex flex-wrap gap-4 text-sm text-slate-700">
           <label className="flex items-center gap-2"><input type="radio" name={`skill-run-time-mode-${issueCode}`} value="none" checked={timeMode === 'none'} onChange={() => setTimeMode('none')} />不限制时间</label>
           <label className="flex items-center gap-2"><input type="radio" name={`skill-run-time-mode-${issueCode}`} value="incident" checked={timeMode === 'incident'} onChange={() => setTimeMode('incident')} />事故时间</label>
