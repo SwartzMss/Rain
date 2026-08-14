@@ -39,7 +39,7 @@ const LINE_OFFSET_BATCH_SIZE: usize = 500;
 const SEGMENT_BATCH_SIZE: usize = 100;
 static EVENT_TIMESTAMP_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"^\[?(?<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))(?:\]|(?:\s|$))",
+        r"^(?:\[(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))\]|(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:Z|[+-]\d{2}:\d{2})))(?:\s|$)",
     )
     .expect("valid event timestamp pattern")
 });
@@ -48,7 +48,7 @@ pub use quota::IssueQuota;
 pub(crate) fn parse_event_time_ms(line: &str) -> Option<i64> {
     let timestamp = EVENT_TIMESTAMP_PATTERN
         .captures(line)
-        .and_then(|captures| captures.name("timestamp"))?
+        .and_then(|captures| captures.get(1).or_else(|| captures.get(2)))?
         .as_str()
         .replace(' ', "T")
         .replace(',', ".");
@@ -855,6 +855,7 @@ mod tests {
             parse_event_time_ms("[2026-08-14 09:32:15Z] error"),
             Some(1_786_699_935_000)
         );
+        assert_eq!(parse_event_time_ms("[2026-08-14 09:32:15Z error"), None);
         assert_eq!(
             parse_event_time_ms("2026-08-14 09:32:15,123-04:00 message"),
             Some(1_786_714_335_123)
