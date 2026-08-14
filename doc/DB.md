@@ -71,7 +71,7 @@
 - `line_end` INTEGER：chunk 结束原始行号，从 0 开始。
 - `chunk_index` INTEGER：文件内 chunk 序号，从 0 开始。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
-- 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`、`idx_log_segments_event_time`；全文检索走 `log_segments_fts`。带时间范围的 Skill Run 仅选择两个事件时间边界均已知且与主窗口相交的 chunk。
+- 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`、`idx_logs_file_event_time`；全文检索走 `log_segments_fts`。带时间范围的 Skill Run 仅选择两个事件时间边界均已知且与主窗口相交的 chunk。
 
 ## 表：log_line_offsets
 
