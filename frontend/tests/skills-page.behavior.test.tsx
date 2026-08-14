@@ -161,8 +161,10 @@ describe('skills page detail loading', () => {
 
     const editor = screen.getByLabelText('SKILL.md');
     expect(editor).toHaveValue(DEFAULT_SKILL_MARKDOWN);
+    expect((editor as HTMLTextAreaElement).value).toContain('# 领域判定规则');
     expect(screen.getAllByLabelText('SKILL.md')).toHaveLength(1);
     expect(screen.getByText('schema_version: 1')).toBeInTheDocument();
+    expect(screen.getByText(/领域判定规则只描述业务信号与诊断结论的关系/)).toBeInTheDocument();
     const requiredSections = screen.getByRole('list', { name: '标准中文必填章节' });
     for (const section of REQUIRED_SKILL_SECTIONS) expect(requiredSections).toHaveTextContent(`# ${section}`);
   });

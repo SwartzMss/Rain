@@ -31,7 +31,8 @@ export function SkillEditor({ skill, saving, onSave, onCancel }: { skill?: UserS
       <label className="block text-sm font-medium">描述<textarea className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2" maxLength={1000} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} /></label>
       <div className="rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-xs text-slate-700">
         <p className="font-semibold text-cyan-900">v1 必填一级章节</p>
-        <p className="mt-1 text-slate-600">标题必须严格匹配，每个章节的正文都不能为空。可以继续添加其他自定义章节。</p>
+        <p className="mt-1 text-slate-600">标题必须严格匹配，每个章节的正文都不能为空。可以继续添加其他自定义章节，例如 <code># 领域判定规则</code>。</p>
+        <p className="mt-1 text-slate-600">领域判定规则只描述业务信号与诊断结论的关系；检索、证据和停止策略由平台统一处理。</p>
         <ul aria-label="标准中文必填章节" className="mt-2 flex flex-wrap gap-1.5">
           {REQUIRED_SKILL_SECTIONS.map((section) => <li className="rounded bg-white px-2 py-1 font-mono text-slate-700" key={section}># {section}</li>)}
         </ul>
