@@ -7,7 +7,7 @@ describe('skill run time scope conversion', () => {
     expect(toSkillRunTimeScope({ mode: 'none' })).toEqual({ scope: null, error: null });
   });
 
-  it('converts an incident time and before/after minutes to UTC RFC3339', () => {
+  it('converts an incident time and before/after minutes to local wall-clock strings', () => {
     const result = toSkillRunTimeScope({
       mode: 'incident',
       incidentTime: '2026-08-14T09:30',
@@ -16,21 +16,52 @@ describe('skill run time scope conversion', () => {
     });
 
     expect(result.error).toBeNull();
-    expect(result.scope?.end).toBe(new Date('2026-08-14T09:40').toISOString());
-    expect(result.scope?.start).toBe(new Date('2026-08-14T09:25').toISOString());
+    expect(result.scope).toEqual({
+      start: '2026-08-14 09:25:00.000',
+      end: '2026-08-14 09:40:00.000'
+    });
+    expect(result.scope?.start).not.toMatch(/[zZ]|[+-]\d\d:?\d\d$/);
   });
 
-  it('converts a direct range and rejects missing, equal, or reversed dates', () => {
+  it('preserves wall-clock fields when converting a direct range', () => {
     expect(toSkillRunTimeScope({ mode: 'range', start: '2026-08-14T09:00', end: '2026-08-14T10:00' })).toEqual({
       scope: {
-        start: new Date('2026-08-14T09:00').toISOString(),
-        end: new Date('2026-08-14T10:00').toISOString()
+        start: '2026-08-14 09:00:00.000',
+        end: '2026-08-14 10:00:00.000'
       },
       error: null
     });
+    expect(toSkillRunTimeScope({ mode: 'range', start: '2026-08-14 09:00:15.125', end: '2026-08-14 09:30:15.5' })).toEqual({
+      scope: {
+        start: '2026-08-14 09:00:15.125',
+        end: '2026-08-14 09:30:15.500'
+      },
+      error: null
+    });
+  });
+
+  it('supports wall-clock arithmetic across a calendar boundary', () => {
+    expect(toSkillRunTimeScope({
+      mode: 'incident',
+      incidentTime: '2026-08-14T00:05:15.250',
+      beforeMinutes: '10',
+      afterMinutes: '5'
+    })).toEqual({
+      scope: {
+        start: '2026-08-13 23:55:15.250',
+        end: '2026-08-14 00:10:15.250'
+      },
+      error: null
+    });
+  });
+
+  it('rejects missing, equal, reversed, invalid, or overlong ranges', () => {
     expect(toSkillRunTimeScope({ mode: 'range', start: '', end: '2026-08-14T10:00' }).error).toBeTruthy();
     expect(toSkillRunTimeScope({ mode: 'range', start: '2026-08-14T10:00', end: '2026-08-14T10:00' }).error).toBeTruthy();
     expect(toSkillRunTimeScope({ mode: 'range', start: '2026-08-14T11:00', end: '2026-08-14T10:00' }).error).toBeTruthy();
+    expect(toSkillRunTimeScope({ mode: 'range', start: '2026-02-30T10:00', end: '2026-03-01T10:00' }).error).toBeTruthy();
+    expect(toSkillRunTimeScope({ mode: 'range', start: '2026-08-14T09:00', end: '2026-08-15T09:00:00.001' }).error).toBeTruthy();
+    expect(toSkillRunTimeScope({ mode: 'range', start: '2026-08-14T09:00+08:00', end: '2026-08-14T10:00+08:00' }).error).toBeTruthy();
   });
 
   it('rejects invalid incident margins and windows longer than 24 hours', () => {
@@ -49,7 +80,7 @@ describe('skill run API time scope payload', () => {
   });
 
   it('sends the optional scope and keeps the explicit null payload for unscoped runs', async () => {
-    const scope = { start: '2026-08-14T01:27:15.000Z', end: '2026-08-14T01:37:15.000Z' };
+    const scope = { start: '2026-08-14 09:27:15.000', end: '2026-08-14 09:37:15.000' };
 
     await rainApi.createSkillRun('issue-1', 'skill-1', scope);
     await rainApi.createSkillRun('issue-1', 'skill-1');
