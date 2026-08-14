@@ -765,7 +765,7 @@ async fn flush_log_chunks(
 ) -> Result<(), AppError> {
     for batch in chunks.chunks(SEGMENT_BATCH_SIZE) {
         let mut segments = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index, event_time_start_ms, event_time_end_ms) ",
+            "INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index, event_time_start_ms, event_time_end_ms, event_time_indexed) ",
         );
         segments.push_values(batch, |mut row, chunk| {
             row.push_bind(bundle_id)
@@ -776,7 +776,8 @@ async fn flush_log_chunks(
                 .push_bind(chunk.line_end)
                 .push_bind(chunk.chunk_index)
                 .push_bind(chunk.event_time_start_ms)
-                .push_bind(chunk.event_time_end_ms);
+                .push_bind(chunk.event_time_end_ms)
+                .push_bind(1_i64);
         });
         segments.push(" RETURNING id, chunk_index");
         let returned = segments
@@ -1064,14 +1065,17 @@ mod tests {
             .unwrap();
         tx.commit().await.unwrap();
 
-        let bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
-            "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE file_id = ?",
+        let bounds: (Option<i64>, Option<i64>, i64) = sqlx::query_as(
+            "SELECT event_time_start_ms, event_time_end_ms, event_time_indexed FROM log_segments WHERE file_id = ?",
         )
         .bind(file_id)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(bounds, (Some(1_786_699_935_000), Some(1_786_699_995_000)));
+        assert_eq!(
+            bounds,
+            (Some(1_786_699_935_000), Some(1_786_699_995_000), 1)
+        );
     }
 
     #[tokio::test]

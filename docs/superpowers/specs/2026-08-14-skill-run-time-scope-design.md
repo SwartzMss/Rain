@@ -42,7 +42,7 @@ Run 记录保存 `analysis_start_time`、`analysis_end_time` 以及内部的毫�
 
 当前 `log_segments.timeline` 固定为 `all`，不能用于比较时间。因此在 `log_segments` 增加可空的 `event_time_start_ms` 和 `event_time_end_ms`。索引器在构建每个 segment 时从带有明确日期和时区的常见 RFC3339/ISO-8601 行首时间戳中提取最小和最大时间；无法解析的行不臆测时区，保持为空。一个 segment 可以包含多行，因此 segment 的时间范围是候选过滤范围，最终事实仍由 `read_file_lines` 验证。
 
-旧数据库启动时通过幂等 schema ensure 补列，并对已有 segment 做一次 best-effort 回填；无法解析的历史内容保持空值。无时间范围的搜索完全不增加时间条件，兼容既有数据和行为。
+旧数据库启动时通过幂等 schema ensure 补列，并为 `event_time_indexed` 使用 `0` 默认值。历史 segment 按 `id` keyset 分批回填，每批使用独立事务；成功处理后即使无法解析也将 `event_time_indexed` 置为 `1`，从而区分“已尝试但没有标准化时间”和“尚未处理”。事务失败会回滚该批，后续启动可从状态为 `0` 的记录继续。回填使用 `COALESCE` 保留已有部分边界，不更新正文或 FTS；无时间范围的搜索完全不增加时间条件，兼容既有数据和行为。
 
 ### Server-bound search scope
 

@@ -66,12 +66,14 @@
 - `timeline` TEXT：旧的时间轴展示标签，当前固定为 `all`，不参与时间比较。
 - `event_time_start_ms` INTEGER NULL：chunk 中可解析事件时间的最早 Unix epoch 毫秒值。
 - `event_time_end_ms` INTEGER NULL：chunk 中可解析事件时间的最晚 Unix epoch 毫秒值；无法解析明确日期和时区时保持 NULL。
+- `event_time_indexed` INTEGER NOT NULL DEFAULT 0：事件时间索引处理状态。新写入的 chunk 在完成时间范围提取后为 `1`；历史回填即使无法解析时间也会置为 `1`，因此 `NULL` 边界表示“无可标准化时间”，不表示尚未尝试。
 - `content` TEXT：日志 chunk 内容，通常最多 200 行，已去空行和空字节。
 - `line_offset` INTEGER：chunk 起始原始行号，从 0 开始。
 - `line_end` INTEGER：chunk 结束原始行号，从 0 开始。
 - `chunk_index` INTEGER：文件内 chunk 序号，从 0 开始。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 - 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`、`idx_logs_file_event_time`；全文检索走 `log_segments_fts`。带时间范围的 Skill Run 仅选择两个事件时间边界均已知且与主窗口相交的 chunk。
+- 旧数据库启动时通过幂等 schema ensure 补列，`event_time_indexed` 默认 `0`；历史回填按 `id` keyset 分批，每批使用独立事务，只处理状态为 `0` 的记录。事务失败会回滚该批，下一次启动可继续；成功处理但无法解析的记录保留 NULL 边界并标记为 `1`。回填使用 `COALESCE`，不会覆盖已有部分边界，也不会更新正文，因此不触发 FTS 内容重建。
 
 ## 表：log_line_offsets
 
