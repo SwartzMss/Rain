@@ -119,10 +119,10 @@ describe('issue skill runner', () => {
   it('shows the persisted analysis range for a completed run', async () => {
     vi.mocked(rainApi.fetchSkills).mockResolvedValue([]);
     vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
-    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue({ id: 'run-1', user_id: 'user-1', issue_code: 'ISSUE-1', skill_id: 'skill-1', skill_version: 1, skill_name: '诊断', status: 'SUCCEEDED', iteration_count: 1, tool_call_count: 1, cancel_requested: false, created_at: '', analysis_start_time: '2026-08-14T01:27:15.000Z', analysis_end_time: '2026-08-14T01:37:15.000Z' });
+    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue({ id: 'run-1', user_id: 'user-1', issue_code: 'ISSUE-1', skill_id: 'skill-1', skill_version: 1, skill_name: '诊断', status: 'SUCCEEDED', iteration_count: 1, tool_call_count: 1, cancel_requested: false, created_at: '', analysis_start_time: '2026-08-14 09:27:15.000', analysis_end_time: '2026-08-14 09:37:15.000' });
 
     render(<IssueSkillRunner issueCode="ISSUE-1" onRevealEvidence={vi.fn()} />);
 
-    expect(await screen.findByText('分析范围：2026-08-14T01:27:15.000Z 至 2026-08-14T01:37:15.000Z')).toBeInTheDocument();
+    expect(await screen.findByText('分析范围：2026-08-14 09:27:15.000 至 2026-08-14 09:37:15.000')).toBeInTheDocument();
   });
 });

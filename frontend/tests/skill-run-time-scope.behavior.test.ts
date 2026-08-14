@@ -55,6 +55,66 @@ describe('skill run time scope conversion', () => {
     });
   });
 
+  it('moves backward across leap-year February', () => {
+    expect(toSkillRunTimeScope({
+      mode: 'incident',
+      incidentTime: '2024-03-01T00:05',
+      beforeMinutes: 10,
+      afterMinutes: 10
+    })).toEqual({
+      scope: {
+        start: '2024-02-29 23:55:00.000',
+        end: '2024-03-01 00:15:00.000'
+      },
+      error: null
+    });
+  });
+
+  it('moves backward across February in a non-leap year', () => {
+    expect(toSkillRunTimeScope({
+      mode: 'incident',
+      incidentTime: '2023-03-01T00:05',
+      beforeMinutes: 10,
+      afterMinutes: 10
+    })).toEqual({
+      scope: {
+        start: '2023-02-28 23:55:00.000',
+        end: '2023-03-01 00:15:00.000'
+      },
+      error: null
+    });
+  });
+
+  it('moves backward across a year boundary', () => {
+    expect(toSkillRunTimeScope({
+      mode: 'incident',
+      incidentTime: '2024-01-01T00:05',
+      beforeMinutes: 10,
+      afterMinutes: 10
+    })).toEqual({
+      scope: {
+        start: '2023-12-31 23:55:00.000',
+        end: '2024-01-01 00:15:00.000'
+      },
+      error: null
+    });
+  });
+
+  it('handles reverse month crossing when subtracting incident minutes', () => {
+    expect(toSkillRunTimeScope({
+      mode: 'incident',
+      incidentTime: '2024-05-01T00:30',
+      beforeMinutes: 90,
+      afterMinutes: 30
+    })).toEqual({
+      scope: {
+        start: '2024-04-30 23:00:00.000',
+        end: '2024-05-01 01:00:00.000'
+      },
+      error: null
+    });
+  });
+
   it('rejects missing, equal, reversed, invalid, or overlong ranges', () => {
     expect(toSkillRunTimeScope({ mode: 'range', start: '', end: '2026-08-14T10:00' }).error).toBeTruthy();
     expect(toSkillRunTimeScope({ mode: 'range', start: '2026-08-14T10:00', end: '2026-08-14T10:00' }).error).toBeTruthy();
