@@ -519,7 +519,7 @@ impl<'a> SkillToolExecutor<'a> {
         };
         if !self.ledger.searches.insert(key) {
             return Ok(
-                json!({ "search_mode": search_mode.as_str(), "duplicate": true, "hits": [], "truncated": false, "time_scope": applied_scope.as_ref().map(time_scope_json).unwrap_or(Value::Null) }),
+                json!({ "search_mode": search_mode.as_str(), "duplicate": true, "hits": [], "truncated": false, "time_scope": applied_scope.as_ref().map(time_scope_json).unwrap_or(Value::Null), "time_index_coverage": Value::Null }),
             );
         }
         #[derive(FromRow)]
@@ -545,10 +545,12 @@ impl<'a> SkillToolExecutor<'a> {
             .map(|value| format!("{}%", escape_like_pattern(value)));
         let max_hits = self.state.limits.api.max_search_results.clamp(1, 20);
         let fetch_limit = max_hits.saturating_add(1);
-        let total_hits: i64 = if search_mode == SearchMode::ShortLiteral {
+        let has_unindexed_matches = if applied_scope.is_some()
+            && search_mode == SearchMode::ShortLiteral
+        {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR (ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE",
+            let marker: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE LIMIT 1",
             )
             .bind(&self.context.issue_code)
             .bind(file_id.expect("short search file_id was validated"))
@@ -556,17 +558,15 @@ impl<'a> SkillToolExecutor<'a> {
             .bind(bundle_hash.as_deref())
             .bind(path_pattern.as_deref())
             .bind(path_pattern.as_deref())
-            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
-            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
-            .bind(applied_scope.as_ref().map(|scope| scope.end_ms))
             .bind(literal_pattern)
-            .fetch_one(&self.state.db.pool)
+            .fetch_optional(&self.state.db.pool)
             .await
-            .map_err(AppError::Database)?
-        } else {
+            .map_err(AppError::Database)?;
+            marker.is_some()
+        } else if applied_scope.is_some() {
             let fts = format!("\"{}\"", query.replace('"', "\"\""));
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (? IS NULL OR (ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?))",
+            let marker: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) LIMIT 1",
             )
             .bind(fts)
             .bind(&self.context.issue_code)
@@ -576,12 +576,12 @@ impl<'a> SkillToolExecutor<'a> {
             .bind(path_pattern.as_deref())
             .bind(file_id)
             .bind(file_id)
-            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
-            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
-            .bind(applied_scope.as_ref().map(|scope| scope.end_ms))
-            .fetch_one(&self.state.db.pool)
+            .fetch_optional(&self.state.db.pool)
             .await
-            .map_err(AppError::Database)?
+            .map_err(AppError::Database)?;
+            marker.is_some()
+        } else {
+            false
         };
         let rows: Vec<HitRow> = if search_mode == SearchMode::ShortLiteral {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
@@ -624,7 +624,7 @@ impl<'a> SkillToolExecutor<'a> {
             .await
             .map_err(AppError::Database)?
         };
-        let mut truncated = total_hits > max_hits;
+        let mut truncated = rows.len() > max_hits as usize;
         let mut hits: Vec<Hit> = rows
             .into_iter()
             .take(max_hits as usize)
@@ -638,7 +638,7 @@ impl<'a> SkillToolExecutor<'a> {
             })
             .collect();
         let value = loop {
-            let candidate = json!({ "search_mode": search_mode.as_str(), "hits": hits, "truncated": truncated, "time_scope": applied_scope.as_ref().map(time_scope_json).unwrap_or(Value::Null) });
+            let candidate = json!({ "search_mode": search_mode.as_str(), "hits": hits, "truncated": truncated, "time_scope": applied_scope.as_ref().map(time_scope_json).unwrap_or(Value::Null), "time_index_coverage": applied_scope.as_ref().map(|_| json!({ "complete": !has_unindexed_matches, "excluded_unindexed_matches": has_unindexed_matches })).unwrap_or(Value::Null) });
             let size = serde_json::to_vec(&candidate)
                 .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
                 .len();

@@ -576,7 +576,8 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index,event_time_start_ms,event_time_end_ms) VALUES('a',?,'timeout inside',0,0,0,1000000,1060000),('a',?,'timeout outside',1,1,1,1660000,1661000),('a',?,'timeout unknown time',2,2,2,NULL,NULL)")
+    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index,event_time_start_ms,event_time_end_ms) VALUES('a',?,'timeout inside',0,0,0,1000000,1060000),('a',?,'timeout outside',1,1,1,1660000,1661000),('a',?,'timeout unknown time',2,2,2,NULL,NULL),('a',?,'in unindexed',3,3,3,NULL,NULL)")
+        .bind(file_id)
         .bind(file_id)
         .bind(file_id)
         .bind(file_id)
@@ -605,14 +606,35 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
         .await
         .unwrap();
     assert_eq!(scoped_fts["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(scoped_fts["time_index_coverage"]["complete"], false);
+    assert_eq!(
+        scoped_fts["time_index_coverage"]["excluded_unindexed_matches"],
+        true
+    );
     assert_eq!(scoped_fts["time_scope"]["start_ms"], scope.start_ms);
     assert_eq!(scoped_fts["time_scope"]["end_ms"], scope.end_ms);
+
+    let only_unindexed = scoped
+        .search_logs_with_expansion("unknown", None, None, None, None)
+        .await
+        .unwrap();
+    assert!(only_unindexed["hits"].as_array().unwrap().is_empty());
+    assert_eq!(only_unindexed["time_index_coverage"]["complete"], false);
+    assert_eq!(
+        only_unindexed["time_index_coverage"]["excluded_unindexed_matches"],
+        true
+    );
 
     let scoped_short = scoped
         .search_logs_with_expansion("in", None, None, Some(file_id), None)
         .await
         .unwrap();
     assert_eq!(scoped_short["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(scoped_short["time_index_coverage"]["complete"], false);
+    assert_eq!(
+        scoped_short["time_index_coverage"]["excluded_unindexed_matches"],
+        true
+    );
 
     let mut expanded = SkillToolExecutor::new(
         &state,
@@ -654,6 +676,7 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
         .unwrap();
     assert_eq!(unscoped_result["hits"].as_array().unwrap().len(), 3);
     assert!(unscoped_result["time_scope"].is_null());
+    assert!(unscoped_result["time_index_coverage"].is_null());
 }
 
 #[tokio::test]
