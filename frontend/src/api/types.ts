@@ -265,6 +265,19 @@ export interface SkillRunTimeScope {
   end: string;
 }
 
+export interface SkillRunIncidentTimeScopeRequest {
+  incident_time: string;
+  before_minutes: number;
+  after_minutes: number;
+}
+
+export interface SkillRunRangeTimeScopeRequest {
+  start: string;
+  end: string;
+}
+
+export type SkillRunTimeScopeRequest = SkillRunIncidentTimeScopeRequest | SkillRunRangeTimeScopeRequest;
+
 export interface SkillRun {
   id: string;
   user_id: string;

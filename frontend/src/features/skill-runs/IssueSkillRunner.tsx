@@ -18,8 +18,8 @@ export function IssueSkillRunner({ issueCode, onRevealEvidence }: { issueCode: s
   const [rangeStart, setRangeStart] = useState('');
   const [rangeEnd, setRangeEnd] = useState('');
   const state = useSkillRun(issueCode);
-  const timeScope = toSkillRunTimeScope({ mode: timeMode, incidentTime, beforeMinutes, afterMinutes, start: rangeStart, end: rangeEnd });
-  const canRun = Boolean(selected) && providerReady && !state.active && !timeScope.error;
+  const timeScopeRequest = toSkillRunTimeScope({ mode: timeMode, incidentTime, beforeMinutes, afterMinutes, start: rangeStart, end: rangeEnd });
+  const canRun = Boolean(selected) && providerReady && !state.active && !timeScopeRequest.error;
   useEffect(() => {
     Promise.all([rainApi.fetchSkills(), rainApi.fetchAiProviderStatus()]).then(([items, provider]) => {
       const enabled = items.filter((item) => item.enabled);
@@ -29,7 +29,7 @@ export function IssueSkillRunner({ issueCode, onRevealEvidence }: { issueCode: s
 
   const start = () => {
     if (!canRun) return;
-    void state.start(selected, timeScope.scope ?? undefined);
+    void state.start(selected, timeScopeRequest.scope ?? undefined);
   };
 
   const renderScopeInputs = () => {
@@ -73,7 +73,7 @@ export function IssueSkillRunner({ issueCode, onRevealEvidence }: { issueCode: s
         </div>
         {renderScopeInputs()}
       </fieldset>
-      {timeScope.error ? <p className="mt-2 text-sm text-rose-700" role="alert">{timeScope.error}</p> : null}
+      {timeScopeRequest.error ? <p className="mt-2 text-sm text-rose-700" role="alert">{timeScopeRequest.error}</p> : null}
       {loaded && !providerReady && !loadError ? <p className="mt-3 text-sm text-amber-700">管理员尚未配置 AI Provider。</p> : null}
       {loaded && providerReady && skills.length === 0 && !loadError ? <p className="mt-3 text-sm text-amber-700">你还没有已启用的 Skill，请先到“我的 Skills”创建或启用。</p> : null}
       {state.run ? <p className="mt-3 text-xs text-slate-500">{state.run.issue_code === issueCode ? '状态' : `已有 ${state.run.issue_code} 的活动任务`}：{state.run.status} · 迭代 {state.run.iteration_count}/8 · 工具调用 {state.run.tool_call_count}/24</p> : null}

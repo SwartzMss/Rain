@@ -51,6 +51,7 @@ async fn scoped_skill_run_persists_wall_clock_analysis_window() {
     let scope = parse_time_scope(Some(TimeScopeInput {
         start: Some("2026-08-14 09:27:15".into()),
         end: Some("2026-08-14T09:37:15".into()),
+        ..Default::default()
     }))
     .unwrap()
     .unwrap();

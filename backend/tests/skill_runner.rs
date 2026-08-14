@@ -255,6 +255,7 @@ async fn runner_places_persisted_scope_only_in_trusted_prompt() {
     let scope = parse_time_scope(Some(TimeScopeInput {
         start: Some("2026-08-14 09:27:15".into()),
         end: Some("2026-08-14 09:37:15".into()),
+        ..Default::default()
     }))
     .unwrap()
     .unwrap();

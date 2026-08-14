@@ -579,24 +579,28 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
     let scope = parse_time_scope(Some(TimeScopeInput {
         start: Some("2026-08-14 09:30:00".into()),
         end: Some("2026-08-14 09:40:00".into()),
+        ..Default::default()
     }))
     .unwrap()
     .unwrap();
     let timeout_inside = parse_time_scope(Some(TimeScopeInput {
         start: Some("2026-08-14 09:32:15".into()),
         end: Some("2026-08-14 09:32:16".into()),
+        ..Default::default()
     }))
     .unwrap()
     .unwrap();
     let timeout_outside = parse_time_scope(Some(TimeScopeInput {
         start: Some("2026-08-14 09:50:00".into()),
         end: Some("2026-08-14 09:50:01".into()),
+        ..Default::default()
     }))
     .unwrap()
     .unwrap();
     let pending_inside = parse_time_scope(Some(TimeScopeInput {
         start: Some("2026-08-14 09:35:00".into()),
         end: Some("2026-08-14 09:35:01".into()),
+        ..Default::default()
     }))
     .unwrap()
     .unwrap();

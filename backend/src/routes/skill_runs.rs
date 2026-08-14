@@ -26,11 +26,15 @@ pub struct CreateSkillRun {
 fn invalid_time_scope(error: TimeScopeError) -> AppError {
     let message = match error {
         TimeScopeError::InvalidTimestamp => {
-            "time_scope 的 start 和 end 必须是本地日志时间，例如 2026-08-14 09:32:15"
+            "time_scope 支持 {start,end} 或 {incident_time,before_minutes,after_minutes}；时间必须是本地日志时间，例如 2026-08-14 09:32:15"
         }
-        TimeScopeError::InvalidRange => "time_scope 的 start 必须早于 end",
+        TimeScopeError::InvalidRange => {
+            "time_scope 的 range 必须 start 早于 end，incident window 必须覆盖正向时间范围"
+        }
         TimeScopeError::TooLarge => "time_scope 的时间跨度不能超过 24 小时",
-        TimeScopeError::InvalidExpansion => "time_scope 的扩展范围必须在 0 到 15 分钟之间",
+        TimeScopeError::InvalidExpansion => {
+            "time_scope 的 incident before_minutes 和 after_minutes 必须为非负分钟数"
+        }
         TimeScopeError::ArithmeticOverflow => "time_scope 的时间范围超出支持的时间边界",
     };
     AppError::public(StatusCode::BAD_REQUEST, "INVALID_TIME_SCOPE", message)

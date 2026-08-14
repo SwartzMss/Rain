@@ -1,14 +1,18 @@
-use chrono::{Datelike, Duration, NaiveDateTime, Timelike};
+use chrono::{Duration, NaiveDateTime};
 use serde::Deserialize;
 use thiserror::Error;
 
-pub const MAX_CONTEXT_EXPANSION_MINUTES: i64 = 15;
-const MILLIS_PER_SECOND: i64 = 1_000;
+use super::wall_clock;
 
-#[derive(Debug, Clone, Deserialize)]
+pub const MAX_CONTEXT_EXPANSION_MINUTES: i64 = 15;
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TimeScopeInput {
     pub start: Option<String>,
     pub end: Option<String>,
+    pub incident_time: Option<String>,
+    pub before_minutes: Option<i64>,
+    pub after_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,8 +48,40 @@ pub fn parse_time_scope(
         return Ok(None);
     };
 
-    let start = parse_timestamp(input.start.as_deref())?;
-    let end = parse_timestamp(input.end.as_deref())?;
+    let has_range_fields = input.start.is_some() || input.end.is_some();
+    let has_incident_fields = input.incident_time.is_some()
+        || input.before_minutes.is_some()
+        || input.after_minutes.is_some();
+
+    let (start, end) = if has_incident_fields {
+        if has_range_fields
+            || input.incident_time.is_none()
+            || input.before_minutes.is_none()
+            || input.after_minutes.is_none()
+        {
+            return Err(TimeScopeError::InvalidTimestamp);
+        }
+
+        let incident = parse_timestamp(input.incident_time.as_deref())?;
+        let before_minutes = input.before_minutes.unwrap();
+        let after_minutes = input.after_minutes.unwrap();
+        if before_minutes < 0 || after_minutes < 0 {
+            return Err(TimeScopeError::InvalidExpansion);
+        }
+
+        let start = incident
+            .checked_sub_signed(Duration::minutes(before_minutes))
+            .ok_or(TimeScopeError::ArithmeticOverflow)?;
+        let end = incident
+            .checked_add_signed(Duration::minutes(after_minutes))
+            .ok_or(TimeScopeError::ArithmeticOverflow)?;
+        (start, end)
+    } else {
+        (
+            parse_timestamp(input.start.as_deref())?,
+            parse_timestamp(input.end.as_deref())?,
+        )
+    };
 
     if start >= end {
         return Err(TimeScopeError::InvalidRange);
@@ -55,12 +91,12 @@ pub fn parse_time_scope(
         return Err(TimeScopeError::TooLarge);
     }
 
-    let start_ms = wall_clock_comparison_key(start)?;
-    let end_ms = wall_clock_comparison_key(end)?;
+    let start_ms = wall_clock::comparison_key(start).ok_or(TimeScopeError::ArithmeticOverflow)?;
+    let end_ms = wall_clock::comparison_key(end).ok_or(TimeScopeError::ArithmeticOverflow)?;
 
     Ok(Some(SkillTimeScope {
-        start: format_wall_clock(start),
-        end: format_wall_clock(end),
+        start: wall_clock::format(start),
+        end: wall_clock::format(end),
         start_ms,
         end_ms,
     }))
@@ -72,8 +108,8 @@ impl SkillTimeScope {
             return Err(TimeScopeError::InvalidExpansion);
         }
 
-        let start = parse_timestamp(Some(&self.start))?;
-        let end = parse_timestamp(Some(&self.end))?;
+        let start = wall_clock::parse(&self.start).ok_or(TimeScopeError::InvalidTimestamp)?;
+        let end = wall_clock::parse(&self.end).ok_or(TimeScopeError::InvalidTimestamp)?;
         let expansion = Duration::minutes(minutes);
         let start = start
             .checked_sub_signed(expansion)
@@ -81,12 +117,12 @@ impl SkillTimeScope {
         let end = end
             .checked_add_signed(expansion)
             .ok_or(TimeScopeError::ArithmeticOverflow)?;
-        let start_ms = wall_clock_comparison_key(start)?;
-        let end_ms = wall_clock_comparison_key(end)?;
+        let start_ms = wall_clock::comparison_key(start).ok_or(TimeScopeError::ArithmeticOverflow)?;
+        let end_ms = wall_clock::comparison_key(end).ok_or(TimeScopeError::ArithmeticOverflow)?;
 
         Ok(Self {
-            start: format_wall_clock(start),
-            end: format_wall_clock(end),
+            start: wall_clock::format(start),
+            end: wall_clock::format(end),
             start_ms,
             end_ms,
         })
@@ -98,54 +134,7 @@ fn parse_timestamp(value: Option<&str>) -> Result<NaiveDateTime, TimeScopeError>
         return Err(TimeScopeError::InvalidTimestamp);
     };
 
-    let parsed = [
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%dT%H:%M",
-    ]
-    .into_iter()
-    .find_map(|format| NaiveDateTime::parse_from_str(value.trim(), format).ok())
-    .ok_or(TimeScopeError::InvalidTimestamp)?;
-    parsed
-        .with_nanosecond((parsed.nanosecond() / 1_000_000) * 1_000_000)
-        .ok_or(TimeScopeError::InvalidTimestamp)
-}
-
-fn format_wall_clock(value: NaiveDateTime) -> String {
-    let base = value.format("%Y-%m-%d %H:%M:%S").to_string();
-    let millis = value.nanosecond() / 1_000_000;
-    if millis == 0 {
-        return base;
-    }
-
-    format!("{base}.{millis:03}")
-}
-
-/// Encodes calendar fields into a sortable integer for wall-clock comparisons.
-/// The legacy *_ms storage names are retained, but this value has no Unix
-/// epoch, timezone, or UTC meaning and must only be compared with like keys.
-fn wall_clock_comparison_key(value: NaiveDateTime) -> Result<i64, TimeScopeError> {
-    let date = value.date();
-    let time = value.time();
-    let millis = i64::from(time.nanosecond() / 1_000_000);
-    let mut key = i64::from(date.year());
-    for (base, component) in [
-        (13_i64, i64::from(date.month())),
-        (32, i64::from(date.day())),
-        (24, i64::from(time.hour())),
-        (60, i64::from(time.minute())),
-        (60, i64::from(time.second())),
-        (MILLIS_PER_SECOND, millis),
-    ] {
-        key = key
-            .checked_mul(base)
-            .and_then(|value| value.checked_add(component))
-            .ok_or(TimeScopeError::ArithmeticOverflow)?;
-    }
-    Ok(key)
+    wall_clock::parse(value).ok_or(TimeScopeError::InvalidTimestamp)
 }
 
 #[cfg(test)]
@@ -156,6 +145,7 @@ mod tests {
         TimeScopeInput {
             start: Some("2026-08-14 09:27:15.123".into()),
             end: Some("2026-08-14T09:37:15.456".into()),
+            ..Default::default()
         }
     }
 
@@ -164,6 +154,7 @@ mod tests {
         let scope = parse_time_scope(Some(TimeScopeInput {
             start: Some("2026-08-14 09:27:15.123".into()),
             end: Some("2026-08-14T09:37:15.456".into()),
+            ..Default::default()
         }))
         .unwrap()
         .unwrap();
@@ -178,6 +169,7 @@ mod tests {
         let scope = parse_time_scope(Some(TimeScopeInput {
             start: Some("2026-08-14T09:27".into()),
             end: Some("2026-08-14T09:37".into()),
+            ..Default::default()
         }))
         .unwrap()
         .unwrap();
@@ -187,10 +179,69 @@ mod tests {
     }
 
     #[test]
+    fn canonicalizes_incident_time_into_a_wall_clock_window() {
+        let input: TimeScopeInput = serde_json::from_value(serde_json::json!({
+            "incident_time": "2026-08-14T00:00:00.9999",
+            "before_minutes": 5,
+            "after_minutes": 10,
+        }))
+        .unwrap();
+
+        let scope = parse_time_scope(Some(input)).unwrap().unwrap();
+
+        assert_eq!(scope.start, "2026-08-13 23:55:00.999");
+        assert_eq!(scope.end, "2026-08-14 00:10:00.999");
+        assert!(scope.start_ms < scope.end_ms);
+    }
+
+    #[test]
+    fn incident_window_requires_non_negative_minutes_and_respects_24_hour_limit() {
+        let negative = serde_json::from_value::<TimeScopeInput>(serde_json::json!({
+            "incident_time": "2026-08-14 09:00:00",
+            "before_minutes": -1,
+            "after_minutes": 1,
+        }))
+        .unwrap();
+        assert!(matches!(
+            parse_time_scope(Some(negative)),
+            Err(TimeScopeError::InvalidExpansion)
+        ));
+
+        let too_large = serde_json::from_value::<TimeScopeInput>(serde_json::json!({
+            "incident_time": "2026-08-14 09:00:00",
+            "before_minutes": 1_440,
+            "after_minutes": 1,
+        }))
+        .unwrap();
+        assert!(matches!(
+            parse_time_scope(Some(too_large)),
+            Err(TimeScopeError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn range_and_incident_fields_cannot_be_mixed() {
+        let input: TimeScopeInput = serde_json::from_value(serde_json::json!({
+            "start": "2026-08-14 09:00:00",
+            "end": "2026-08-14 09:01:00",
+            "incident_time": "2026-08-14 09:00:30",
+            "before_minutes": 1,
+            "after_minutes": 1,
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            parse_time_scope(Some(input)),
+            Err(TimeScopeError::InvalidTimestamp)
+        ));
+    }
+
+    #[test]
     fn rejects_ranges_that_collapse_to_the_same_millisecond_key() {
         let result = parse_time_scope(Some(TimeScopeInput {
             start: Some("2026-08-14 09:27:15.1231".into()),
             end: Some("2026-08-14 09:27:15.1239".into()),
+            ..Default::default()
         }));
 
         assert!(matches!(result, Err(TimeScopeError::InvalidRange)));
@@ -201,6 +252,7 @@ mod tests {
         let scope = parse_time_scope(Some(TimeScopeInput {
             start: Some("2026-08-14 23:59:59.999".into()),
             end: Some("2026-08-15 00:00:00.001".into()),
+            ..Default::default()
         }))
         .unwrap()
         .unwrap();
@@ -213,6 +265,7 @@ mod tests {
         let invalid = parse_time_scope(Some(TimeScopeInput {
             start: Some("not-a-timestamp".into()),
             end: Some("2026-08-14 09:37:15".into()),
+            ..Default::default()
         }));
 
         assert!(matches!(invalid, Err(TimeScopeError::InvalidTimestamp)));
@@ -224,14 +277,17 @@ mod tests {
             TimeScopeInput {
                 start: None,
                 end: Some("2026-08-14 09:37:15".into()),
+                ..Default::default()
             },
             TimeScopeInput {
                 start: Some("2026-08-14 09:27:15".into()),
                 end: None,
+                ..Default::default()
             },
             TimeScopeInput {
                 start: Some("  ".into()),
                 end: Some("2026-08-14 09:37:15".into()),
+                ..Default::default()
             },
         ] {
             assert!(matches!(
@@ -246,12 +302,14 @@ mod tests {
         let reversed = parse_time_scope(Some(TimeScopeInput {
             start: Some("2026-08-14 10:00:00".into()),
             end: Some("2026-08-14 09:00:00".into()),
+            ..Default::default()
         }));
         assert!(matches!(reversed, Err(TimeScopeError::InvalidRange)));
 
         let too_large = parse_time_scope(Some(TimeScopeInput {
             start: Some("2026-08-14 09:00:00".into()),
             end: Some("2026-08-15 09:00:01".into()),
+            ..Default::default()
         }));
         assert!(matches!(too_large, Err(TimeScopeError::TooLarge)));
     }
@@ -261,6 +319,7 @@ mod tests {
         let invalid = parse_time_scope(Some(TimeScopeInput {
             start: Some("2026-08-14T09:27:15+08:00".into()),
             end: Some("2026-08-14T09:37:15+08:00".into()),
+            ..Default::default()
         }));
 
         assert!(matches!(invalid, Err(TimeScopeError::InvalidTimestamp)));

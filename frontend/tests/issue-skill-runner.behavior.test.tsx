@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { rainApi } from '../src/api/client';
 import { IssueSkillRunner } from '../src/features/skill-runs/IssueSkillRunner';
-import { toSkillRunTimeScope } from '../src/features/skill-runs/timeScope';
 
 vi.mock('../src/api/client', () => ({
   normalizeApiError: (value: unknown) => String(value),
@@ -56,7 +55,7 @@ describe('issue skill runner', () => {
     expect(screen.queryByText(/迁移到 v1/)).not.toBeInTheDocument();
   });
 
-  it('offers incident and direct range modes and sends the normalized scope', async () => {
+  it('offers incident and direct range modes and sends the raw request', async () => {
     vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '', review: null }]);
     vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
     vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(null);
@@ -76,12 +75,14 @@ describe('issue skill runner', () => {
     await user.type(screen.getByLabelText('故障后分钟数'), '10');
     await user.click(screen.getByRole('button', { name: '运行 Skill' }));
 
-    const incident = toSkillRunTimeScope({ mode: 'incident', incidentTime: '2026-08-14T09:30', beforeMinutes: '5', afterMinutes: '10' });
-    expect(incident.error).toBeNull();
-    expect(rainApi.createSkillRun).toHaveBeenCalledWith('ISSUE-1', 'skill-1', incident.scope);
+    expect(rainApi.createSkillRun).toHaveBeenCalledWith('ISSUE-1', 'skill-1', {
+      incident_time: '2026-08-14T09:30',
+      before_minutes: 5,
+      after_minutes: 10
+    });
   });
 
-  it('disables running for invalid ranges and preserves unrestricted compatibility', async () => {
+  it('passes direct ranges through and preserves unrestricted compatibility', async () => {
     vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '', review: null }]);
     vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
     vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(null);
@@ -92,10 +93,21 @@ describe('issue skill runner', () => {
     await user.click(await screen.findByRole('radio', { name: '直接范围' }));
     await user.type(screen.getByLabelText('开始时间'), '2026-08-14T10:00');
     await user.type(screen.getByLabelText('结束时间'), '2026-08-14T09:00');
-    expect(screen.getByRole('button', { name: '运行 Skill' })).toBeDisabled();
-    expect(screen.getByText('结束时间必须晚于开始时间')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '运行 Skill' }));
+    expect(rainApi.createSkillRun).toHaveBeenCalledWith('ISSUE-1', 'skill-1', {
+      start: '2026-08-14T10:00',
+      end: '2026-08-14T09:00'
+    });
+  });
 
-    await user.click(screen.getByRole('radio', { name: '不限制时间' }));
+  it('preserves unrestricted compatibility', async () => {
+    vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '', review: null }]);
+    vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
+    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(null);
+    vi.mocked(rainApi.createSkillRun).mockResolvedValue({ id: 'run-1', user_id: 'user-1', issue_code: 'ISSUE-1', skill_id: 'skill-1', skill_version: 1, skill_name: '诊断', status: 'QUEUED', iteration_count: 0, tool_call_count: 0, cancel_requested: false, created_at: '' });
+    const user = userEvent.setup();
+    render(<IssueSkillRunner issueCode="ISSUE-1" onRevealEvidence={vi.fn()} />);
+
     await user.click(screen.getByRole('button', { name: '运行 Skill' }));
     expect(rainApi.createSkillRun).toHaveBeenCalledWith('ISSUE-1', 'skill-1', undefined);
   });

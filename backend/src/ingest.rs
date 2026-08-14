@@ -1,4 +1,3 @@
-use chrono::{Datelike, NaiveDateTime, Timelike};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use sqlx::{QueryBuilder, Sqlite};
@@ -16,6 +15,7 @@ use crate::{
     config::IndexingConfig,
     error::AppError,
     file_classification::{PreviewKind, classify_file, effective_mime_type},
+    services::wall_clock,
     upload::lifecycle::set_bundle_stage,
 };
 
@@ -45,34 +45,6 @@ static EVENT_TIMESTAMP_PATTERN: Lazy<Regex> = Lazy::new(|| {
 });
 pub use quota::IssueQuota;
 
-/// Returns a deterministic wall-clock comparison key.
-///
-/// The legacy `*_ms` name is retained for the database/API boundary. This is
-/// not Unix time and must not be interpreted as an absolute timestamp or as
-/// carrying timezone information.
-fn wall_clock_comparison_key(datetime: NaiveDateTime) -> Option<i64> {
-    let month = i64::from(datetime.month());
-    let day = i64::from(datetime.day());
-    let hour = i64::from(datetime.hour());
-    let minute = i64::from(datetime.minute());
-    let second = i64::from(datetime.second());
-    let millis = i64::from(datetime.nanosecond() / 1_000_000);
-
-    i64::from(datetime.year())
-        .checked_mul(13)?
-        .checked_add(month)?
-        .checked_mul(32)?
-        .checked_add(day)?
-        .checked_mul(24)?
-        .checked_add(hour)?
-        .checked_mul(60)?
-        .checked_add(minute)?
-        .checked_mul(60)?
-        .checked_add(second)?
-        .checked_mul(1_000)?
-        .checked_add(millis)
-}
-
 pub(crate) fn parse_event_time_ms(line: &str) -> Option<i64> {
     let timestamp = EVENT_TIMESTAMP_PATTERN
         .captures(line)
@@ -80,10 +52,7 @@ pub(crate) fn parse_event_time_ms(line: &str) -> Option<i64> {
         .as_str()
         .replace('T', " ")
         .replace(',', ".");
-    let datetime = NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S%.f")
-        .or_else(|_| NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S"))
-        .ok()?;
-    wall_clock_comparison_key(datetime)
+    wall_clock::parse(&timestamp).and_then(wall_clock::comparison_key)
 }
 
 pub(crate) fn event_time_range(content: &str) -> (Option<i64>, Option<i64>) {
