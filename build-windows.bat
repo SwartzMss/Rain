@@ -3,6 +3,8 @@ setlocal
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+if "%RAIN_RELEASE_VERSION%"=="" set "RAIN_RELEASE_VERSION=v0.0.1"
+set "VITE_APP_VERSION=%RAIN_RELEASE_VERSION%"
 
 echo ==^> Building embedded frontend...
 pushd "%ROOT%\frontend" || exit /b 1
@@ -24,8 +26,10 @@ popd
 if not exist "%ROOT%\release" mkdir "%ROOT%\release"
 copy /Y "%ROOT%\backend\target\release\backend.exe" "%ROOT%\release\Rain.exe" >nul || exit /b 1
 copy /Y "%ROOT%\backend\.env.example" "%ROOT%\release\.env" >nul || exit /b 1
+> "%ROOT%\release\VERSION" echo %RAIN_RELEASE_VERSION%
 
 echo.
 echo Build completed. Keep both files together:
 echo %ROOT%\release\Rain.exe
 echo %ROOT%\release\.env
+echo %ROOT%\release\VERSION

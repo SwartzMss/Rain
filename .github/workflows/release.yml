@@ -25,6 +25,9 @@ jobs:
             artifact_name: rain-linux-x64
             build_command: bash ./build-linux.sh
 
+    env:
+      RAIN_RELEASE_VERSION: ${{ github.ref_name }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,13 +66,15 @@ jobs:
           path: artifacts
 
       - name: Prepare assets
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
           mkdir -p dist
           cd artifacts/Rain-windows-x64
-          zip ../../dist/Rain-windows-x64.zip Rain.exe .env
+          zip "../../dist/Rain-windows-x64-${TAG_NAME}.zip" Rain.exe .env VERSION
           cd ../rain-linux-x64
           chmod +x rain
-          tar -czf ../../dist/rain-linux-x64.tar.gz rain .env
+          tar -czf "../../dist/rain-linux-x64-${TAG_NAME}.tar.gz" rain .env VERSION
 
       - name: Create or update release
         env:

@@ -8,6 +8,10 @@ use crate::AppState;
 const READINESS_CACHE_TTL: Duration = Duration::from_secs(5);
 static READINESS_CACHE: OnceLock<Mutex<Option<ReadinessSnapshot>>> = OnceLock::new();
 
+fn build_version() -> &'static str {
+    option_env!("RAIN_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 #[derive(Clone, Copy)]
 struct ReadinessSnapshot {
     checked_at: Instant,
@@ -20,7 +24,7 @@ pub async fn health() -> HttpResponse {
     HttpResponse::Ok().json(json!({
         "status": "ok",
         "service": "rain-backend",
-        "version": env!("CARGO_PKG_VERSION")
+        "version": build_version()
     }))
 }
 
@@ -58,7 +62,7 @@ async fn readiness_response(state: &AppState) -> HttpResponse {
         "storage": storage_ok,
         "recovery": recovery_ok,
         "service": "rain-backend",
-        "version": env!("CARGO_PKG_VERSION")
+        "version": build_version()
     }))
 }
 
