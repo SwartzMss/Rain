@@ -19,6 +19,7 @@ use backend::{
     models::skill_runs::NewSkillRun,
     repositories::skill_runs,
     services::skill_runner::SkillRunner,
+    services::skill_time_scope::{TimeScopeInput, parse_time_scope},
 };
 use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
@@ -246,6 +247,63 @@ async fn runner_persists_a_valid_structured_result() {
             "read_file_lines",
         ]
     );
+}
+
+#[tokio::test]
+async fn runner_places_persisted_scope_only_in_trusted_prompt() {
+    let (pool, state, run, cancellation) = create_recovery_test_run().await;
+    let scope = parse_time_scope(Some(TimeScopeInput {
+        start: Some("2026-08-14T01:27:15Z".into()),
+        end: Some("2026-08-14T01:37:15Z".into()),
+    }))
+    .unwrap()
+    .unwrap();
+    sqlx::query("UPDATE skill_runs SET analysis_start_time=?,analysis_end_time=?,analysis_start_ms=?,analysis_end_ms=? WHERE id=?")
+        .bind(&scope.start)
+        .bind(&scope.end)
+        .bind(scope.start_ms)
+        .bind(scope.end_ms)
+        .bind(&run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let client = Arc::new(RecordingClient {
+        responses: Mutex::new(VecDeque::from([
+            Ok(ChatResponse {
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(r#"{"summary":{"status":"INSUFFICIENT_EVIDENCE","text":"No matching evidence","evidence_ids":[]},"observations":[],"inferences":[],"missing_context":["No logs"],"evidence":[]}"#.into()),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    name: None,
+                },
+            }),
+            insufficient_evidence_response(),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    SkillRunner::execute(state, run.id.clone(), client.clone(), cancellation).await;
+    let requests = client.requests.lock().unwrap();
+    let trusted = requests[0].messages[1].content.as_deref().unwrap();
+    let skill = requests[0]
+        .messages
+        .iter()
+        .find_map(|message| {
+            message
+                .content
+                .as_deref()
+                .filter(|content| content.starts_with("USER SKILL INSTRUCTIONS"))
+        })
+        .unwrap();
+    assert!(trusted.contains("Primary incident time range"));
+    assert!(trusted.contains(&scope.start));
+    assert!(trusted.contains(&scope.end));
+    assert!(trusted.contains("context expansion"));
+    assert!(!skill.contains("Primary incident time range"));
+    assert!(!skill.contains(&scope.start));
+    assert!(!skill.contains(&scope.end));
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ use crate::{
     file_classification::PreviewKind,
     repositories::files::{FileRow, preview_kind_for_record},
     services::file_reader::read_file_lines,
+    services::skill_time_scope::{MAX_CONTEXT_EXPANSION_MINUTES, SkillTimeScope},
 };
 
 const MAX_READ_LINES: i64 = 200;
@@ -26,6 +27,7 @@ pub struct SkillRunContext {
     pub run_id: String,
     pub user_id: String,
     pub issue_code: String,
+    pub time_scope: Option<SkillTimeScope>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,6 +43,7 @@ pub enum SkillToolCall {
         path_prefix: Option<String>,
         bundle_hash: Option<String>,
         file_id: Option<i64>,
+        context_expansion_minutes: Option<i64>,
     },
     ReadFileLines {
         file_id: i64,
@@ -79,6 +82,7 @@ struct SearchKey {
     path_prefix: Option<String>,
     bundle_hash: Option<String>,
     file_id: Option<i64>,
+    context_expansion_minutes: i64,
     mode: SearchMode,
 }
 
@@ -228,12 +232,14 @@ impl<'a> SkillToolExecutor<'a> {
                 path_prefix,
                 bundle_hash,
                 file_id,
+                context_expansion_minutes,
             } => {
-                self.search_logs(
+                self.search_logs_with_expansion(
                     &query,
                     path_prefix.as_deref(),
                     bundle_hash.as_deref(),
                     file_id,
+                    context_expansion_minutes,
                 )
                 .await
             }
@@ -450,6 +456,34 @@ impl<'a> SkillToolExecutor<'a> {
         bundle_hash: Option<&str>,
         file_id: Option<i64>,
     ) -> Result<Value, AppError> {
+        self.search_logs_with_expansion(query, path_prefix, bundle_hash, file_id, None)
+            .await
+    }
+
+    pub async fn search_logs_with_expansion(
+        &mut self,
+        query: &str,
+        path_prefix: Option<&str>,
+        bundle_hash: Option<&str>,
+        file_id: Option<i64>,
+        context_expansion_minutes: Option<i64>,
+    ) -> Result<Value, AppError> {
+        let context_expansion_minutes = context_expansion_minutes.unwrap_or(0);
+        if !(0..=MAX_CONTEXT_EXPANSION_MINUTES).contains(&context_expansion_minutes) {
+            return Err(AppError::BadRequest(
+                "context expansion must be between 0 and 15 minutes".into(),
+            ));
+        }
+        let applied_scope = self
+            .context
+            .time_scope
+            .as_ref()
+            .map(|scope| {
+                scope
+                    .expanded(context_expansion_minutes)
+                    .map_err(|error| AppError::BadRequest(error.to_string()))
+            })
+            .transpose()?;
         let query = query.trim();
         let query_chars = query.chars().count();
         if !(2..=200).contains(&query_chars) {
@@ -480,11 +514,12 @@ impl<'a> SkillToolExecutor<'a> {
             path_prefix: path_prefix.as_deref().map(str::to_ascii_lowercase),
             bundle_hash: bundle_hash.as_deref().map(str::to_ascii_lowercase),
             file_id,
+            context_expansion_minutes,
             mode: search_mode,
         };
         if !self.ledger.searches.insert(key) {
             return Ok(
-                json!({ "search_mode": search_mode.as_str(), "duplicate": true, "hits": [], "truncated": false }),
+                json!({ "search_mode": search_mode.as_str(), "duplicate": true, "hits": [], "truncated": false, "time_scope": applied_scope.as_ref().map(time_scope_json).unwrap_or(Value::Null) }),
             );
         }
         #[derive(FromRow)]
@@ -510,27 +545,28 @@ impl<'a> SkillToolExecutor<'a> {
             .map(|value| format!("{}%", escape_like_pattern(value)));
         let max_hits = self.state.limits.api.max_search_results.clamp(1, 20);
         let fetch_limit = max_hits.saturating_add(1);
-        let rows: Vec<HitRow> = if search_mode == SearchMode::ShortLiteral {
+        let total_hits: i64 = if search_mode == SearchMode::ShortLiteral {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
-            sqlx::query_as(
-                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR (ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE",
             )
-            .bind(query)
             .bind(&self.context.issue_code)
             .bind(file_id.expect("short search file_id was validated"))
             .bind(bundle_hash.as_deref())
             .bind(bundle_hash.as_deref())
             .bind(path_pattern.as_deref())
             .bind(path_pattern.as_deref())
+            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
+            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
+            .bind(applied_scope.as_ref().map(|scope| scope.end_ms))
             .bind(literal_pattern)
-            .bind(fetch_limit)
-            .fetch_all(&self.state.db.pool)
+            .fetch_one(&self.state.db.pool)
             .await
             .map_err(AppError::Database)?
         } else {
             let fts = format!("\"{}\"", query.replace('"', "\"\""));
-            sqlx::query_as(
-                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,snippet(log_segments_fts,0,'','','',64) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) ORDER BY rank LIMIT ?",
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (? IS NULL OR (ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?))",
             )
             .bind(fts)
             .bind(&self.context.issue_code)
@@ -540,12 +576,55 @@ impl<'a> SkillToolExecutor<'a> {
             .bind(path_pattern.as_deref())
             .bind(file_id)
             .bind(file_id)
+            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
+            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
+            .bind(applied_scope.as_ref().map(|scope| scope.end_ms))
+            .fetch_one(&self.state.db.pool)
+            .await
+            .map_err(AppError::Database)?
+        };
+        let rows: Vec<HitRow> = if search_mode == SearchMode::ShortLiteral {
+            let literal_pattern = format!("%{}%", escape_like_pattern(query));
+            sqlx::query_as(
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR (ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
+            )
+            .bind(query)
+            .bind(&self.context.issue_code)
+            .bind(file_id.expect("short search file_id was validated"))
+            .bind(bundle_hash.as_deref())
+            .bind(bundle_hash.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
+            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
+            .bind(applied_scope.as_ref().map(|scope| scope.end_ms))
+            .bind(literal_pattern)
+            .bind(fetch_limit)
+            .fetch_all(&self.state.db.pool)
+            .await
+            .map_err(AppError::Database)?
+        } else {
+            let fts = format!("\"{}\"", query.replace('"', "\"\""));
+            sqlx::query_as(
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,snippet(log_segments_fts,0,'','','',64) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (? IS NULL OR (ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) ORDER BY rank LIMIT ?",
+            )
+            .bind(fts)
+            .bind(&self.context.issue_code)
+            .bind(bundle_hash.as_deref())
+            .bind(bundle_hash.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(path_pattern.as_deref())
+            .bind(file_id)
+            .bind(file_id)
+            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
+            .bind(applied_scope.as_ref().map(|scope| scope.start_ms))
+            .bind(applied_scope.as_ref().map(|scope| scope.end_ms))
             .bind(fetch_limit)
             .fetch_all(&self.state.db.pool)
             .await
             .map_err(AppError::Database)?
         };
-        let mut truncated = rows.len() > max_hits as usize;
+        let mut truncated = total_hits > max_hits;
         let mut hits: Vec<Hit> = rows
             .into_iter()
             .take(max_hits as usize)
@@ -559,7 +638,7 @@ impl<'a> SkillToolExecutor<'a> {
             })
             .collect();
         let value = loop {
-            let candidate = json!({ "search_mode": search_mode.as_str(), "hits": hits, "truncated": truncated });
+            let candidate = json!({ "search_mode": search_mode.as_str(), "hits": hits, "truncated": truncated, "time_scope": applied_scope.as_ref().map(time_scope_json).unwrap_or(Value::Null) });
             let size = serde_json::to_vec(&candidate)
                 .map_err(|_| AppError::Config("failed to serialize tool output".into()))?
                 .len();
@@ -777,6 +856,15 @@ fn bounded_snippet_bytes(snippet: &str) -> String {
         end -= 1;
     }
     snippet[..end].to_owned()
+}
+
+fn time_scope_json(scope: &SkillTimeScope) -> Value {
+    json!({
+        "start": scope.start,
+        "end": scope.end,
+        "start_ms": scope.start_ms,
+        "end_ms": scope.end_ms,
+    })
 }
 
 #[cfg(test)]
