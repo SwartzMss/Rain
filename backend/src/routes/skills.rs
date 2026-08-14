@@ -37,6 +37,11 @@ const SKILL_REVIEW_SYSTEM_PROMPT: &str = concat!(
     "A heading restatement, placeholder, tautology, generic one-liner, or advice that could apply to any diagnosis must score low in the affected dimension. ",
     "For example, a present # 关键日志 section containing only ‘记录日志。’ is structurally valid but must receive a low signal_semantics score. ",
     "A structurally complete yet generic playbook must not receive GOOD or EXCELLENT merely because every section exists. ",
+    "# 领域判定规则 is an optional domain-knowledge section, not a platform evidence policy. It may map domain signals to candidate causes, exclusions, or state interpretations. ",
+    "Do not require or reward instructions about retrieval, raw-log requirements, evidence counts, missing-log handling, or stopping in # 领域判定规则 or any other Skill section. ",
+    "Treat # 关键日志 as the v1 authoring heading for observable domain signals, including log patterns, event text, error codes, state values, and metric values recorded in the Issue materials. ",
+    "Do not assume a Skill can access external monitoring systems or data sources that are not present in the Issue materials. ",
+    "Do not require runtime incident times, analysis windows, or other Skill Run scope in # 分析范围; those are controlled by the platform at run time. ",
     "Do not require the Skill to repeat platform retrieval, evidence, incomplete-log, stopping, output, or tool policy; those are supplied by the platform. ",
     "Evaluate whether the Skill explains the normal business flow, log/event meaning, upstream/downstream dependencies, causal relationships, and impact. ",
     "Unsupported shell, network, writes, SQL, scripts, cross-Issue access, or extra tools must be warnings and must never be treated as granted capabilities. ",
@@ -591,6 +596,20 @@ mod tests {
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("must not receive GOOD or EXCELLENT"));
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains("raw post-Front-Matter Markdown"));
         assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains(
+            "# 领域判定规则 is an optional domain-knowledge section, not a platform evidence policy"
+        ));
+        assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains(
+            "Treat # 关键日志 as the v1 authoring heading for observable domain signals"
+        ));
+        assert!(
+            SKILL_REVIEW_SYSTEM_PROMPT
+                .contains("Do not assume a Skill can access external monitoring systems")
+        );
+        assert!(
+            SKILL_REVIEW_SYSTEM_PROMPT
+                .contains("Do not require runtime incident times, analysis windows")
+        );
+        assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains(
             "Headings inside fenced code blocks are content or examples, not Skill section boundaries"
         ));
     }
@@ -603,6 +622,9 @@ mod tests {
             "not shell commands, grep, external parsers, scripts, SQL, network access, or unavailable tools",
             "Incomplete-log handling and stopping behavior are platform-owned",
             "Do not penalize the Skill or suggest adding sections, rules, or instructions",
+            "# 领域判定规则 is an optional domain-knowledge section",
+            "Do not require or reward instructions about retrieval, raw-log requirements",
+            "Do not require runtime incident times, analysis windows",
         ] {
             assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains(expected));
         }
