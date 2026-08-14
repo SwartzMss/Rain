@@ -18,7 +18,7 @@ import type {
   SavedSearch,
   SavedSearchPayload
   , AdminUserPage, AuditLogPage, UserStatus, RegistrationStatus, RegistrationSettings, AuthRateLimitsResponse,
-  UserSkill, UserSkillSummary, SkillPayload, SkillReview, AiProviderSettings, SkillRun, SkillRunResult
+  UserSkill, UserSkillSummary, SkillPayload, SkillReview, AiProviderSettings, SkillRun, SkillRunResult, SkillRunTimeScope
 } from './types';
 
 const API_BASE_URL = '';
@@ -140,7 +140,7 @@ export const rainApi = {
   updateAiProvider(payload: { base_url: string; api_key?: string; model: string; request_timeout_seconds: number }) { return request<AiProviderSettings>('/api/admin/ai-provider', { method: 'PUT', body: JSON.stringify(payload) }); },
   testAiProvider(payload?: { base_url: string; api_key: string; model: string; request_timeout_seconds: number }) { return request<{ ok: boolean; model: string }>('/api/admin/ai-provider/test', { method: 'POST', body: payload ? JSON.stringify(payload) : undefined }); },
   fetchAiProviderStatus() { return request<{ configured: boolean }>('/api/me/ai-provider-status'); },
-  createSkillRun(issueCode: string, skillId: string) { return request<SkillRun>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/skill-runs`, { method: 'POST', body: JSON.stringify({ skill_id: skillId }) }); },
+  createSkillRun(issueCode: string, skillId: string, timeScope: SkillRunTimeScope | null = null) { return request<SkillRun>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/skill-runs`, { method: 'POST', body: JSON.stringify({ skill_id: skillId, time_scope: timeScope }) }); },
   fetchActiveSkillRun() { return request<SkillRun | null>('/api/me/skill-runs/active'); },
   fetchSkillRun(id: string) { return request<SkillRun>(`/api/skill-runs/${encodePathSegment(id)}`); },
   cancelSkillRun(id: string) { return request<SkillRun>(`/api/skill-runs/${encodePathSegment(id)}/cancel`, { method: 'POST' }); },

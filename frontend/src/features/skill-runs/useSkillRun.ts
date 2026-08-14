@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ApiError, normalizeApiError, rainApi } from '../../api/client';
-import type { SkillRun, SkillRunResult } from '../../api/types';
+import type { SkillRun, SkillRunResult, SkillRunTimeScope } from '../../api/types';
 
 const isActive = (run: SkillRun | null) => run?.status === 'QUEUED' || run?.status === 'RUNNING';
 
@@ -41,10 +41,10 @@ export function useSkillRun(issueCode: string) {
     return () => { stopped = true; window.clearInterval(timer); events?.close(); };
   }, [refresh, run?.id, run?.status]);
 
-  const start = async (skillId: string) => {
+  const start = async (skillId: string, timeScope?: SkillRunTimeScope) => {
     setError(''); setResult(null);
     try {
-      const value = await rainApi.createSkillRun(issueCode, skillId);
+      const value = await rainApi.createSkillRun(issueCode, skillId, timeScope);
       sessionStorage.setItem(storageKey, value.id);
       setRun(value);
       if (value.status === 'SUCCEEDED') setResult(await rainApi.fetchSkillRunResult(value.id));

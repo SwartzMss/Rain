@@ -260,6 +260,11 @@ export interface AiProviderSettings {
   api_key_mask?: string | null;
 }
 
+export interface SkillRunTimeScope {
+  start: string;
+  end: string;
+}
+
 export interface SkillRun {
   id: string;
   user_id: string;
@@ -271,6 +276,8 @@ export interface SkillRun {
   iteration_count: number;
   tool_call_count: number;
   cancel_requested: boolean;
+  analysis_start_time?: string | null;
+  analysis_end_time?: string | null;
   error_code?: string | null;
   error_message?: string | null;
   started_at?: string | null;
