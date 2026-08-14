@@ -545,6 +545,9 @@ impl<'a> SkillToolExecutor<'a> {
             .map(|value| format!("{}%", escape_like_pattern(value)));
         let max_hits = self.state.limits.api.max_search_results.clamp(1, 20);
         let fetch_limit = max_hits.saturating_add(1);
+        // The legacy event_time_*_ms columns contain packed wall-clock
+        // comparison keys. They are only comparable with the matching
+        // SkillTimeScope keys; they are not Unix or UTC timestamps.
         let has_unindexed_matches = if applied_scope.is_some()
             && search_mode == SearchMode::ShortLiteral
         {
@@ -864,6 +867,7 @@ fn time_scope_json(scope: &SkillTimeScope) -> Value {
         "end": scope.end,
         "start_ms": scope.start_ms,
         "end_ms": scope.end_ms,
+        "time_basis": "wall_clock",
     })
 }
 

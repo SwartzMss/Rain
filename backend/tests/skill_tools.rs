@@ -576,21 +576,45 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index,event_time_start_ms,event_time_end_ms) VALUES('a',?,'timeout inside',0,0,0,1000000,1060000),('a',?,'timeout outside',1,1,1,1660000,1661000),('a',?,'timeout unknown time',2,2,2,NULL,NULL),('a',?,'in unindexed',3,3,3,NULL,NULL)")
-        .bind(file_id)
-        .bind(file_id)
-        .bind(file_id)
-        .bind(file_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
     let scope = parse_time_scope(Some(TimeScopeInput {
-        start: Some("1970-01-01T00:16:40Z".into()),
-        end: Some("1970-01-01T00:17:40Z".into()),
+        start: Some("2026-08-14 09:30:00".into()),
+        end: Some("2026-08-14 09:40:00".into()),
     }))
     .unwrap()
     .unwrap();
+    let timeout_inside = parse_time_scope(Some(TimeScopeInput {
+        start: Some("2026-08-14 09:32:15".into()),
+        end: Some("2026-08-14 09:32:16".into()),
+    }))
+    .unwrap()
+    .unwrap();
+    let timeout_outside = parse_time_scope(Some(TimeScopeInput {
+        start: Some("2026-08-14 09:50:00".into()),
+        end: Some("2026-08-14 09:50:01".into()),
+    }))
+    .unwrap()
+    .unwrap();
+    let pending_inside = parse_time_scope(Some(TimeScopeInput {
+        start: Some("2026-08-14 09:35:00".into()),
+        end: Some("2026-08-14 09:35:01".into()),
+    }))
+    .unwrap()
+    .unwrap();
+    sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content,line_offset,line_end,chunk_index,event_time_start_ms,event_time_end_ms,event_time_indexed) VALUES('a',?,'[E][2026-08-14 09:32:15][worker] timeout wallclock no timezone',0,0,0,?,?,1),('a',?,'2026-08-14 09:50:00 timeout outside',1,1,1,?,?,1),('a',?,'timeout unknown time',2,2,2,NULL,NULL,1),('a',?,'zz unindexed',3,3,3,NULL,NULL,1),('a',?,'2026-08-14 09:35:00 pending key',4,4,4,?,?,0)")
+        .bind(file_id)
+        .bind(timeout_inside.start_ms)
+        .bind(timeout_inside.end_ms)
+        .bind(file_id)
+        .bind(timeout_outside.start_ms)
+        .bind(timeout_outside.end_ms)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(pending_inside.start_ms)
+        .bind(pending_inside.end_ms)
+        .execute(&pool)
+        .await
+        .unwrap();
     let state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
     let mut scoped = SkillToolExecutor::new(
         &state,
@@ -613,6 +637,28 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
     );
     assert_eq!(scoped_fts["time_scope"]["start_ms"], scope.start_ms);
     assert_eq!(scoped_fts["time_scope"]["end_ms"], scope.end_ms);
+    assert_eq!(scoped_fts["time_scope"]["time_basis"], "wall_clock");
+
+    let no_timezone = scoped
+        .search_logs_with_expansion("wallclock", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(no_timezone["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(no_timezone["time_index_coverage"]["complete"], true);
+    assert_eq!(
+        no_timezone["time_index_coverage"]["excluded_unindexed_matches"],
+        false
+    );
+
+    let non_null_pending_index = scoped
+        .search_logs_with_expansion("pending", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(non_null_pending_index["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        non_null_pending_index["time_index_coverage"]["excluded_unindexed_matches"],
+        false
+    );
 
     let only_unindexed = scoped
         .search_logs_with_expansion("unknown", None, None, None, None)
@@ -649,10 +695,11 @@ async fn search_logs_applies_run_scope_to_fts_and_short_literal_hits() {
         .search_logs_with_expansion("timeout", None, None, None, Some(10))
         .await
         .unwrap();
+    let expanded_scope = scope.expanded(10).unwrap();
     assert_eq!(expanded_result["hits"].as_array().unwrap().len(), 2);
     assert_eq!(
         expanded_result["time_scope"]["end_ms"],
-        scope.end_ms + 10 * 60 * 1000
+        expanded_scope.end_ms
     );
     assert!(
         expanded
