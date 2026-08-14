@@ -69,11 +69,15 @@ pub fn parse_time_scope(
             return Err(TimeScopeError::InvalidExpansion);
         }
 
+        let before = Duration::try_minutes(before_minutes)
+            .ok_or(TimeScopeError::ArithmeticOverflow)?;
+        let after = Duration::try_minutes(after_minutes)
+            .ok_or(TimeScopeError::ArithmeticOverflow)?;
         let start = incident
-            .checked_sub_signed(Duration::minutes(before_minutes))
+            .checked_sub_signed(before)
             .ok_or(TimeScopeError::ArithmeticOverflow)?;
         let end = incident
-            .checked_add_signed(Duration::minutes(after_minutes))
+            .checked_add_signed(after)
             .ok_or(TimeScopeError::ArithmeticOverflow)?;
         (start, end)
     } else {
@@ -110,7 +114,8 @@ impl SkillTimeScope {
 
         let start = wall_clock::parse(&self.start).ok_or(TimeScopeError::InvalidTimestamp)?;
         let end = wall_clock::parse(&self.end).ok_or(TimeScopeError::InvalidTimestamp)?;
-        let expansion = Duration::minutes(minutes);
+        let expansion = Duration::try_minutes(minutes)
+            .ok_or(TimeScopeError::ArithmeticOverflow)?;
         let start = start
             .checked_sub_signed(expansion)
             .ok_or(TimeScopeError::ArithmeticOverflow)?;
@@ -216,6 +221,21 @@ mod tests {
         assert!(matches!(
             parse_time_scope(Some(too_large)),
             Err(TimeScopeError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn incident_window_rejects_i64_max_minutes_without_panicking() {
+        let input: TimeScopeInput = serde_json::from_value(serde_json::json!({
+            "incident_time": "2026-08-14 09:00:00",
+            "before_minutes": i64::MAX,
+            "after_minutes": 0,
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            parse_time_scope(Some(input)),
+            Err(TimeScopeError::ArithmeticOverflow)
         ));
     }
 
