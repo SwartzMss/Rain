@@ -34,12 +34,15 @@ describe('useSkillRun time scope forwarding', () => {
 
   it('forwards a scope while preserving calls without a scope', async () => {
     const { result, unmount } = renderHook(() => useSkillRun('ISSUE-1'));
-    const scope = { start: '2026-08-14T01:27:15.000Z', end: '2026-08-14T01:37:15.000Z' };
+    const scope = { start: '2026-08-14 09:27:15.000', end: '2026-08-14 09:37:15.000' };
 
     await act(async () => { await result.current.start('skill-1', scope); });
     await act(async () => { await result.current.start('skill-2'); });
 
-    expect(createSkillRun).toHaveBeenNthCalledWith(1, 'ISSUE-1', 'skill-1', scope);
+    expect(createSkillRun).toHaveBeenNthCalledWith(1, 'ISSUE-1', 'skill-1', {
+      start: '2026-08-14 09:27:15.000',
+      end: '2026-08-14 09:37:15.000'
+    });
     expect(createSkillRun).toHaveBeenNthCalledWith(2, 'ISSUE-1', 'skill-2', undefined);
     unmount();
   });
