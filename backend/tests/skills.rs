@@ -93,6 +93,122 @@ schema_version: 1
     .into()
 }
 
+fn payment_skill_v1() -> String {
+    r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位支付订单失败发生在授权、扣款、回调还是订单状态更新阶段，并区分上游失败与下游症状。
+
+# 分析范围
+
+关注支付网关、订单状态、扣款结果和支付回调相关的 Issue 材料。
+
+排除客户端展示问题和支付渠道自身不可观测的内部处理。
+
+# 关键流程
+
+创建订单 → 授权 → 扣款 → 回调 → 更新订单状态。
+
+扣款成功是回调处理的前置条件；回调成功是订单进入已支付状态的前置条件。
+
+关键状态：PAYMENT_CREATED、CHARGE_SUCCEEDED、CALLBACK_RECEIVED、ORDER_PAID。
+
+# 关键日志
+
+## 支付请求定位
+
+`payment_id=...` 表示同一笔支付请求，用于关联前后阶段。
+
+## 扣款成功
+
+`charge status=SUCCEEDED` 表示支付渠道返回扣款成功。
+
+## 回调失败
+
+`callback signature invalid` 表示回调校验失败。
+
+## 订单状态症状
+
+`order status remains PENDING` 表示订单仍未进入已支付状态，本身不等于扣款失败。
+
+# 领域判定规则
+
+扣款成功后出现回调校验失败，支持“回调处理失败”作为候选原因。
+
+回调成功后出现订单状态仍为 PENDING，可以排除“回调未到达”这一候选原因，但不能单独确定状态更新失败的具体原因。
+
+只有订单状态 PENDING 时，只能确认结果症状，不能反推出授权或扣款失败。
+
+# 关系与影响
+
+授权成功后才能进行扣款；扣款成功后才应处理回调；回调成功后订单才应进入已支付状态。
+
+回调失败可能导致扣款成功但订单仍为 PENDING，后者是下游症状而不是扣款根因。
+"#
+    .into()
+}
+
+fn auth_skill_v1() -> String {
+    r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位用户认证失败发生在请求接收、凭证校验、会话签发还是后续授权阶段。
+
+# 分析范围
+
+关注认证请求、凭证校验、会话创建和授权状态相关的 Issue 材料。
+
+排除用户未完成的业务操作和认证系统之外的页面渲染问题。
+
+# 关键流程
+
+接收请求 → 校验凭证 → 创建会话 → 访问受保护资源。
+
+凭证校验成功是会话创建的前置条件；有效会话是访问受保护资源的前置条件。
+
+关键状态：REQUEST_RECEIVED、CREDENTIALS_VALID、SESSION_CREATED、AUTHENTICATED。
+
+# 关键日志
+
+## 认证请求定位
+
+`request_id=... login started` 表示一次认证请求开始。
+
+## 凭证校验成功
+
+`credentials verified` 表示用户名和凭证校验成功。
+
+## 凭证校验失败
+
+`invalid credentials` 表示凭证校验失败。
+
+## 会话状态
+
+`session created` 表示会话已经签发；`401 missing session` 表示访问受保护资源时缺少有效会话。
+
+# 领域判定规则
+
+认证请求定位信号后出现 invalid credentials，支持“凭证校验失败”作为候选原因。
+
+凭证校验成功且出现 session created，可以排除“凭证校验失败”，但不能单独解释后续 401。
+
+只有 401 missing session 时，只能确认访问阶段缺少会话，不能反推出凭证一定校验失败。
+
+# 关系与影响
+
+请求接收先于凭证校验；凭证校验成功后才能创建会话；没有有效会话会导致受保护资源返回 401。
+
+凭证校验失败会阻止会话创建，后续 401 可能是该上游失败的结果。
+"#
+    .into()
+}
+
 async fn user_cookie(pool: &sqlx::SqlitePool, id: &str, username: &str) -> Cookie<'static> {
     sqlx::query(
         "INSERT INTO users(id,username,username_normalized,password_hash) VALUES(?,?,?,'hash')",
@@ -115,6 +231,45 @@ async fn user_cookie(pool: &sqlx::SqlitePool, id: &str, username: &str) -> Cooki
     .await
     .unwrap();
     Cookie::new(SESSION_COOKIE_NAME, token)
+}
+
+#[actix_web::test]
+async fn cross_domain_v1_fixtures_pass_the_existing_create_path() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let owner = user_cookie(&pool, "owner", "owner").await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool,
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    for (name, skill_markdown) in [
+        ("payment-v1", payment_skill_v1()),
+        ("auth-v1", auth_skill_v1()),
+    ] {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/me/skills")
+                .cookie(owner.clone())
+                .set_json(serde_json::json!({
+                    "name": name,
+                    "skill_markdown": skill_markdown,
+                    "enabled": true
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED, "fixture {name}");
+        let created: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(created["schema_version"], 1, "fixture {name}");
+    }
 }
 
 #[tokio::test]
