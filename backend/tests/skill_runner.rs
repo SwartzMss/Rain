@@ -253,8 +253,8 @@ async fn runner_persists_a_valid_structured_result() {
 async fn runner_places_persisted_scope_only_in_trusted_prompt() {
     let (pool, state, run, cancellation) = create_recovery_test_run().await;
     let scope = parse_time_scope(Some(TimeScopeInput {
-        start: Some("2026-08-14T01:27:15Z".into()),
-        end: Some("2026-08-14T01:37:15Z".into()),
+        start: Some("2026-08-14 09:27:15".into()),
+        end: Some("2026-08-14 09:37:15".into()),
     }))
     .unwrap()
     .unwrap();

@@ -26,7 +26,7 @@ pub struct CreateSkillRun {
 fn invalid_time_scope(error: TimeScopeError) -> AppError {
     let message = match error {
         TimeScopeError::InvalidTimestamp => {
-            "time_scope 的 start 和 end 必须是带时区的 RFC3339 时间"
+            "time_scope 的 start 和 end 必须是本地日志时间，例如 2026-08-14 09:32:15"
         }
         TimeScopeError::InvalidRange => "time_scope 的 start 必须早于 end",
         TimeScopeError::TooLarge => "time_scope 的时间跨度不能超过 24 小时",

@@ -29,7 +29,7 @@ schema_version: 1
 "#;
 
 #[tokio::test]
-async fn scoped_skill_run_persists_canonical_analysis_window() {
+async fn scoped_skill_run_persists_wall_clock_analysis_window() {
     let pool = db::init_pool("sqlite::memory:").unwrap();
     db::prepare_schema(&pool, false).await.unwrap();
     sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
@@ -49,8 +49,8 @@ async fn scoped_skill_run_persists_canonical_analysis_window() {
         skill_snapshot_markdown: "# Skill".into(),
     };
     let scope = parse_time_scope(Some(TimeScopeInput {
-        start: Some("2026-08-14T09:27:15+08:00".into()),
-        end: Some("2026-08-14T09:37:15+08:00".into()),
+        start: Some("2026-08-14 09:27:15".into()),
+        end: Some("2026-08-14T09:37:15".into()),
     }))
     .unwrap()
     .unwrap();
@@ -61,11 +61,11 @@ async fn scoped_skill_run_persists_canonical_analysis_window() {
 
     assert_eq!(
         run.analysis_start_time.as_deref(),
-        Some("2026-08-14T01:27:15.000Z")
+        Some("2026-08-14 09:27:15")
     );
     assert_eq!(
         run.analysis_end_time.as_deref(),
-        Some("2026-08-14T01:37:15.000Z")
+        Some("2026-08-14 09:37:15")
     );
     assert_eq!(run.analysis_start_ms, Some(scope.start_ms));
     assert_eq!(run.analysis_end_ms, Some(scope.end_ms));
@@ -405,8 +405,8 @@ async fn skill_run_api_exposes_canonical_analysis_window_in_all_run_views() {
             .set_json(serde_json::json!({
                 "skill_id": "skill",
                 "time_scope": {
-                    "start": "2026-08-14T09:27:15+08:00",
-                    "end": "2026-08-14T09:37:15+08:00"
+                    "start": "2026-08-14 09:27:15",
+                    "end": "2026-08-14T09:37:15"
                 }
             }))
             .to_request(),
@@ -416,8 +416,8 @@ async fn skill_run_api_exposes_canonical_analysis_window_in_all_run_views() {
     let created: serde_json::Value = test::read_body_json(response).await;
     let run_id = created["id"].as_str().unwrap().to_owned();
     for body in [&created] {
-        assert_eq!(body["analysis_start_time"], "2026-08-14T01:27:15.000Z");
-        assert_eq!(body["analysis_end_time"], "2026-08-14T01:37:15.000Z");
+        assert_eq!(body["analysis_start_time"], "2026-08-14 09:27:15");
+        assert_eq!(body["analysis_end_time"], "2026-08-14 09:37:15");
     }
 
     let response = test::call_service(
@@ -429,8 +429,8 @@ async fn skill_run_api_exposes_canonical_analysis_window_in_all_run_views() {
     )
     .await;
     let fetched: serde_json::Value = test::read_body_json(response).await;
-    assert_eq!(fetched["analysis_start_time"], "2026-08-14T01:27:15.000Z");
-    assert_eq!(fetched["analysis_end_time"], "2026-08-14T01:37:15.000Z");
+    assert_eq!(fetched["analysis_start_time"], "2026-08-14 09:27:15");
+    assert_eq!(fetched["analysis_end_time"], "2026-08-14 09:37:15");
 
     let response = test::call_service(
         &app,
@@ -441,8 +441,8 @@ async fn skill_run_api_exposes_canonical_analysis_window_in_all_run_views() {
     )
     .await;
     let active: serde_json::Value = test::read_body_json(response).await;
-    assert_eq!(active["analysis_start_time"], "2026-08-14T01:27:15.000Z");
-    assert_eq!(active["analysis_end_time"], "2026-08-14T01:37:15.000Z");
+    assert_eq!(active["analysis_start_time"], "2026-08-14 09:27:15");
+    assert_eq!(active["analysis_end_time"], "2026-08-14 09:37:15");
 
     let response = test::call_service(
         &app,
@@ -455,8 +455,8 @@ async fn skill_run_api_exposes_canonical_analysis_window_in_all_run_views() {
     assert_eq!(response.status(), StatusCode::OK);
     let sse = String::from_utf8(test::read_body(response).await.to_vec()).unwrap();
     assert!(sse.contains("event: snapshot"));
-    assert!(sse.contains("\"analysis_start_time\":\"2026-08-14T01:27:15.000Z\""));
-    assert!(sse.contains("\"analysis_end_time\":\"2026-08-14T01:37:15.000Z\""));
+    assert!(sse.contains("\"analysis_start_time\":\"2026-08-14 09:27:15\""));
+    assert!(sse.contains("\"analysis_end_time\":\"2026-08-14 09:37:15\""));
 }
 
 #[actix_web::test]
@@ -492,30 +492,30 @@ async fn invalid_skill_run_time_scopes_are_rejected_before_downstream_work() {
     let invalid_scopes = [
         serde_json::json!({
             "start": "not-a-timestamp",
-            "end": "2026-08-14T01:37:15Z"
+            "end": "2026-08-14 09:37:15"
         }),
         serde_json::json!({
-            "start": "2026-08-14T01:37:15Z",
-            "end": "2026-08-14T01:27:15Z"
+            "start": "2026-08-14 09:37:15",
+            "end": "2026-08-14 09:27:15"
         }),
         serde_json::json!({
-            "start": "2026-08-14T01:27:15Z",
-            "end": "2026-08-14T01:27:15Z"
+            "start": "2026-08-14 09:27:15",
+            "end": "2026-08-14 09:27:15"
         }),
         serde_json::json!({
-            "start": "2026-08-14T00:00:00Z",
-            "end": "2026-08-15T01:00:01Z"
+            "start": "2026-08-14 09:00:00",
+            "end": "2026-08-15 09:00:01"
         }),
         serde_json::json!({}),
-        serde_json::json!({"start": "2026-08-14T01:27:15Z"}),
-        serde_json::json!({"end": "2026-08-14T01:37:15Z"}),
+        serde_json::json!({"start": "2026-08-14 09:27:15"}),
+        serde_json::json!({"end": "2026-08-14 09:37:15"}),
         serde_json::json!({
             "start": 1723602435,
-            "end": "2026-08-14T01:37:15Z"
+            "end": "2026-08-14 09:37:15"
         }),
         serde_json::json!({
-            "start": "2026-08-14T01:27:15Z",
-            "end": ["2026-08-14T01:37:15Z"]
+            "start": "2026-08-14 09:27:15",
+            "end": ["2026-08-14 09:37:15"]
         }),
         serde_json::json!([]),
         serde_json::json!("not-an-object"),
