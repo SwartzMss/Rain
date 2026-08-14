@@ -128,6 +128,17 @@ describe('issue skill runner', () => {
     expect(rainApi.cancelSkillRun).toHaveBeenCalledWith('run-1');
   });
 
+  it('labels an active run from another issue with its owning issue', async () => {
+    const activeRun = { id: 'run-1', user_id: 'user-1', issue_code: 'ISSUE-2', skill_id: 'skill-1', skill_version: 1, skill_name: '诊断', status: 'RUNNING' as const, iteration_count: 1, tool_call_count: 1, cancel_requested: false, created_at: '', analysis_start_time: '2026-08-14 18:01:00', analysis_end_time: '2026-08-14 18:11:00' };
+    vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '', review: null }]);
+    vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });
+    vi.mocked(rainApi.fetchActiveSkillRun).mockResolvedValue(activeRun);
+    render(<IssueSkillRunner issueCode="ISSUE-1" onRevealEvidence={vi.fn()} />);
+
+    expect(await screen.findByText('ISSUE-2 当前运行分析范围：2026-08-14 18:01:00 至 2026-08-14 18:11:00')).toBeInTheDocument();
+    expect(screen.queryByText('本次运行分析范围：2026-08-14 18:01:00 至 2026-08-14 18:11:00')).not.toBeInTheDocument();
+  });
+
   it('shows the persisted canonical range for a completed scoped run', async () => {
     vi.mocked(rainApi.fetchSkills).mockResolvedValue([{ id: 'skill-1', user_id: 'user-1', name: '诊断', description: '', schema_version: 1, enabled: true, version: 1, content_hash: 'hash', created_at: '', updated_at: '' }]);
     vi.mocked(rainApi.fetchAiProviderStatus).mockResolvedValue({ configured: true });

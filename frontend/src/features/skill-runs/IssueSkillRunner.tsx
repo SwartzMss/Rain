@@ -49,7 +49,10 @@ export function IssueSkillRunner({ issueCode, onRevealEvidence }: { issueCode: s
     return null;
   };
 
-  const analysisRangeLabel = state.active ? '本次运行分析范围' : '上次运行分析范围';
+  const isCurrentIssueRun = state.run?.issue_code === issueCode;
+  const analysisRangeLabel = state.active
+    ? isCurrentIssueRun ? '本次运行分析范围' : `${state.run?.issue_code} 当前运行分析范围`
+    : '上次运行分析范围';
   const analysisRange = state.run
     ? state.run.analysis_start_time && state.run.analysis_end_time
       ? `${analysisRangeLabel}：${state.run.analysis_start_time} 至 ${state.run.analysis_end_time}`
