@@ -849,6 +849,7 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
 
     ensure_skill_run_optional_columns(pool).await?;
     ensure_log_segment_optional_columns(pool).await?;
+    ensure_log_segment_event_time_indexes(pool).await?;
     backfill_log_segment_event_times(pool).await?;
 
     let index_statements = [
@@ -862,7 +863,6 @@ async fn create_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "CREATE INDEX IF NOT EXISTS idx_logs_bundle_timeline ON log_segments (bundle_id, timeline)",
         "CREATE INDEX IF NOT EXISTS idx_logs_file_chunk ON log_segments (file_id, chunk_index)",
         "CREATE INDEX IF NOT EXISTS idx_logs_file_event_time ON log_segments (file_id, event_time_start_ms, event_time_end_ms)",
-        "CREATE INDEX IF NOT EXISTS idx_logs_event_time_indexed ON log_segments (event_time_indexed, id)",
         "CREATE INDEX IF NOT EXISTS idx_line_offsets_file_line ON log_line_offsets (file_id, line_number)",
         "CREATE INDEX IF NOT EXISTS idx_temp_results_expiry ON temp_results (expires_at)",
         "CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions (user_id)",
@@ -959,6 +959,16 @@ async fn ensure_log_segment_optional_columns(pool: &SqlitePool) -> Result<(), Ap
                 .map_err(AppError::Database)?;
         }
     }
+    Ok(())
+}
+
+async fn ensure_log_segment_event_time_indexes(pool: &SqlitePool) -> Result<(), AppError> {
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_logs_event_time_indexed ON log_segments (event_time_indexed, id)",
+    )
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
     Ok(())
 }
 
@@ -1511,6 +1521,32 @@ mod tests {
 
         assert_eq!(before, 1);
         assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn event_time_backfill_query_uses_pending_index() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        sqlx::query(
+            "CREATE TABLE log_segments (id INTEGER PRIMARY KEY, content TEXT NOT NULL, event_time_indexed INTEGER NOT NULL DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create log segments table");
+
+        super::ensure_log_segment_event_time_indexes(&pool)
+            .await
+            .expect("create event time indexes before backfill");
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT id, content FROM log_segments WHERE id > 0 AND event_time_indexed = 0 ORDER BY id LIMIT 500",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("explain event time backfill query");
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.contains("idx_logs_event_time_indexed")),
+            "backfill query plan did not use pending index: {plan:?}"
+        );
     }
 
     #[tokio::test]
