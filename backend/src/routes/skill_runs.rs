@@ -12,12 +12,27 @@ use crate::{
     models::skill_runs::NewSkillRun,
     repositories::{skill_runs, skills},
     services::skill_runner::SkillRunner,
+    services::skill_time_scope::{TimeScopeError, TimeScopeInput, parse_time_scope},
     skill_schema::parse_skill_markdown,
 };
 
 #[derive(Deserialize)]
 pub struct CreateSkillRun {
     skill_id: String,
+    time_scope: Option<TimeScopeInput>,
+}
+
+fn invalid_time_scope(error: TimeScopeError) -> AppError {
+    let message = match error {
+        TimeScopeError::InvalidTimestamp => {
+            "time_scope 的 start 和 end 必须是带时区的 RFC3339 时间"
+        }
+        TimeScopeError::InvalidRange => "time_scope 的 start 必须早于 end",
+        TimeScopeError::TooLarge => "time_scope 的时间跨度不能超过 24 小时",
+        TimeScopeError::InvalidExpansion => "time_scope 的扩展范围必须在 0 到 15 分钟之间",
+        TimeScopeError::ArithmeticOverflow => "time_scope 的时间范围超出支持的时间边界",
+    };
+    AppError::public(StatusCode::BAD_REQUEST, "INVALID_TIME_SCOPE", message)
 }
 
 fn not_found() -> AppError {
@@ -37,6 +52,7 @@ pub async fn create(
     request: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = issue_code.trim().to_ascii_uppercase();
+    let time_scope = parse_time_scope(body.time_scope.clone()).map_err(invalid_time_scope)?;
     let issue_exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issues WHERE code=? AND status='ACTIVE')")
             .bind(&issue_code)
@@ -77,7 +93,7 @@ pub async fn create(
             "模型服务不可用",
         )
     })?;
-    let run = skill_runs::create(
+    let run = skill_runs::create_with_scope(
         &state.db.pool,
         &NewSkillRun {
             user_id: user.0.id.clone(),
@@ -87,6 +103,7 @@ pub async fn create(
             skill_name: skill.name,
             skill_snapshot_markdown: skill.skill_markdown,
         },
+        time_scope.as_ref(),
     )
     .await
     .map_err(|error| {

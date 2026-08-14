@@ -4,7 +4,7 @@ use actix_web::{App, cookie::Cookie, http::StatusCode, test, web};
 use backend::{
     AppState,
     auth::session::{SESSION_COOKIE_NAME, generate_session_token, hash_session_token},
-    config::AppLimits,
+    config::{AiProviderEnv, AppLimits},
     db,
     models::skill_runs::NewSkillRun,
     repositories::{sessions, skill_runs},
@@ -333,4 +333,194 @@ async fn run_creation_requires_a_valid_skill_and_configured_provider_but_not_iss
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let body: serde_json::Value = test::read_body_json(response).await;
     assert_eq!(body["code"], "AI_PROVIDER_NOT_CONFIGURED");
+}
+
+#[actix_web::test]
+async fn skill_run_api_exposes_canonical_analysis_window_in_all_run_views() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('ISSUE','Issue')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_skills(id,owner_user_id,name,skill_markdown,content_hash) VALUES('skill','u','Skill',?,'hash')")
+        .bind(VALID_SKILL_V1)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        "u",
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _provider_server = tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = [0_u8; 4096];
+        let _ = socket.read(&mut request).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await;
+    });
+    let base_url = format!("http://{address}/v1");
+    let ai_provider = AiProviderEnv::from_values(
+        Some(&base_url),
+        Some("test-key"),
+        Some("test-model"),
+        10,
+        None,
+    )
+    .unwrap();
+    let state = web::Data::new(AppState::new_with_ai(
+        pool.clone(),
+        PathBuf::from("data"),
+        AppLimits::default(),
+        ai_provider,
+    ));
+    let app = test::init_service(App::new().app_data(state).configure(routes::register)).await;
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/ISSUE/skill-runs")
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token.clone()))
+            .set_json(serde_json::json!({
+                "skill_id": "skill",
+                "time_scope": {
+                    "start": "2026-08-14T09:27:15+08:00",
+                    "end": "2026-08-14T09:37:15+08:00"
+                }
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let created: serde_json::Value = test::read_body_json(response).await;
+    let run_id = created["id"].as_str().unwrap().to_owned();
+    for body in [&created] {
+        assert_eq!(body["analysis_start_time"], "2026-08-14T01:27:15.000Z");
+        assert_eq!(body["analysis_end_time"], "2026-08-14T01:37:15.000Z");
+    }
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/skill-runs/{run_id}"))
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token.clone()))
+            .to_request(),
+    )
+    .await;
+    let fetched: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(fetched["analysis_start_time"], "2026-08-14T01:27:15.000Z");
+    assert_eq!(fetched["analysis_end_time"], "2026-08-14T01:37:15.000Z");
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/me/skill-runs/active")
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token.clone()))
+            .to_request(),
+    )
+    .await;
+    let active: serde_json::Value = test::read_body_json(response).await;
+    assert_eq!(active["analysis_start_time"], "2026-08-14T01:27:15.000Z");
+    assert_eq!(active["analysis_end_time"], "2026-08-14T01:37:15.000Z");
+
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/skill-runs/{run_id}/events"))
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sse = String::from_utf8(test::read_body(response).await.to_vec()).unwrap();
+    assert!(sse.contains("event: snapshot"));
+    assert!(sse.contains("\"analysis_start_time\":\"2026-08-14T01:27:15.000Z\""));
+    assert!(sse.contains("\"analysis_end_time\":\"2026-08-14T01:37:15.000Z\""));
+}
+
+#[actix_web::test]
+async fn invalid_skill_run_time_scopes_are_rejected_before_downstream_work() {
+    let pool = db::init_pool("sqlite::memory:").unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('u','user','user','hash')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        "u",
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                PathBuf::from("data"),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let invalid_scopes = [
+        ("not-a-timestamp", "2026-08-14T01:37:15Z"),
+        ("2026-08-14T01:37:15Z", "2026-08-14T01:27:15Z"),
+        ("2026-08-14T01:27:15Z", "2026-08-14T01:27:15Z"),
+        ("2026-08-14T00:00:00Z", "2026-08-15T01:00:01Z"),
+    ];
+    for (start, end) in invalid_scopes {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/api/issues/MISSING/skill-runs")
+                .cookie(Cookie::new(SESSION_COOKIE_NAME, token.clone()))
+                .set_json(serde_json::json!({
+                    "skill_id": "missing-skill",
+                    "time_scope": {"start": start, "end": end}
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["code"], "INVALID_TIME_SCOPE");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty())
+        );
+    }
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM skill_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
