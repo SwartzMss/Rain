@@ -973,6 +973,8 @@ async fn ensure_log_segment_event_time_indexes(pool: &SqlitePool) -> Result<(), 
 }
 
 async fn backfill_log_segment_event_times(pool: &SqlitePool) -> Result<(), AppError> {
+    // The legacy *_ms columns store deterministic wall-clock comparison keys,
+    // not Unix milliseconds or absolute timestamps.
     let mut last_id = 0_i64;
     loop {
         let mut tx = pool.begin().await.map_err(AppError::Database)?;
@@ -1279,7 +1281,7 @@ mod tests {
         .expect("create legacy log_segments");
 
         sqlx::query("INSERT INTO log_segments (content) VALUES (?)")
-            .bind("2026-08-14T09:32:15Z first\nnoise\n2026-08-14T09:33:15Z second")
+            .bind("2026-08-14T09:32:15 first\nnoise\n2026-08-14T09:33:15 second")
             .execute(&pool)
             .await
             .expect("insert backfillable segment");
@@ -1289,7 +1291,7 @@ mod tests {
             .await
             .expect("insert unparseable segment");
         sqlx::query("INSERT INTO log_segments (content, event_time_start_ms) VALUES (?, ?)")
-            .bind("2026-08-14T09:34:15Z partial")
+            .bind("2026-08-14T09:34:15 partial")
             .bind(111_i64)
             .execute(&pool)
             .await
@@ -1336,9 +1338,16 @@ mod tests {
             "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE content LIKE '2026-%'",
         )
         .fetch_one(&pool)
-        .await
-        .expect("inspect backfilled segment");
-        assert_eq!(bounds, (Some(1_786_699_935_000), Some(1_786_699_995_000)));
+            .await
+            .expect("inspect backfilled segment");
+        assert!(bounds.0.is_some(), "wall-clock timestamp should be indexed");
+        assert_eq!(
+            bounds,
+            (
+                crate::ingest::parse_event_time_ms("2026-08-14T09:32:15 first"),
+                crate::ingest::parse_event_time_ms("2026-08-14T09:33:15 second")
+            )
+        );
 
         let partial_bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
             "SELECT event_time_start_ms, event_time_end_ms FROM log_segments WHERE content LIKE '%partial'",
@@ -1346,7 +1355,13 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("inspect partially bounded segment");
-        assert_eq!(partial_bounds, (Some(111), Some(1_786_700_055_000)));
+        assert_eq!(
+            partial_bounds,
+            (
+                Some(111),
+                crate::ingest::parse_event_time_ms("2026-08-14T09:34:15 partial")
+            )
+        );
 
         sqlx::query(
             "UPDATE log_segments SET event_time_start_ms = 111, event_time_end_ms = 222 WHERE content LIKE '2026-%'",
@@ -1366,7 +1381,7 @@ mod tests {
         assert_eq!(preserved_bounds, (Some(111), Some(222)));
 
         sqlx::query("INSERT INTO log_segments (content) VALUES (?)")
-            .bind("2026-08-14T09:35:15Z added after upgrade")
+            .bind("2026-08-14T09:35:15 added after upgrade")
             .execute(&pool)
             .await
             .expect("insert segment after upgrade");
@@ -1381,7 +1396,10 @@ mod tests {
         .expect("inspect late segment");
         assert_eq!(
             late_bounds,
-            (Some(1_786_700_115_000), Some(1_786_700_115_000))
+            (
+                crate::ingest::parse_event_time_ms("2026-08-14T09:35:15 added after upgrade"),
+                crate::ingest::parse_event_time_ms("2026-08-14T09:35:15 added after upgrade")
+            )
         );
 
         let null_bounds: (Option<i64>, Option<i64>) = sqlx::query_as(
@@ -1401,7 +1419,7 @@ mod tests {
         assert_eq!(unparseable_indexed, 1);
 
         sqlx::query(
-            "UPDATE log_segments SET content = '2026-08-14T09:36:15Z now parseable' WHERE content = 'not a dated log line'",
+            "UPDATE log_segments SET content = '2026-08-14T09:36:15 now parseable' WHERE content = 'not a dated log line'",
         )
         .execute(&pool)
         .await
@@ -1410,7 +1428,7 @@ mod tests {
             .await
             .expect("skip completed event time indexing");
         let skipped_bounds: (Option<i64>, Option<i64>, i64) = sqlx::query_as(
-            "SELECT event_time_start_ms, event_time_end_ms, event_time_indexed FROM log_segments WHERE content = '2026-08-14T09:36:15Z now parseable'",
+            "SELECT event_time_start_ms, event_time_end_ms, event_time_indexed FROM log_segments WHERE content = '2026-08-14T09:36:15 now parseable'",
         )
         .fetch_one(&pool)
         .await
@@ -1420,7 +1438,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO log_segments (content, event_time_start_ms, event_time_end_ms) VALUES (?, ?, ?)",
         )
-        .bind("2026-08-14T09:37:15Z interrupted")
+        .bind("2026-08-14T09:37:15 interrupted")
         .bind(111_i64)
         .bind(222_i64)
         .execute(&pool)
@@ -1498,7 +1516,7 @@ mod tests {
         )
         .bind("backfill-fts-bundle")
         .bind(file_id)
-        .bind("2026-08-14T09:32:15Z requestId=backfill123")
+        .bind("2026-08-14T09:32:15 requestId=backfill123")
         .execute(&pool)
         .await
         .expect("insert segment");

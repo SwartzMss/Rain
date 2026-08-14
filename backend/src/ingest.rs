@@ -1,4 +1,4 @@
-use chrono::DateTime;
+use chrono::{Datelike, NaiveDateTime, Timelike};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use sqlx::{QueryBuilder, Sqlite};
@@ -39,22 +39,51 @@ const LINE_OFFSET_BATCH_SIZE: usize = 500;
 const SEGMENT_BATCH_SIZE: usize = 100;
 static EVENT_TIMESTAMP_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"^(?:\[(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))\]|(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?(?:Z|[+-]\d{2}:\d{2})))(?:\s|$)",
+        r"^(?:\[[^\]\r\n]*\]\s*)*(?:\[(?P<bracket>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?)\](?:\s|\[|$)|(?P<plain>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?)(?:\s|$))",
     )
     .expect("valid event timestamp pattern")
 });
 pub use quota::IssueQuota;
 
+/// Returns a deterministic wall-clock comparison key.
+///
+/// The legacy `*_ms` name is retained for the database/API boundary. This is
+/// not Unix time and must not be interpreted as an absolute timestamp or as
+/// carrying timezone information.
+fn wall_clock_comparison_key(datetime: NaiveDateTime) -> Option<i64> {
+    let month = i64::from(datetime.month());
+    let day = i64::from(datetime.day());
+    let hour = i64::from(datetime.hour());
+    let minute = i64::from(datetime.minute());
+    let second = i64::from(datetime.second());
+    let millis = i64::from(datetime.nanosecond() / 1_000_000);
+
+    i64::from(datetime.year())
+        .checked_mul(13)?
+        .checked_add(month)?
+        .checked_mul(32)?
+        .checked_add(day)?
+        .checked_mul(24)?
+        .checked_add(hour)?
+        .checked_mul(60)?
+        .checked_add(minute)?
+        .checked_mul(60)?
+        .checked_add(second)?
+        .checked_mul(1_000)?
+        .checked_add(millis)
+}
+
 pub(crate) fn parse_event_time_ms(line: &str) -> Option<i64> {
     let timestamp = EVENT_TIMESTAMP_PATTERN
         .captures(line)
-        .and_then(|captures| captures.get(1).or_else(|| captures.get(2)))?
+        .and_then(|captures| captures.name("bracket").or_else(|| captures.name("plain")))?
         .as_str()
-        .replace(' ', "T")
+        .replace('T', " ")
         .replace(',', ".");
-    DateTime::parse_from_rfc3339(&timestamp)
-        .ok()
-        .map(|timestamp| timestamp.timestamp_millis())
+    let datetime = NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S"))
+        .ok()?;
+    wall_clock_comparison_key(datetime)
 }
 
 pub(crate) fn event_time_range(content: &str) -> (Option<i64>, Option<i64>) {
@@ -847,39 +876,38 @@ mod tests {
     };
 
     #[test]
-    fn parses_explicit_event_timestamps_at_the_start_of_cleaned_lines() {
-        assert_eq!(
-            parse_event_time_ms("2026-08-14T09:32:15.123+08:00"),
-            Some(1_786_671_135_123)
-        );
-        assert_eq!(
-            parse_event_time_ms("[2026-08-14 09:32:15Z] error"),
-            Some(1_786_699_935_000)
-        );
-        assert_eq!(parse_event_time_ms("[2026-08-14 09:32:15Z error"), None);
-        assert_eq!(
-            parse_event_time_ms("2026-08-14 09:32:15,123-04:00 message"),
-            Some(1_786_714_335_123)
-        );
+    fn parses_wall_clock_event_timestamps_in_common_log_prefixes() {
+        let plain = parse_event_time_ms("2026-08-14 09:32:15.123 error");
+        let bracketed = parse_event_time_ms("[2026-08-14T09:32:15.123] error");
+        let level_prefixed = parse_event_time_ms("[E][2026-08-14 09:32:15.123][worker] error");
+
+        assert!(plain.is_some());
+        assert_eq!(bracketed, plain);
+        assert_eq!(level_prefixed, plain);
+        assert!(parse_event_time_ms("2026-08-14 09:32:15.124 error") > plain);
     }
 
     #[test]
-    fn ignores_timestamps_without_an_explicit_timezone_or_at_line_start() {
+    fn ignores_timestamps_without_a_date_or_with_absolute_time_syntax() {
         assert_eq!(parse_event_time_ms("09:32:15 error"), None);
-        assert_eq!(parse_event_time_ms("2026-08-14T09:32:15 message"), None);
+        assert_eq!(parse_event_time_ms("[E][09:32:15][worker] error"), None);
+        assert_eq!(parse_event_time_ms("2026-08-14T09:32:15Z message"), None);
+        assert_eq!(parse_event_time_ms("[2026-08-14 09:32:15 error"), None);
         assert_eq!(
-            parse_event_time_ms("prefix 2026-08-14T09:32:15Z message"),
+            parse_event_time_ms("prefix 2026-08-14T09:32:15 message"),
             None
         );
     }
 
     #[test]
     fn extracts_the_minimum_and_maximum_event_time_from_segment_content() {
+        let first = parse_event_time_ms("2026-08-14T09:32:15 first");
+        let second = parse_event_time_ms("2026-08-14T09:33:15 second");
         let (start, end) =
-            event_time_range("2026-08-14T09:32:15Z first\nnoise\n2026-08-14T09:33:15Z second");
+            event_time_range("2026-08-14T09:32:15 first\nnoise\n2026-08-14T09:33:15 second");
 
-        assert_eq!(start, Some(1_786_699_935_000));
-        assert_eq!(end, Some(1_786_699_995_000));
+        assert_eq!(start, first);
+        assert_eq!(end, second);
     }
 
     #[test]
@@ -1056,8 +1084,8 @@ mod tests {
         .await
         .unwrap();
         let mut chunk = LogChunk::new(0, 128);
-        chunk.push(0, "2026-08-14T09:32:15Z first".into());
-        chunk.push(1, "2026-08-14T09:33:15Z second".into());
+        chunk.push(0, "2026-08-14T09:32:15 first".into());
+        chunk.push(1, "2026-08-14T09:33:15 second".into());
         let mut tx = pool.begin().await.unwrap();
 
         flush_log_chunks(&mut tx, "bundle", file_id, &[chunk])
@@ -1074,7 +1102,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             bounds,
-            (Some(1_786_699_935_000), Some(1_786_699_995_000), 1)
+            (
+                parse_event_time_ms("2026-08-14T09:32:15 first"),
+                parse_event_time_ms("2026-08-14T09:33:15 second"),
+                1
+            )
         );
     }
 
