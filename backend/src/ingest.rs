@@ -29,7 +29,9 @@ pub use archive::ArchiveBudget;
 use archive::{archive_parent_depth, extract_gzip_file, gzip_output_name, sanitize_archive_path};
 use archive::{extract_archive, validate_extracted_path};
 use indexing::clean_log_line;
-pub use indexing::line_reader::{decode_log_line, read_line_bytes_limited};
+pub use indexing::line_reader::{
+    LimitedLine, decode_log_line, read_line_bytes_limited, read_line_bytes_limited_with_budget,
+};
 use limits::{
     INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES, INDEX_COMMIT_MAX_LINES,
     INDEX_COMMIT_TARGET_BYTES, LINE_OFFSET_INTERVAL,

@@ -4,6 +4,19 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 const TRUNCATED_LINE_MARKER: &str = " ... [line truncated]";
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum LimitedLine {
+    EndOfFile,
+    Line {
+        bytes_read: usize,
+        original_length: usize,
+        truncated: bool,
+    },
+    ScanLimit {
+        bytes_read: usize,
+    },
+}
+
 pub(crate) fn clean_log_line(line: &[u8], truncated: bool) -> String {
     // SQLite text values should not contain embedded null bytes in this app.
     decode_log_line(line, truncated).trim().replace('\0', "")
@@ -17,6 +30,26 @@ pub async fn read_line_bytes_limited<R>(
 where
     R: AsyncBufRead + Unpin,
 {
+    match read_line_bytes_limited_with_budget(reader, output, max_bytes, usize::MAX).await? {
+        LimitedLine::EndOfFile => Ok(None),
+        LimitedLine::Line {
+            bytes_read,
+            original_length,
+            truncated,
+        } => Ok(Some((bytes_read, original_length, truncated))),
+        LimitedLine::ScanLimit { .. } => Err(io::Error::other("line scan budget exhausted")),
+    }
+}
+
+pub async fn read_line_bytes_limited_with_budget<R>(
+    reader: &mut R,
+    output: &mut Vec<u8>,
+    max_bytes: usize,
+    scan_budget: usize,
+) -> Result<LimitedLine, io::Error>
+where
+    R: AsyncBufRead + Unpin,
+{
     output.clear();
     let mut total_read = 0usize;
     let mut previous_byte = None;
@@ -25,12 +58,23 @@ where
         let available = reader.fill_buf().await?;
         if available.is_empty() {
             return if total_read == 0 {
-                Ok(None)
+                Ok(LimitedLine::EndOfFile)
             } else {
-                Ok(Some((total_read, total_read, total_read > max_bytes)))
+                Ok(LimitedLine::Line {
+                    bytes_read: total_read,
+                    original_length: total_read,
+                    truncated: total_read > max_bytes,
+                })
             };
         }
 
+        let remaining_budget = scan_budget.saturating_sub(total_read);
+        if remaining_budget == 0 {
+            return Ok(LimitedLine::ScanLimit {
+                bytes_read: total_read,
+            });
+        }
+        let available = &available[..available.len().min(remaining_budget)];
         let newline_pos = available.iter().position(|byte| *byte == b'\n');
         let has_carriage_return = newline_pos.map(|position| {
             if position > 0 {
@@ -62,6 +106,12 @@ where
 
         reader.consume(consume_len);
 
+        if newline_pos.is_none() && total_read == scan_budget {
+            return Ok(LimitedLine::ScanLimit {
+                bytes_read: total_read,
+            });
+        }
+
         if let Some(has_carriage_return) = has_carriage_return {
             let line_ending_bytes = 1 + usize::from(has_carriage_return);
             let original_length = total_read.saturating_sub(line_ending_bytes);
@@ -72,11 +122,11 @@ where
             {
                 output.pop();
             }
-            return Ok(Some((
-                total_read,
+            return Ok(LimitedLine::Line {
+                bytes_read: total_read,
                 original_length,
-                original_length > max_bytes,
-            )));
+                truncated: original_length > max_bytes,
+            });
         }
         previous_byte = consumed_last_byte;
     }
@@ -104,7 +154,9 @@ pub fn decode_log_line(line: &[u8], truncated: bool) -> String {
 mod tests {
     use tokio::io::BufReader;
 
-    use super::{decode_log_line, read_line_bytes_limited};
+    use super::{
+        LimitedLine, decode_log_line, read_line_bytes_limited, read_line_bytes_limited_with_budget,
+    };
 
     async fn read_with_capacity(
         content: &[u8],
@@ -151,5 +203,19 @@ mod tests {
         let (result, output) = read_with_capacity(b"abc\r\n", 4, 16).await;
         assert_eq!(result, (5, 3, false));
         assert_eq!(output, b"abc");
+    }
+
+    #[tokio::test]
+    async fn scan_budget_stops_a_line_without_growing_the_output() {
+        let content = b"a".repeat(1024);
+        let mut reader = BufReader::with_capacity(4, content.as_slice());
+        let mut output = Vec::new();
+        let result = read_line_bytes_limited_with_budget(&mut reader, &mut output, 16, 32)
+            .await
+            .unwrap();
+
+        assert_eq!(result, LimitedLine::ScanLimit { bytes_read: 32 });
+        assert_eq!(output.len(), 16);
+        assert!(output.capacity() <= 16);
     }
 }

@@ -6,7 +6,12 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
 };
 
-use crate::{error::AppError, log_expression::Expression};
+use crate::{
+    config::MAX_LOGICAL_LINE_BYTES,
+    error::AppError,
+    ingest::{LimitedLine, read_line_bytes_limited_with_budget},
+    log_expression::Expression,
+};
 
 pub struct TempSource {
     pub path: PathBuf,
@@ -58,12 +63,22 @@ impl TempResultExecutor {
         output: &mut File,
         metadata_output: &mut File,
         index_output: &mut File,
+        max_scan_bytes: u64,
     ) -> Result<MaterializedPreview, AppError> {
         let mut matched = 0_i64;
         let mut lines = Vec::new();
         let mut log_offset = 0_u64;
         let mut meta_offset = 0_u64;
         let mut total_output_bytes = 0_u64;
+        let max_scan_bytes = usize::try_from(max_scan_bytes).map_err(|_| {
+            AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SCAN_BYTES cannot be represented on this platform".into(),
+            )
+        })?;
+        let max_logical_line_bytes = usize::try_from(MAX_LOGICAL_LINE_BYTES).map_err(|_| {
+            AppError::Config("MAX_LOGICAL_LINE_BYTES cannot be represented on this platform".into())
+        })?;
+        let mut scanned_bytes = 0usize;
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
@@ -78,14 +93,28 @@ impl TempResultExecutor {
             let mut source_line = 0_i64;
             loop {
                 bytes.clear();
-                if reader
-                    .read_until(b'\n', &mut bytes)
-                    .await
-                    .map_err(AppError::Io)?
-                    == 0
-                {
-                    break;
+                let remaining_scan_bytes = max_scan_bytes.saturating_sub(scanned_bytes);
+                if remaining_scan_bytes == 0 {
+                    return Err(scan_limit());
                 }
+                match read_line_bytes_limited_with_budget(
+                    &mut reader,
+                    &mut bytes,
+                    max_logical_line_bytes,
+                    remaining_scan_bytes,
+                )
+                .await
+                .map_err(AppError::Io)?
+                {
+                    LimitedLine::EndOfFile => break,
+                    LimitedLine::Line { bytes_read, .. } => {
+                        scanned_bytes = scanned_bytes.saturating_add(bytes_read);
+                        bytes_read
+                    }
+                    LimitedLine::ScanLimit { .. } => {
+                        return Err(scan_limit());
+                    }
+                };
                 let line = String::from_utf8_lossy(&bytes);
                 let content = line.trim_end_matches(['\r', '\n']);
                 let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
@@ -192,6 +221,7 @@ impl TempResultExecutor {
         metadata_output: &mut File,
         index_output: &mut File,
         max_output_bytes: u64,
+        max_scan_bytes: u64,
     ) -> Result<i64, AppError> {
         // Full materialization uses the same scan, metadata, index, newline, and
         // size-limit pipeline as preview; a zero-sized window suppresses only
@@ -205,6 +235,7 @@ impl TempResultExecutor {
             output,
             metadata_output,
             index_output,
+            max_scan_bytes,
         )
         .await?
         .total)
@@ -216,6 +247,22 @@ fn too_large() -> AppError {
         actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
         "TEMP_RESULT_TOO_LARGE",
         "临时结果超过大小限制",
+    )
+}
+
+fn scan_limit() -> AppError {
+    AppError::public(
+        actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+        "TEMP_RESULT_SCAN_LIMIT",
+        "临时结果扫描超过限制",
+    )
+}
+
+pub fn scan_timeout() -> AppError {
+    AppError::public(
+        actix_web::http::StatusCode::REQUEST_TIMEOUT,
+        "TEMP_RESULT_SCAN_TIMEOUT",
+        "临时结果扫描超时",
     )
 }
 
@@ -277,7 +324,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint};
-    use crate::log_expression;
+    use crate::{error::AppError, log_expression};
 
     fn test_path(suffix: &str) -> PathBuf {
         std::env::temp_dir().join(format!("rain-temp-result-{}-{suffix}", Uuid::new_v4()))
@@ -317,6 +364,7 @@ mod tests {
             &mut log,
             &mut meta,
             &mut index,
+            u64::MAX,
         )
         .await
         .unwrap();
@@ -344,6 +392,56 @@ mod tests {
         assert_eq!(checkpoints[0].result_line, 0);
         assert_eq!(checkpoints[1].result_line, 1_000);
 
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stops_scanning_an_unterminated_line_at_the_scan_budget() {
+        let source_path = test_path("scan-limit-source.log");
+        let log_path = test_path("scan-limit-result.log");
+        let meta_path = test_path("scan-limit-result.meta");
+        let index_path = test_path("scan-limit-result.idx");
+        tokio::fs::write(&source_path, "ERROR ".repeat(1024))
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let error = match TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            1,
+            u64::MAX,
+            &mut log,
+            &mut meta,
+            &mut index,
+            32,
+        )
+        .await
+        {
+            Ok(_) => panic!("unterminated line should hit the scan budget"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            AppError::PublicApi {
+                code: "TEMP_RESULT_SCAN_LIMIT",
+                ..
+            }
+        ));
         for path in [source_path, log_path, meta_path, index_path] {
             let _ = tokio::fs::remove_file(path).await;
         }
@@ -390,6 +488,7 @@ mod tests {
             &mut full.1,
             &mut full.2,
             u64::MAX,
+            u64::MAX,
         )
         .await
         .unwrap();
@@ -402,6 +501,7 @@ mod tests {
             &mut preview.0,
             &mut preview.1,
             &mut preview.2,
+            u64::MAX,
         )
         .await
         .unwrap();
@@ -453,6 +553,7 @@ mod tests {
             &mut first_log,
             &mut first_meta,
             &mut first_index,
+            u64::MAX,
         )
         .await
         .unwrap();
@@ -480,6 +581,7 @@ mod tests {
             &mut second_log,
             &mut second_meta,
             &mut second_index,
+            u64::MAX,
         )
         .await
         .unwrap();

@@ -11,6 +11,7 @@ use crate::ingest::limits::{
 const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
+pub const MAX_LOGICAL_LINE_BYTES: u64 = 8 * MIB;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuredOutputMode {
@@ -293,6 +294,8 @@ pub struct TempResultConfig {
     pub max_total_size: u64,
     pub max_records: i64,
     pub concurrent_materializations: usize,
+    pub max_scan_bytes: u64,
+    pub max_scan_duration_seconds: u64,
 }
 
 impl Default for TempResultConfig {
@@ -302,6 +305,8 @@ impl Default for TempResultConfig {
             max_total_size: GIB,
             max_records: 1_000,
             concurrent_materializations: 2,
+            max_scan_bytes: GIB,
+            max_scan_duration_seconds: 30,
         }
     }
 }
@@ -553,6 +558,14 @@ impl AppLimits {
                     "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
                     defaults.temp_results.concurrent_materializations,
                 )?,
+                max_scan_bytes: env_size(
+                    "RAIN_TEMP_RESULT_MAX_SCAN_BYTES",
+                    defaults.temp_results.max_scan_bytes,
+                )?,
+                max_scan_duration_seconds: env_value(
+                    "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS",
+                    defaults.temp_results.max_scan_duration_seconds,
+                )?,
             },
         };
         limits.validate()?;
@@ -615,10 +628,28 @@ impl AppLimits {
             self.temp_results.concurrent_materializations,
             "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS"
         );
+        positive!(
+            self.temp_results.max_scan_bytes,
+            "RAIN_TEMP_RESULT_MAX_SCAN_BYTES"
+        );
+        positive!(
+            self.temp_results.max_scan_duration_seconds,
+            "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS"
+        );
         if self.temp_results.max_result_size > self.temp_results.max_total_size {
             return Err(AppError::Config(
                 "RAIN_TEMP_RESULT_MAX_SIZE must not exceed RAIN_TEMP_RESULT_MAX_TOTAL_SIZE".into(),
             ));
+        }
+        if self.indexing.max_indexed_line_size > MAX_LOGICAL_LINE_BYTES {
+            return Err(AppError::Config(format!(
+                "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE must not exceed {MAX_LOGICAL_LINE_BYTES} bytes"
+            )));
+        }
+        if self.api.max_preview_line_size > MAX_LOGICAL_LINE_BYTES {
+            return Err(AppError::Config(format!(
+                "RAIN_API_MAX_PREVIEW_LINE_SIZE must not exceed {MAX_LOGICAL_LINE_BYTES} bytes"
+            )));
         }
         if self.api.default_line_page_size > self.api.max_line_page_size {
             return Err(AppError::Config(

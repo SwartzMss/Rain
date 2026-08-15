@@ -14,7 +14,7 @@ use super::storage::{
     temp_result_too_large,
 };
 use super::*;
-use crate::services::temp_results::MaterializedPreview;
+use crate::services::temp_results::{MaterializedPreview, scan_timeout};
 
 enum MaterializeMode {
     Full,
@@ -58,34 +58,43 @@ async fn materialize_result(
         let mut index = File::create(&staging_index_path)
             .await
             .map_err(AppError::Io)?;
-        let materialized = match mode {
-            MaterializeMode::Full => TempResultExecutor::write_matches(
-                sources,
-                expression,
-                &mut output,
-                &mut metadata,
-                &mut index,
-                state.limits.temp_results.max_result_size,
-            )
-            .await
-            .map(|total| MaterializedPreview {
-                total,
-                lines: Vec::new(),
-            }),
-            MaterializeMode::Preview { from, size } => {
-                TempResultExecutor::materialize_preview(
-                    sources,
-                    expression,
-                    from,
-                    size,
-                    state.limits.temp_results.max_result_size,
-                    &mut output,
-                    &mut metadata,
-                    &mut index,
-                )
-                .await
-            }
-        }?;
+        let materialized = tokio::time::timeout(
+            std::time::Duration::from_secs(state.limits.temp_results.max_scan_duration_seconds),
+            async {
+                match mode {
+                    MaterializeMode::Full => TempResultExecutor::write_matches(
+                        sources,
+                        expression,
+                        &mut output,
+                        &mut metadata,
+                        &mut index,
+                        state.limits.temp_results.max_result_size,
+                        state.limits.temp_results.max_scan_bytes,
+                    )
+                    .await
+                    .map(|total| MaterializedPreview {
+                        total,
+                        lines: Vec::new(),
+                    }),
+                    MaterializeMode::Preview { from, size } => {
+                        TempResultExecutor::materialize_preview(
+                            sources,
+                            expression,
+                            from,
+                            size,
+                            state.limits.temp_results.max_result_size,
+                            &mut output,
+                            &mut metadata,
+                            &mut index,
+                            state.limits.temp_results.max_scan_bytes,
+                        )
+                        .await
+                    }
+                }
+            },
+        )
+        .await
+        .map_err(|_| scan_timeout())??;
         drop(output);
         drop(metadata);
         drop(index);
