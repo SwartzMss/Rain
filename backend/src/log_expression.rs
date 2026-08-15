@@ -162,10 +162,29 @@ impl ExpressionChunkMatcher {
             if term.found {
                 continue;
             }
-            let combined = format!("{}{}", term.tail, normalized);
-            if combined.contains(&term.term) {
+
+            if normalized.contains(&term.term) {
                 term.found = true;
+                continue;
+            }
+
+            let (prefix, has_more) = prefix_by_chars(normalized, term.keep_chars);
+            if !term.tail.is_empty() && !prefix.is_empty() {
+                let mut boundary = String::with_capacity(term.tail.len() + prefix.len());
+                boundary.push_str(&term.tail);
+                boundary.push_str(prefix);
+                if boundary.contains(&term.term) {
+                    term.found = true;
+                    continue;
+                }
+            }
+
+            if has_more {
+                term.tail = keep_suffix(normalized, term.keep_chars);
             } else {
+                let mut combined = String::with_capacity(term.tail.len() + normalized.len());
+                combined.push_str(&term.tail);
+                combined.push_str(normalized);
                 term.tail = keep_suffix(&combined, term.keep_chars);
             }
         }
@@ -217,6 +236,13 @@ fn keep_suffix(value: &str, chars: usize) -> String {
         .chars()
         .rev()
         .collect()
+}
+
+fn prefix_by_chars(value: &str, chars: usize) -> (&str, bool) {
+    let Some((end, _)) = value.char_indices().nth(chars) else {
+        return (value, false);
+    };
+    (&value[..end], true)
 }
 
 pub fn parse(input: &str) -> Result<Expression, ParseError> {
