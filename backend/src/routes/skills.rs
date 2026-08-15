@@ -33,11 +33,18 @@ const SKILL_REVIEW_SYSTEM_PROMPT: &str = concat!(
     "- causal_relationships (20%): # 关系与影响\n",
     "- diagnostic_usefulness (15%): all domain sections together\n",
     "- clarity (10%): all standard and custom sections as a whole\n",
-    "Score each dimension from 0 to 100 for specificity, domain relevance, causal usefulness, and actionability. ",
+    "Score each dimension from 0 to 100 for specificity, domain relevance, causal usefulness, and actionability, using that dimension's own boundary. ",
+    "signal_semantics answers what an observed signal means; causal_relationships answers why an upstream failure leads to a downstream effect; diagnostic_usefulness answers whether the domain knowledge helps distinguish, confirm, or exclude candidate causes. ",
+    "Do not mechanically give both causal_relationships and diagnostic_usefulness a high score merely because a causal chain is present. ",
     "A heading restatement, placeholder, tautology, generic one-liner, or advice that could apply to any diagnosis must score low in the affected dimension. ",
     "For example, a present # 关键日志 section containing only ‘记录日志。’ is structurally valid but must receive a low signal_semantics score. ",
     "A structurally complete yet generic playbook must not receive GOOD or EXCELLENT merely because every section exists. ",
-    "# 领域判定规则 is an optional domain-knowledge section, not a platform evidence policy. It may map domain signals to candidate causes, exclusions, or state interpretations. ",
+    "Use these general quality anchors: 0-39 means little usable domain knowledge; 40-59 means partial domain information with major gaps; 60-74 means basically usable with important gaps; 75-89 means specific knowledge that can locate stages and distinguish some candidates; 90-100 means highly complete and consistent knowledge. These anchors describe general quality and must be interpreted within each dimension; a single dimension need not satisfy the content requirements of other dimensions. ",
+    "For example, signal_semantics at 90-100 means observable signals and their meanings are highly complete and consistent; causal_relationships at 90-100 means upstream/downstream dependencies and propagation are highly complete and consistent; diagnostic_usefulness at 90-100 means the knowledge can effectively distinguish, confirm, and exclude major candidate causes. ",
+    "These scoring anchors guide dimension scores only; they do not change the server-side grade thresholds. The server derives EXCELLENT at 85-100, GOOD at 70-84, NEEDS_IMPROVEMENT at 50-69, and POOR at 0-49. ",
+    "# 领域判定规则 is an optional domain-knowledge section, not a platform evidence policy, and its heading being present or absent is not itself a scoring criterion. ",
+    "The diagnostic knowledge to distinguish, confirm, or exclude candidate causes still contributes to diagnostic_usefulness and may appear in any standard or custom section; it does not have to appear under # 领域判定规则. ",
+    "It may map domain signals to candidate causes, exclusions, or state interpretations. ",
     "Do not require or reward instructions about retrieval, raw-log requirements, evidence counts, missing-log handling, or stopping in # 领域判定规则 or any other Skill section. ",
     "Treat # 关键日志 as the v1 authoring heading for observable domain signals, including log patterns, event text, error codes, state values, and metric values recorded in the Issue materials. ",
     "Do not assume a Skill can access external monitoring systems or data sources that are not present in the Issue materials. ",
@@ -454,8 +461,8 @@ mod tests {
     };
 
     use super::{
-        SKILL_REVIEW_REPAIR_PROMPT, SKILL_REVIEW_SYSTEM_PROMPT, build_review_request,
-        grade_for_score, parse_review, with_review_budget,
+        SKILL_REVIEW_REPAIR_PROMPT, SKILL_REVIEW_SYSTEM_PROMPT, UNTRUSTED_SKILL_REVIEW_PREFIX,
+        build_review_request, grade_for_score, parse_review, with_review_budget,
     };
     use crate::{
         SkillReviewRuntime,
@@ -479,6 +486,17 @@ mod tests {
         .unwrap();
         assert_eq!(review.overall_score, 95);
         assert_eq!(review.grade, "EXCELLENT");
+    }
+
+    #[test]
+    fn parse_review_recomputes_weighted_score_and_preserves_grade_boundaries() {
+        let review = parse_review(Some(
+            r#"{"overall_score":54,"grade":"EXCELLENT","dimensions":{"task_scope":100,"business_flow":80,"signal_semantics":60,"causal_relationships":40,"diagnostic_usefulness":20,"clarity":0},"warnings":[],"suggestions":[]}"#,
+        ))
+        .unwrap();
+
+        assert_eq!(review.overall_score, 54);
+        assert_eq!(review.grade, "NEEDS_IMPROVEMENT");
     }
 
     fn review_with_findings(warnings: &str, suggestions: &str) -> String {
@@ -584,6 +602,20 @@ mod tests {
             "clarity (10%): all standard and custom sections as a whole",
             "Each standard Chinese H1 section primarily contributes to its mapped dimension",
             "diagnostic_usefulness and clarity evaluate the Skill across sections",
+            "using that dimension's own boundary",
+            "signal_semantics answers what an observed signal means",
+            "causal_relationships answers why an upstream failure leads to a downstream effect",
+            "diagnostic_usefulness answers whether the domain knowledge helps distinguish, confirm, or exclude candidate causes",
+            "Do not mechanically give both causal_relationships and diagnostic_usefulness a high score",
+            "Use these general quality anchors: 0-39 means little usable domain knowledge",
+            "These anchors describe general quality and must be interpreted within each dimension",
+            "signal_semantics at 90-100 means observable signals and their meanings are highly complete and consistent",
+            "causal_relationships at 90-100 means upstream/downstream dependencies and propagation are highly complete and consistent",
+            "diagnostic_usefulness at 90-100 means the knowledge can effectively distinguish, confirm, and exclude major candidate causes",
+            "These scoring anchors guide dimension scores only; they do not change the server-side grade thresholds",
+            "The server derives EXCELLENT at 85-100, GOOD at 70-84, NEEDS_IMPROVEMENT at 50-69, and POOR at 0-49",
+            "its heading being present or absent is not itself a scoring criterion",
+            "may appear in any standard or custom section; it does not have to appear under # 领域判定规则",
         ] {
             assert!(SKILL_REVIEW_SYSTEM_PROMPT.contains(expected));
         }
@@ -669,6 +701,133 @@ schema_version: 1
         assert_eq!(user_input.matches("自定义内容").count(), 1);
         assert!(!user_input.contains("schema_version"));
         assert!(!user_input.contains("standard_key"));
+    }
+
+    #[test]
+    fn reviewer_request_contract_is_shared_across_domain_fixtures() {
+        let fixtures = [
+            (
+                "IVI Bluetooth",
+                r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位 IVI Bluetooth 连接失败。
+
+# 分析范围
+
+关注 IVI Bluetooth 连接相关材料。
+
+# 关键流程
+
+公钥获取 → 解密 → Bluetooth 连接。
+
+# 关键日志
+
+`Decrypt ret=1` 表示解密失败。
+
+# 领域判定规则
+
+解密失败支持解密阶段故障候选。
+
+# 关系与影响
+
+公钥获取失败可能导致解密失败，进而导致连接失败。
+"#,
+            ),
+            (
+                "payment",
+                r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位 payment 订单失败阶段。
+
+# 分析范围
+
+关注 payment 授权、扣款和回调材料。
+
+# 关键流程
+
+授权 → 扣款 → 回调 → 订单状态更新。
+
+# 关键日志
+
+`charge status=SUCCEEDED` 表示扣款成功。
+
+# 领域判定规则
+
+扣款成功后回调失败支持回调处理故障候选。
+
+# 关系与影响
+
+回调失败可能导致扣款成功但订单状态仍未更新。
+"#,
+            ),
+            (
+                "authentication",
+                r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位 authentication failure 的发生阶段。
+
+# 分析范围
+
+关注认证请求、凭证校验和会话创建材料。
+
+# 关键流程
+
+接收请求 → 校验凭证 → 创建会话 → 访问受保护资源。
+
+# 关键日志
+
+`invalid credentials` 表示凭证校验失败。
+
+# 领域判定规则
+
+凭证校验失败支持认证失败候选。
+
+# 关系与影响
+
+凭证校验失败会阻止会话创建，后续 401 可能是下游症状。
+"#,
+            ),
+        ];
+        let requests: Vec<_> = fixtures
+            .iter()
+            .map(|(_, markdown)| {
+                build_review_request(
+                    "review-model".into(),
+                    &parse_skill_markdown(markdown).unwrap(),
+                )
+            })
+            .collect();
+        let system_messages: Vec<_> = requests
+            .iter()
+            .map(|request| request.messages[0].content.as_deref().unwrap())
+            .collect();
+
+        assert!(
+            system_messages
+                .iter()
+                .all(|message| *message == SKILL_REVIEW_SYSTEM_PROMPT)
+        );
+        let system_lower = SKILL_REVIEW_SYSTEM_PROMPT.to_ascii_lowercase();
+        for ((marker, _), request) in fixtures.iter().zip(&requests) {
+            assert_eq!(request.messages[0].role, "system");
+            assert_eq!(request.messages[1].role, "user");
+            let user_message = request.messages[1].content.as_deref().unwrap();
+            assert!(user_message.starts_with(UNTRUSTED_SKILL_REVIEW_PREFIX));
+            assert!(user_message.contains(marker));
+            assert!(!system_lower.contains(&marker.to_ascii_lowercase()));
+        }
     }
 
     #[test]

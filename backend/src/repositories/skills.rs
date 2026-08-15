@@ -11,7 +11,7 @@ use crate::{
 
 const COLUMNS: &str = "id,owner_user_id,name,description,skill_markdown,content_hash,version,enabled,created_at,updated_at";
 pub const MAX_SKILLS_PER_USER: i64 = 50;
-pub const CURRENT_SKILL_REVIEW_RUBRIC: &str = "skill-quality-v2";
+pub const CURRENT_SKILL_REVIEW_RUBRIC: &str = "skill-quality-v1";
 
 #[derive(FromRow)]
 struct SkillListRow {
