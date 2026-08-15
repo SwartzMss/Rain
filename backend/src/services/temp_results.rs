@@ -9,7 +9,9 @@ use tokio::{
 use crate::{
     config::MAX_LOGICAL_LINE_BYTES,
     error::AppError,
-    ingest::{LimitedLine, read_line_bytes_limited_with_budget},
+    ingest::{
+        LimitedLine, TRUNCATED_LINE_MARKER, decode_log_line, read_line_bytes_limited_with_budget,
+    },
     log_expression::Expression,
 };
 
@@ -94,10 +96,7 @@ impl TempResultExecutor {
             loop {
                 bytes.clear();
                 let remaining_scan_bytes = max_scan_bytes.saturating_sub(scanned_bytes);
-                if remaining_scan_bytes == 0 {
-                    return Err(scan_limit());
-                }
-                match read_line_bytes_limited_with_budget(
+                let truncated = match read_line_bytes_limited_with_budget(
                     &mut reader,
                     &mut bytes,
                     max_logical_line_bytes,
@@ -107,16 +106,19 @@ impl TempResultExecutor {
                 .map_err(AppError::Io)?
                 {
                     LimitedLine::EndOfFile => break,
-                    LimitedLine::Line { bytes_read, .. } => {
+                    LimitedLine::Line {
+                        bytes_read,
+                        truncated,
+                        ..
+                    } => {
                         scanned_bytes = scanned_bytes.saturating_add(bytes_read);
-                        bytes_read
+                        truncated
                     }
-                    LimitedLine::ScanLimit { .. } => {
-                        return Err(scan_limit());
-                    }
+                    LimitedLine::ScanLimit { .. } => return Err(scan_limit()),
                 };
-                let line = String::from_utf8_lossy(&bytes);
-                let content = line.trim_end_matches(['\r', '\n']);
+                let match_content = String::from_utf8_lossy(&bytes);
+                let match_content = match_content.trim_end_matches(['\r', '\n']);
+                let content = decode_log_line(&bytes, truncated);
                 let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
                     source_metadata_line.clear();
                     if reader
@@ -135,7 +137,11 @@ impl TempResultExecutor {
                 } else {
                     None
                 };
-                if expression.matches(content) {
+                if expression.matches(match_content) {
+                    let mut output_bytes = bytes.clone();
+                    if truncated {
+                        output_bytes.extend_from_slice(TRUNCATED_LINE_MARKER.as_bytes());
+                    }
                     let metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
                         bundle_hash: source.bundle_hash.clone(),
                         file_id: source.file_id.clone(),
@@ -156,16 +162,20 @@ impl TempResultExecutor {
                         )
                         .await?;
                     }
-                    let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
+                    let line_bytes =
+                        output_bytes.len() as u64 + u64::from(!output_bytes.ends_with(b"\n"));
                     let next_output_size =
                         log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
                     ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
-                    output.write_all(&bytes).await.map_err(AppError::Io)?;
+                    output
+                        .write_all(&output_bytes)
+                        .await
+                        .map_err(AppError::Io)?;
                     log_offset = next_output_size;
                     total_output_bytes = total_output_bytes
                         .checked_add(line_bytes)
                         .ok_or_else(too_large)?;
-                    if !bytes.ends_with(b"\n") {
+                    if !output_bytes.ends_with(b"\n") {
                         output.write_all(b"\n").await.map_err(AppError::Io)?;
                     }
                     meta_offset += write_json_line(
@@ -323,7 +333,9 @@ mod tests {
     use tokio::fs::File;
     use uuid::Uuid;
 
-    use super::{SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint};
+    use super::{
+        SparseCheckpoint, TRUNCATED_LINE_MARKER, TempResultExecutor, TempSource, select_checkpoint,
+    };
     use crate::{error::AppError, log_expression};
 
     fn test_path(suffix: &str) -> PathBuf {
@@ -442,6 +454,98 @@ mod tests {
                 ..
             }
         ));
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_a_source_that_ends_exactly_at_the_scan_budget() {
+        let source_path = test_path("exact-scan-source.log");
+        let log_path = test_path("exact-scan-result.log");
+        let meta_path = test_path("exact-scan-result.meta");
+        let index_path = test_path("exact-scan-result.idx");
+        let source_content = format!("ERROR {}\n", "x".repeat(25));
+        assert_eq!(source_content.len(), 32);
+        tokio::fs::write(&source_path, source_content)
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let preview = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            1,
+            u64::MAX,
+            &mut log,
+            &mut meta,
+            &mut index,
+            32,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(preview.total, 1);
+        assert_eq!(preview.lines.len(), 1);
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn marks_temp_result_lines_truncated_at_the_logical_line_limit() {
+        let source_path = test_path("truncated-source.log");
+        let log_path = test_path("truncated-result.log");
+        let meta_path = test_path("truncated-result.meta");
+        let index_path = test_path("truncated-result.idx");
+        let source_content = format!("ERROR {}\n", "x".repeat(8 * 1024 * 1024));
+        tokio::fs::write(&source_path, source_content)
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let preview = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            1,
+            u64::MAX,
+            &mut log,
+            &mut meta,
+            &mut index,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(preview.total, 1);
+        assert!(preview.lines[0].content.ends_with(TRUNCATED_LINE_MARKER));
+        drop(log);
+        drop(meta);
+        drop(index);
+        let result = tokio::fs::read_to_string(&log_path).await.unwrap();
+        assert!(result.ends_with(&format!("{TRUNCATED_LINE_MARKER}\n")));
         for path in [source_path, log_path, meta_path, index_path] {
             let _ = tokio::fs::remove_file(path).await;
         }

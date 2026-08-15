@@ -2,7 +2,7 @@ use std::io;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
-const TRUNCATED_LINE_MARKER: &str = " ... [line truncated]";
+pub const TRUNCATED_LINE_MARKER: &str = " ... [line truncated]";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LimitedLine {
@@ -107,6 +107,13 @@ where
         reader.consume(consume_len);
 
         if newline_pos.is_none() && total_read == scan_budget {
+            if reader.fill_buf().await?.is_empty() {
+                return Ok(LimitedLine::Line {
+                    bytes_read: total_read,
+                    original_length: total_read,
+                    truncated: total_read > max_bytes,
+                });
+            }
             return Ok(LimitedLine::ScanLimit {
                 bytes_read: total_read,
             });
@@ -217,5 +224,39 @@ mod tests {
         assert_eq!(result, LimitedLine::ScanLimit { bytes_read: 32 });
         assert_eq!(output.len(), 16);
         assert!(output.capacity() <= 16);
+    }
+
+    #[tokio::test]
+    async fn exact_scan_budget_at_eof_returns_the_line() {
+        let content = b"abc\n";
+        let mut reader = BufReader::with_capacity(2, content.as_slice());
+        let mut output = Vec::new();
+
+        let result = read_line_bytes_limited_with_budget(&mut reader, &mut output, 16, 4)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            LimitedLine::Line {
+                bytes_read: 4,
+                original_length: 3,
+                truncated: false,
+            }
+        );
+        assert_eq!(output, b"abc");
+    }
+
+    #[tokio::test]
+    async fn scan_budget_plus_one_byte_returns_scan_limit() {
+        let content = b"abcd\n";
+        let mut reader = BufReader::with_capacity(2, content.as_slice());
+        let mut output = Vec::new();
+
+        let result = read_line_bytes_limited_with_budget(&mut reader, &mut output, 16, 4)
+            .await
+            .unwrap();
+
+        assert_eq!(result, LimitedLine::ScanLimit { bytes_read: 4 });
     }
 }
