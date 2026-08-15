@@ -65,6 +65,9 @@ impl TempResultExecutor {
         index_output: &mut File,
         max_scan_bytes: u64,
     ) -> Result<MaterializedPreview, AppError> {
+        let page_end = from
+            .checked_add(size)
+            .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
         let mut matched = 0_i64;
         let mut lines = Vec::new();
         let mut log_offset = 0_u64;
@@ -182,9 +185,6 @@ impl TempResultExecutor {
                         &mut total_output_bytes,
                     )
                     .await?;
-                    let page_end = from
-                        .checked_add(size)
-                        .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
                     if matched >= from && matched < page_end {
                         lines.push(PreviewLine {
                             bundle_hash: metadata.bundle_hash.clone(),
@@ -337,6 +337,49 @@ mod tests {
 
     fn test_path(suffix: &str) -> PathBuf {
         std::env::temp_dir().join(format!("rain-temp-result-{}-{suffix}", Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn rejects_overflowing_preview_page_before_opening_sources() {
+        let source_path = test_path("overflow-source.log");
+        let log_path = test_path("overflow-result.log");
+        let meta_path = test_path("overflow-result.meta");
+        let index_path = test_path("overflow-result.idx");
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "missing.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let error = match TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            i64::MAX,
+            1,
+            TEST_MAX_SCAN_BYTES,
+            &mut log,
+            &mut meta,
+            &mut index,
+            TEST_MAX_SCAN_BYTES,
+        )
+        .await
+        {
+            Ok(_) => panic!("overflowing page parameters must be rejected before scanning"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, AppError::BadRequest(message) if message == "分页参数超出支持范围")
+        );
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 
     #[tokio::test]

@@ -1086,6 +1086,33 @@ mod tests {
     }
 
     #[test]
+    fn environment_values_override_temp_result_scan_limits() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let bytes_name = "RAIN_TEMP_RESULT_MAX_SCAN_BYTES";
+        let duration_name = "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS";
+        let previous_bytes = std::env::var_os(bytes_name);
+        let previous_duration = std::env::var_os(duration_name);
+        unsafe {
+            std::env::set_var(bytes_name, "2 GiB");
+            std::env::set_var(duration_name, "45");
+        }
+
+        let limits = AppLimits::from_env().unwrap();
+
+        match previous_bytes {
+            Some(value) => unsafe { std::env::set_var(bytes_name, value) },
+            None => unsafe { std::env::remove_var(bytes_name) },
+        }
+        match previous_duration {
+            Some(value) => unsafe { std::env::set_var(duration_name, value) },
+            None => unsafe { std::env::remove_var(duration_name) },
+        }
+        assert_eq!(limits.temp_results.max_scan_bytes, 2 * 1024_u64.pow(3));
+        assert_eq!(limits.temp_results.max_scan_duration_seconds, 45);
+    }
+
+    #[test]
     fn rejects_zero_indexed_and_preview_line_limits() {
         let mut limits = AppLimits::default();
         limits.indexing.max_indexed_line_size = 0;

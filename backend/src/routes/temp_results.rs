@@ -39,6 +39,7 @@ const RETENTION_DAYS: i64 = 7;
 const ORPHAN_GRACE_PERIOD: StdDuration = StdDuration::from_secs(10 * 60);
 const TEMP_RESULT_RATE_LIMIT: usize = 10;
 const TEMP_RESULT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
+const TEMP_RESULT_IP_MAX_BUCKETS: usize = 1024;
 
 struct StagingLease {
     id: String,

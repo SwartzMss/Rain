@@ -469,3 +469,119 @@ pub(crate) async fn delete_result(
     }
     Ok(HttpResponse::NoContent().finish())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use actix_web::web;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use uuid::Uuid;
+
+    use super::{MaterializeMode, materialize_result};
+    use crate::{
+        AppState, config::AppLimits, db, error::AppError, log_expression,
+        services::temp_results::TempSource,
+    };
+
+    fn test_path(suffix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("rain-temp-materialize-{}-{suffix}", Uuid::new_v4()))
+    }
+
+    async fn test_state(root: &Path, mut limits: AppLimits) -> web::Data<AppState> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        limits.temp_results.max_scan_bytes = 32;
+        web::Data::new(AppState::new(pool, root.to_path_buf(), limits))
+    }
+
+    async fn assert_failed_materialization_is_clean(
+        state: &web::Data<AppState>,
+        source: TempSource,
+        expected: &'static str,
+    ) {
+        let expression = log_expression::parse("ERROR").unwrap();
+        let error = match materialize_result(
+            state,
+            "ERROR",
+            &expression,
+            &[source],
+            "app.log",
+            MaterializeMode::Full,
+        )
+        .await
+        {
+            Ok(_) => panic!("materialization should fail with {expected}"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            AppError::PublicApi { code, .. } if code == expected
+        ));
+        let staging_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM temp_results WHERE status = 'STAGING'")
+                .fetch_one(&state.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(staging_count, 0);
+        assert!(state.temp_results.staging.lock().unwrap().is_empty());
+        let mut entries = tokio::fs::read_dir(super::data_root(state).join("temp-results"))
+            .await
+            .unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn scan_limit_cleans_staging_record_and_part_files() {
+        let root = test_path("scan-limit");
+        let source_path = root.join("source.log");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(&source_path, "ERROR ".repeat(1024))
+            .await
+            .unwrap();
+        let state = test_state(&root, AppLimits::default()).await;
+
+        assert_failed_materialization_is_clean(
+            &state,
+            TempSource {
+                path: source_path,
+                metadata_path: None,
+                label: "app.log".into(),
+                bundle_hash: None,
+                file_id: None,
+            },
+            "TEMP_RESULT_SCAN_LIMIT",
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn timeout_cleans_staging_record_and_part_files() {
+        let root = test_path("timeout");
+        let source_path = root.join("source.log");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(&source_path, "ERROR\n").await.unwrap();
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_scan_duration_seconds = 0;
+        let state = test_state(&root, limits).await;
+
+        assert_failed_materialization_is_clean(
+            &state,
+            TempSource {
+                path: source_path,
+                metadata_path: None,
+                label: "app.log".into(),
+                bundle_hash: None,
+                file_id: None,
+            },
+            "TEMP_RESULT_SCAN_TIMEOUT",
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+}
