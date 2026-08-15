@@ -1,4 +1,4 @@
-use unic_ucd_case::{is_case_ignorable, is_cased};
+use caseless::default_case_fold_str;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
@@ -32,7 +32,7 @@ struct Token {
 
 impl Expression {
     pub fn matches(&self, line: &str) -> bool {
-        let normalized = line.to_lowercase();
+        let normalized = default_case_fold_str(line);
         self.matches_normalized(&normalized)
     }
 
@@ -63,14 +63,12 @@ impl Expression {
                 })
                 .collect(),
             pending: Vec::new(),
-            pending_case_char: None,
-            pending_case_ignorable: String::new(),
-            previous_cased: false,
         }
     }
 }
 
-const MAX_EXPRESSION_LENGTH_BYTES: usize = 4_096;
+pub const MAX_EXPRESSION_CHARS: usize = 4_096;
+pub const MAX_EXPRESSION_BYTES: usize = 16 * 1024;
 const MAX_EXPRESSION_TOKENS: usize = 128;
 const MAX_EXPRESSION_NESTING_DEPTH: usize = 32;
 const MAX_EXPRESSION_AST_NODES: usize = 128;
@@ -78,9 +76,6 @@ const MAX_EXPRESSION_AST_NODES: usize = 128;
 pub(crate) struct ExpressionChunkMatcher {
     terms: Vec<ChunkTerm>,
     pending: Vec<u8>,
-    pending_case_char: Option<char>,
-    pending_case_ignorable: String,
-    previous_cased: bool,
 }
 
 struct ChunkTerm {
@@ -93,9 +88,6 @@ struct ChunkTerm {
 impl ExpressionChunkMatcher {
     pub(crate) fn reset(&mut self) {
         self.pending.clear();
-        self.pending_case_char = None;
-        self.pending_case_ignorable.clear();
-        self.previous_cased = false;
         for term in &mut self.terms {
             term.tail.clear();
             term.found = false;
@@ -109,7 +101,6 @@ impl ExpressionChunkMatcher {
 
     pub(crate) fn finish(&mut self) {
         self.decode_pending(true);
-        self.finish_case_char();
     }
 
     pub(crate) fn matches(&self, expression: &Expression) -> bool {
@@ -163,49 +154,7 @@ impl ExpressionChunkMatcher {
     }
 
     fn feed_text(&mut self, text: &str) {
-        let mut normalized = String::new();
-        for character in text.chars() {
-            if let Some(previous) = self.pending_case_char.take() {
-                if is_case_ignorable(character) {
-                    append_lowercase(character, false, &mut self.pending_case_ignorable);
-                    self.pending_case_char = Some(previous);
-                    continue;
-                }
-                append_lowercase(
-                    previous,
-                    self.previous_cased && !is_cased(character),
-                    &mut normalized,
-                );
-                normalized.push_str(&self.pending_case_ignorable);
-                self.pending_case_ignorable.clear();
-                self.previous_cased = is_cased(character);
-                if character == 'Σ' {
-                    self.pending_case_char = Some(character);
-                } else {
-                    append_lowercase(character, false, &mut normalized);
-                }
-            } else if character == 'Σ' {
-                self.pending_case_char = Some(character);
-            } else {
-                append_lowercase(character, false, &mut normalized);
-                if !is_case_ignorable(character) {
-                    self.previous_cased = is_cased(character);
-                }
-            }
-        }
-        self.feed_normalized(&normalized);
-    }
-
-    fn finish_case_char(&mut self) {
-        let Some(character) = self.pending_case_char.take() else {
-            return;
-        };
-        let mut normalized = String::new();
-        append_lowercase(character, self.previous_cased, &mut normalized);
-        normalized.push_str(&self.pending_case_ignorable);
-        self.pending_case_ignorable.clear();
-        self.previous_cased = is_cased(character);
-        self.feed_normalized(&normalized);
+        self.feed_normalized(&default_case_fold_str(text));
     }
 
     fn feed_normalized(&mut self, normalized: &str) {
@@ -220,14 +169,6 @@ impl ExpressionChunkMatcher {
                 term.tail = keep_suffix(&combined, term.keep_chars);
             }
         }
-    }
-}
-
-fn append_lowercase(character: char, final_sigma: bool, output: &mut String) {
-    if character == 'Σ' {
-        output.push(if final_sigma { 'ς' } else { 'σ' });
-    } else {
-        output.extend(character.to_lowercase());
     }
 }
 
@@ -279,10 +220,20 @@ fn keep_suffix(value: &str, chars: usize) -> String {
 }
 
 pub fn parse(input: &str) -> Result<Expression, ParseError> {
-    if input.len() > MAX_EXPRESSION_LENGTH_BYTES {
+    if input.len() > MAX_EXPRESSION_BYTES {
         return Err(ParseError {
-            offset: MAX_EXPRESSION_LENGTH_BYTES,
-            message: "expression is too long".into(),
+            offset: MAX_EXPRESSION_BYTES,
+            message: "expression exceeds the byte limit".into(),
+        });
+    }
+    if input.chars().count() > MAX_EXPRESSION_CHARS {
+        let offset = input
+            .char_indices()
+            .nth(MAX_EXPRESSION_CHARS)
+            .map_or(input.len(), |(offset, _)| offset);
+        return Err(ParseError {
+            offset,
+            message: "expression exceeds the character limit".into(),
         });
     }
     let tokens = tokenize(input)?;
@@ -385,7 +336,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 });
             }
             tokens.push(Token {
-                kind: TokenKind::Term(phrase.to_lowercase()),
+                kind: TokenKind::Term(default_case_fold_str(phrase)),
                 offset,
             });
             continue;
@@ -404,7 +355,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
             "AND" => TokenKind::And,
             "OR" => TokenKind::Or,
             "NOT" => TokenKind::Not,
-            _ => TokenKind::Term(word.to_lowercase()),
+            _ => TokenKind::Term(default_case_fold_str(word)),
         };
         tokens.push(Token { kind, offset });
     }
@@ -584,6 +535,26 @@ mod tests {
     }
 
     #[test]
+    fn chunk_matcher_uses_case_folding_for_caseless_variants() {
+        let expression = parse("Σ").expect("expression");
+        for source in ["Σ", "σ", "ς"] {
+            assert!(expression.matches(source), "source: {source:?}");
+            let mut matcher = expression.chunk_matcher();
+            matcher.feed_bytes(source.as_bytes());
+            matcher.finish();
+            assert!(matcher.matches(&expression), "source: {source:?}");
+        }
+
+        let expression = parse("ß").expect("expression");
+        assert!(expression.matches("SS"));
+        let mut matcher = expression.chunk_matcher();
+        matcher.feed_bytes(b"S");
+        matcher.feed_bytes(b"S");
+        matcher.finish();
+        assert!(matcher.matches(&expression));
+    }
+
+    #[test]
     fn chunk_matcher_uses_complete_unicode_sigma_context() {
         for source in ["AΣ\u{0301}B", "ǅΣ"] {
             let expression = parse(source).expect("expression");
@@ -628,7 +599,9 @@ mod tests {
 
     #[test]
     fn rejects_excessive_expression_complexity() {
+        assert!(parse(&"中".repeat(4_096)).is_ok());
         assert!(parse(&"x".repeat(4_097)).is_err());
+        assert!(parse(&"😀".repeat(4_097)).is_err());
         assert!(parse(&format!("{}x", "x OR ".repeat(64))).is_err());
         assert!(parse(&format!("{}x", "NOT ".repeat(33))).is_err());
         assert!(parse(&format!("{}x{}", "(".repeat(33), ")".repeat(33))).is_err());
