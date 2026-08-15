@@ -624,6 +624,52 @@ mod tests {
     }
 
     #[test]
+    fn chunk_matcher_matches_whole_line_for_all_chunk_sizes() {
+        let cases = [
+            (
+                "ERROR AND 中文",
+                "prefix ERROR 中文 suffix".as_bytes().to_vec(),
+                "prefix ERROR 中文 suffix".to_owned(),
+            ),
+            (
+                "ΟΣ",
+                "prefix ΟΣ 中 suffix".as_bytes().to_vec(),
+                "prefix ΟΣ 中 suffix".to_owned(),
+            ),
+            (
+                "ß",
+                b"prefix SS suffix".to_vec(),
+                "prefix SS suffix".to_owned(),
+            ),
+            (
+                "ERROR",
+                vec![b'p', b'r', 0xff, b'E', b'R', b'R', b'O', b'R'],
+                String::from_utf8_lossy(&[b'p', b'r', 0xff, b'E', b'R', b'R', b'O', b'R'])
+                    .into_owned(),
+            ),
+        ];
+
+        for (expression_text, source, oracle_source) in cases {
+            let expression = parse(expression_text).expect("expression");
+            let expected = expression.matches(&oracle_source);
+
+            for chunk_size in 1..=source.len().max(1) {
+                let mut matcher = expression.chunk_matcher();
+                for chunk in source.chunks(chunk_size) {
+                    matcher.feed_bytes(chunk);
+                }
+                matcher.finish();
+
+                assert_eq!(
+                    matcher.matches(&expression),
+                    expected,
+                    "expression: {expression_text:?}, chunk size: {chunk_size}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rejects_excessive_expression_complexity() {
         assert!(parse(&"中".repeat(4_096)).is_ok());
         assert!(parse(&"x".repeat(4_097)).is_err());
