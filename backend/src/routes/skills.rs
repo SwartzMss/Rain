@@ -461,8 +461,8 @@ mod tests {
     };
 
     use super::{
-        SKILL_REVIEW_REPAIR_PROMPT, SKILL_REVIEW_SYSTEM_PROMPT, build_review_request,
-        grade_for_score, parse_review, with_review_budget,
+        SKILL_REVIEW_REPAIR_PROMPT, SKILL_REVIEW_SYSTEM_PROMPT, UNTRUSTED_SKILL_REVIEW_PREFIX,
+        build_review_request, grade_for_score, parse_review, with_review_budget,
     };
     use crate::{
         SkillReviewRuntime,
@@ -701,6 +701,133 @@ schema_version: 1
         assert_eq!(user_input.matches("自定义内容").count(), 1);
         assert!(!user_input.contains("schema_version"));
         assert!(!user_input.contains("standard_key"));
+    }
+
+    #[test]
+    fn reviewer_request_contract_is_shared_across_domain_fixtures() {
+        let fixtures = [
+            (
+                "IVI Bluetooth",
+                r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位 IVI Bluetooth 连接失败。
+
+# 分析范围
+
+关注 IVI Bluetooth 连接相关材料。
+
+# 关键流程
+
+公钥获取 → 解密 → Bluetooth 连接。
+
+# 关键日志
+
+`Decrypt ret=1` 表示解密失败。
+
+# 领域判定规则
+
+解密失败支持解密阶段故障候选。
+
+# 关系与影响
+
+公钥获取失败可能导致解密失败，进而导致连接失败。
+"#,
+            ),
+            (
+                "payment",
+                r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位 payment 订单失败阶段。
+
+# 分析范围
+
+关注 payment 授权、扣款和回调材料。
+
+# 关键流程
+
+授权 → 扣款 → 回调 → 订单状态更新。
+
+# 关键日志
+
+`charge status=SUCCEEDED` 表示扣款成功。
+
+# 领域判定规则
+
+扣款成功后回调失败支持回调处理故障候选。
+
+# 关系与影响
+
+回调失败可能导致扣款成功但订单状态仍未更新。
+"#,
+            ),
+            (
+                "authentication",
+                r#"---
+schema_version: 1
+---
+
+# 目标
+
+定位 authentication failure 的发生阶段。
+
+# 分析范围
+
+关注认证请求、凭证校验和会话创建材料。
+
+# 关键流程
+
+接收请求 → 校验凭证 → 创建会话 → 访问受保护资源。
+
+# 关键日志
+
+`invalid credentials` 表示凭证校验失败。
+
+# 领域判定规则
+
+凭证校验失败支持认证失败候选。
+
+# 关系与影响
+
+凭证校验失败会阻止会话创建，后续 401 可能是下游症状。
+"#,
+            ),
+        ];
+        let requests: Vec<_> = fixtures
+            .iter()
+            .map(|(_, markdown)| {
+                build_review_request(
+                    "review-model".into(),
+                    &parse_skill_markdown(markdown).unwrap(),
+                )
+            })
+            .collect();
+        let system_messages: Vec<_> = requests
+            .iter()
+            .map(|request| request.messages[0].content.as_deref().unwrap())
+            .collect();
+
+        assert!(
+            system_messages
+                .iter()
+                .all(|message| *message == SKILL_REVIEW_SYSTEM_PROMPT)
+        );
+        let system_lower = SKILL_REVIEW_SYSTEM_PROMPT.to_ascii_lowercase();
+        for ((marker, _), request) in fixtures.iter().zip(&requests) {
+            assert_eq!(request.messages[0].role, "system");
+            assert_eq!(request.messages[1].role, "user");
+            let user_message = request.messages[1].content.as_deref().unwrap();
+            assert!(user_message.starts_with(UNTRUSTED_SKILL_REVIEW_PREFIX));
+            assert!(user_message.contains(marker));
+            assert!(!system_lower.contains(&marker.to_ascii_lowercase()));
+        }
     }
 
     #[test]
