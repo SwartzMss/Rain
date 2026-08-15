@@ -148,7 +148,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_UPLOAD_MAX_TMP_BYTES` | `16 GiB` | 所有上传任务 `.tmp` 工作区的全局字节预算，包含原始接收文件和解压后的 staging 文件 |
 | `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
-| `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小（不得超过程序内 8 MiB 行上限） |
+| `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
 | `RAIN_API_DEFAULT_LINE_PAGE_SIZE` | `5000` | 默认行分页大小 |
 | `RAIN_API_MAX_LINE_PAGE_SIZE` | `10000` | 最大行分页大小 |
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
@@ -159,6 +159,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS` | `2` | 并发物化临时结果的任务数 |
 | `RAIN_TEMP_RESULT_MAX_SCAN_BYTES` | `1 GiB` | 单次临时结果物化允许扫描的源文件字节数 |
 | `RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS` | `30` | 单次临时结果物化的扫描超时时间（秒） |
+| — | `8 MiB` | Temp Result 单行物化前缀上限；超出部分继续参与表达式匹配，结果会标记为截断 |
 | `RAIN_SESSION_TTL_SECONDS` | `604800` | 登录 Session 有效期（秒），默认 7 天 |
 | `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
 | `RAIN_AUTH_ARGON2_CONCURRENCY` | `5` | Argon2 哈希与校验并发上限 |

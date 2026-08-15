@@ -50,6 +50,21 @@ pub async fn read_line_bytes_limited_with_budget<R>(
 where
     R: AsyncBufRead + Unpin,
 {
+    read_line_bytes_limited_with_budget_and_callback(reader, output, max_bytes, scan_budget, |_| {})
+        .await
+}
+
+pub async fn read_line_bytes_limited_with_budget_and_callback<R, F>(
+    reader: &mut R,
+    output: &mut Vec<u8>,
+    max_bytes: usize,
+    scan_budget: usize,
+    mut on_content: F,
+) -> Result<LimitedLine, io::Error>
+where
+    R: AsyncBufRead + Unpin,
+    F: FnMut(&[u8]),
+{
     output.clear();
     let mut total_read = 0usize;
     let mut previous_byte = None;
@@ -92,6 +107,7 @@ where
             }
         });
         let chunk = &available[..content_end];
+        on_content(chunk);
         total_read = total_read.saturating_add(chunk.len());
 
         let remaining = max_bytes.saturating_sub(output.len());

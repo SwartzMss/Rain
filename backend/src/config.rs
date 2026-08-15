@@ -11,7 +11,7 @@ use crate::ingest::limits::{
 const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
-pub const MAX_LOGICAL_LINE_BYTES: u64 = 8 * MIB;
+pub const MAX_TEMP_RESULT_LOGICAL_LINE_BYTES: u64 = 8 * MIB;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuredOutputMode {
@@ -641,16 +641,6 @@ impl AppLimits {
                 "RAIN_TEMP_RESULT_MAX_SIZE must not exceed RAIN_TEMP_RESULT_MAX_TOTAL_SIZE".into(),
             ));
         }
-        if self.indexing.max_indexed_line_size > MAX_LOGICAL_LINE_BYTES {
-            return Err(AppError::Config(format!(
-                "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE must not exceed {MAX_LOGICAL_LINE_BYTES} bytes"
-            )));
-        }
-        if self.api.max_preview_line_size > MAX_LOGICAL_LINE_BYTES {
-            return Err(AppError::Config(format!(
-                "RAIN_API_MAX_PREVIEW_LINE_SIZE must not exceed {MAX_LOGICAL_LINE_BYTES} bytes"
-            )));
-        }
         if self.api.default_line_page_size > self.api.max_line_page_size {
             return Err(AppError::Config(
                 "RAIN_API_DEFAULT_LINE_PAGE_SIZE must not exceed RAIN_API_MAX_LINE_PAGE_SIZE"
@@ -671,6 +661,11 @@ impl AppLimits {
         usize::try_from(self.api.max_preview_line_size).map_err(|_| {
             AppError::Config(
                 "RAIN_API_MAX_PREVIEW_LINE_SIZE cannot be represented on this platform".into(),
+            )
+        })?;
+        usize::try_from(self.temp_results.max_scan_bytes).map_err(|_| {
+            AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SCAN_BYTES cannot be represented on this platform".into(),
             )
         })?;
         Ok(())
@@ -1134,6 +1129,16 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("RAIN_API_MAX_PREVIEW_LINE_SIZE")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_scan_bytes = u64::MAX;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_TEMP_RESULT_MAX_SCAN_BYTES")
         );
     }
 

@@ -46,6 +46,155 @@ impl Expression {
             }
         }
     }
+
+    pub(crate) fn chunk_matcher(&self) -> ExpressionChunkMatcher {
+        let mut terms = Vec::new();
+        collect_terms(self, &mut terms);
+        ExpressionChunkMatcher {
+            terms: terms
+                .into_iter()
+                .map(|term| ChunkTerm {
+                    keep_chars: term.chars().count().saturating_sub(1),
+                    term,
+                    tail: String::new(),
+                    found: false,
+                })
+                .collect(),
+            pending: Vec::new(),
+        }
+    }
+}
+
+pub(crate) struct ExpressionChunkMatcher {
+    terms: Vec<ChunkTerm>,
+    pending: Vec<u8>,
+}
+
+struct ChunkTerm {
+    term: String,
+    keep_chars: usize,
+    tail: String,
+    found: bool,
+}
+
+impl ExpressionChunkMatcher {
+    pub(crate) fn feed_bytes(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+        self.decode_pending(false);
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.decode_pending(true);
+    }
+
+    pub(crate) fn matches(&self, expression: &Expression) -> bool {
+        let mut cursor = 0;
+        let result = evaluate_chunk_matches(expression, &self.terms, &mut cursor);
+        debug_assert_eq!(cursor, self.terms.len());
+        result
+    }
+
+    fn decode_pending(&mut self, flush: bool) {
+        loop {
+            if self.pending.is_empty() {
+                return;
+            }
+            match std::str::from_utf8(&self.pending) {
+                Ok(text) => {
+                    let text = text.to_owned();
+                    self.feed_text(&text);
+                    self.pending.clear();
+                    return;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    if valid > 0 {
+                        let text = std::str::from_utf8(&self.pending[..valid])
+                            .expect("valid UTF-8 prefix")
+                            .to_owned();
+                        self.feed_text(&text);
+                        self.pending.drain(..valid);
+                    }
+                    if let Some(invalid_length) = error.error_len() {
+                        let invalid = invalid_length.min(self.pending.len());
+                        let replacement =
+                            String::from_utf8_lossy(&self.pending[..invalid]).into_owned();
+                        self.feed_text(&replacement);
+                        self.pending.drain(..invalid);
+                        continue;
+                    }
+                    if flush {
+                        let replacement = String::from_utf8_lossy(&self.pending).to_string();
+                        self.feed_text(&replacement);
+                        self.pending.clear();
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    fn feed_text(&mut self, text: &str) {
+        let normalized = text.to_lowercase();
+        for term in &mut self.terms {
+            if term.found {
+                continue;
+            }
+            let combined = format!("{}{}", term.tail, normalized);
+            if combined.contains(&term.term) {
+                term.found = true;
+            } else {
+                term.tail = keep_suffix(&combined, term.keep_chars);
+            }
+        }
+    }
+}
+
+fn collect_terms(expression: &Expression, terms: &mut Vec<String>) {
+    match expression {
+        Expression::Term(term) => terms.push(term.clone()),
+        Expression::Not(expression) => collect_terms(expression, terms),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            collect_terms(left, terms);
+            collect_terms(right, terms);
+        }
+    }
+}
+
+fn evaluate_chunk_matches(
+    expression: &Expression,
+    terms: &[ChunkTerm],
+    cursor: &mut usize,
+) -> bool {
+    match expression {
+        Expression::Term(_) => {
+            let result = terms[*cursor].found;
+            *cursor += 1;
+            result
+        }
+        Expression::Not(expression) => !evaluate_chunk_matches(expression, terms, cursor),
+        Expression::And(left, right) => {
+            let left = evaluate_chunk_matches(left, terms, cursor);
+            let right = evaluate_chunk_matches(right, terms, cursor);
+            left && right
+        }
+        Expression::Or(left, right) => {
+            let left = evaluate_chunk_matches(left, terms, cursor);
+            let right = evaluate_chunk_matches(right, terms, cursor);
+            left || right
+        }
+    }
+}
+
+fn keep_suffix(value: &str, chars: usize) -> String {
+    value
+        .chars()
+        .rev()
+        .take(chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 pub fn parse(input: &str) -> Result<Expression, ParseError> {
@@ -276,6 +425,19 @@ mod tests {
             expression
                 .matches("EXT4-fs (vds): mounted with ordered data mode; AND remains literal")
         );
+    }
+
+    #[test]
+    fn chunk_matcher_finds_terms_across_chunks_and_utf8_boundaries() {
+        let expression = parse("ERROR AND 中").expect("expression");
+        let mut matcher = expression.chunk_matcher();
+        matcher.feed_bytes(b"prefix er");
+        matcher.feed_bytes(b"ror ");
+        matcher.feed_bytes(&[0xe4]);
+        matcher.feed_bytes(&[0xb8, 0xad]);
+        matcher.finish();
+
+        assert!(matcher.matches(&expression));
     }
 
     #[test]

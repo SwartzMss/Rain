@@ -267,7 +267,16 @@ pub(crate) fn checked_temp_path(
 
 #[cfg(test)]
 mod tests {
-    use super::staging_path;
+    use tokio::fs::File;
+    use uuid::Uuid;
+
+    use super::{read_indexed_lines, staging_path};
+    use crate::{
+        config::MAX_TEMP_RESULT_LOGICAL_LINE_BYTES,
+        ingest::TRUNCATED_LINE_MARKER,
+        log_expression,
+        services::temp_results::{TempResultExecutor, TempSource},
+    };
 
     #[test]
     fn staging_artifact_uses_part_suffix() {
@@ -276,5 +285,59 @@ mod tests {
             staging_path(path),
             std::path::PathBuf::from("temp-results/result.log.part")
         );
+    }
+
+    #[tokio::test]
+    async fn indexed_reader_accepts_utf8_canonicalized_truncated_lines() {
+        let suffix = Uuid::new_v4();
+        let source_path = std::env::temp_dir().join(format!("rain-utf8-source-{suffix}.log"));
+        let result_path = std::env::temp_dir().join(format!("rain-utf8-result-{suffix}.log"));
+        let meta_path = std::env::temp_dir().join(format!("rain-utf8-result-{suffix}.meta"));
+        let index_path = std::env::temp_dir().join(format!("rain-utf8-result-{suffix}.idx"));
+        let prefix = "a".repeat(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES as usize - 1);
+        tokio::fs::write(&source_path, format!("{prefix}中\n"))
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("a").unwrap();
+        let mut result = File::create(&result_path).await.unwrap();
+        let mut metadata = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+        let preview = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            1,
+            u64::MAX,
+            &mut result,
+            &mut metadata,
+            &mut index,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+        drop(result);
+        drop(metadata);
+        drop(index);
+
+        let lines = read_indexed_lines(&result_path, &meta_path, &index_path, 0, 1, preview.total)
+            .await
+            .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].content.ends_with(TRUNCATED_LINE_MARKER));
+        assert!(
+            std::str::from_utf8(&tokio::fs::read(&result_path).await.unwrap()).is_ok(),
+            "materialized Temp Result must remain valid UTF-8"
+        );
+
+        for path in [source_path, result_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 }

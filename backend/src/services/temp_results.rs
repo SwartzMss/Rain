@@ -7,11 +7,9 @@ use tokio::{
 };
 
 use crate::{
-    config::MAX_LOGICAL_LINE_BYTES,
+    config::MAX_TEMP_RESULT_LOGICAL_LINE_BYTES,
     error::AppError,
-    ingest::{
-        LimitedLine, TRUNCATED_LINE_MARKER, decode_log_line, read_line_bytes_limited_with_budget,
-    },
+    ingest::{LimitedLine, decode_log_line, read_line_bytes_limited_with_budget_and_callback},
     log_expression::Expression,
 };
 
@@ -77,9 +75,13 @@ impl TempResultExecutor {
                 "RAIN_TEMP_RESULT_MAX_SCAN_BYTES cannot be represented on this platform".into(),
             )
         })?;
-        let max_logical_line_bytes = usize::try_from(MAX_LOGICAL_LINE_BYTES).map_err(|_| {
-            AppError::Config("MAX_LOGICAL_LINE_BYTES cannot be represented on this platform".into())
-        })?;
+        let max_logical_line_bytes =
+            usize::try_from(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES).map_err(|_| {
+                AppError::Config(
+                    "MAX_TEMP_RESULT_LOGICAL_LINE_BYTES cannot be represented on this platform"
+                        .into(),
+                )
+            })?;
         let mut scanned_bytes = 0usize;
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
@@ -96,11 +98,13 @@ impl TempResultExecutor {
             loop {
                 bytes.clear();
                 let remaining_scan_bytes = max_scan_bytes.saturating_sub(scanned_bytes);
-                let truncated = match read_line_bytes_limited_with_budget(
+                let mut matcher = expression.chunk_matcher();
+                let truncated = match read_line_bytes_limited_with_budget_and_callback(
                     &mut reader,
                     &mut bytes,
                     max_logical_line_bytes,
                     remaining_scan_bytes,
+                    |chunk| matcher.feed_bytes(chunk),
                 )
                 .await
                 .map_err(AppError::Io)?
@@ -116,9 +120,7 @@ impl TempResultExecutor {
                     }
                     LimitedLine::ScanLimit { .. } => return Err(scan_limit()),
                 };
-                let match_content = String::from_utf8_lossy(&bytes);
-                let match_content = match_content.trim_end_matches(['\r', '\n']);
-                let content = decode_log_line(&bytes, truncated);
+                matcher.finish();
                 let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
                     source_metadata_line.clear();
                     if reader
@@ -137,11 +139,8 @@ impl TempResultExecutor {
                 } else {
                     None
                 };
-                if expression.matches(match_content) {
-                    let mut output_bytes = bytes.clone();
-                    if truncated {
-                        output_bytes.extend_from_slice(TRUNCATED_LINE_MARKER.as_bytes());
-                    }
+                if matcher.matches(expression) {
+                    let content = decode_log_line(&bytes, truncated);
                     let metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
                         bundle_hash: source.bundle_hash.clone(),
                         file_id: source.file_id.clone(),
@@ -162,22 +161,19 @@ impl TempResultExecutor {
                         )
                         .await?;
                     }
-                    let line_bytes =
-                        output_bytes.len() as u64 + u64::from(!output_bytes.ends_with(b"\n"));
+                    let line_bytes = content.len() as u64 + 1;
                     let next_output_size =
                         log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
                     ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
                     output
-                        .write_all(&output_bytes)
+                        .write_all(content.as_bytes())
                         .await
                         .map_err(AppError::Io)?;
                     log_offset = next_output_size;
                     total_output_bytes = total_output_bytes
                         .checked_add(line_bytes)
                         .ok_or_else(too_large)?;
-                    if !output_bytes.ends_with(b"\n") {
-                        output.write_all(b"\n").await.map_err(AppError::Io)?;
-                    }
+                    output.write_all(b"\n").await.map_err(AppError::Io)?;
                     meta_offset += write_json_line(
                         metadata_output,
                         &metadata,
@@ -194,7 +190,7 @@ impl TempResultExecutor {
                             file_id: metadata.file_id.clone(),
                             path: metadata.path.clone(),
                             line_number: metadata.line_number,
-                            content: content.to_string(),
+                            content,
                         });
                     }
                     matched += 1;
@@ -333,10 +329,8 @@ mod tests {
     use tokio::fs::File;
     use uuid::Uuid;
 
-    use super::{
-        SparseCheckpoint, TRUNCATED_LINE_MARKER, TempResultExecutor, TempSource, select_checkpoint,
-    };
-    use crate::{error::AppError, log_expression};
+    use super::{SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint};
+    use crate::{error::AppError, ingest::TRUNCATED_LINE_MARKER, log_expression};
 
     fn test_path(suffix: &str) -> PathBuf {
         std::env::temp_dir().join(format!("rain-temp-result-{}-{suffix}", Uuid::new_v4()))
@@ -509,7 +503,7 @@ mod tests {
         let log_path = test_path("truncated-result.log");
         let meta_path = test_path("truncated-result.meta");
         let index_path = test_path("truncated-result.idx");
-        let source_content = format!("ERROR {}\n", "x".repeat(8 * 1024 * 1024));
+        let source_content = format!("{} LATE\n", "x".repeat(8 * 1024 * 1024));
         tokio::fs::write(&source_path, source_content)
             .await
             .unwrap();
@@ -520,7 +514,7 @@ mod tests {
             bundle_hash: None,
             file_id: None,
         }];
-        let expression = log_expression::parse("ERROR").unwrap();
+        let expression = log_expression::parse("LATE").unwrap();
         let mut log = File::create(&log_path).await.unwrap();
         let mut meta = File::create(&meta_path).await.unwrap();
         let mut index = File::create(&index_path).await.unwrap();
