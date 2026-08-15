@@ -83,6 +83,7 @@ impl TempResultExecutor {
                 )
             })?;
         let mut scanned_bytes = 0usize;
+        let mut matcher = expression.chunk_matcher();
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
@@ -98,7 +99,7 @@ impl TempResultExecutor {
             loop {
                 bytes.clear();
                 let remaining_scan_bytes = max_scan_bytes.saturating_sub(scanned_bytes);
-                let mut matcher = expression.chunk_matcher();
+                matcher.reset();
                 let truncated = match read_line_bytes_limited_with_budget_and_callback(
                     &mut reader,
                     &mut bytes,
@@ -324,6 +325,8 @@ pub fn select_checkpoint(
 
 #[cfg(test)]
 mod tests {
+    const TEST_MAX_SCAN_BYTES: u64 = usize::MAX as u64;
+
     use std::path::PathBuf;
 
     use tokio::fs::File;
@@ -366,11 +369,11 @@ mod tests {
             &expression,
             0,
             2,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
             &mut log,
             &mut meta,
             &mut index,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -429,7 +432,7 @@ mod tests {
             &expression,
             0,
             1,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
             &mut log,
             &mut meta,
             &mut index,
@@ -481,7 +484,7 @@ mod tests {
             &expression,
             0,
             1,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
             &mut log,
             &mut meta,
             &mut index,
@@ -524,11 +527,11 @@ mod tests {
             &expression,
             0,
             1,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
             &mut log,
             &mut meta,
             &mut index,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -586,7 +589,7 @@ mod tests {
             &mut full.1,
             &mut full.2,
             u64::MAX,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -599,7 +602,7 @@ mod tests {
             &mut preview.0,
             &mut preview.1,
             &mut preview.2,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -651,7 +654,7 @@ mod tests {
             &mut first_log,
             &mut first_meta,
             &mut first_index,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -679,7 +682,7 @@ mod tests {
             &mut second_log,
             &mut second_meta,
             &mut second_index,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();

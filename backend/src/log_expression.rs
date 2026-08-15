@@ -61,13 +61,22 @@ impl Expression {
                 })
                 .collect(),
             pending: Vec::new(),
+            pending_case_char: None,
+            previous_cased: false,
         }
     }
 }
 
+const MAX_EXPRESSION_LENGTH_BYTES: usize = 4_096;
+const MAX_EXPRESSION_TOKENS: usize = 128;
+const MAX_EXPRESSION_NESTING_DEPTH: usize = 32;
+const MAX_EXPRESSION_AST_NODES: usize = 128;
+
 pub(crate) struct ExpressionChunkMatcher {
     terms: Vec<ChunkTerm>,
     pending: Vec<u8>,
+    pending_case_char: Option<char>,
+    previous_cased: bool,
 }
 
 struct ChunkTerm {
@@ -78,6 +87,16 @@ struct ChunkTerm {
 }
 
 impl ExpressionChunkMatcher {
+    pub(crate) fn reset(&mut self) {
+        self.pending.clear();
+        self.pending_case_char = None;
+        self.previous_cased = false;
+        for term in &mut self.terms {
+            term.tail.clear();
+            term.found = false;
+        }
+    }
+
     pub(crate) fn feed_bytes(&mut self, bytes: &[u8]) {
         self.pending.extend_from_slice(bytes);
         self.decode_pending(false);
@@ -85,6 +104,7 @@ impl ExpressionChunkMatcher {
 
     pub(crate) fn finish(&mut self) {
         self.decode_pending(true);
+        self.finish_case_char();
     }
 
     pub(crate) fn matches(&self, expression: &Expression) -> bool {
@@ -135,7 +155,37 @@ impl ExpressionChunkMatcher {
     }
 
     fn feed_text(&mut self, text: &str) {
-        let normalized = text.to_lowercase();
+        let mut normalized = String::new();
+        for character in text.chars() {
+            if let Some(previous) = self.pending_case_char.take() {
+                append_lowercase(
+                    previous,
+                    self.previous_cased && !is_cased(character),
+                    &mut normalized,
+                );
+                self.previous_cased = is_cased(previous);
+            }
+            if character == 'Σ' {
+                self.pending_case_char = Some(character);
+            } else {
+                append_lowercase(character, false, &mut normalized);
+                self.previous_cased = is_cased(character);
+            }
+        }
+        self.feed_normalized(&normalized);
+    }
+
+    fn finish_case_char(&mut self) {
+        let Some(character) = self.pending_case_char.take() else {
+            return;
+        };
+        let mut normalized = String::new();
+        append_lowercase(character, self.previous_cased, &mut normalized);
+        self.previous_cased = is_cased(character);
+        self.feed_normalized(&normalized);
+    }
+
+    fn feed_normalized(&mut self, normalized: &str) {
         for term in &mut self.terms {
             if term.found {
                 continue;
@@ -148,6 +198,18 @@ impl ExpressionChunkMatcher {
             }
         }
     }
+}
+
+fn append_lowercase(character: char, final_sigma: bool, output: &mut String) {
+    if character == 'Σ' {
+        output.push(if final_sigma { 'ς' } else { 'σ' });
+    } else {
+        output.extend(character.to_lowercase());
+    }
+}
+
+fn is_cased(character: char) -> bool {
+    character.is_lowercase() || character.is_uppercase()
 }
 
 fn collect_terms(expression: &Expression, terms: &mut Vec<String>) {
@@ -198,6 +260,12 @@ fn keep_suffix(value: &str, chars: usize) -> String {
 }
 
 pub fn parse(input: &str) -> Result<Expression, ParseError> {
+    if input.len() > MAX_EXPRESSION_LENGTH_BYTES {
+        return Err(ParseError {
+            offset: MAX_EXPRESSION_LENGTH_BYTES,
+            message: "expression is too long".into(),
+        });
+    }
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
         return Err(ParseError {
@@ -205,12 +273,28 @@ pub fn parse(input: &str) -> Result<Expression, ParseError> {
             message: "expression is required".into(),
         });
     }
-    let mut parser = Parser { tokens, cursor: 0 };
+    if tokens.len() > MAX_EXPRESSION_TOKENS {
+        return Err(ParseError {
+            offset: tokens[MAX_EXPRESSION_TOKENS].offset,
+            message: "expression has too many tokens".into(),
+        });
+    }
+    let mut parser = Parser {
+        tokens,
+        cursor: 0,
+        nesting_depth: 0,
+    };
     let expression = parser.parse_or()?;
     if let Some(token) = parser.peek() {
         return Err(ParseError {
             offset: token.offset,
             message: "unexpected token".into(),
+        });
+    }
+    if ast_node_count(&expression) > MAX_EXPRESSION_AST_NODES {
+        return Err(ParseError {
+            offset: input.len(),
+            message: "expression has too many AST nodes".into(),
         });
     }
     Ok(expression)
@@ -311,6 +395,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
 struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
+    nesting_depth: usize,
 }
 
 impl Parser {
@@ -344,8 +429,11 @@ impl Parser {
 
     fn parse_not(&mut self) -> Result<Expression, ParseError> {
         if matches!(self.peek().map(|token| &token.kind), Some(TokenKind::Not)) {
-            self.take();
-            return Ok(Expression::Not(Box::new(self.parse_not()?)));
+            let token = self.take().expect("NOT token");
+            self.enter_nesting(token.offset)?;
+            let expression = self.parse_not();
+            self.nesting_depth -= 1;
+            return Ok(Expression::Not(Box::new(expression?)));
         }
         self.parse_primary()
     }
@@ -360,7 +448,10 @@ impl Parser {
         match token.kind {
             TokenKind::Term(term) => Ok(Expression::Term(term)),
             TokenKind::LeftParen => {
-                let expression = self.parse_or()?;
+                self.enter_nesting(token.offset)?;
+                let expression = self.parse_or();
+                self.nesting_depth -= 1;
+                let expression = expression?;
                 let Some(closing) = self.take() else {
                     return Err(ParseError {
                         offset: token.offset,
@@ -379,6 +470,27 @@ impl Parser {
                 offset: token.offset,
                 message: "expected a term or parenthesized expression".into(),
             }),
+        }
+    }
+
+    fn enter_nesting(&mut self, offset: usize) -> Result<(), ParseError> {
+        if self.nesting_depth >= MAX_EXPRESSION_NESTING_DEPTH {
+            return Err(ParseError {
+                offset,
+                message: "expression nesting is too deep".into(),
+            });
+        }
+        self.nesting_depth += 1;
+        Ok(())
+    }
+}
+
+fn ast_node_count(expression: &Expression) -> usize {
+    match expression {
+        Expression::Term(_) => 1,
+        Expression::Not(expression) => 1 + ast_node_count(expression),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            1 + ast_node_count(left) + ast_node_count(right)
         }
     }
 }
@@ -438,6 +550,42 @@ mod tests {
         matcher.finish();
 
         assert!(matcher.matches(&expression));
+    }
+
+    #[test]
+    fn chunk_matcher_matches_contextual_sigma_across_chunks() {
+        let expression = parse("ΟΣ").expect("expression");
+        assert!(expression.matches("ΟΣ"));
+
+        let mut matcher = expression.chunk_matcher();
+        matcher.feed_bytes("Ο".as_bytes());
+        matcher.feed_bytes("Σ".as_bytes());
+        matcher.finish();
+        assert!(matcher.matches(&expression));
+    }
+
+    #[test]
+    fn chunk_matcher_matches_whole_line_for_all_byte_splits() {
+        let source = "prefix ΟΣ 中 suffix";
+        let expression = parse("ΟΣ").expect("expression");
+        let expected = expression.matches(source);
+
+        for split in 0..=source.len() {
+            let mut matcher = expression.chunk_matcher();
+            matcher.feed_bytes(&source.as_bytes()[..split]);
+            matcher.feed_bytes(&source.as_bytes()[split..]);
+            matcher.finish();
+            assert_eq!(matcher.matches(&expression), expected, "split at {split}");
+        }
+    }
+
+    #[test]
+    fn rejects_excessive_expression_complexity() {
+        assert!(parse(&"x".repeat(4_097)).is_err());
+        assert!(parse(&format!("{}x", "x OR ".repeat(64))).is_err());
+        assert!(parse(&format!("{}x", "NOT ".repeat(33))).is_err());
+        assert!(parse(&format!("{}x{}", "(".repeat(33), ")".repeat(33))).is_err());
+        assert!(parse(&(0..65).map(|_| "x").collect::<Vec<_>>().join(" OR ")).is_err());
     }
 
     #[test]

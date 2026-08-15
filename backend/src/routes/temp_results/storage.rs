@@ -314,11 +314,11 @@ mod tests {
             &expression,
             0,
             1,
-            u64::MAX,
+            usize::MAX as u64,
             &mut result,
             &mut metadata,
             &mut index,
-            u64::MAX,
+            usize::MAX as u64,
         )
         .await
         .unwrap();
