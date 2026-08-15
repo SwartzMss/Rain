@@ -68,10 +68,14 @@ where
     output.clear();
     let mut total_read = 0usize;
     let mut previous_byte = None;
+    let mut deferred_carriage_return = false;
 
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
+            if deferred_carriage_return {
+                on_content(b"\r");
+            }
             return if total_read == 0 {
                 Ok(LimitedLine::EndOfFile)
             } else {
@@ -106,14 +110,21 @@ where
                 position
             }
         });
-        let chunk = &available[..content_end];
+        if deferred_carriage_return && newline_pos != Some(0) {
+            on_content(b"\r");
+        }
+        let defer_carriage_return = newline_pos.is_none() && available.last() == Some(&b'\r');
+        let callback_end = content_end.saturating_sub(usize::from(defer_carriage_return));
+        let chunk = &available[..callback_end];
+        let output_chunk = &available[..content_end];
         on_content(chunk);
-        total_read = total_read.saturating_add(chunk.len());
+        deferred_carriage_return = defer_carriage_return;
+        total_read = total_read.saturating_add(output_chunk.len());
 
         let remaining = max_bytes.saturating_sub(output.len());
         if remaining > 0 {
-            let keep_len = remaining.min(chunk.len());
-            output.extend_from_slice(&chunk[..keep_len]);
+            let keep_len = remaining.min(output_chunk.len());
+            output.extend_from_slice(&output_chunk[..keep_len]);
         }
 
         let consumed_last_byte = available.get(consume_len.saturating_sub(1)).copied();
@@ -124,6 +135,9 @@ where
 
         if newline_pos.is_none() && total_read == scan_budget {
             if reader.fill_buf().await?.is_empty() {
+                if deferred_carriage_return {
+                    on_content(b"\r");
+                }
                 return Ok(LimitedLine::Line {
                     bytes_read: total_read,
                     original_length: total_read,
@@ -179,6 +193,7 @@ mod tests {
 
     use super::{
         LimitedLine, decode_log_line, read_line_bytes_limited, read_line_bytes_limited_with_budget,
+        read_line_bytes_limited_with_budget_and_callback,
     };
 
     async fn read_with_capacity(
@@ -226,6 +241,26 @@ mod tests {
         let (result, output) = read_with_capacity(b"abc\r\n", 4, 16).await;
         assert_eq!(result, (5, 3, false));
         assert_eq!(output, b"abc");
+    }
+
+    #[tokio::test]
+    async fn callback_excludes_cr_from_split_crlf() {
+        let mut reader = BufReader::with_capacity(4, b"abc\r\n".as_slice());
+        let mut output = Vec::new();
+        let mut streamed = Vec::new();
+
+        read_line_bytes_limited_with_budget_and_callback(
+            &mut reader,
+            &mut output,
+            16,
+            usize::MAX,
+            |chunk| streamed.extend_from_slice(chunk),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output, b"abc");
+        assert_eq!(streamed, b"abc");
     }
 
     #[tokio::test]

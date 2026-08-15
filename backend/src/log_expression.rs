@@ -1,3 +1,5 @@
+use unic_ucd_case::{is_case_ignorable, is_cased};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
     Term(String),
@@ -62,6 +64,7 @@ impl Expression {
                 .collect(),
             pending: Vec::new(),
             pending_case_char: None,
+            pending_case_ignorable: String::new(),
             previous_cased: false,
         }
     }
@@ -76,6 +79,7 @@ pub(crate) struct ExpressionChunkMatcher {
     terms: Vec<ChunkTerm>,
     pending: Vec<u8>,
     pending_case_char: Option<char>,
+    pending_case_ignorable: String,
     previous_cased: bool,
 }
 
@@ -90,6 +94,7 @@ impl ExpressionChunkMatcher {
     pub(crate) fn reset(&mut self) {
         self.pending.clear();
         self.pending_case_char = None;
+        self.pending_case_ignorable.clear();
         self.previous_cased = false;
         for term in &mut self.terms {
             term.tail.clear();
@@ -115,42 +120,45 @@ impl ExpressionChunkMatcher {
     }
 
     fn decode_pending(&mut self, flush: bool) {
-        loop {
-            if self.pending.is_empty() {
-                return;
-            }
-            match std::str::from_utf8(&self.pending) {
+        if self.pending.is_empty() {
+            return;
+        }
+
+        let mut decoded = String::new();
+        let mut consumed = 0;
+        while consumed < self.pending.len() {
+            match std::str::from_utf8(&self.pending[consumed..]) {
                 Ok(text) => {
-                    let text = text.to_owned();
-                    self.feed_text(&text);
-                    self.pending.clear();
-                    return;
+                    decoded.push_str(text);
+                    consumed = self.pending.len();
                 }
                 Err(error) => {
                     let valid = error.valid_up_to();
                     if valid > 0 {
-                        let text = std::str::from_utf8(&self.pending[..valid])
-                            .expect("valid UTF-8 prefix")
-                            .to_owned();
-                        self.feed_text(&text);
-                        self.pending.drain(..valid);
+                        decoded.push_str(
+                            std::str::from_utf8(&self.pending[consumed..consumed + valid])
+                                .expect("valid UTF-8 prefix"),
+                        );
+                        consumed += valid;
                     }
                     if let Some(invalid_length) = error.error_len() {
-                        let invalid = invalid_length.min(self.pending.len());
-                        let replacement =
-                            String::from_utf8_lossy(&self.pending[..invalid]).into_owned();
-                        self.feed_text(&replacement);
-                        self.pending.drain(..invalid);
-                        continue;
+                        decoded.push('\u{fffd}');
+                        consumed += invalid_length;
+                    } else if flush {
+                        decoded.push('\u{fffd}');
+                        consumed = self.pending.len();
+                    } else {
+                        break;
                     }
-                    if flush {
-                        let replacement = String::from_utf8_lossy(&self.pending).to_string();
-                        self.feed_text(&replacement);
-                        self.pending.clear();
-                    }
-                    return;
                 }
             }
+        }
+
+        if !decoded.is_empty() {
+            self.feed_text(&decoded);
+        }
+        if consumed > 0 {
+            self.pending.drain(..consumed);
         }
     }
 
@@ -158,18 +166,31 @@ impl ExpressionChunkMatcher {
         let mut normalized = String::new();
         for character in text.chars() {
             if let Some(previous) = self.pending_case_char.take() {
+                if is_case_ignorable(character) {
+                    append_lowercase(character, false, &mut self.pending_case_ignorable);
+                    self.pending_case_char = Some(previous);
+                    continue;
+                }
                 append_lowercase(
                     previous,
                     self.previous_cased && !is_cased(character),
                     &mut normalized,
                 );
-                self.previous_cased = is_cased(previous);
-            }
-            if character == 'Σ' {
+                normalized.push_str(&self.pending_case_ignorable);
+                self.pending_case_ignorable.clear();
+                self.previous_cased = is_cased(character);
+                if character == 'Σ' {
+                    self.pending_case_char = Some(character);
+                } else {
+                    append_lowercase(character, false, &mut normalized);
+                }
+            } else if character == 'Σ' {
                 self.pending_case_char = Some(character);
             } else {
                 append_lowercase(character, false, &mut normalized);
-                self.previous_cased = is_cased(character);
+                if !is_case_ignorable(character) {
+                    self.previous_cased = is_cased(character);
+                }
             }
         }
         self.feed_normalized(&normalized);
@@ -181,6 +202,8 @@ impl ExpressionChunkMatcher {
         };
         let mut normalized = String::new();
         append_lowercase(character, self.previous_cased, &mut normalized);
+        normalized.push_str(&self.pending_case_ignorable);
+        self.pending_case_ignorable.clear();
         self.previous_cased = is_cased(character);
         self.feed_normalized(&normalized);
     }
@@ -206,10 +229,6 @@ fn append_lowercase(character: char, final_sigma: bool, output: &mut String) {
     } else {
         output.extend(character.to_lowercase());
     }
-}
-
-fn is_cased(character: char) -> bool {
-    character.is_lowercase() || character.is_uppercase()
 }
 
 fn collect_terms(expression: &Expression, terms: &mut Vec<String>) {
@@ -560,6 +579,34 @@ mod tests {
         let mut matcher = expression.chunk_matcher();
         matcher.feed_bytes("Ο".as_bytes());
         matcher.feed_bytes("Σ".as_bytes());
+        matcher.finish();
+        assert!(matcher.matches(&expression));
+    }
+
+    #[test]
+    fn chunk_matcher_uses_complete_unicode_sigma_context() {
+        for source in ["AΣ\u{0301}B", "ǅΣ"] {
+            let expression = parse(source).expect("expression");
+            assert!(expression.matches(source));
+
+            for split in 0..=source.len() {
+                let mut matcher = expression.chunk_matcher();
+                matcher.feed_bytes(&source.as_bytes()[..split]);
+                matcher.feed_bytes(&source.as_bytes()[split..]);
+                matcher.finish();
+                assert!(
+                    matcher.matches(&expression),
+                    "source: {source:?}, split: {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_matcher_decodes_invalid_bytes_in_one_pass() {
+        let expression = parse("\u{fffd}").expect("replacement expression");
+        let mut matcher = expression.chunk_matcher();
+        matcher.feed_bytes(&[0xff; 8_192]);
         matcher.finish();
         assert!(matcher.matches(&expression));
     }
