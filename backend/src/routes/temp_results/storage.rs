@@ -239,6 +239,15 @@ pub(crate) fn is_staging_lease_active(state: &web::Data<AppState>, id: &str) -> 
         .unwrap_or(false)
 }
 
+pub(crate) fn is_read_lease_active(state: &web::Data<AppState>, id: &str) -> bool {
+    state
+        .temp_results
+        .reads
+        .lock()
+        .map(|reads| reads.contains(id))
+        .unwrap_or(false)
+}
+
 pub(crate) async fn remove_stale_file(path: &Path) {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {

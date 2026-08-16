@@ -255,24 +255,18 @@ pub(crate) async fn find_by_id(
     .ok_or_else(|| AppError::NotFound(format!("temporary result {id}")))
 }
 
-pub(crate) async fn renew_active(
+pub(crate) async fn find_active_unexpired_by_id(
     state: &web::Data<AppState>,
     id: &str,
-    expires_at: &str,
-) -> Result<TransitionResult<()>, AppError> {
-    let updated =
-        sqlx::query("UPDATE temp_results SET expires_at = ? WHERE id = ? AND status = ? AND datetime(expires_at) >= datetime('now')")
-            .bind(expires_at)
-            .bind(id)
-            .bind(TempResultStatus::Active.as_str())
-            .execute(&state.db.pool)
-            .await
-            .map_err(AppError::Database)?;
-    if updated.rows_affected() == 1 {
-        Ok(TransitionResult::Applied(()))
-    } else {
-        classify_transition_failure(state, id).await
-    }
+) -> Result<TempResultRecord, AppError> {
+    sqlx::query_as::<_, TempResultRecord>(
+        "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) >= datetime('now') LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::NotFound(format!("temporary result {id}")))
 }
 
 pub(crate) async fn list_deleting(
@@ -333,15 +327,14 @@ mod tests {
     use std::path::PathBuf;
 
     use actix_web::web;
-    use chrono::{Duration, Utc};
+    use chrono::Utc;
     use sqlx::sqlite::SqlitePoolOptions;
 
     use crate::{AppState, config::AppLimits, db};
 
     use super::{
-        TempResultStatus, TransitionResult, claim_active_for_delete, claim_expired_active,
-        claim_staging_for_delete, delete_deleting_record, insert_staging_temp_result,
-        publish_temp_result, renew_active,
+        TempResultStatus, TransitionResult, claim_active_for_delete, claim_staging_for_delete,
+        delete_deleting_record, insert_staging_temp_result, publish_temp_result,
     };
 
     #[test]
@@ -349,37 +342,6 @@ mod tests {
         assert_eq!(TempResultStatus::Staging.as_str(), "STAGING");
         assert_eq!(TempResultStatus::Active.as_str(), "ACTIVE");
         assert_eq!(TempResultStatus::Deleting.as_str(), "DELETING");
-    }
-
-    #[tokio::test]
-    async fn expired_active_result_cannot_be_renewed() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        db::prepare_schema(&pool, false).await.unwrap();
-        let state = web::Data::new(AppState::new(
-            pool.clone(),
-            PathBuf::from("data"),
-            AppLimits::default(),
-        ));
-        let expired = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        sqlx::query(
-            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('expired', 'ACTIVE', 'expired.log', 'x', 'x', 'data/temp-results/expired.log', 0, 0, ?, ?)",
-        )
-        .bind(&expired)
-        .bind(&expired)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        assert!(matches!(
-            renew_active(&state, "expired", &Utc::now().to_rfc3339())
-                .await
-                .unwrap(),
-            TransitionResult::StateMismatch
-        ));
     }
 
     #[tokio::test]
@@ -502,50 +464,5 @@ mod tests {
                 .unwrap(),
             TransitionResult::StateMismatch
         );
-    }
-
-    #[tokio::test]
-    async fn renewal_and_expiry_claim_are_mutually_exclusive() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(2)
-            .connect("sqlite::memory:?cache=shared")
-            .await
-            .unwrap();
-        db::prepare_schema(&pool, false).await.unwrap();
-        let state = web::Data::new(AppState::new(
-            pool.clone(),
-            PathBuf::from("data"),
-            AppLimits::default(),
-        ));
-        let expired = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        sqlx::query(
-            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('racy', 'ACTIVE', 'racy.log', 'x', 'x', 'data/temp-results/racy.log', 0, 0, ?, ?)",
-        )
-        .bind(&expired)
-        .bind(&expired)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let renewal_expiry = Utc::now().to_rfc3339();
-        let (renewed, claimed) = tokio::join!(
-            renew_active(&state, "racy", &renewal_expiry),
-            claim_expired_active(&state, "racy", &expired),
-        );
-        let renewed = renewed.unwrap();
-        let claimed = claimed.unwrap();
-        assert!(
-            !matches!(renewed, TransitionResult::Applied(()))
-                || !matches!(claimed, TransitionResult::Applied(_))
-        );
-        let (status, expires_at): (String, String) =
-            sqlx::query_as("SELECT status, expires_at FROM temp_results WHERE id = 'racy'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(status == "ACTIVE" || status == "DELETING");
-        if status == "DELETING" {
-            assert_eq!(expires_at, expired);
-        }
     }
 }

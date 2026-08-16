@@ -1,8 +1,7 @@
 use super::common::checked_page_end;
 use super::lifecycle::abort_staging_result;
-use super::lifecycle::load_and_renew;
-use super::lifecycle::load_record;
 use super::lifecycle::{check_temp_result_rate_limit, preview_page_size, to_response};
+use super::lifecycle::{load_active_unexpired_record, load_record};
 use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
     insert_staging_temp_result, publish_temp_result,
@@ -25,6 +24,11 @@ struct MaterializeOutcome {
     id: String,
     total: i64,
     lines: Vec<PreviewLine>,
+}
+
+pub(crate) struct ResolvedSources {
+    sources: Vec<TempSource>,
+    _source_lease: Option<TempResultReadLease>,
 }
 
 async fn materialize_result(
@@ -80,6 +84,7 @@ async fn materialize_result_with_timeout(
             .await
             .map_err(AppError::Io)?;
         let materialized = tokio::time::timeout(timeout, async {
+            tokio::task::yield_now().await;
             match mode {
                 MaterializeMode::Full => TempResultExecutor::write_matches(
                     sources,
@@ -181,9 +186,10 @@ struct IssueSourceRow {
 pub(crate) async fn resolve_sources(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
-) -> Result<Vec<TempSource>, AppError> {
+) -> Result<ResolvedSources, AppError> {
     if let Some(source_id) = payload.source_temp_id.as_deref() {
-        let source = load_and_renew(state, source_id).await?;
+        let source = load_active_unexpired_record(state, source_id).await?;
+        let source_lease = register_read_lease(state, source_id);
         let path = checked_temp_path(state, &source.storage_path)?;
         let meta_path = path.with_extension("meta");
         let index_path = path.with_extension("idx");
@@ -198,13 +204,16 @@ pub(crate) async fn resolve_sources(
                 "temporary result metadata or index is missing",
             ));
         }
-        return Ok(vec![TempSource {
-            path,
-            metadata_path: Some(meta_path),
-            label: source.name,
-            bundle_hash: None,
-            file_id: None,
-        }]);
+        return Ok(ResolvedSources {
+            sources: vec![TempSource {
+                path,
+                metadata_path: Some(meta_path),
+                label: source.name,
+                bundle_hash: None,
+                file_id: None,
+            }],
+            _source_lease: Some(source_lease),
+        });
     }
     if let Some(issue_code) = payload.issue_code.as_deref() {
         let issue_code = normalize_issue_code(issue_code)?;
@@ -274,7 +283,10 @@ pub(crate) async fn resolve_sources(
                 "ready log files for issue {issue_code}"
             )));
         }
-        return Ok(sources);
+        return Ok(ResolvedSources {
+            sources,
+            _source_lease: None,
+        });
     }
     let bundle_hash = payload
         .bundle_hash
@@ -291,13 +303,16 @@ pub(crate) async fn resolve_sources(
     let file = fetch_file(&state.db.pool, &bundle.id, file_id).await?;
     ensure_text_preview(&file)?;
     let path = resolve_file_path(&file, state.storage.blob_store.as_ref()).await?;
-    Ok(vec![TempSource {
-        path,
-        metadata_path: None,
-        label: file.name,
-        bundle_hash: Some(bundle.hash),
-        file_id: Some(file.id.to_string()),
-    }])
+    Ok(ResolvedSources {
+        sources: vec![TempSource {
+            path,
+            metadata_path: None,
+            label: file.name,
+            bundle_hash: Some(bundle.hash),
+            file_id: Some(file.id.to_string()),
+        }],
+        _source_lease: None,
+    })
 }
 
 pub(crate) fn source_label(sources: &[TempSource]) -> String {
@@ -336,13 +351,13 @@ pub(crate) async fn create_preview_result(
         issue_code: payload.issue_code.clone(),
         source_temp_id: payload.source_temp_id.clone(),
     };
-    let sources = resolve_sources(&request, &state).await?;
-    let source_label = source_label(&sources);
+    let resolved = resolve_sources(&request, &state).await?;
+    let source_label = source_label(&resolved.sources);
     let outcome = materialize_result(
         &state,
         expression_text,
         &expression,
-        &sources,
+        &resolved.sources,
         &source_label,
         MaterializeMode::Preview {
             from: payload.from.unwrap_or(0).max(0),
@@ -390,13 +405,13 @@ pub(crate) async fn create_full_result(
     ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
-    let sources = resolve_sources(&payload, &state).await?;
-    let source_label = source_label(&sources);
+    let resolved = resolve_sources(&payload, &state).await?;
+    let source_label = source_label(&resolved.sources);
     let outcome = materialize_result(
         &state,
         expression_text,
         &expression,
-        &sources,
+        &resolved.sources,
         &source_label,
         MaterializeMode::Full,
     )
@@ -409,7 +424,7 @@ pub(crate) async fn create_full_result(
         )
         .await;
     }
-    let result = load_and_renew(&state, &outcome.id).await?;
+    let result = load_active_unexpired_record(&state, &outcome.id).await?;
     Ok(HttpResponse::Created().json(to_response(result)))
 }
 
@@ -417,7 +432,8 @@ pub(crate) async fn get_result(
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let result = load_record(&state, &id).await?;
+    let result = load_active_unexpired_record(&state, &id).await?;
+    let _read_lease = register_read_lease(&state, &result.id);
     Ok(HttpResponse::Ok().json(to_response(result)))
 }
 
@@ -426,7 +442,8 @@ pub(crate) async fn get_result_lines(
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let result = load_record(&state, &id).await?;
+    let result = load_active_unexpired_record(&state, &id).await?;
+    let _read_lease = register_read_lease(&state, &result.id);
     let start = query.start.unwrap_or(0).max(0);
     let limit = query
         .limit
@@ -477,7 +494,8 @@ pub(crate) async fn open_result_download(
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<NamedFile, AppError> {
-    let result = load_and_renew(&state, &id).await?;
+    let result = load_active_unexpired_record(&state, &id).await?;
+    let _read_lease = register_read_lease(&state, &result.id);
     let file = NamedFile::open_async(checked_temp_path(&state, &result.storage_path)?)
         .await
         .map_err(AppError::Io)?

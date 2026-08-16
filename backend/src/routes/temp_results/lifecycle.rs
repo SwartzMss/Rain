@@ -1,6 +1,7 @@
 use super::repository::TransitionResult;
 use super::storage::{
-    checked_temp_path, cleanup_orphan_temp_files, is_staging_lease_active, remove_result_files,
+    checked_temp_path, cleanup_orphan_temp_files, is_read_lease_active, is_staging_lease_active,
+    remove_result_files,
 };
 use super::*;
 use super::{repository, storage};
@@ -34,25 +35,24 @@ pub(crate) async fn load_record(
     repository::find_by_id(state, id).await
 }
 
-pub(crate) async fn load_and_renew(
+pub(crate) async fn load_active_unexpired_record(
     state: &web::Data<AppState>,
     id: &str,
 ) -> Result<TempResultRecord, AppError> {
-    let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
-    match repository::renew_active(state, id, &expires_at).await? {
-        TransitionResult::Applied(()) => {}
-        TransitionResult::NotFound | TransitionResult::StateMismatch => {
-            return Err(AppError::NotFound(format!("temporary result {id}")));
-        }
-    }
-    repository::find_by_id(state, id).await
+    repository::find_active_unexpired_by_id(state, id).await
 }
 
 pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
     for record in repository::list_deleting(state).await? {
+        if is_read_lease_active(state, &record.id) {
+            continue;
+        }
         finish_deleting_temp_result(state, &record).await;
     }
     for record in repository::list_expired_active(state).await? {
+        if is_read_lease_active(state, &record.id) {
+            continue;
+        }
         let TransitionResult::Applied(storage_path) =
             repository::claim_expired_active(state, &record.id, &record.expires_at).await?
         else {
@@ -84,6 +84,9 @@ pub(crate) async fn finish_deleting_temp_result(
     state: &web::Data<AppState>,
     record: &TempResultRecord,
 ) {
+    if is_read_lease_active(state, &record.id) {
+        return;
+    }
     let path = match checked_temp_path(state, &record.storage_path) {
         Ok(path) => path,
         Err(error) => {
@@ -228,7 +231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_load_and_renew_returns_not_found() {
+    async fn expired_active_lookup_returns_not_found() {
         let pool = SqlitePoolOptions::new()
             .max_connections(2)
             .connect("sqlite::memory:?cache=shared")
@@ -250,8 +253,41 @@ mod tests {
         .await
         .unwrap();
 
-        let result = super::load_and_renew(&state, "expired-load").await;
+        let result = super::load_active_unexpired_record(&state, "expired-load").await;
         assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn active_unexpired_lookup_rejects_non_active_records() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:?cache=shared")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        for (id, status) in [("staging-read", "STAGING"), ("deleting-read", "DELETING")] {
+            sqlx::query(
+                "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES (?, ?, 'result.log', 'x', 'x', 'data/temp-results/result.log', 0, 0, ?, ?)",
+            )
+            .bind(id)
+            .bind(status)
+            .bind(&expires_at)
+            .bind(&expires_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert!(
+                super::load_active_unexpired_record(&state, id)
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

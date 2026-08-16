@@ -122,10 +122,16 @@ export function TempResultView() {
           <div className="min-h-[65vh] overflow-auto rounded-lg bg-white p-3 text-xs leading-5 text-slate-900">
             <div className="grid grid-cols-[auto_1fr] gap-3 font-mono">
               <div className="select-none text-right text-slate-600">
-                {lines?.lines.map((line) => <div key={line.line_number}>{line.line_number + 1}</div>)}
+                {lines?.lines.map((line) => {
+                  const lineKey = `${line.bundle_hash ?? ''}:${line.file_id ?? line.path ?? ''}:${line.line_number}`;
+                  return <div key={lineKey}>{line.path ? `${line.path}:` : ''}{line.line_number + 1}</div>;
+                })}
               </div>
               <div>
-                {lines?.lines.map((line) => <div key={line.line_number} className="whitespace-pre">{line.content}</div>)}
+                {lines?.lines.map((line) => {
+                  const lineKey = `${line.bundle_hash ?? ''}:${line.file_id ?? line.path ?? ''}:${line.line_number}`;
+                  return <div key={lineKey} className="whitespace-pre">{line.content}</div>;
+                })}
               </div>
             </div>
           </div>

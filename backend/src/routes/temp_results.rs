@@ -64,6 +64,29 @@ fn register_staging_lease(state: &web::Data<AppState>, id: &str) -> StagingLease
     }
 }
 
+pub(crate) struct TempResultReadLease {
+    id: String,
+    registry: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl Drop for TempResultReadLease {
+    fn drop(&mut self) {
+        if let Ok(mut reads) = self.registry.lock() {
+            reads.remove(&self.id);
+        }
+    }
+}
+
+pub(crate) fn register_read_lease(state: &web::Data<AppState>, id: &str) -> TempResultReadLease {
+    if let Ok(mut reads) = state.temp_results.reads.lock() {
+        reads.insert(id.to_string());
+    }
+    TempResultReadLease {
+        id: id.to_string(),
+        registry: state.temp_results.reads.clone(),
+    }
+}
+
 fn invalid_expression(error: log_expression::ParseError) -> AppError {
     AppError::public(
         StatusCode::BAD_REQUEST,
@@ -276,6 +299,25 @@ mod tests {
         .await
         .unwrap();
 
+        let leased_log = temp_root.join("leased.log");
+        tokio::fs::write(&leased_log, "being read\n").await.unwrap();
+        tokio::fs::write(temp_root.join("leased.meta"), "{}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(temp_root.join("leased.idx"), "{}\n")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('leased-files', 'DELETING', 'l.log', 'x', 'x', ?, 1, 10, ?, ?)",
+        )
+        .bind(leased_log.to_string_lossy().to_string())
+        .bind(&created)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let read_lease = super::register_read_lease(&state, "leased-files");
+
         let active_staging_log = temp_root.join("active-staging.log");
         tokio::fs::write(&active_staging_log, "still generating\n")
             .await
@@ -297,17 +339,27 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(remaining, 1);
+        assert_eq!(remaining, 2);
         assert!(!deleting_log.exists());
         assert!(active_staging_log.exists());
+        assert!(leased_log.exists());
         drop(lease);
         super::cleanup_expired(&state).await.unwrap();
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(remaining, 0);
+        assert_eq!(remaining, 1);
         assert!(!active_staging_log.exists());
+        assert!(leased_log.exists());
+        drop(read_lease);
+        super::cleanup_expired(&state).await.unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert!(!leased_log.exists());
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
