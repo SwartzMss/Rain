@@ -32,6 +32,8 @@ pub struct MatchMetadata {
     pub file_id: Option<String>,
     pub path: String,
     pub line_number: i64,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -150,6 +152,7 @@ impl TempResultExecutor {
                         file_id: source.file_id.clone(),
                         path: source.label.clone(),
                         line_number: source_line,
+                        truncated,
                     });
                     if matched % 1_000 == 0 {
                         let checkpoint = SparseCheckpoint {

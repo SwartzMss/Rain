@@ -185,6 +185,7 @@ pub(crate) struct TempLine {
     path: Option<String>,
     line_number: i64,
     content: String,
+    truncated: bool,
 }
 
 #[derive(Serialize)]
