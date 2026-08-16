@@ -180,6 +180,11 @@ export function BundleView() {
   const activeViewerTabIdRef = useRef<string | null>(null);
   const selectedNodeIdRef = useRef<string | null>(null);
   const treeNodesRef = useRef<Record<string, TreeNode>>({});
+  const pendingFilePageRef = useRef<{
+    from: number;
+    navigation: 'next' | 'previous' | 'reset';
+    previousStart?: number;
+  } | null>(null);
   const {
     viewerTabs,
     activeViewerTabId,
@@ -306,7 +311,7 @@ export function BundleView() {
       const hits = response.lines.map((line) => ({ bundle_hash: line.bundle_hash, file_id: line.file_id ?? '', path: line.path, snippet: line.content, line_number: line.line_number }));
       setSearchResults(hits);
       setSearchExecuted(true);
-      openViewerTab({ id: `search:${Date.now()}`, kind: 'search', resultId: response.result_id, title: item.name, pinned: false, scrollTop: 0, expression: item.query_text, hits, total: response.total, from: 0, pageSize: LINE_PAGE_SIZE_OPTIONS[0], source: { kind: 'issue', issueCode } });
+      openViewerTab({ id: `search:${Date.now()}`, kind: 'search', resultId: response.result_id, title: item.name, pinned: false, scrollTop: 0, expression: item.query_text, hits, total: response.total, from: 0, pageSize: LINE_PAGE_SIZE_OPTIONS[0], pageHistory: [], source: { kind: 'issue', issueCode } });
     } finally {
       setSearchLoading(false);
     }
@@ -509,6 +514,7 @@ export function BundleView() {
           total: response.total,
           from: 0,
           pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+          pageHistory: [],
           source: { kind: 'issue', issueCode: issue }
         });
       }
@@ -763,6 +769,7 @@ export function BundleView() {
     line?: number | null,
     options?: { preserveSearch?: boolean }
   ) => {
+    pendingFilePageRef.current = null;
     if (typeof line === 'number' && line >= 0) {
       setTargetLine(line);
       setLineStart(Math.floor(line / linePageSize) * linePageSize);
@@ -816,6 +823,7 @@ export function BundleView() {
           ? Math.floor(line / linePageSize) * linePageSize
           : 0,
         pageSize: linePageSize,
+        pageHistory: [],
         targetLine: typeof line === 'number' && line >= 0 ? line : null
       });
     }
@@ -876,6 +884,7 @@ export function BundleView() {
   };
 
   const activateViewerTabWithState = (tab: ViewerTab) => {
+    pendingFilePageRef.current = null;
     if (activeViewerTabId && contentRef.current) {
       const scrollTop = contentRef.current.scrollTop;
       updateViewerTabs((tabs) =>
@@ -939,6 +948,7 @@ export function BundleView() {
       nodeId: selectedNode.id,
       lineStart,
       pageSize: linePageSize,
+      pageHistory: [],
       targetLine
     });
   }, [linePageSize, lineStart, openViewerTab, selectedNode, targetLine]);
@@ -953,6 +963,28 @@ export function BundleView() {
       )
     );
   }, [activeViewerTab?.id, linePageSize, lineStart, targetLine, updateViewerTabs]);
+
+  useEffect(() => {
+    const pending = pendingFilePageRef.current;
+    if (!pending || fileContentLoading) return;
+    if (fileContentError || fileLines?.start !== pending.from) {
+      if (fileContentError) pendingFilePageRef.current = null;
+      return;
+    }
+    const activeId = activeViewerTabIdRef.current;
+    updateViewerTabs((tabs) => tabs.map((tab) => {
+      if (tab.id !== activeId || tab.kind !== 'file') return tab;
+      return {
+        ...tab,
+        pageHistory: pending.navigation === 'next'
+          ? [...(tab.pageHistory ?? []), pending.previousStart ?? tab.lineStart]
+          : pending.navigation === 'previous'
+            ? (tab.pageHistory ?? []).slice(0, -1)
+            : []
+      };
+    }));
+    pendingFilePageRef.current = null;
+  }, [activeViewerTabId, fileContentError, fileContentLoading, fileLines, updateViewerTabs]);
 
   const clearFileSearch = useCallback(() => {
     setFileSearchTokens([]);
@@ -1022,6 +1054,7 @@ export function BundleView() {
           total: response.total,
           from: 0,
           pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+          pageHistory: [],
           source: { kind: 'file', bundleHash: selectedBundleId, fileId: selectedNode.rawId }
         });
         setFileSearchResults([]);
@@ -1084,6 +1117,7 @@ export function BundleView() {
         total: response.total,
         from: 0,
         pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+        pageHistory: [],
         source
       });
     } catch (error) {
@@ -1093,7 +1127,12 @@ export function BundleView() {
     }
   }, [activeViewerTab, openViewerTab, resultFilterDraft, resultFilterTokens]);
 
-  const loadViewerPage = useCallback(async (tab: ViewerTab, from: number, pageSize: number) => {
+  const loadViewerPage = useCallback(async (
+    tab: ViewerTab,
+    from: number,
+    pageSize: number,
+    navigation: 'next' | 'previous' | 'reset'
+  ) => {
     setSearchLoading(true);
     setSearchError(null);
     try {
@@ -1109,6 +1148,11 @@ export function BundleView() {
               total: response.line_count,
               from: response.start,
               pageSize: response.limit,
+              pageHistory: navigation === 'next'
+                ? [...(item.pageHistory ?? []), item.from]
+                : navigation === 'previous'
+                  ? (item.pageHistory ?? []).slice(0, -1)
+                  : [],
               scrollTop: 0
             }
           : item));
@@ -1133,6 +1177,11 @@ export function BundleView() {
             total: response.line_count,
             from: response.start,
             pageSize: response.limit,
+            pageHistory: navigation === 'next'
+              ? [...(item.pageHistory ?? []), item.from]
+              : navigation === 'previous'
+                ? (item.pageHistory ?? []).slice(0, -1)
+                : [],
             scrollTop: 0
           }
         : item));
@@ -1619,8 +1668,8 @@ export function BundleView() {
                     searchLoading={searchLoading}
                     contentRef={contentRef}
                     pageSizeOptions={LINE_PAGE_SIZE_OPTIONS}
-                    onLoadPage={(tab, from, pageSize) => {
-                      loadViewerPage(tab, from, pageSize).catch(() => undefined);
+                    onLoadPage={(tab, from, pageSize, navigation) => {
+                      loadViewerPage(tab, from, pageSize, navigation).catch(() => undefined);
                     }}
                     highlightTerm={resultFilterHighlightTerm}
                     renderHighlightedText={highlightText}
@@ -1658,6 +1707,7 @@ export function BundleView() {
                           className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 outline-none focus:border-cyan-500/60"
                           value={linePageSize}
                           onChange={(event) => {
+                            pendingFilePageRef.current = { from: 0, navigation: 'reset' };
                             setLinePageSize(Number(event.target.value));
                             setLineStart(0);
                             setTargetLine(null);
@@ -1668,17 +1718,24 @@ export function BundleView() {
                           ))}
                         </select>
                       </label>
-                      <span className="min-w-[86px] text-center">
-                        第 {Math.floor(fileLines.start / linePageSize) + 1}
-                        {fileLines.line_count
-                          ? ` / ${Math.max(1, Math.ceil(fileLines.line_count / linePageSize))} 页`
-                          : ' 页'}
+                      <span className="min-w-[120px] text-center">
+                        {fileLines.lines.length > 0
+                          ? `${fileLines.start + 1} - ${fileLines.start + fileLines.lines.length}`
+                          : '0'}
+                        {fileLines.line_count ? ` / ${fileLines.line_count}` : ''}
                       </span>
                       <button
                         type="button"
                         className="rounded border border-slate-300 px-3 py-1 text-slate-600 hover:border-slate-500 disabled:opacity-50"
-                        disabled={lineStart <= 0 || fileContentLoading}
-                        onClick={() => setLineStart(Math.max(0, lineStart - linePageSize))}
+                        disabled={activeViewerTab?.kind !== 'file' || (activeViewerTab.pageHistory ?? []).length === 0 || fileContentLoading}
+                        onClick={() => {
+                          if (activeViewerTab?.kind !== 'file') return;
+                          const pageHistory = activeViewerTab.pageHistory ?? [];
+                          const previousStart = pageHistory[pageHistory.length - 1];
+                          if (previousStart === undefined) return;
+                          pendingFilePageRef.current = { from: previousStart, navigation: 'previous' };
+                          setLineStart(previousStart);
+                        }}
                       >
                         上一页
                       </button>
@@ -1686,7 +1743,15 @@ export function BundleView() {
                         type="button"
                         className="rounded border border-slate-300 px-3 py-1 text-slate-600 hover:border-slate-500 disabled:opacity-50"
                         disabled={!fileLines.next_start || fileContentLoading}
-                        onClick={() => setLineStart(fileLines.next_start ?? lineStart + linePageSize)}
+                        onClick={() => {
+                          const nextStart = fileLines.next_start ?? lineStart + fileLines.lines.length;
+                          pendingFilePageRef.current = {
+                            from: nextStart,
+                            navigation: 'next',
+                            previousStart: lineStart
+                          };
+                          setLineStart(nextStart);
+                        }}
                       >
                         下一页
                       </button>

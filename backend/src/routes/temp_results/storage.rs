@@ -1,5 +1,6 @@
 use super::common::checked_page_end;
 use super::*;
+use crate::services::json_size::{json_optional_string_encoded_len, json_string_encoded_len};
 
 pub(crate) async fn result_storage_size(
     log_path: &Path,
@@ -120,9 +121,14 @@ pub(crate) async fn read_indexed_lines_bounded(
         let metadata = decode_sidecar::<MatchMetadata>(metadata_line.trim_end())?;
         if current >= start {
             let content = content.trim_end_matches(['\r', '\n']);
-            let line_bytes = u64::try_from(content.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(u64::try_from(metadata_line.len()).unwrap_or(u64::MAX))
+            let line_bytes = json_string_encoded_len(content)
+                .saturating_add(json_optional_string_encoded_len(
+                    metadata.bundle_hash.as_deref(),
+                ))
+                .saturating_add(json_optional_string_encoded_len(
+                    metadata.file_id.as_deref(),
+                ))
+                .saturating_add(json_string_encoded_len(&metadata.path))
                 .saturating_add(256);
             if line_bytes > max_page_bytes || page_bytes.saturating_add(line_bytes) > max_page_bytes
             {

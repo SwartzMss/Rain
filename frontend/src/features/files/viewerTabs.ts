@@ -12,6 +12,7 @@ export type FileViewerTab = ViewerTabBase & {
   nodeId: string;
   lineStart: number;
   pageSize: number;
+  pageHistory: number[];
   targetLine: number | null;
 };
 
@@ -23,6 +24,7 @@ export type SearchViewerTab = ViewerTabBase & {
   total: number;
   from: number;
   pageSize: number;
+  pageHistory: number[];
   source:
     | { kind: 'issue'; issueCode: string }
     | { kind: 'file'; bundleHash: string; fileId: string }
@@ -37,6 +39,7 @@ export type TempViewerTab = ViewerTabBase & {
   total: number;
   from: number;
   pageSize: number;
+  pageHistory: number[];
 };
 
 export type ViewerTab = FileViewerTab | SearchViewerTab | TempViewerTab;

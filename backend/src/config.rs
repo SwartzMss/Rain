@@ -599,7 +599,7 @@ impl AppLimits {
     pub fn validate(&self) -> Result<(), AppError> {
         macro_rules! positive {
             ($value:expr, $name:literal) => {
-                if $value == 0 {
+                if $value <= 0 {
                     return Err(AppError::Config(format!(concat!(
                         $name,
                         " must be positive"
@@ -1219,6 +1219,29 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("RAIN_TEMP_RESULT_MAX_SOURCES")
+        );
+    }
+
+    #[test]
+    fn rejects_negative_signed_page_and_record_limits() {
+        let mut limits = AppLimits::default();
+        limits.api.default_line_page_size = -1;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_API_DEFAULT_LINE_PAGE_SIZE")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_records = -1;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_TEMP_RESULT_MAX_RECORDS")
         );
     }
 

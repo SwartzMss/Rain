@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import type { IssueLogSearchHit } from '../../../api/types';
 import type { SearchToken } from '../searchTokens';
 import type { SearchViewerTab, TempViewerTab } from '../viewerTabs';
@@ -19,7 +19,12 @@ type SearchResultViewerProps = {
   searchLoading: boolean;
   contentRef: React.RefObject<HTMLDivElement>;
   pageSizeOptions: readonly number[];
-  onLoadPage: (tab: SearchViewerTab | TempViewerTab, from: number, pageSize: number) => void;
+  onLoadPage: (
+    tab: SearchViewerTab | TempViewerTab,
+    from: number,
+    pageSize: number,
+    navigation: 'next' | 'previous' | 'reset'
+  ) => void;
   highlightTerm: string;
   renderHighlightedText: (text: string, keyword: string) => React.ReactNode;
   onOpenSource?: (hit: IssueLogSearchHit) => void;
@@ -43,32 +48,25 @@ export function SearchResultViewer({
   renderHighlightedText,
   onOpenSource
 }: SearchResultViewerProps) {
-  const [pageHistory, setPageHistory] = useState<number[]>([]);
+  const pageHistory = activeViewerTab.pageHistory ?? [];
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
     hit: IssueLogSearchHit;
   } | null>(null);
-  useEffect(() => {
-    setPageHistory([]);
-  }, [activeViewerTab.id]);
-
   const loadNextPage = () => {
     const nextStart = activeViewerTab.from + results.length;
-    setPageHistory((history) => [...history, activeViewerTab.from]);
-    onLoadPage(activeViewerTab, nextStart, activeViewerTab.pageSize);
+    onLoadPage(activeViewerTab, nextStart, activeViewerTab.pageSize, 'next');
   };
 
   const loadPreviousPage = () => {
     const previousStart = pageHistory[pageHistory.length - 1];
     if (previousStart === undefined) return;
-    setPageHistory((history) => history.slice(0, -1));
-    onLoadPage(activeViewerTab, previousStart, activeViewerTab.pageSize);
+    onLoadPage(activeViewerTab, previousStart, activeViewerTab.pageSize, 'previous');
   };
 
   const changePageSize = (nextPageSize: number) => {
-    setPageHistory([]);
-    onLoadPage(activeViewerTab, 0, nextPageSize);
+    onLoadPage(activeViewerTab, 0, nextPageSize, 'reset');
   };
   if (searchLoading && results.length === 0) {
     return <p className="py-8 text-center text-sm text-slate-500">正在搜索...</p>;

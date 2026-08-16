@@ -11,6 +11,7 @@ use crate::{
     error::AppError,
     ingest::{decode_log_line, read_line_bytes_limited},
     repositories::files::{FileRow, ensure_text_preview, nearest_line_offset, resolve_file_path},
+    services::json_size::json_string_encoded_len,
 };
 
 #[derive(Serialize)]
@@ -93,7 +94,7 @@ pub async fn read_file_lines(
     let end_line = start.saturating_add(limit);
     let mut lines = Vec::new();
     let mut buffer = Vec::new();
-    let mut page_bytes = 0_u64;
+    let mut page_bytes = json_string_encoded_len(&record.path).saturating_add(256);
     let mut stopped_by_page_bytes = false;
 
     while current_line < end_line {
@@ -114,9 +115,7 @@ pub async fn read_file_lines(
 
         if current_line >= start {
             let content = decode_log_line(&buffer, truncated);
-            let line_bytes = u64::try_from(content.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(256);
+            let line_bytes = json_string_encoded_len(&content).saturating_add(256);
             if line_bytes > api.max_line_page_bytes
                 || page_bytes.saturating_add(line_bytes) > api.max_line_page_bytes
             {
