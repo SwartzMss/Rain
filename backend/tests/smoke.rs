@@ -1023,6 +1023,21 @@ async fn upload_search_tree_and_delete_issue() {
         "ERROR smoke works requestId=abcdef123456 中文连续文本"
     );
 
+    let beyond_file_lines: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{bundle_hash}/files/{app_file_id}/lines?start={}&limit=1",
+                i64::MAX
+            ))
+            .cookie(auth_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(beyond_file_lines["line_count"], 2);
+    assert_eq!(beyond_file_lines["lines"].as_array().unwrap().len(), 0);
+    assert!(beyond_file_lines["next_start"].is_null());
+
     let download = test::call_and_read_body(
         &app,
         test::TestRequest::get()

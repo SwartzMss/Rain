@@ -2,7 +2,7 @@ pub(crate) fn json_string_encoded_len(value: &str) -> u64 {
     let mut length = 2_u64;
     for byte in value.bytes() {
         length = length.saturating_add(match byte {
-            b'"' | b'\\' | 0x08..=0x0D => 2,
+            b'"' | b'\\' | b'\x08' | b'\t' | b'\n' | b'\x0C' | b'\r' => 2,
             0x00..=0x1F => 6,
             _ => 1,
         });
@@ -25,5 +25,17 @@ mod tests {
         assert_eq!(json_string_encoded_len("\0\n"), 10);
         assert_eq!(json_string_encoded_len("中文"), 8);
         assert_eq!(json_optional_string_encoded_len(None), 4);
+    }
+
+    #[test]
+    fn encoded_length_matches_serde_json_for_ascii_bytes() {
+        for byte in 0u8..=0x7f {
+            let value = String::from_utf8(vec![byte]).unwrap();
+            assert_eq!(
+                json_string_encoded_len(&value),
+                serde_json::to_string(&value).unwrap().len() as u64,
+                "byte = 0x{byte:02x}"
+            );
+        }
     }
 }

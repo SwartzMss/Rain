@@ -181,6 +181,7 @@ export function BundleView() {
   const selectedNodeIdRef = useRef<string | null>(null);
   const treeNodesRef = useRef<Record<string, TreeNode>>({});
   const pendingFilePageRef = useRef<{
+    tabId: string;
     from: number;
     navigation: 'next' | 'previous' | 'reset';
     previousStart?: number;
@@ -966,14 +967,19 @@ export function BundleView() {
 
   useEffect(() => {
     const pending = pendingFilePageRef.current;
-    if (!pending || fileContentLoading) return;
+    if (!pending) return;
+    const activeId = activeViewerTabIdRef.current;
+    if (activeId !== pending.tabId) {
+      pendingFilePageRef.current = null;
+      return;
+    }
+    if (fileContentLoading) return;
     if (fileContentError || fileLines?.start !== pending.from) {
       if (fileContentError) pendingFilePageRef.current = null;
       return;
     }
-    const activeId = activeViewerTabIdRef.current;
     updateViewerTabs((tabs) => tabs.map((tab) => {
-      if (tab.id !== activeId || tab.kind !== 'file') return tab;
+      if (tab.id !== pending.tabId || tab.kind !== 'file') return tab;
       return {
         ...tab,
         pageHistory: pending.navigation === 'next'
@@ -1707,7 +1713,12 @@ export function BundleView() {
                           className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 outline-none focus:border-cyan-500/60"
                           value={linePageSize}
                           onChange={(event) => {
-                            pendingFilePageRef.current = { from: 0, navigation: 'reset' };
+                            if (activeViewerTab?.kind !== 'file') return;
+                            pendingFilePageRef.current = {
+                              tabId: activeViewerTab.id,
+                              from: 0,
+                              navigation: 'reset'
+                            };
                             setLinePageSize(Number(event.target.value));
                             setLineStart(0);
                             setTargetLine(null);
@@ -1733,7 +1744,11 @@ export function BundleView() {
                           const pageHistory = activeViewerTab.pageHistory ?? [];
                           const previousStart = pageHistory[pageHistory.length - 1];
                           if (previousStart === undefined) return;
-                          pendingFilePageRef.current = { from: previousStart, navigation: 'previous' };
+                          pendingFilePageRef.current = {
+                            tabId: activeViewerTab.id,
+                            from: previousStart,
+                            navigation: 'previous'
+                          };
                           setLineStart(previousStart);
                         }}
                       >
@@ -1744,8 +1759,10 @@ export function BundleView() {
                         className="rounded border border-slate-300 px-3 py-1 text-slate-600 hover:border-slate-500 disabled:opacity-50"
                         disabled={!fileLines.next_start || fileContentLoading}
                         onClick={() => {
+                          if (activeViewerTab?.kind !== 'file') return;
                           const nextStart = fileLines.next_start ?? lineStart + fileLines.lines.length;
                           pendingFilePageRef.current = {
+                            tabId: activeViewerTab.id,
                             from: nextStart,
                             navigation: 'next',
                             previousStart: lineStart

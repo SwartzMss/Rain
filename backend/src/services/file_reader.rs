@@ -82,6 +82,18 @@ pub async fn read_file_lines(
     }
     ensure_text_preview(record)?;
 
+    if record.line_count.is_some_and(|count| start >= count) {
+        return Ok(FileLinesResponse {
+            path: record.path.clone(),
+            size_bytes: record.size_bytes,
+            line_count: record.line_count,
+            start,
+            limit,
+            next_start: None,
+            lines: Vec::new(),
+        });
+    }
+
     let (base_line, byte_offset) = nearest_line_offset(pool, record.id, start).await?;
     let disk_path = resolve_file_path(record, blob_store).await?;
 
