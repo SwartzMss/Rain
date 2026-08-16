@@ -24,6 +24,7 @@ pub(crate) fn temp_result_too_large() -> AppError {
     )
 }
 
+#[cfg(test)]
 pub(crate) async fn read_indexed_lines(
     result_path: &Path,
     meta_path: &Path,
@@ -31,6 +32,27 @@ pub(crate) async fn read_indexed_lines(
     start: i64,
     limit: i64,
     line_count: i64,
+) -> Result<Vec<TempLine>, AppError> {
+    read_indexed_lines_bounded(
+        result_path,
+        meta_path,
+        index_path,
+        start,
+        limit,
+        line_count,
+        u64::MAX,
+    )
+    .await
+}
+
+pub(crate) async fn read_indexed_lines_bounded(
+    result_path: &Path,
+    meta_path: &Path,
+    index_path: &Path,
+    start: i64,
+    limit: i64,
+    line_count: i64,
+    max_page_bytes: u64,
 ) -> Result<Vec<TempLine>, AppError> {
     if start >= line_count {
         return Ok(Vec::new());
@@ -68,6 +90,7 @@ pub(crate) async fn read_indexed_lines(
     let mut content = String::new();
     let mut metadata_line = String::new();
     let mut lines = Vec::new();
+    let mut page_bytes = 0_u64;
     let expected_end = checked_page_end(start, limit)?.min(line_count);
     while lines.len() < limit as usize {
         content.clear();
@@ -96,12 +119,29 @@ pub(crate) async fn read_indexed_lines(
         }
         let metadata = decode_sidecar::<MatchMetadata>(metadata_line.trim_end())?;
         if current >= start {
+            let content = content.trim_end_matches(['\r', '\n']);
+            let line_bytes = u64::try_from(content.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(u64::try_from(metadata_line.len()).unwrap_or(u64::MAX))
+                .saturating_add(256);
+            if line_bytes > max_page_bytes || page_bytes.saturating_add(line_bytes) > max_page_bytes
+            {
+                if lines.is_empty() {
+                    return Err(AppError::public(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "LINE_PAGE_TOO_LARGE",
+                        "单行或行分页结果超过字节限制",
+                    ));
+                }
+                break;
+            }
+            page_bytes = page_bytes.saturating_add(line_bytes);
             lines.push(TempLine {
                 bundle_hash: metadata.bundle_hash,
                 file_id: metadata.file_id,
                 path: Some(metadata.path),
                 line_number: metadata.line_number,
-                content: content.trim_end_matches(['\r', '\n']).to_string(),
+                content: content.to_string(),
             });
         }
         current += 1;
@@ -279,7 +319,7 @@ mod tests {
     use tokio::fs::File;
     use uuid::Uuid;
 
-    use super::{read_indexed_lines, staging_path};
+    use super::{read_indexed_lines, read_indexed_lines_bounded, staging_path};
     use crate::{
         config::MAX_TEMP_RESULT_LOGICAL_LINE_BYTES,
         ingest::TRUNCATED_LINE_MARKER,
@@ -344,6 +384,22 @@ mod tests {
             std::str::from_utf8(&tokio::fs::read(&result_path).await.unwrap()).is_ok(),
             "materialized Temp Result must remain valid UTF-8"
         );
+
+        let error = read_indexed_lines_bounded(
+            &result_path,
+            &meta_path,
+            &index_path,
+            0,
+            1,
+            preview.total,
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::AppError::PublicApi { code, .. } if code == "LINE_PAGE_TOO_LARGE"
+        ));
 
         for path in [source_path, result_path, meta_path, index_path] {
             let _ = tokio::fs::remove_file(path).await;

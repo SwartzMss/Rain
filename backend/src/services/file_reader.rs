@@ -93,6 +93,8 @@ pub async fn read_file_lines(
     let end_line = start.saturating_add(limit);
     let mut lines = Vec::new();
     let mut buffer = Vec::new();
+    let mut page_bytes = 0_u64;
+    let mut stopped_by_page_bytes = false;
 
     while current_line < end_line {
         let Some((_read, original_length, truncated)) = read_line_bytes_limited(
@@ -111,9 +113,27 @@ pub async fn read_file_lines(
         };
 
         if current_line >= start {
+            let content = decode_log_line(&buffer, truncated);
+            let line_bytes = u64::try_from(content.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(256);
+            if line_bytes > api.max_line_page_bytes
+                || page_bytes.saturating_add(line_bytes) > api.max_line_page_bytes
+            {
+                if lines.is_empty() {
+                    return Err(AppError::public(
+                        actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+                        "LINE_PAGE_TOO_LARGE",
+                        "单行或行分页结果超过字节限制",
+                    ));
+                }
+                stopped_by_page_bytes = true;
+                break;
+            }
+            page_bytes = page_bytes.saturating_add(line_bytes);
             lines.push(FileLine {
                 line_number: current_line,
-                content: decode_log_line(&buffer, truncated),
+                content,
                 truncated,
                 original_length: truncated.then_some(original_length),
             });
@@ -121,11 +141,10 @@ pub async fn read_file_lines(
         current_line += 1;
     }
 
-    let next_start = if lines.len() as i64 == limit {
-        Some(start + limit)
-    } else {
-        None
-    };
+    let next_start = start.checked_add(lines.len() as i64).filter(|next| {
+        (lines.len() as i64 == limit || stopped_by_page_bytes)
+            && record.line_count.is_none_or(|count| *next < count)
+    });
 
     Ok(FileLinesResponse {
         path: record.path.clone(),

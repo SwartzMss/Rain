@@ -29,11 +29,12 @@ pub(crate) async fn get_temp_result(
 
 #[get("/temp-results/{id}/lines")]
 pub(crate) async fn get_temp_result_lines(
+    request: HttpRequest,
     id: web::Path<String>,
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    service::get_result_lines(id, query, state).await
+    service::get_result_lines(request, id, query, state).await
 }
 
 #[get("/temp-results/{id}/download")]

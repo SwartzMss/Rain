@@ -284,6 +284,9 @@ pub struct ApiConfig {
     pub max_preview_line_size: u64,
     pub default_line_page_size: i64,
     pub max_line_page_size: i64,
+    pub max_line_page_bytes: u64,
+    pub concurrent_line_reads: usize,
+    pub concurrent_line_reads_per_client: usize,
     pub default_search_results: i64,
     pub max_search_results: i64,
 }
@@ -320,6 +323,9 @@ impl Default for ApiConfig {
             max_preview_line_size: 8 * MIB,
             default_line_page_size: 5_000,
             max_line_page_size: 10_000,
+            max_line_page_bytes: 8 * MIB,
+            concurrent_line_reads: 8,
+            concurrent_line_reads_per_client: 2,
             default_search_results: 50,
             max_search_results: 100,
         }
@@ -534,6 +540,18 @@ impl AppLimits {
                     "RAIN_API_MAX_LINE_PAGE_SIZE",
                     defaults.api.max_line_page_size,
                 )?,
+                max_line_page_bytes: env_size(
+                    "RAIN_API_MAX_LINE_PAGE_BYTES",
+                    defaults.api.max_line_page_bytes,
+                )?,
+                concurrent_line_reads: env_value(
+                    "RAIN_API_CONCURRENT_LINE_READS",
+                    defaults.api.concurrent_line_reads,
+                )?,
+                concurrent_line_reads_per_client: env_value(
+                    "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT",
+                    defaults.api.concurrent_line_reads_per_client,
+                )?,
                 default_search_results: env_value(
                     "RAIN_API_DEFAULT_SEARCH_RESULTS",
                     defaults.api.default_search_results,
@@ -613,6 +631,15 @@ impl AppLimits {
             "RAIN_API_DEFAULT_LINE_PAGE_SIZE"
         );
         positive!(self.api.max_line_page_size, "RAIN_API_MAX_LINE_PAGE_SIZE");
+        positive!(self.api.max_line_page_bytes, "RAIN_API_MAX_LINE_PAGE_BYTES");
+        positive!(
+            self.api.concurrent_line_reads,
+            "RAIN_API_CONCURRENT_LINE_READS"
+        );
+        positive!(
+            self.api.concurrent_line_reads_per_client,
+            "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT"
+        );
         positive!(
             self.api.default_search_results,
             "RAIN_API_DEFAULT_SEARCH_RESULTS"
@@ -948,6 +975,9 @@ mod tests {
         assert_eq!(limits.api.max_preview_line_size, 8 * 1024_u64.pow(2));
         assert_eq!(limits.api.default_line_page_size, 5_000);
         assert_eq!(limits.api.max_line_page_size, 10_000);
+        assert_eq!(limits.api.max_line_page_bytes, 8 * 1024_u64.pow(2));
+        assert_eq!(limits.api.concurrent_line_reads, 8);
+        assert_eq!(limits.api.concurrent_line_reads_per_client, 2);
     }
 
     #[test]
@@ -1107,13 +1137,22 @@ mod tests {
         let bytes_name = "RAIN_TEMP_RESULT_MAX_SCAN_BYTES";
         let duration_name = "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS";
         let sources_name = "RAIN_TEMP_RESULT_MAX_SOURCES";
+        let page_bytes_name = "RAIN_API_MAX_LINE_PAGE_BYTES";
+        let reads_name = "RAIN_API_CONCURRENT_LINE_READS";
+        let client_reads_name = "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT";
         let previous_bytes = std::env::var_os(bytes_name);
         let previous_duration = std::env::var_os(duration_name);
         let previous_sources = std::env::var_os(sources_name);
+        let previous_page_bytes = std::env::var_os(page_bytes_name);
+        let previous_reads = std::env::var_os(reads_name);
+        let previous_client_reads = std::env::var_os(client_reads_name);
         unsafe {
             std::env::set_var(bytes_name, "2 GiB");
             std::env::set_var(duration_name, "45");
             std::env::set_var(sources_name, "2048");
+            std::env::set_var(page_bytes_name, "4 MiB");
+            std::env::set_var(reads_name, "12");
+            std::env::set_var(client_reads_name, "3");
         }
 
         let limits = AppLimits::from_env().unwrap();
@@ -1130,9 +1169,24 @@ mod tests {
             Some(value) => unsafe { std::env::set_var(sources_name, value) },
             None => unsafe { std::env::remove_var(sources_name) },
         }
+        match previous_page_bytes {
+            Some(value) => unsafe { std::env::set_var(page_bytes_name, value) },
+            None => unsafe { std::env::remove_var(page_bytes_name) },
+        }
+        match previous_reads {
+            Some(value) => unsafe { std::env::set_var(reads_name, value) },
+            None => unsafe { std::env::remove_var(reads_name) },
+        }
+        match previous_client_reads {
+            Some(value) => unsafe { std::env::set_var(client_reads_name, value) },
+            None => unsafe { std::env::remove_var(client_reads_name) },
+        }
         assert_eq!(limits.temp_results.max_scan_bytes, 2 * 1024_u64.pow(3));
         assert_eq!(limits.temp_results.max_scan_duration_seconds, 45);
         assert_eq!(limits.temp_results.max_sources, 2048);
+        assert_eq!(limits.api.max_line_page_bytes, 4 * 1024_u64.pow(2));
+        assert_eq!(limits.api.concurrent_line_reads, 12);
+        assert_eq!(limits.api.concurrent_line_reads_per_client, 3);
     }
 
     #[test]

@@ -41,6 +41,13 @@ const TEMP_RESULT_RATE_LIMIT: usize = 10;
 const TEMP_RESULT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 const TEMP_RESULT_IP_MAX_BUCKETS: usize = 1024;
 
+pub(crate) fn request_client_key(request: &HttpRequest) -> String {
+    request
+        .peer_addr()
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 struct StagingLease {
     id: String,
     registry: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,

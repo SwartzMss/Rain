@@ -50,6 +50,7 @@ pub(crate) async fn list_storage_paths(
         .map_err(AppError::Database)
 }
 
+#[cfg(test)]
 pub(crate) async fn insert_staging_temp_result(
     state: &web::Data<AppState>,
     id: &str,
@@ -57,8 +58,27 @@ pub(crate) async fn insert_staging_temp_result(
     source_label: &str,
     output_path: &Path,
 ) -> Result<(), AppError> {
+    insert_staging_temp_result_with_retention(
+        state,
+        id,
+        expression,
+        source_label,
+        output_path,
+        Duration::days(RETENTION_DAYS),
+    )
+    .await
+}
+
+pub(crate) async fn insert_staging_temp_result_with_retention(
+    state: &web::Data<AppState>,
+    id: &str,
+    expression: &str,
+    source_label: &str,
+    output_path: &Path,
+    retention: Duration,
+) -> Result<(), AppError> {
     let created_at = Utc::now();
-    let expires_at = created_at + Duration::days(RETENTION_DAYS);
+    let expires_at = created_at + retention;
     let name = format!("filtered-{}.log", &id[..8]);
     sqlx::query(
         r#"
@@ -81,6 +101,7 @@ pub(crate) async fn insert_staging_temp_result(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn publish_temp_result(
     state: &web::Data<AppState>,
     id: &str,
@@ -90,9 +111,33 @@ pub(crate) async fn publish_temp_result(
     line_count: i64,
     size_bytes: i64,
 ) -> Result<TransitionResult<()>, AppError> {
+    publish_temp_result_with_retention(
+        state,
+        id,
+        expression,
+        source_label,
+        output_path,
+        line_count,
+        size_bytes,
+        Duration::days(RETENTION_DAYS),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn publish_temp_result_with_retention(
+    state: &web::Data<AppState>,
+    id: &str,
+    expression: &str,
+    source_label: &str,
+    output_path: &Path,
+    line_count: i64,
+    size_bytes: i64,
+    retention: Duration,
+) -> Result<TransitionResult<()>, AppError> {
     let _capacity_guard = state.temp_results.capacity_lock.lock().await;
     ensure_temp_result_capacity(state, size_bytes, Some(id)).await?;
-    let expires_at = (Utc::now() + Duration::days(RETENTION_DAYS)).to_rfc3339();
+    let expires_at = (Utc::now() + retention).to_rfc3339();
     let updated = sqlx::query(
         r#"
         UPDATE temp_results

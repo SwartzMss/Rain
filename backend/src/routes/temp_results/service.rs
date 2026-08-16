@@ -1,15 +1,15 @@
 use super::common::checked_page_end;
-use super::lifecycle::abort_staging_result;
+use super::lifecycle::{abort_staging_result, acquire_materialization_lease};
 use super::lifecycle::{acquire_active_result, load_active_unexpired_record, load_record};
 use super::lifecycle::{check_temp_result_rate_limit, preview_page_size, to_response};
 use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
-    insert_staging_temp_result, publish_temp_result,
+    insert_staging_temp_result_with_retention, publish_temp_result_with_retention,
 };
 use super::storage::checked_temp_path;
 use super::storage::invalid_sidecar;
 use super::storage::{
-    read_indexed_lines, remove_result_files, result_storage_size, staging_path,
+    read_indexed_lines_bounded, remove_result_files, result_storage_size, staging_path,
     temp_result_too_large,
 };
 use super::*;
@@ -18,6 +18,15 @@ use crate::services::temp_results::{MaterializedPreview, scan_timeout};
 enum MaterializeMode {
     Full,
     Preview { from: i64, size: i64 },
+}
+
+impl MaterializeMode {
+    fn retention(&self) -> Duration {
+        match self {
+            Self::Full => Duration::days(RETENTION_DAYS),
+            Self::Preview { .. } => Duration::minutes(30),
+        }
+    }
 }
 
 struct MaterializeOutcome {
@@ -72,7 +81,16 @@ async fn materialize_result_with_timeout(
     let staging_meta_path = staging_path(&meta_path);
     let staging_index_path = staging_path(&index_path);
     let _staging_lease = register_staging_lease(state, &id);
-    insert_staging_temp_result(state, &id, expression_text, source_label, &output_path).await?;
+    let retention = mode.retention();
+    insert_staging_temp_result_with_retention(
+        state,
+        &id,
+        expression_text,
+        source_label,
+        &output_path,
+        retention,
+    )
+    .await?;
     let result = async {
         let mut output = File::create(&staging_output_path)
             .await
@@ -136,7 +154,7 @@ async fn materialize_result_with_timeout(
         tokio::fs::rename(&staging_index_path, &index_path)
             .await
             .map_err(AppError::Io)?;
-        let transition = publish_temp_result(
+        let transition = publish_temp_result_with_retention(
             state,
             &id,
             expression_text,
@@ -144,6 +162,7 @@ async fn materialize_result_with_timeout(
             &output_path,
             materialized.total,
             i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
+            retention,
         )
         .await?;
         if !matches!(transition, TransitionResult::Applied(())) {
@@ -327,6 +346,7 @@ pub(crate) async fn create_preview_result(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     check_temp_result_rate_limit(&state, &request)?;
+    let _client_lease = acquire_materialization_lease(&state, &request)?;
     let _permit = state
         .temp_results
         .permits
@@ -388,6 +408,7 @@ pub(crate) async fn create_full_result(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     check_temp_result_rate_limit(&state, &request)?;
+    let _client_lease = acquire_materialization_lease(&state, &request)?;
     let _permit = state
         .temp_results
         .permits
@@ -435,10 +456,12 @@ pub(crate) async fn get_result(
 }
 
 pub(crate) async fn get_result_lines(
+    request: HttpRequest,
     id: web::Path<String>,
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    let _line_read = state.acquire_line_read(&request_client_key(&request))?;
     let (result, _read_lease) = acquire_active_result(&state, &id).await?;
     let start = query.start.unwrap_or(0).max(0);
     let limit = query
@@ -459,20 +482,21 @@ pub(crate) async fn get_result_lines(
             "temporary result metadata or index is missing",
         ));
     }
-    let lines = read_indexed_lines(
+    let lines = read_indexed_lines_bounded(
         &result_path,
         &meta_path,
         &index_path,
         start,
         limit,
         result.line_count,
+        state.limits.api.max_line_page_bytes,
     )
     .await?;
     let next_start = if start
         .checked_add(lines.len() as i64)
         .is_some_and(|end| end < result.line_count)
     {
-        Some(checked_page_end(start, limit)?)
+        Some(checked_page_end(start, lines.len() as i64)?)
     } else {
         None
     };

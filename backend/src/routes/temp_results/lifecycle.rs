@@ -6,6 +6,61 @@ use super::storage::{
 use super::*;
 use super::{repository, storage};
 
+const TEMP_RESULT_MAX_IN_FLIGHT_PER_CLIENT: usize = 1;
+const TEMP_RESULT_MAX_IN_FLIGHT_CLIENTS: usize = 1024;
+
+pub(crate) struct MaterializationLease {
+    key: String,
+    registry: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+}
+
+impl Drop for MaterializationLease {
+    fn drop(&mut self) {
+        if let Ok(mut clients) = self.registry.lock()
+            && let Some(count) = clients.get_mut(&self.key)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                clients.remove(&self.key);
+            }
+        }
+    }
+}
+
+pub(crate) fn acquire_materialization_lease(
+    state: &web::Data<AppState>,
+    request: &HttpRequest,
+) -> Result<MaterializationLease, AppError> {
+    let key = super::request_client_key(request);
+    let mut clients = state.temp_results.materializations.lock().map_err(|_| {
+        AppError::api(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TEMP_RESULT_UNAVAILABLE",
+            "临时结果服务暂时不可用",
+        )
+    })?;
+    if !clients.contains_key(&key) && clients.len() >= TEMP_RESULT_MAX_IN_FLIGHT_CLIENTS {
+        return Err(AppError::api(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TEMP_RESULT_BUSY",
+            "临时结果客户端数量超过限制，请稍后重试",
+        ));
+    }
+    let count = clients.entry(key.clone()).or_insert(0);
+    if *count >= TEMP_RESULT_MAX_IN_FLIGHT_PER_CLIENT {
+        return Err(AppError::api(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TEMP_RESULT_BUSY",
+            "单个客户端的临时结果任务过多，请稍后重试",
+        ));
+    }
+    *count = count.saturating_add(1);
+    Ok(MaterializationLease {
+        key,
+        registry: state.temp_results.materializations.clone(),
+    })
+}
+
 pub(crate) async fn abort_staging_result(
     state: &web::Data<AppState>,
     id: &str,
@@ -46,9 +101,18 @@ pub(crate) async fn acquire_active_result(
     state: &web::Data<AppState>,
     id: &str,
 ) -> Result<(TempResultRecord, TempResultReadLease), AppError> {
+    validate_temp_result_id(id)?;
+    repository::find_active_unexpired_by_id(state, id).await?;
     let lease = register_read_lease(state, id)?;
     let record = repository::find_active_unexpired_by_id(state, id).await?;
     Ok((record, lease))
+}
+
+pub(crate) fn validate_temp_result_id(id: &str) -> Result<(), AppError> {
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AppError::NotFound(format!("temporary result {id}")));
+    }
+    Ok(())
 }
 
 pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
@@ -126,10 +190,7 @@ pub(crate) fn check_temp_result_rate_limit(
     state: &web::Data<AppState>,
     request: &HttpRequest,
 ) -> Result<(), AppError> {
-    let key = request
-        .peer_addr()
-        .map(|address| address.ip().to_string())
-        .unwrap_or_else(|| "unknown".into());
+    let key = super::request_client_key(request);
     let mut limits = state.temp_results.ip_limits.lock().map_err(|_| {
         AppError::api(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -297,6 +358,28 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_result_ids_do_not_enter_the_read_lease_registry() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool,
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+
+        assert!(
+            super::acquire_active_result(&state, "random-invalid-id")
+                .await
+                .is_err()
+        );
+        assert!(state.temp_results.reads.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
