@@ -1,7 +1,7 @@
 use super::common::checked_page_end;
 use super::lifecycle::abort_staging_result;
+use super::lifecycle::{acquire_active_result, load_active_unexpired_record, load_record};
 use super::lifecycle::{check_temp_result_rate_limit, preview_page_size, to_response};
-use super::lifecycle::{load_active_unexpired_record, load_record};
 use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
     insert_staging_temp_result, publish_temp_result,
@@ -84,7 +84,6 @@ async fn materialize_result_with_timeout(
             .await
             .map_err(AppError::Io)?;
         let materialized = tokio::time::timeout(timeout, async {
-            tokio::task::yield_now().await;
             match mode {
                 MaterializeMode::Full => TempResultExecutor::write_matches(
                     sources,
@@ -188,8 +187,7 @@ pub(crate) async fn resolve_sources(
     state: &web::Data<AppState>,
 ) -> Result<ResolvedSources, AppError> {
     if let Some(source_id) = payload.source_temp_id.as_deref() {
-        let source = load_active_unexpired_record(state, source_id).await?;
-        let source_lease = register_read_lease(state, source_id);
+        let (source, source_lease) = acquire_active_result(state, source_id).await?;
         let path = checked_temp_path(state, &source.storage_path)?;
         let meta_path = path.with_extension("meta");
         let index_path = path.with_extension("idx");
@@ -433,7 +431,6 @@ pub(crate) async fn get_result(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let result = load_active_unexpired_record(&state, &id).await?;
-    let _read_lease = register_read_lease(&state, &result.id);
     Ok(HttpResponse::Ok().json(to_response(result)))
 }
 
@@ -442,8 +439,7 @@ pub(crate) async fn get_result_lines(
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let result = load_active_unexpired_record(&state, &id).await?;
-    let _read_lease = register_read_lease(&state, &result.id);
+    let (result, _read_lease) = acquire_active_result(&state, &id).await?;
     let start = query.start.unwrap_or(0).max(0);
     let limit = query
         .limit
@@ -494,8 +490,7 @@ pub(crate) async fn open_result_download(
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<NamedFile, AppError> {
-    let result = load_active_unexpired_record(&state, &id).await?;
-    let _read_lease = register_read_lease(&state, &result.id);
+    let (result, _read_lease) = acquire_active_result(&state, &id).await?;
     let file = NamedFile::open_async(checked_temp_path(&state, &result.storage_path)?)
         .await
         .map_err(AppError::Io)?
@@ -517,6 +512,9 @@ pub(crate) async fn delete_result(
         TransitionResult::NotFound | TransitionResult::StateMismatch => {
             return Err(AppError::NotFound(format!("temporary result {id}")));
         }
+    }
+    if super::storage::is_read_lease_active(&state, &result.id) {
+        return Ok(HttpResponse::NoContent().finish());
     }
     let path = checked_temp_path(&state, &result.storage_path)?;
     remove_result_files(&path).await?;

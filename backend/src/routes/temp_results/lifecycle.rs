@@ -42,6 +42,15 @@ pub(crate) async fn load_active_unexpired_record(
     repository::find_active_unexpired_by_id(state, id).await
 }
 
+pub(crate) async fn acquire_active_result(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<(TempResultRecord, TempResultReadLease), AppError> {
+    let lease = register_read_lease(state, id)?;
+    let record = repository::find_active_unexpired_by_id(state, id).await?;
+    Ok((record, lease))
+}
+
 pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
     for record in repository::list_deleting(state).await? {
         if is_read_lease_active(state, &record.id) {

@@ -119,7 +119,7 @@ pub struct TempResultRuntime {
     pub permits: Arc<Semaphore>,
     pub capacity_lock: Arc<AsyncMutex<()>>,
     pub staging: Arc<Mutex<HashSet<String>>>,
-    pub reads: Arc<Mutex<HashSet<String>>>,
+    pub reads: Arc<Mutex<HashMap<String, usize>>>,
     pub ip_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
 }
 
@@ -129,7 +129,7 @@ impl TempResultRuntime {
             permits: Arc::new(Semaphore::new(materializations)),
             capacity_lock: Arc::new(AsyncMutex::new(())),
             staging: Arc::new(Mutex::new(HashSet::new())),
-            reads: Arc::new(Mutex::new(HashSet::new())),
+            reads: Arc::new(Mutex::new(HashMap::new())),
             ip_limits: Arc::new(Mutex::new(HashMap::new())),
         }
     }

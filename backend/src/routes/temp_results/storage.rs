@@ -244,7 +244,7 @@ pub(crate) fn is_read_lease_active(state: &web::Data<AppState>, id: &str) -> boo
         .temp_results
         .reads
         .lock()
-        .map(|reads| reads.contains(id))
+        .map(|reads| reads.contains_key(id))
         .unwrap_or(false)
 }
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -66,25 +66,39 @@ fn register_staging_lease(state: &web::Data<AppState>, id: &str) -> StagingLease
 
 pub(crate) struct TempResultReadLease {
     id: String,
-    registry: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    registry: std::sync::Arc<std::sync::Mutex<HashMap<String, usize>>>,
 }
 
 impl Drop for TempResultReadLease {
     fn drop(&mut self) {
-        if let Ok(mut reads) = self.registry.lock() {
-            reads.remove(&self.id);
+        if let Ok(mut reads) = self.registry.lock()
+            && let Some(count) = reads.get_mut(&self.id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                reads.remove(&self.id);
+            }
         }
     }
 }
 
-pub(crate) fn register_read_lease(state: &web::Data<AppState>, id: &str) -> TempResultReadLease {
-    if let Ok(mut reads) = state.temp_results.reads.lock() {
-        reads.insert(id.to_string());
-    }
-    TempResultReadLease {
+pub(crate) fn register_read_lease(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<TempResultReadLease, AppError> {
+    let mut reads = state.temp_results.reads.lock().map_err(|_| {
+        AppError::api(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TEMP_RESULT_UNAVAILABLE",
+            "临时结果服务暂时不可用",
+        )
+    })?;
+    let count = reads.entry(id.to_string()).or_insert(0);
+    *count = count.saturating_add(1);
+    Ok(TempResultReadLease {
         id: id.to_string(),
         registry: state.temp_results.reads.clone(),
-    }
+    })
 }
 
 fn invalid_expression(error: log_expression::ParseError) -> AppError {
@@ -316,7 +330,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let read_lease = super::register_read_lease(&state, "leased-files");
+        let read_lease = super::register_read_lease(&state, "leased-files").unwrap();
 
         let active_staging_log = temp_root.join("active-staging.log");
         tokio::fs::write(&active_staging_log, "still generating\n")
@@ -361,6 +375,26 @@ mod tests {
         assert_eq!(remaining, 0);
         assert!(!leased_log.exists());
         let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_read_leases_are_reference_counted() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let state = web::Data::new(AppState::new(
+            pool,
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let first = super::register_read_lease(&state, "shared").unwrap();
+        let second = super::register_read_lease(&state, "shared").unwrap();
+        assert!(super::storage::is_read_lease_active(&state, "shared"));
+        drop(first);
+        assert!(super::storage::is_read_lease_active(&state, "shared"));
+        drop(second);
+        assert!(!super::storage::is_read_lease_active(&state, "shared"));
     }
 
     #[tokio::test]
