@@ -1287,6 +1287,53 @@ async fn upload_search_tree_and_delete_issue() {
         .expect("second storage");
     assert_ne!(first_storage, second_storage);
 
+    sqlx::query("UPDATE issues SET status = 'DELETING' WHERE code = 'SMOKE'")
+        .execute(&pool)
+        .await
+        .expect("mark issue deleting");
+    let deleting_tree = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/files/v1/{bundle_hash}/files/root"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleting_tree.status(), StatusCode::NOT_FOUND);
+    let deleting_lines = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{bundle_hash}/files/{app_file_id}/lines"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleting_lines.status(), StatusCode::NOT_FOUND);
+    let deleting_search = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/SMOKE/search?q=smoke&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleting_search.status(), StatusCode::NOT_FOUND);
+    let deleting_preview = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/temp-results/preview")
+            .set_json(serde_json::json!({
+                "expression": "ERROR AND smoke",
+                "issue_code": "SMOKE"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleting_preview.status(), StatusCode::NOT_FOUND);
+    sqlx::query("UPDATE issues SET status = 'ACTIVE' WHERE code = 'SMOKE'")
+        .execute(&pool)
+        .await
+        .expect("restore issue status");
+
     let delete_response = test::call_service(
         &app,
         test::TestRequest::delete()

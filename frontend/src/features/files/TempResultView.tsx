@@ -13,6 +13,7 @@ export function TempResultView() {
   const [result, setResult] = useState<TempResultInfo | null>(null);
   const [lines, setLines] = useState<TempResultLinesResponse | null>(null);
   const [start, setStart] = useState(0);
+  const [pageHistory, setPageHistory] = useState<number[]>([]);
   const [pageSize, setPageSize] = useState<number>(LINE_PAGE_SIZE_OPTIONS[0]);
   const [expression, setExpression] = useState('');
   const [loading, setLoading] = useState(true);
@@ -40,6 +41,11 @@ export function TempResultView() {
   useEffect(() => {
     load().catch(() => undefined);
   }, [load]);
+
+  useEffect(() => {
+    setStart(0);
+    setPageHistory([]);
+  }, [resultId]);
 
   const createFromResult = async () => {
     if (!expression.trim() || !resultId) return;
@@ -145,23 +151,33 @@ export function TempResultView() {
                 value={pageSize}
                 onChange={(event) => {
                   setPageSize(Number(event.target.value));
+                  setPageHistory([]);
                   setStart(0);
                 }}
               >
                 {LINE_PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} 行/页</option>)}
               </select>
-              <span>第 {Math.floor(start / pageSize) + 1} / {Math.max(1, Math.ceil(lines.line_count / pageSize))} 页</span>
+              <span>{start + 1} - {start + lines.lines.length} / {lines.line_count}</span>
               <button
                 type="button"
                 className="rounded border border-slate-300 px-3 py-1 disabled:opacity-50"
-                disabled={start === 0 || loading}
-                onClick={() => setStart(Math.max(0, start - pageSize))}
+                disabled={pageHistory.length === 0 || loading}
+                onClick={() => {
+                  const previousStart = pageHistory[pageHistory.length - 1];
+                  if (previousStart === undefined) return;
+                  setPageHistory((history) => history.slice(0, -1));
+                  setStart(previousStart);
+                }}
               >上一页</button>
               <button
                 type="button"
                 className="rounded border border-slate-300 px-3 py-1 disabled:opacity-50"
                 disabled={!lines.next_start || loading}
-                onClick={() => setStart(lines.next_start ?? start + pageSize)}
+                onClick={() => {
+                  const nextStart = lines.next_start ?? start + lines.lines.length;
+                  setPageHistory((history) => [...history, start]);
+                  setStart(nextStart);
+                }}
               >下一页</button>
             </div>
           ) : null}

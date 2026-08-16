@@ -225,8 +225,9 @@ pub(crate) async fn resolve_sources(
                    b.hash AS bundle_hash
             FROM files f
             JOIN bundles b ON b.id = f.bundle_id
+            JOIN issues i ON i.code = b.issue_code
             LEFT JOIN blobs bl ON bl.id = f.blob_id
-            WHERE b.issue_code = ? AND b.status = 'READY' AND f.is_dir = 0
+            WHERE b.issue_code = ? AND i.status = 'ACTIVE' AND b.status = 'READY' AND f.is_dir = 0
               AND EXISTS (SELECT 1 FROM log_segments ls WHERE ls.file_id = f.id)
             ORDER BY b.created_at, f.path
             LIMIT ?

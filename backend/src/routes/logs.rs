@@ -8,7 +8,7 @@ use crate::{
     models::logs::{LogSearchHit, LogSearchResponse},
 };
 
-use super::issues::{normalize_issue_code, touch_issue_activity_best_effort};
+use super::issues::{ensure_issue_active, normalize_issue_code, touch_issue_activity_best_effort};
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
 
@@ -280,6 +280,7 @@ pub async fn search_issue_logs(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
+    ensure_issue_active(&state.db.pool, &issue_code).await?;
     let term = query.into_inner();
     let search_term = term.q.trim();
     if search_term.is_empty() {
@@ -328,8 +329,10 @@ pub async fn search_issue_logs(
                 SELECT ls.id
                 FROM log_segments ls
                 JOIN bundles b ON b.id = ls.bundle_id
+                JOIN issues i ON i.code = b.issue_code
                 JOIN files f ON f.id = ls.file_id
                 WHERE b.issue_code = ?
+                  AND i.status = 'ACTIVE'
                   AND b.status = 'READY'
                   AND (? IS NULL OR f.path LIKE ?)
                 ORDER BY ls.id
@@ -356,8 +359,10 @@ pub async fn search_issue_logs(
         SELECT ls.content, f.path
         FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
+        JOIN issues i ON i.code = b.issue_code
         JOIN files f ON f.id = ls.file_id
         WHERE b.issue_code = ?
+          AND i.status = 'ACTIVE'
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
         ORDER BY ls.id
@@ -381,9 +386,11 @@ pub async fn search_issue_logs(
         SELECT COUNT(*) FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
+        JOIN issues i ON i.code = b.issue_code
         JOIN files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND b.issue_code = ?
+          AND i.status = 'ACTIVE'
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
         "#,
@@ -405,8 +412,10 @@ pub async fn search_issue_logs(
                ls.chunk_index, ls.content, b.hash AS bundle_hash
         FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
+        JOIN issues i ON i.code = b.issue_code
         JOIN files f ON f.id = ls.file_id
         WHERE b.issue_code = ?
+          AND i.status = 'ACTIVE'
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
         ORDER BY ls.id
@@ -442,9 +451,11 @@ pub async fn search_issue_logs(
         FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
+        JOIN issues i ON i.code = b.issue_code
         JOIN files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND b.issue_code = ?
+          AND i.status = 'ACTIVE'
           AND b.status = 'READY'
           AND (? IS NULL OR f.path LIKE ?)
         ORDER BY ls.line_offset NULLS FIRST, ls.id
@@ -505,7 +516,9 @@ async fn search_issue_files(
         SELECT COUNT(*)
         FROM files f
         JOIN bundles b ON b.id = f.bundle_id
+        JOIN issues i ON i.code = b.issue_code
         WHERE b.issue_code = ?
+          AND i.status = 'ACTIVE'
           AND b.status = 'READY'
           AND f.is_dir = 0
           AND (
@@ -529,7 +542,9 @@ async fn search_issue_files(
                b.hash AS bundle_hash
         FROM files f
         JOIN bundles b ON b.id = f.bundle_id
+        JOIN issues i ON i.code = b.issue_code
         WHERE b.issue_code = ?
+          AND i.status = 'ACTIVE'
           AND b.status = 'READY'
           AND f.is_dir = 0
           AND (

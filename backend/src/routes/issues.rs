@@ -557,6 +557,21 @@ pub async fn require_issue_owner(
     Ok(code)
 }
 
+pub async fn ensure_issue_active(pool: &sqlx::SqlitePool, code: &str) -> Result<(), AppError> {
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM issues WHERE code = ? AND status = 'ACTIVE')",
+    )
+    .bind(code)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if active {
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!("issue {code}")))
+    }
+}
+
 pub async fn require_issue_owner_for_delete(
     pool: &sqlx::SqlitePool,
     code: &str,
