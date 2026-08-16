@@ -106,8 +106,8 @@ pub(crate) async fn finish_deleting_temp_result(
     }
 }
 
-pub(crate) fn preview_page_size(requested: Option<i64>) -> i64 {
-    requested.unwrap_or(5_000).clamp(1, 10_000)
+pub(crate) fn preview_page_size(requested: Option<i64>, default: i64, maximum: i64) -> i64 {
+    requested.unwrap_or(default).clamp(1, maximum)
 }
 
 pub(crate) fn check_temp_result_rate_limit(
@@ -188,7 +188,9 @@ mod tests {
     fn lifecycle_pagination_helpers_reject_overflow() {
         assert_eq!(checked_page_end(10, 5).unwrap(), 15);
         assert!(checked_page_end(i64::MAX, 1).is_err());
-        assert_eq!(preview_page_size(Some(20_000)), 10_000);
+        assert_eq!(preview_page_size(None, 5_000, 10_000), 5_000);
+        assert_eq!(preview_page_size(Some(20_000), 5_000, 10_000), 10_000);
+        assert_eq!(preview_page_size(Some(0), 5_000, 1_000), 1);
     }
 
     #[test]
@@ -250,5 +252,38 @@ mod tests {
 
         let result = super::load_and_renew(&state, "expired-load").await;
         assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn loading_a_result_does_not_renew_its_expiry() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:?cache=shared")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('fixed-expiry', 'ACTIVE', 'result.log', 'x', 'x', 'data/temp-results/result.log', 0, 0, ?, ?)",
+        )
+        .bind(&expires_at)
+        .bind(&expires_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let record = super::load_record(&state, "fixed-expiry").await.unwrap();
+        assert_eq!(record.expires_at, expires_at);
+        let stored: String =
+            sqlx::query_scalar("SELECT expires_at FROM temp_results WHERE id = 'fixed-expiry'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, expires_at);
     }
 }

@@ -35,6 +35,27 @@ async fn materialize_result(
     source_label: &str,
     mode: MaterializeMode,
 ) -> Result<MaterializeOutcome, AppError> {
+    materialize_result_with_timeout(
+        state,
+        expression_text,
+        expression,
+        sources,
+        source_label,
+        mode,
+        std::time::Duration::from_secs(state.limits.temp_results.max_scan_duration_seconds),
+    )
+    .await
+}
+
+async fn materialize_result_with_timeout(
+    state: &web::Data<AppState>,
+    expression_text: &str,
+    expression: &log_expression::Expression,
+    sources: &[TempSource],
+    source_label: &str,
+    mode: MaterializeMode,
+    timeout: std::time::Duration,
+) -> Result<MaterializeOutcome, AppError> {
     let id = Uuid::new_v4().simple().to_string();
     let directory = data_root(state).join("temp-results");
     tokio::fs::create_dir_all(&directory)
@@ -58,41 +79,38 @@ async fn materialize_result(
         let mut index = File::create(&staging_index_path)
             .await
             .map_err(AppError::Io)?;
-        let materialized = tokio::time::timeout(
-            std::time::Duration::from_secs(state.limits.temp_results.max_scan_duration_seconds),
-            async {
-                match mode {
-                    MaterializeMode::Full => TempResultExecutor::write_matches(
+        let materialized = tokio::time::timeout(timeout, async {
+            match mode {
+                MaterializeMode::Full => TempResultExecutor::write_matches(
+                    sources,
+                    expression,
+                    &mut output,
+                    &mut metadata,
+                    &mut index,
+                    state.limits.temp_results.max_result_size,
+                    state.limits.temp_results.max_scan_bytes,
+                )
+                .await
+                .map(|total| MaterializedPreview {
+                    total,
+                    lines: Vec::new(),
+                }),
+                MaterializeMode::Preview { from, size } => {
+                    TempResultExecutor::materialize_preview(
                         sources,
                         expression,
+                        from,
+                        size,
+                        state.limits.temp_results.max_result_size,
                         &mut output,
                         &mut metadata,
                         &mut index,
-                        state.limits.temp_results.max_result_size,
                         state.limits.temp_results.max_scan_bytes,
                     )
                     .await
-                    .map(|total| MaterializedPreview {
-                        total,
-                        lines: Vec::new(),
-                    }),
-                    MaterializeMode::Preview { from, size } => {
-                        TempResultExecutor::materialize_preview(
-                            sources,
-                            expression,
-                            from,
-                            size,
-                            state.limits.temp_results.max_result_size,
-                            &mut output,
-                            &mut metadata,
-                            &mut index,
-                            state.limits.temp_results.max_scan_bytes,
-                        )
-                        .await
-                    }
                 }
-            },
-        )
+            }
+        })
         .await
         .map_err(|_| scan_timeout())??;
         drop(output);
@@ -190,6 +208,14 @@ pub(crate) async fn resolve_sources(
     }
     if let Some(issue_code) = payload.issue_code.as_deref() {
         let issue_code = normalize_issue_code(issue_code)?;
+        let max_sources = i64::try_from(state.limits.temp_results.max_sources).map_err(|_| {
+            AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SOURCES cannot be represented on this platform".into(),
+            )
+        })?;
+        let query_limit = max_sources
+            .checked_add(1)
+            .ok_or_else(|| AppError::Config("RAIN_TEMP_RESULT_MAX_SOURCES is too large".into()))?;
         let rows = sqlx::query_as::<_, IssueSourceRow>(
             r#"
             SELECT f.id, f.name, f.path, f.size_bytes, f.line_count, f.mime_type,
@@ -202,12 +228,21 @@ pub(crate) async fn resolve_sources(
             WHERE b.issue_code = ? AND b.status = 'READY' AND f.is_dir = 0
               AND EXISTS (SELECT 1 FROM log_segments ls WHERE ls.file_id = f.id)
             ORDER BY b.created_at, f.path
+            LIMIT ?
             "#,
         )
         .bind(&issue_code)
+        .bind(query_limit)
         .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
+        if rows.len() > state.limits.temp_results.max_sources {
+            return Err(AppError::public(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "TEMP_RESULT_SOURCE_LIMIT",
+                "临时结果源文件数量超过限制",
+            ));
+        }
         let mut sources = Vec::new();
         for row in rows {
             let file = FileRow {
@@ -311,7 +346,11 @@ pub(crate) async fn create_preview_result(
         &source_label,
         MaterializeMode::Preview {
             from: payload.from.unwrap_or(0).max(0),
-            size: preview_page_size(payload.size),
+            size: preview_page_size(
+                payload.size,
+                state.limits.api.default_line_page_size,
+                state.limits.api.max_line_page_size,
+            ),
         },
     )
     .await?;
@@ -378,7 +417,7 @@ pub(crate) async fn get_result(
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let result = load_and_renew(&state, &id).await?;
+    let result = load_record(&state, &id).await?;
     Ok(HttpResponse::Ok().json(to_response(result)))
 }
 
@@ -387,7 +426,7 @@ pub(crate) async fn get_result_lines(
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let result = load_and_renew(&state, &id).await?;
+    let result = load_record(&state, &id).await?;
     let start = query.start.unwrap_or(0).max(0);
     let limit = query
         .limit
@@ -472,16 +511,21 @@ pub(crate) async fn delete_result(
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
     use actix_web::web;
     use sqlx::sqlite::SqlitePoolOptions;
     use uuid::Uuid;
 
-    use super::{MaterializeMode, materialize_result};
+    use super::{
+        MaterializeMode, materialize_result, materialize_result_with_timeout, resolve_sources,
+    };
     use crate::{
         AppState, config::AppLimits, db, error::AppError, log_expression,
-        services::temp_results::TempSource,
+        routes::temp_results::CreateTempResultRequest, services::temp_results::TempSource,
     };
 
     fn test_path(suffix: &str) -> PathBuf {
@@ -503,18 +547,35 @@ mod tests {
         state: &web::Data<AppState>,
         source: TempSource,
         expected: &'static str,
+        timeout: Option<Duration>,
     ) {
         let expression = log_expression::parse("ERROR").unwrap();
-        let error = match materialize_result(
-            state,
-            "ERROR",
-            &expression,
-            &[source],
-            "app.log",
-            MaterializeMode::Full,
-        )
-        .await
-        {
+        let result = match timeout {
+            Some(timeout) => {
+                materialize_result_with_timeout(
+                    state,
+                    "ERROR",
+                    &expression,
+                    &[source],
+                    "app.log",
+                    MaterializeMode::Full,
+                    timeout,
+                )
+                .await
+            }
+            None => {
+                materialize_result(
+                    state,
+                    "ERROR",
+                    &expression,
+                    &[source],
+                    "app.log",
+                    MaterializeMode::Full,
+                )
+                .await
+            }
+        };
+        let error = match result {
             Ok(_) => panic!("materialization should fail with {expected}"),
             Err(error) => error,
         };
@@ -555,6 +616,7 @@ mod tests {
                 file_id: None,
             },
             "TEMP_RESULT_SCAN_LIMIT",
+            None,
         )
         .await;
         let _ = tokio::fs::remove_dir_all(root).await;
@@ -566,9 +628,7 @@ mod tests {
         let source_path = root.join("source.log");
         tokio::fs::create_dir_all(&root).await.unwrap();
         tokio::fs::write(&source_path, "ERROR\n").await.unwrap();
-        let mut limits = AppLimits::default();
-        limits.temp_results.max_scan_duration_seconds = 0;
-        let state = test_state(&root, limits).await;
+        let state = test_state(&root, AppLimits::default()).await;
 
         assert_failed_materialization_is_clean(
             &state,
@@ -580,8 +640,69 @@ mod tests {
                 file_id: None,
             },
             "TEMP_RESULT_SCAN_TIMEOUT",
+            Some(Duration::from_nanos(1)),
         )
         .await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn issue_source_resolution_rejects_more_than_the_configured_limit() {
+        let root = test_path("source-limit");
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_sources = 1;
+        let state = test_state(&root, limits).await;
+        sqlx::query("INSERT INTO issues(code, name) VALUES('ISSUE', 'Issue')")
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+        for (bundle_id, file_name) in [("bundle-a", "a.log"), ("bundle-b", "b.log")] {
+            sqlx::query(
+                "INSERT INTO bundles(id, issue_code, hash, name, status) VALUES(?, 'ISSUE', ?, ?, 'READY')",
+            )
+            .bind(bundle_id)
+            .bind(format!("hash-{bundle_id}"))
+            .bind(file_name)
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+            let file_id: i64 = sqlx::query_scalar(
+                "INSERT INTO files(bundle_id, name, path, is_dir) VALUES(?, ?, ?, 0) RETURNING id",
+            )
+            .bind(bundle_id)
+            .bind(file_name)
+            .bind(format!("/{file_name}"))
+            .fetch_one(&state.db.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO log_segments(bundle_id, file_id, content) VALUES(?, ?, 'ERROR')",
+            )
+            .bind(bundle_id)
+            .bind(file_id)
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+        }
+
+        let payload = CreateTempResultRequest {
+            expression: "ERROR".into(),
+            bundle_hash: None,
+            file_id: None,
+            issue_code: Some("ISSUE".into()),
+            source_temp_id: None,
+        };
+        let error = match resolve_sources(&payload, &state).await {
+            Ok(_) => panic!("source resolution must enforce the configured limit"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            AppError::PublicApi {
+                code: "TEMP_RESULT_SOURCE_LIMIT",
+                ..
+            }
+        ));
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

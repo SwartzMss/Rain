@@ -157,6 +157,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_TEMP_RESULT_MAX_TOTAL_SIZE` | `1 GiB` | 临时结果目录的数据库登记总容量上限 |
 | `RAIN_TEMP_RESULT_MAX_RECORDS` | `1000` | 临时结果最多保留的记录数 |
 | `RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS` | `2` | 并发物化临时结果的任务数 |
+| `RAIN_TEMP_RESULT_MAX_SOURCES` | `10000` | Issue 级临时结果最多解析的源文件数 |
 | `RAIN_TEMP_RESULT_MAX_SCAN_BYTES` | `1 GiB` | 单次临时结果物化允许扫描的源文件字节数 |
 | `RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS` | `30` | 单次临时结果物化的扫描超时时间（秒） |
 | — | `8 MiB` | Temp Result 单行物化前缀上限；超出部分继续参与表达式匹配，结果会标记为截断 |

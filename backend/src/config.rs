@@ -294,6 +294,7 @@ pub struct TempResultConfig {
     pub max_total_size: u64,
     pub max_records: i64,
     pub concurrent_materializations: usize,
+    pub max_sources: usize,
     pub max_scan_bytes: u64,
     pub max_scan_duration_seconds: u64,
 }
@@ -305,6 +306,7 @@ impl Default for TempResultConfig {
             max_total_size: GIB,
             max_records: 1_000,
             concurrent_materializations: 2,
+            max_sources: 10_000,
             max_scan_bytes: GIB,
             max_scan_duration_seconds: 30,
         }
@@ -558,6 +560,10 @@ impl AppLimits {
                     "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
                     defaults.temp_results.concurrent_materializations,
                 )?,
+                max_sources: env_value(
+                    "RAIN_TEMP_RESULT_MAX_SOURCES",
+                    defaults.temp_results.max_sources,
+                )?,
                 max_scan_bytes: env_size(
                     "RAIN_TEMP_RESULT_MAX_SCAN_BYTES",
                     defaults.temp_results.max_scan_bytes,
@@ -636,6 +642,15 @@ impl AppLimits {
             self.temp_results.max_scan_duration_seconds,
             "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS"
         );
+        positive!(
+            self.temp_results.max_sources,
+            "RAIN_TEMP_RESULT_MAX_SOURCES"
+        );
+        i64::try_from(self.temp_results.max_sources).map_err(|_| {
+            AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SOURCES cannot be represented as a database limit".into(),
+            )
+        })?;
         if self.temp_results.max_result_size > self.temp_results.max_total_size {
             return Err(AppError::Config(
                 "RAIN_TEMP_RESULT_MAX_SIZE must not exceed RAIN_TEMP_RESULT_MAX_TOTAL_SIZE".into(),
@@ -1091,11 +1106,14 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let bytes_name = "RAIN_TEMP_RESULT_MAX_SCAN_BYTES";
         let duration_name = "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS";
+        let sources_name = "RAIN_TEMP_RESULT_MAX_SOURCES";
         let previous_bytes = std::env::var_os(bytes_name);
         let previous_duration = std::env::var_os(duration_name);
+        let previous_sources = std::env::var_os(sources_name);
         unsafe {
             std::env::set_var(bytes_name, "2 GiB");
             std::env::set_var(duration_name, "45");
+            std::env::set_var(sources_name, "2048");
         }
 
         let limits = AppLimits::from_env().unwrap();
@@ -1108,8 +1126,13 @@ mod tests {
             Some(value) => unsafe { std::env::set_var(duration_name, value) },
             None => unsafe { std::env::remove_var(duration_name) },
         }
+        match previous_sources {
+            Some(value) => unsafe { std::env::set_var(sources_name, value) },
+            None => unsafe { std::env::remove_var(sources_name) },
+        }
         assert_eq!(limits.temp_results.max_scan_bytes, 2 * 1024_u64.pow(3));
         assert_eq!(limits.temp_results.max_scan_duration_seconds, 45);
+        assert_eq!(limits.temp_results.max_sources, 2048);
     }
 
     #[test]
@@ -1132,6 +1155,16 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("RAIN_API_MAX_PREVIEW_LINE_SIZE")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_sources = 0;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_TEMP_RESULT_MAX_SOURCES")
         );
     }
 
