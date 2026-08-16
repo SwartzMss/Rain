@@ -825,6 +825,7 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(temporary_preview["total"], 1);
+    assert!(temporary_preview["next_start"].is_null());
     let preview_result_id = temporary_preview["result_id"]
         .as_str()
         .expect("preview result id");
@@ -908,10 +909,28 @@ async fn upload_search_tree_and_delete_issue() {
     assert!(invalid_expression_message.contains("搜索条件无效"));
     assert!(invalid_expression_message.contains("位置"));
 
+    let guest_temporary_result_response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/temp-results")
+            .set_json(serde_json::json!({
+                "expression": "ERROR AND NOT timeout",
+                "bundle_hash": bundle_hash,
+                "file_id": app_file_id
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        guest_temporary_result_response.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
     let temporary_result_response = test::call_service(
         &app,
         test::TestRequest::post()
             .uri("/api/temp-results")
+            .cookie(auth_cookie.clone())
             .set_json(serde_json::json!({
                 "expression": "ERROR AND NOT timeout",
                 "bundle_hash": bundle_hash,

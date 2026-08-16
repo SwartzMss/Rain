@@ -323,7 +323,7 @@ impl Default for ApiConfig {
             max_preview_line_size: 8 * MIB,
             default_line_page_size: 5_000,
             max_line_page_size: 10_000,
-            max_line_page_bytes: 8 * MIB,
+            max_line_page_bytes: 16 * MIB,
             concurrent_line_reads: 8,
             concurrent_line_reads_per_client: 2,
             default_search_results: 50,
@@ -975,7 +975,7 @@ mod tests {
         assert_eq!(limits.api.max_preview_line_size, 8 * 1024_u64.pow(2));
         assert_eq!(limits.api.default_line_page_size, 5_000);
         assert_eq!(limits.api.max_line_page_size, 10_000);
-        assert_eq!(limits.api.max_line_page_bytes, 8 * 1024_u64.pow(2));
+        assert_eq!(limits.api.max_line_page_bytes, 16 * 1024_u64.pow(2));
         assert_eq!(limits.api.concurrent_line_reads, 8);
         assert_eq!(limits.api.concurrent_line_reads_per_client, 2);
     }

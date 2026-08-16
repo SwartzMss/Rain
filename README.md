@@ -151,7 +151,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
 | `RAIN_API_DEFAULT_LINE_PAGE_SIZE` | `5000` | 默认行分页大小 |
 | `RAIN_API_MAX_LINE_PAGE_SIZE` | `10000` | 最大行分页大小 |
-| `RAIN_API_MAX_LINE_PAGE_BYTES` | `8 MiB` | 文件和临时结果行分页的近似最大字节数 |
+| `RAIN_API_MAX_LINE_PAGE_BYTES` | `16 MiB` | 文件和临时结果行分页的近似最大字节数 |
 | `RAIN_API_CONCURRENT_LINE_READS` | `8` | 文件和临时结果行接口的全局并发读取数 |
 | `RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT` | `2` | 每个客户端的并发行读取数 |
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
@@ -267,7 +267,7 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 上传接收阶段按单次请求限制文件总数和字节数，并受并发接收数与 `.tmp` 工作区全局字节预算限制；预算覆盖原始接收文件、递归解压后的 staging 文件和解压过程中的中间输出。接收字节上限为 Issue 最终内容上限的 2 倍，最终可浏览内容仍受 `RAIN_ISSUE_MAX_CONTENT_SIZE` 限制。Multipart 中的每个文件字段都会计入文件数量，即使字段内容为空。
 - 后台处理在 `.tmp/{task_id}/staging` 中完成解压和索引；真实文件同步写入内容寻址 BlobStore，完成或失败后 staging 工作区会被清理。
 - 临时搜索结果受单结果大小、全局总容量、记录数、并发物化数和按 IP 的请求频率共同限制；Preview 结果固定保留 30 分钟，完整结果固定保留 7 天，读取不会滑动续期；达到上限时不会继续创建结果文件。
-- 文件和临时结果行分页同时受近似字节预算、全局并发读取数和单客户端并发读取数限制，避免少数超大分页请求占满内存或 I/O。
+- 文件和临时结果行分页同时受近似字节预算、全局并发读取数和单客户端并发读取数限制，避免少数超大分页请求占满内存或 I/O；默认 16 MiB 预算可容纳 Temp Result 的 8 MiB 截断行及其标记和元数据开销。
 - 搜索关键词少于 3 个字符会被拒绝，以避免公开接口执行无界的全文扫描。
 - SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务默认最多 4 个并发，可通过 `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` 调整。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。

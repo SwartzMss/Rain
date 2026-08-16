@@ -13,18 +13,18 @@ use super::storage::{
     temp_result_too_large,
 };
 use super::*;
-use crate::services::temp_results::{MaterializedPreview, scan_timeout};
+use crate::services::temp_results::scan_timeout;
 
 enum MaterializeMode {
     Full,
-    Preview { from: i64, size: i64 },
+    Preview,
 }
 
 impl MaterializeMode {
     fn retention(&self) -> Duration {
         match self {
             Self::Full => Duration::days(RETENTION_DAYS),
-            Self::Preview { .. } => Duration::minutes(30),
+            Self::Preview => Duration::minutes(30),
         }
     }
 }
@@ -32,7 +32,6 @@ impl MaterializeMode {
 struct MaterializeOutcome {
     id: String,
     total: i64,
-    lines: Vec<PreviewLine>,
 }
 
 pub(crate) struct ResolvedSources {
@@ -101,37 +100,17 @@ async fn materialize_result_with_timeout(
         let mut index = File::create(&staging_index_path)
             .await
             .map_err(AppError::Io)?;
-        let materialized = tokio::time::timeout(timeout, async {
-            match mode {
-                MaterializeMode::Full => TempResultExecutor::write_matches(
-                    sources,
-                    expression,
-                    &mut output,
-                    &mut metadata,
-                    &mut index,
-                    state.limits.temp_results.max_result_size,
-                    state.limits.temp_results.max_scan_bytes,
-                )
-                .await
-                .map(|total| MaterializedPreview {
-                    total,
-                    lines: Vec::new(),
-                }),
-                MaterializeMode::Preview { from, size } => {
-                    TempResultExecutor::materialize_preview(
-                        sources,
-                        expression,
-                        from,
-                        size,
-                        state.limits.temp_results.max_result_size,
-                        &mut output,
-                        &mut metadata,
-                        &mut index,
-                        state.limits.temp_results.max_scan_bytes,
-                    )
-                    .await
-                }
-            }
+        let total = tokio::time::timeout(timeout, async {
+            TempResultExecutor::write_matches(
+                sources,
+                expression,
+                &mut output,
+                &mut metadata,
+                &mut index,
+                state.limits.temp_results.max_result_size,
+                state.limits.temp_results.max_scan_bytes,
+            )
+            .await
         })
         .await
         .map_err(|_| scan_timeout())??;
@@ -160,7 +139,7 @@ async fn materialize_result_with_timeout(
             expression_text,
             source_label,
             &output_path,
-            materialized.total,
+            total,
             i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
             retention,
         )
@@ -168,15 +147,11 @@ async fn materialize_result_with_timeout(
         if !matches!(transition, TransitionResult::Applied(())) {
             return Err(AppError::NotFound(format!("temporary result {id}")));
         }
-        Ok::<MaterializedPreview, AppError>(materialized)
+        Ok::<i64, AppError>(total)
     }
     .await;
     match result {
-        Ok(materialized) => Ok(MaterializeOutcome {
-            id,
-            total: materialized.total,
-            lines: materialized.lines,
-        }),
+        Ok(total) => Ok(MaterializeOutcome { id, total }),
         Err(error) => {
             abort_staging_result(state, &id, &output_path).await;
             Err(error)
@@ -340,6 +315,47 @@ pub(crate) fn source_label(sources: &[TempSource]) -> String {
     }
 }
 
+async fn read_result_page(
+    state: &web::Data<AppState>,
+    result: &TempResultRecord,
+    start: i64,
+    limit: i64,
+) -> Result<(Vec<TempLine>, Option<i64>), AppError> {
+    let result_path = checked_temp_path(state, &result.storage_path)?;
+    let meta_path = result_path.with_extension("meta");
+    let index_path = result_path.with_extension("idx");
+    let has_meta = tokio::fs::try_exists(&meta_path)
+        .await
+        .map_err(AppError::Io)?;
+    let has_index = tokio::fs::try_exists(&index_path)
+        .await
+        .map_err(AppError::Io)?;
+    if !has_meta || !has_index {
+        return Err(invalid_sidecar(
+            "temporary result metadata or index is missing",
+        ));
+    }
+    let lines = read_indexed_lines_bounded(
+        &result_path,
+        &meta_path,
+        &index_path,
+        start,
+        limit,
+        result.line_count,
+        state.limits.api.max_line_page_bytes,
+    )
+    .await?;
+    let next_start = if start
+        .checked_add(lines.len() as i64)
+        .is_some_and(|end| end < result.line_count)
+    {
+        Some(checked_page_end(start, lines.len() as i64)?)
+    } else {
+        None
+    };
+    Ok((lines, next_start))
+}
+
 pub(crate) async fn create_preview_result(
     request: HttpRequest,
     payload: web::Json<PreviewTempResultRequest>,
@@ -362,6 +378,13 @@ pub(crate) async fn create_preview_result(
     ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
+    let start = payload.from.unwrap_or(0).max(0);
+    let limit = preview_page_size(
+        payload.size,
+        state.limits.api.default_line_page_size,
+        state.limits.api.max_line_page_size,
+    );
+    checked_page_end(start, limit)?;
     let request = CreateTempResultRequest {
         expression: expression_text.to_string(),
         bundle_hash: payload.bundle_hash.clone(),
@@ -377,16 +400,11 @@ pub(crate) async fn create_preview_result(
         &expression,
         &resolved.sources,
         &source_label,
-        MaterializeMode::Preview {
-            from: payload.from.unwrap_or(0).max(0),
-            size: preview_page_size(
-                payload.size,
-                state.limits.api.default_line_page_size,
-                state.limits.api.max_line_page_size,
-            ),
-        },
+        MaterializeMode::Preview,
     )
     .await?;
+    let (result, _read_lease) = acquire_active_result(&state, &outcome.id).await?;
+    let (lines, next_start) = read_result_page(&state, &result, start, limit).await?;
     if let Some(issue_code) = payload.issue_code.as_deref() {
         touch_issue_activity_best_effort(
             &state.db.pool,
@@ -398,7 +416,8 @@ pub(crate) async fn create_preview_result(
     Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
         result_id: outcome.id,
         total: outcome.total,
-        lines: outcome.lines,
+        next_start,
+        lines,
     }))
 }
 
@@ -468,38 +487,7 @@ pub(crate) async fn get_result_lines(
         .limit
         .unwrap_or(state.limits.api.default_line_page_size)
         .clamp(1, state.limits.api.max_line_page_size);
-    let result_path = checked_temp_path(&state, &result.storage_path)?;
-    let meta_path = result_path.with_extension("meta");
-    let index_path = result_path.with_extension("idx");
-    let has_meta = tokio::fs::try_exists(&meta_path)
-        .await
-        .map_err(AppError::Io)?;
-    let has_index = tokio::fs::try_exists(&index_path)
-        .await
-        .map_err(AppError::Io)?;
-    if !has_meta || !has_index {
-        return Err(invalid_sidecar(
-            "temporary result metadata or index is missing",
-        ));
-    }
-    let lines = read_indexed_lines_bounded(
-        &result_path,
-        &meta_path,
-        &index_path,
-        start,
-        limit,
-        result.line_count,
-        state.limits.api.max_line_page_bytes,
-    )
-    .await?;
-    let next_start = if start
-        .checked_add(lines.len() as i64)
-        .is_some_and(|end| end < result.line_count)
-    {
-        Some(checked_page_end(start, lines.len() as i64)?)
-    } else {
-        None
-    };
+    let (lines, next_start) = read_result_page(&state, &result, start, limit).await?;
     Ok(HttpResponse::Ok().json(TempResultLines {
         start,
         limit,

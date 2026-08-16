@@ -25,8 +25,7 @@ use crate::{
     log_expression,
     repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
     services::temp_results::{
-        MatchMetadata, PreviewLine, SparseCheckpoint, TempResultExecutor, TempSource,
-        select_checkpoint,
+        MatchMetadata, SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint,
     },
 };
 
@@ -192,7 +191,8 @@ pub(crate) struct TempLine {
 struct MaterializedPreviewResponse {
     result_id: String,
     total: i64,
-    lines: Vec<PreviewLine>,
+    next_start: Option<i64>,
+    lines: Vec<TempLine>,
 }
 
 mod common;

@@ -12,6 +12,7 @@ pub(crate) async fn preview_temp_result(
 
 #[post("/temp-results")]
 pub(crate) async fn create_temp_result(
+    _user: RequireUser,
     request: HttpRequest,
     payload: web::Json<CreateTempResultRequest>,
     state: web::Data<AppState>,

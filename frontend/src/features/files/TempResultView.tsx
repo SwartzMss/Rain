@@ -46,11 +46,13 @@ export function TempResultView() {
     setCreating(true);
     setError(null);
     try {
-      const created = await rainApi.createTempResult({
+      const created = await rainApi.previewTempResult({
         expression: expression.trim(),
-        source_temp_id: resultId
+        source_temp_id: resultId,
+        from: 0,
+        size: LINE_PAGE_SIZE_OPTIONS[0]
       });
-      navigate(`/temp-results/${created.id}`);
+      navigate(`/temp-results/${created.result_id}`);
     } catch (createError) {
       setError(normalizeApiError(createError));
     } finally {

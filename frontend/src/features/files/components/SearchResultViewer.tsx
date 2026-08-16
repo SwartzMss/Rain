@@ -146,7 +146,7 @@ export function SearchResultViewer({
             type="button"
             className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
             disabled={activeViewerTab.from + results.length >= activeViewerTab.total || searchLoading}
-            onClick={() => onLoadPage(activeViewerTab, activeViewerTab.from + activeViewerTab.pageSize, activeViewerTab.pageSize)}
+            onClick={() => onLoadPage(activeViewerTab, activeViewerTab.from + results.length, activeViewerTab.pageSize)}
           >
             下一页
           </button>
