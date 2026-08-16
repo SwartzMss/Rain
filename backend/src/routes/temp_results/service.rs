@@ -550,14 +550,13 @@ mod tests {
         std::env::temp_dir().join(format!("rain-temp-materialize-{}-{suffix}", Uuid::new_v4()))
     }
 
-    async fn test_state(root: &Path, mut limits: AppLimits) -> web::Data<AppState> {
+    async fn test_state(root: &Path, limits: AppLimits) -> web::Data<AppState> {
         let pool = SqlitePoolOptions::new()
             .max_connections(2)
             .connect("sqlite::memory:")
             .await
             .unwrap();
         db::prepare_schema(&pool, false).await.unwrap();
-        limits.temp_results.max_scan_bytes = 32;
         web::Data::new(AppState::new(pool, root.to_path_buf(), limits))
     }
 
@@ -622,7 +621,9 @@ mod tests {
         tokio::fs::write(&source_path, "ERROR ".repeat(1024))
             .await
             .unwrap();
-        let state = test_state(&root, AppLimits::default()).await;
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_scan_bytes = 32;
+        let state = test_state(&root, limits).await;
 
         assert_failed_materialization_is_clean(
             &state,
@@ -645,7 +646,9 @@ mod tests {
         let root = test_path("timeout");
         let source_path = root.join("source.log");
         tokio::fs::create_dir_all(&root).await.unwrap();
-        tokio::fs::write(&source_path, "ERROR\n").await.unwrap();
+        tokio::fs::write(&source_path, "INFO\n".repeat((32 * 1024 * 1024) / 5))
+            .await
+            .unwrap();
         let state = test_state(&root, AppLimits::default()).await;
 
         assert_failed_materialization_is_clean(
@@ -658,7 +661,7 @@ mod tests {
                 file_id: None,
             },
             "TEMP_RESULT_SCAN_TIMEOUT",
-            Some(Duration::from_nanos(1)),
+            Some(Duration::from_millis(1)),
         )
         .await;
         let _ = tokio::fs::remove_dir_all(root).await;
