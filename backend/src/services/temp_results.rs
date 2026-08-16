@@ -147,13 +147,14 @@ impl TempResultExecutor {
                 };
                 if matcher.matches(expression) {
                     let content = decode_log_line(&bytes, truncated);
-                    let metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
+                    let mut metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
                         bundle_hash: source.bundle_hash.clone(),
                         file_id: source.file_id.clone(),
                         path: source.label.clone(),
                         line_number: source_line,
                         truncated,
                     });
+                    metadata.truncated |= truncated;
                     if matched % 1_000 == 0 {
                         let checkpoint = SparseCheckpoint {
                             result_line: matched,
