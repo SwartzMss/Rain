@@ -1,6 +1,8 @@
 use super::common::checked_page_end;
 use super::lifecycle::{abort_staging_result, acquire_materialization_lease};
-use super::lifecycle::{acquire_active_result, load_active_unexpired_record, load_record};
+use super::lifecycle::{
+    acquire_active_result, finish_deleting_temp_result, load_active_unexpired_record, load_record,
+};
 use super::lifecycle::{check_temp_result_rate_limit, preview_page_size, to_response};
 use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
@@ -357,6 +359,21 @@ async fn read_result_page(
     Ok((lines, next_start))
 }
 
+async fn cleanup_published_result_after_preview_failure(
+    state: &web::Data<AppState>,
+    result: &TempResultRecord,
+) {
+    match claim_active_for_delete(state, &result.id).await {
+        Ok(TransitionResult::Applied(())) => finish_deleting_temp_result(state, result).await,
+        Ok(TransitionResult::NotFound | TransitionResult::StateMismatch) => {}
+        Err(error) => tracing::warn!(
+            result_id = %result.id,
+            %error,
+            "published temporary result could not be claimed after preview failure"
+        ),
+    }
+}
+
 pub(crate) async fn create_preview_result(
     request: HttpRequest,
     payload: web::Json<PreviewTempResultRequest>,
@@ -404,8 +421,16 @@ pub(crate) async fn create_preview_result(
         MaterializeMode::Preview,
     )
     .await?;
-    let (result, _read_lease) = acquire_active_result(&state, &outcome.id).await?;
-    let (lines, next_start) = read_result_page(&state, &result, start, limit).await?;
+    let (result, read_lease) = acquire_active_result(&state, &outcome.id).await?;
+    let page = read_result_page(&state, &result, start, limit).await;
+    drop(read_lease);
+    let (lines, next_start) = match page {
+        Ok(page) => page,
+        Err(error) => {
+            cleanup_published_result_after_preview_failure(&state, &result).await;
+            return Err(error);
+        }
+    };
     if let Some(issue_code) = payload.issue_code.as_deref() {
         touch_issue_activity_best_effort(
             &state.db.pool,
@@ -735,6 +760,44 @@ mod tests {
                 ..
             }
         ));
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn preview_failure_cleanup_removes_published_result() {
+        let root = test_path("preview-failure-cleanup");
+        let result_dir = root.join("temp-results");
+        tokio::fs::create_dir_all(&result_dir).await.unwrap();
+        let state = test_state(&root, AppLimits::default()).await;
+        let result_path = result_dir.join("preview-failure.log");
+        let meta_path = result_path.with_extension("meta");
+        let index_path = result_path.with_extension("idx");
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('preview-failure', 'ACTIVE', 'preview-failure.log', 'ERROR', 'app.log', ?, 1, 10, ?, ?)",
+        )
+        .bind(result_path.to_string_lossy().to_string())
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+        for path in [&result_path, &meta_path, &index_path] {
+            tokio::fs::write(path, b"artifact").await.unwrap();
+        }
+
+        let result = super::load_record(&state, "preview-failure").await.unwrap();
+        super::cleanup_published_result_after_preview_failure(&state, &result).await;
+
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM temp_results WHERE id = 'preview-failure'")
+                .fetch_optional(&state.db.pool)
+                .await
+                .unwrap();
+        assert!(status.is_none());
+        for path in [result_path, meta_path, index_path] {
+            assert!(!path.exists());
+        }
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

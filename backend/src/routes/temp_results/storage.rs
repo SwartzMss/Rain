@@ -1,6 +1,9 @@
 use super::common::checked_page_end;
 use super::*;
-use crate::services::json_size::{json_optional_string_encoded_len, json_string_encoded_len};
+use crate::services::json_size::{
+    RESPONSE_TRUNCATED_LINE_MARKER, json_optional_string_encoded_len, json_string_encoded_len,
+    truncate_json_string_to_budget,
+};
 
 pub(crate) async fn result_storage_size(
     log_path: &Path,
@@ -121,15 +124,22 @@ pub(crate) async fn read_indexed_lines_bounded(
         let metadata = decode_sidecar::<MatchMetadata>(metadata_line.trim_end())?;
         if current >= start {
             let content = content.trim_end_matches(['\r', '\n']);
-            let line_bytes = json_string_encoded_len(content)
-                .saturating_add(json_optional_string_encoded_len(
-                    metadata.bundle_hash.as_deref(),
-                ))
-                .saturating_add(json_optional_string_encoded_len(
-                    metadata.file_id.as_deref(),
-                ))
-                .saturating_add(json_string_encoded_len(&metadata.path))
-                .saturating_add(256);
+            let fixed_line_bytes =
+                json_optional_string_encoded_len(metadata.bundle_hash.as_deref())
+                    .saturating_add(json_optional_string_encoded_len(
+                        metadata.file_id.as_deref(),
+                    ))
+                    .saturating_add(json_string_encoded_len(&metadata.path))
+                    .saturating_add(256);
+            let content_budget = max_page_bytes
+                .saturating_sub(page_bytes)
+                .saturating_sub(fixed_line_bytes);
+            let content = truncate_json_string_to_budget(
+                content,
+                content_budget,
+                RESPONSE_TRUNCATED_LINE_MARKER,
+            );
+            let line_bytes = json_string_encoded_len(&content).saturating_add(fixed_line_bytes);
             if line_bytes > max_page_bytes || page_bytes.saturating_add(line_bytes) > max_page_bytes
             {
                 if lines.is_empty() {
@@ -147,7 +157,7 @@ pub(crate) async fn read_indexed_lines_bounded(
                 file_id: metadata.file_id,
                 path: Some(metadata.path),
                 line_number: metadata.line_number,
-                content: content.to_string(),
+                content,
             });
         }
         current += 1;
@@ -330,7 +340,7 @@ mod tests {
         config::MAX_TEMP_RESULT_LOGICAL_LINE_BYTES,
         ingest::TRUNCATED_LINE_MARKER,
         log_expression,
-        services::temp_results::{TempResultExecutor, TempSource},
+        services::temp_results::{MatchMetadata, SparseCheckpoint, TempResultExecutor, TempSource},
     };
 
     #[test]
@@ -408,6 +418,71 @@ mod tests {
         ));
 
         for path in [source_path, result_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_encoded_line_does_not_block_following_pages() {
+        let suffix = Uuid::new_v4();
+        let result_path = std::env::temp_dir().join(format!("rain-page-budget-{suffix}.log"));
+        let meta_path = std::env::temp_dir().join(format!("rain-page-budget-{suffix}.meta"));
+        let index_path = std::env::temp_dir().join(format!("rain-page-budget-{suffix}.idx"));
+        let result_content = format!("small\n{}\ntail\n", "\"".repeat(200));
+        let metadata = (0..3)
+            .map(|line_number| {
+                serde_json::to_string(&MatchMetadata {
+                    bundle_hash: None,
+                    file_id: None,
+                    path: "app.log".into(),
+                    line_number,
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        tokio::fs::write(&result_path, result_content)
+            .await
+            .unwrap();
+        tokio::fs::write(&meta_path, metadata).await.unwrap();
+        tokio::fs::write(
+            &index_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SparseCheckpoint {
+                    result_line: 0,
+                    log_offset: 0,
+                    meta_offset: 0,
+                })
+                .unwrap()
+            ),
+        )
+        .await
+        .unwrap();
+
+        let first_page =
+            read_indexed_lines_bounded(&result_path, &meta_path, &index_path, 0, 3, 3, 512)
+                .await
+                .unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].content, "small");
+
+        let following_page =
+            read_indexed_lines_bounded(&result_path, &meta_path, &index_path, 1, 1, 3, 512)
+                .await
+                .unwrap();
+        assert_eq!(following_page.len(), 1);
+        assert!(following_page[0].content.ends_with("[response truncated]"));
+
+        let last_page =
+            read_indexed_lines_bounded(&result_path, &meta_path, &index_path, 2, 1, 3, 512)
+                .await
+                .unwrap();
+        assert_eq!(last_page.len(), 1);
+        assert_eq!(last_page[0].content, "tail");
+
+        for path in [result_path, meta_path, index_path] {
             let _ = tokio::fs::remove_file(path).await;
         }
     }

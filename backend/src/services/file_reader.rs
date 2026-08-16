@@ -11,7 +11,9 @@ use crate::{
     error::AppError,
     ingest::{decode_log_line, read_line_bytes_limited},
     repositories::files::{FileRow, ensure_text_preview, nearest_line_offset, resolve_file_path},
-    services::json_size::json_string_encoded_len,
+    services::json_size::{
+        RESPONSE_TRUNCATED_LINE_MARKER, json_string_encoded_len, truncate_json_string_to_budget,
+    },
 };
 
 #[derive(Serialize)]
@@ -126,7 +128,16 @@ pub async fn read_file_lines(
         };
 
         if current_line >= start {
-            let content = decode_log_line(&buffer, truncated);
+            let decoded_content = decode_log_line(&buffer, truncated);
+            let content_budget = api
+                .max_line_page_bytes
+                .saturating_sub(page_bytes)
+                .saturating_sub(256);
+            let content = truncate_json_string_to_budget(
+                &decoded_content,
+                content_budget,
+                RESPONSE_TRUNCATED_LINE_MARKER,
+            );
             let line_bytes = json_string_encoded_len(&content).saturating_add(256);
             if line_bytes > api.max_line_page_bytes
                 || page_bytes.saturating_add(line_bytes) > api.max_line_page_bytes
