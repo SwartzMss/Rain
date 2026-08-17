@@ -13,7 +13,7 @@ vi.mock('../src/features/auth/AuthPage', () => ({ AuthPage: () => <p>auth page</
 vi.mock('../src/features/auth/AccountPage', () => ({ AccountPage: () => <p>account page</p> }));
 vi.mock('../src/features/files/FilesView', () => ({ BundleView: () => <p>home page</p> }));
 vi.mock('../src/features/files/HomeView', () => ({ HomeView: () => <p>home page</p> }));
-vi.mock('../src/features/files/TempResultView', () => ({ TempResultView: () => <p>temp result</p> }));
+vi.mock('../src/features/files/TempResultView', () => ({ TempResultRoute: () => <p>temp result</p> }));
 vi.mock('../src/features/admin/AdminPage', () => ({
   AdminPage: () => <p>admin page</p>,
   AdminUsersPage: () => <p>admin users page</p>,
