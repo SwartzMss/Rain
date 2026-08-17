@@ -26,11 +26,13 @@ use std::{
 };
 
 use sqlx::SqlitePool;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AiProviderEnv, AppLimits, AuthConfig};
+use crate::error::AppError;
 
 #[derive(Debug, Clone)]
 pub struct RequestLogId(pub String);
@@ -119,6 +121,8 @@ pub struct TempResultRuntime {
     pub permits: Arc<Semaphore>,
     pub capacity_lock: Arc<AsyncMutex<()>>,
     pub staging: Arc<Mutex<HashSet<String>>>,
+    pub reads: Arc<Mutex<HashMap<String, usize>>>,
+    pub materializations: Arc<Mutex<HashMap<String, usize>>>,
     pub ip_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
 }
 
@@ -128,6 +132,8 @@ impl TempResultRuntime {
             permits: Arc::new(Semaphore::new(materializations)),
             capacity_lock: Arc::new(AsyncMutex::new(())),
             staging: Arc::new(Mutex::new(HashSet::new())),
+            reads: Arc::new(Mutex::new(HashMap::new())),
+            materializations: Arc::new(Mutex::new(HashMap::new())),
             ip_limits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -353,6 +359,8 @@ pub struct AppState {
     pub storage: StorageContext,
     pub upload: UploadRuntime,
     pub temp_results: TempResultRuntime,
+    pub line_read_permits: Arc<Semaphore>,
+    pub line_read_clients: Arc<Mutex<HashMap<String, usize>>>,
     pub auth_runtime: AuthRuntime,
     pub ai_provider: AiProviderEnv,
     pub skill_runs: SkillRunRuntime,
@@ -361,6 +369,8 @@ pub struct AppState {
     pub issue_inactive_days: AtomicUsize,
     pub limits: AppLimits,
 }
+
+const MAX_LINE_READ_CLIENTS: usize = 1024;
 
 /// Start a resilient Tokio periodic job. A failed iteration is logged and does
 /// not terminate the worker, so unrelated maintenance jobs keep running.
@@ -456,6 +466,8 @@ impl AppState {
             limits.upload.concurrent_receive_tasks,
         );
         let temp_results = TempResultRuntime::new(limits.temp_results.concurrent_materializations);
+        let line_read_permits = Arc::new(Semaphore::new(limits.api.concurrent_line_reads));
+        let line_read_clients = Arc::new(Mutex::new(HashMap::new()));
         let auth_runtime = AuthRuntime::new(auth);
         Self {
             db: DatabaseContext { pool },
@@ -465,6 +477,8 @@ impl AppState {
             },
             upload,
             temp_results,
+            line_read_permits,
+            line_read_clients,
             auth_runtime,
             ai_provider,
             skill_runs: SkillRunRuntime::default(),
@@ -472,6 +486,69 @@ impl AppState {
             recovery: Arc::new(RecoveryRuntime::ready()),
             issue_inactive_days: AtomicUsize::new(0),
             limits,
+        }
+    }
+
+    pub fn acquire_line_read(&self, client_key: &str) -> Result<LineReadLease, AppError> {
+        let permit = self
+            .line_read_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                AppError::api(
+                    actix_web::http::StatusCode::TOO_MANY_REQUESTS,
+                    "LINE_READ_BUSY",
+                    "行读取任务过多，请稍后重试",
+                )
+            })?;
+        let mut clients = self.line_read_clients.lock().map_err(|_| {
+            AppError::api(
+                actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+                "LINE_READ_UNAVAILABLE",
+                "行读取服务暂时不可用",
+            )
+        })?;
+        if !clients.contains_key(client_key) && clients.len() >= MAX_LINE_READ_CLIENTS {
+            drop(permit);
+            return Err(AppError::api(
+                actix_web::http::StatusCode::TOO_MANY_REQUESTS,
+                "LINE_READ_RATE_LIMITED",
+                "行读取客户端数量超过限制，请稍后重试",
+            ));
+        }
+        let count = clients.entry(client_key.to_owned()).or_insert(0);
+        if *count >= self.limits.api.concurrent_line_reads_per_client {
+            drop(permit);
+            return Err(AppError::api(
+                actix_web::http::StatusCode::TOO_MANY_REQUESTS,
+                "LINE_READ_RATE_LIMITED",
+                "单个客户端的行读取任务过多，请稍后重试",
+            ));
+        }
+        *count = count.saturating_add(1);
+        Ok(LineReadLease {
+            client_key: client_key.to_owned(),
+            clients: self.line_read_clients.clone(),
+            _permit: permit,
+        })
+    }
+}
+
+pub struct LineReadLease {
+    client_key: String,
+    clients: Arc<Mutex<HashMap<String, usize>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for LineReadLease {
+    fn drop(&mut self) {
+        if let Ok(mut clients) = self.clients.lock()
+            && let Some(count) = clients.get_mut(&self.client_key)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                clients.remove(&self.client_key);
+            }
         }
     }
 }
@@ -497,6 +574,28 @@ mod tests {
         let state = AppState::new(pool, PathBuf::from("data"), limits);
 
         assert_eq!(state.upload.processing_permits.available_permits(), 7);
+    }
+
+    #[tokio::test]
+    async fn line_read_leases_are_bounded_per_client_and_released() {
+        let pool = SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let mut limits = AppLimits::default();
+        limits.api.concurrent_line_reads = 2;
+        limits.api.concurrent_line_reads_per_client = 1;
+        let state = AppState::new(pool, PathBuf::from("data"), limits);
+
+        let first = state.acquire_line_read("client-a").unwrap();
+        assert!(state.acquire_line_read("client-a").is_err());
+        let second = state.acquire_line_read("client-b").unwrap();
+        assert!(state.acquire_line_read("client-c").is_err());
+
+        drop(first);
+        let replacement = state.acquire_line_read("client-c").unwrap();
+        drop(second);
+        drop(replacement);
+        assert!(state.line_read_clients.lock().unwrap().is_empty());
     }
 
     #[test]

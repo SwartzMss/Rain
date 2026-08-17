@@ -6,7 +6,12 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
 };
 
-use crate::{error::AppError, log_expression::Expression};
+use crate::{
+    config::MAX_TEMP_RESULT_LOGICAL_LINE_BYTES,
+    error::AppError,
+    ingest::{LimitedLine, decode_log_line, read_line_bytes_limited_with_budget_and_callback},
+    log_expression::Expression,
+};
 
 pub struct TempSource {
     pub path: PathBuf,
@@ -27,6 +32,8 @@ pub struct MatchMetadata {
     pub file_id: Option<String>,
     pub path: String,
     pub line_number: i64,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -58,12 +65,30 @@ impl TempResultExecutor {
         output: &mut File,
         metadata_output: &mut File,
         index_output: &mut File,
+        max_scan_bytes: u64,
     ) -> Result<MaterializedPreview, AppError> {
+        let page_end = from
+            .checked_add(size)
+            .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
         let mut matched = 0_i64;
         let mut lines = Vec::new();
         let mut log_offset = 0_u64;
         let mut meta_offset = 0_u64;
         let mut total_output_bytes = 0_u64;
+        let max_scan_bytes = usize::try_from(max_scan_bytes).map_err(|_| {
+            AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SCAN_BYTES cannot be represented on this platform".into(),
+            )
+        })?;
+        let max_logical_line_bytes =
+            usize::try_from(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES).map_err(|_| {
+                AppError::Config(
+                    "MAX_TEMP_RESULT_LOGICAL_LINE_BYTES cannot be represented on this platform"
+                        .into(),
+                )
+            })?;
+        let mut scanned_bytes = 0usize;
+        let mut matcher = expression.chunk_matcher();
         for source in sources {
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
@@ -78,16 +103,30 @@ impl TempResultExecutor {
             let mut source_line = 0_i64;
             loop {
                 bytes.clear();
-                if reader
-                    .read_until(b'\n', &mut bytes)
-                    .await
-                    .map_err(AppError::Io)?
-                    == 0
+                let remaining_scan_bytes = max_scan_bytes.saturating_sub(scanned_bytes);
+                matcher.reset();
+                let truncated = match read_line_bytes_limited_with_budget_and_callback(
+                    &mut reader,
+                    &mut bytes,
+                    max_logical_line_bytes,
+                    remaining_scan_bytes,
+                    |chunk| matcher.feed_bytes(chunk),
+                )
+                .await
+                .map_err(AppError::Io)?
                 {
-                    break;
-                }
-                let line = String::from_utf8_lossy(&bytes);
-                let content = line.trim_end_matches(['\r', '\n']);
+                    LimitedLine::EndOfFile => break,
+                    LimitedLine::Line {
+                        bytes_read,
+                        truncated,
+                        ..
+                    } => {
+                        scanned_bytes = scanned_bytes.saturating_add(bytes_read);
+                        truncated
+                    }
+                    LimitedLine::ScanLimit { .. } => return Err(scan_limit()),
+                };
+                matcher.finish();
                 let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
                     source_metadata_line.clear();
                     if reader
@@ -106,13 +145,16 @@ impl TempResultExecutor {
                 } else {
                     None
                 };
-                if expression.matches(content) {
-                    let metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
+                if matcher.matches(expression) {
+                    let content = decode_log_line(&bytes, truncated);
+                    let mut metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
                         bundle_hash: source.bundle_hash.clone(),
                         file_id: source.file_id.clone(),
                         path: source.label.clone(),
                         line_number: source_line,
+                        truncated,
                     });
+                    metadata.truncated |= truncated;
                     if matched % 1_000 == 0 {
                         let checkpoint = SparseCheckpoint {
                             result_line: matched,
@@ -127,18 +169,19 @@ impl TempResultExecutor {
                         )
                         .await?;
                     }
-                    let line_bytes = bytes.len() as u64 + u64::from(!bytes.ends_with(b"\n"));
+                    let line_bytes = content.len() as u64 + 1;
                     let next_output_size =
                         log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
                     ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
-                    output.write_all(&bytes).await.map_err(AppError::Io)?;
+                    output
+                        .write_all(content.as_bytes())
+                        .await
+                        .map_err(AppError::Io)?;
                     log_offset = next_output_size;
                     total_output_bytes = total_output_bytes
                         .checked_add(line_bytes)
                         .ok_or_else(too_large)?;
-                    if !bytes.ends_with(b"\n") {
-                        output.write_all(b"\n").await.map_err(AppError::Io)?;
-                    }
+                    output.write_all(b"\n").await.map_err(AppError::Io)?;
                     meta_offset += write_json_line(
                         metadata_output,
                         &metadata,
@@ -146,16 +189,13 @@ impl TempResultExecutor {
                         &mut total_output_bytes,
                     )
                     .await?;
-                    let page_end = from
-                        .checked_add(size)
-                        .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
                     if matched >= from && matched < page_end {
                         lines.push(PreviewLine {
                             bundle_hash: metadata.bundle_hash.clone(),
                             file_id: metadata.file_id.clone(),
                             path: metadata.path.clone(),
                             line_number: metadata.line_number,
-                            content: content.to_string(),
+                            content,
                         });
                     }
                     matched += 1;
@@ -192,6 +232,7 @@ impl TempResultExecutor {
         metadata_output: &mut File,
         index_output: &mut File,
         max_output_bytes: u64,
+        max_scan_bytes: u64,
     ) -> Result<i64, AppError> {
         // Full materialization uses the same scan, metadata, index, newline, and
         // size-limit pipeline as preview; a zero-sized window suppresses only
@@ -205,6 +246,7 @@ impl TempResultExecutor {
             output,
             metadata_output,
             index_output,
+            max_scan_bytes,
         )
         .await?
         .total)
@@ -216,6 +258,22 @@ fn too_large() -> AppError {
         actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
         "TEMP_RESULT_TOO_LARGE",
         "临时结果超过大小限制",
+    )
+}
+
+fn scan_limit() -> AppError {
+    AppError::public(
+        actix_web::http::StatusCode::PAYLOAD_TOO_LARGE,
+        "TEMP_RESULT_SCAN_LIMIT",
+        "临时结果扫描超过限制",
+    )
+}
+
+pub fn scan_timeout() -> AppError {
+    AppError::public(
+        actix_web::http::StatusCode::REQUEST_TIMEOUT,
+        "TEMP_RESULT_SCAN_TIMEOUT",
+        "临时结果扫描超时",
     )
 }
 
@@ -271,16 +329,61 @@ pub fn select_checkpoint(
 
 #[cfg(test)]
 mod tests {
+    const TEST_MAX_SCAN_BYTES: u64 = usize::MAX as u64;
+
     use std::path::PathBuf;
 
     use tokio::fs::File;
     use uuid::Uuid;
 
     use super::{SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint};
-    use crate::log_expression;
+    use crate::{error::AppError, ingest::TRUNCATED_LINE_MARKER, log_expression};
 
     fn test_path(suffix: &str) -> PathBuf {
         std::env::temp_dir().join(format!("rain-temp-result-{}-{suffix}", Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn rejects_overflowing_preview_page_before_opening_sources() {
+        let source_path = test_path("overflow-source.log");
+        let log_path = test_path("overflow-result.log");
+        let meta_path = test_path("overflow-result.meta");
+        let index_path = test_path("overflow-result.idx");
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "missing.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let error = match TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            i64::MAX,
+            1,
+            TEST_MAX_SCAN_BYTES,
+            &mut log,
+            &mut meta,
+            &mut index,
+            TEST_MAX_SCAN_BYTES,
+        )
+        .await
+        {
+            Ok(_) => panic!("overflowing page parameters must be rejected before scanning"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, AppError::BadRequest(message) if message == "分页参数超出支持范围")
+        );
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 
     #[tokio::test]
@@ -313,10 +416,11 @@ mod tests {
             &expression,
             0,
             2,
-            u64::MAX,
+            TEST_MAX_SCAN_BYTES,
             &mut log,
             &mut meta,
             &mut index,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -344,6 +448,148 @@ mod tests {
         assert_eq!(checkpoints[0].result_line, 0);
         assert_eq!(checkpoints[1].result_line, 1_000);
 
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stops_scanning_an_unterminated_line_at_the_scan_budget() {
+        let source_path = test_path("scan-limit-source.log");
+        let log_path = test_path("scan-limit-result.log");
+        let meta_path = test_path("scan-limit-result.meta");
+        let index_path = test_path("scan-limit-result.idx");
+        tokio::fs::write(&source_path, "ERROR ".repeat(1024))
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let error = match TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            1,
+            TEST_MAX_SCAN_BYTES,
+            &mut log,
+            &mut meta,
+            &mut index,
+            32,
+        )
+        .await
+        {
+            Ok(_) => panic!("unterminated line should hit the scan budget"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            AppError::PublicApi {
+                code: "TEMP_RESULT_SCAN_LIMIT",
+                ..
+            }
+        ));
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_a_source_that_ends_exactly_at_the_scan_budget() {
+        let source_path = test_path("exact-scan-source.log");
+        let log_path = test_path("exact-scan-result.log");
+        let meta_path = test_path("exact-scan-result.meta");
+        let index_path = test_path("exact-scan-result.idx");
+        let source_content = format!("ERROR {}\n", "x".repeat(25));
+        assert_eq!(source_content.len(), 32);
+        tokio::fs::write(&source_path, source_content)
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let preview = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            1,
+            TEST_MAX_SCAN_BYTES,
+            &mut log,
+            &mut meta,
+            &mut index,
+            32,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(preview.total, 1);
+        assert_eq!(preview.lines.len(), 1);
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn marks_temp_result_lines_truncated_at_the_logical_line_limit() {
+        let source_path = test_path("truncated-source.log");
+        let log_path = test_path("truncated-result.log");
+        let meta_path = test_path("truncated-result.meta");
+        let index_path = test_path("truncated-result.idx");
+        let source_content = format!("{} LATE\n", "x".repeat(8 * 1024 * 1024));
+        tokio::fs::write(&source_path, source_content)
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("LATE").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let preview = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            1,
+            TEST_MAX_SCAN_BYTES,
+            &mut log,
+            &mut meta,
+            &mut index,
+            TEST_MAX_SCAN_BYTES,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(preview.total, 1);
+        assert!(preview.lines[0].content.ends_with(TRUNCATED_LINE_MARKER));
+        drop(log);
+        drop(meta);
+        drop(index);
+        let result = tokio::fs::read_to_string(&log_path).await.unwrap();
+        assert!(result.ends_with(&format!("{TRUNCATED_LINE_MARKER}\n")));
         for path in [source_path, log_path, meta_path, index_path] {
             let _ = tokio::fs::remove_file(path).await;
         }
@@ -390,6 +636,7 @@ mod tests {
             &mut full.1,
             &mut full.2,
             u64::MAX,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -402,6 +649,7 @@ mod tests {
             &mut preview.0,
             &mut preview.1,
             &mut preview.2,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -453,6 +701,7 @@ mod tests {
             &mut first_log,
             &mut first_meta,
             &mut first_index,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();
@@ -480,6 +729,7 @@ mod tests {
             &mut second_log,
             &mut second_meta,
             &mut second_index,
+            TEST_MAX_SCAN_BYTES,
         )
         .await
         .unwrap();

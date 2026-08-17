@@ -212,6 +212,7 @@ export interface TempResultLinesResponse {
 export interface TempResultPreviewResponse {
   result_id: string;
   total: number;
+  next_start?: number | null;
   lines: Array<FileLine & {
     bundle_hash?: string;
     file_id?: string;

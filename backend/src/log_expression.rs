@@ -1,3 +1,5 @@
+use caseless::default_case_fold_str;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
     Term(String),
@@ -30,7 +32,7 @@ struct Token {
 
 impl Expression {
     pub fn matches(&self, line: &str) -> bool {
-        let normalized = line.to_lowercase();
+        let normalized = default_case_fold_str(line);
         self.matches_normalized(&normalized)
     }
 
@@ -46,9 +48,220 @@ impl Expression {
             }
         }
     }
+
+    pub(crate) fn chunk_matcher(&self) -> ExpressionChunkMatcher {
+        let mut terms = Vec::new();
+        collect_terms(self, &mut terms);
+        ExpressionChunkMatcher {
+            terms: terms
+                .into_iter()
+                .map(|term| ChunkTerm {
+                    keep_chars: term.chars().count().saturating_sub(1),
+                    term,
+                    tail: String::new(),
+                    found: false,
+                })
+                .collect(),
+            pending: Vec::new(),
+        }
+    }
+}
+
+pub const MAX_EXPRESSION_CHARS: usize = 4_096;
+pub const MAX_EXPRESSION_BYTES: usize = 16 * 1024;
+const MAX_EXPRESSION_TOKENS: usize = 128;
+const MAX_EXPRESSION_NESTING_DEPTH: usize = 32;
+const MAX_EXPRESSION_AST_NODES: usize = 128;
+
+pub(crate) struct ExpressionChunkMatcher {
+    terms: Vec<ChunkTerm>,
+    pending: Vec<u8>,
+}
+
+struct ChunkTerm {
+    term: String,
+    keep_chars: usize,
+    tail: String,
+    found: bool,
+}
+
+impl ExpressionChunkMatcher {
+    pub(crate) fn reset(&mut self) {
+        self.pending.clear();
+        for term in &mut self.terms {
+            term.tail.clear();
+            term.found = false;
+        }
+    }
+
+    pub(crate) fn feed_bytes(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+        self.decode_pending(false);
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.decode_pending(true);
+    }
+
+    pub(crate) fn matches(&self, expression: &Expression) -> bool {
+        let mut cursor = 0;
+        let result = evaluate_chunk_matches(expression, &self.terms, &mut cursor);
+        debug_assert_eq!(cursor, self.terms.len());
+        result
+    }
+
+    fn decode_pending(&mut self, flush: bool) {
+        if self.pending.is_empty() {
+            return;
+        }
+
+        let mut decoded = String::new();
+        let mut consumed = 0;
+        while consumed < self.pending.len() {
+            match std::str::from_utf8(&self.pending[consumed..]) {
+                Ok(text) => {
+                    decoded.push_str(text);
+                    consumed = self.pending.len();
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    if valid > 0 {
+                        decoded.push_str(
+                            std::str::from_utf8(&self.pending[consumed..consumed + valid])
+                                .expect("valid UTF-8 prefix"),
+                        );
+                        consumed += valid;
+                    }
+                    if let Some(invalid_length) = error.error_len() {
+                        decoded.push('\u{fffd}');
+                        consumed += invalid_length;
+                    } else if flush {
+                        decoded.push('\u{fffd}');
+                        consumed = self.pending.len();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !decoded.is_empty() {
+            self.feed_text(&decoded);
+        }
+        if consumed > 0 {
+            self.pending.drain(..consumed);
+        }
+    }
+
+    fn feed_text(&mut self, text: &str) {
+        self.feed_normalized(&default_case_fold_str(text));
+    }
+
+    fn feed_normalized(&mut self, normalized: &str) {
+        for term in &mut self.terms {
+            if term.found {
+                continue;
+            }
+
+            if normalized.contains(&term.term) {
+                term.found = true;
+                continue;
+            }
+
+            let (prefix, has_more) = prefix_by_chars(normalized, term.keep_chars);
+            if !term.tail.is_empty() && !prefix.is_empty() {
+                let mut boundary = String::with_capacity(term.tail.len() + prefix.len());
+                boundary.push_str(&term.tail);
+                boundary.push_str(prefix);
+                if boundary.contains(&term.term) {
+                    term.found = true;
+                    continue;
+                }
+            }
+
+            if has_more {
+                term.tail = keep_suffix(normalized, term.keep_chars);
+            } else {
+                let mut combined = String::with_capacity(term.tail.len() + normalized.len());
+                combined.push_str(&term.tail);
+                combined.push_str(normalized);
+                term.tail = keep_suffix(&combined, term.keep_chars);
+            }
+        }
+    }
+}
+
+fn collect_terms(expression: &Expression, terms: &mut Vec<String>) {
+    match expression {
+        Expression::Term(term) => terms.push(term.clone()),
+        Expression::Not(expression) => collect_terms(expression, terms),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            collect_terms(left, terms);
+            collect_terms(right, terms);
+        }
+    }
+}
+
+fn evaluate_chunk_matches(
+    expression: &Expression,
+    terms: &[ChunkTerm],
+    cursor: &mut usize,
+) -> bool {
+    match expression {
+        Expression::Term(_) => {
+            let result = terms[*cursor].found;
+            *cursor += 1;
+            result
+        }
+        Expression::Not(expression) => !evaluate_chunk_matches(expression, terms, cursor),
+        Expression::And(left, right) => {
+            let left = evaluate_chunk_matches(left, terms, cursor);
+            let right = evaluate_chunk_matches(right, terms, cursor);
+            left && right
+        }
+        Expression::Or(left, right) => {
+            let left = evaluate_chunk_matches(left, terms, cursor);
+            let right = evaluate_chunk_matches(right, terms, cursor);
+            left || right
+        }
+    }
+}
+
+fn keep_suffix(value: &str, chars: usize) -> String {
+    value
+        .chars()
+        .rev()
+        .take(chars)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn prefix_by_chars(value: &str, chars: usize) -> (&str, bool) {
+    let Some((end, _)) = value.char_indices().nth(chars) else {
+        return (value, false);
+    };
+    (&value[..end], true)
 }
 
 pub fn parse(input: &str) -> Result<Expression, ParseError> {
+    if input.len() > MAX_EXPRESSION_BYTES {
+        return Err(ParseError {
+            offset: MAX_EXPRESSION_BYTES,
+            message: "expression exceeds the byte limit".into(),
+        });
+    }
+    if input.chars().count() > MAX_EXPRESSION_CHARS {
+        let offset = input
+            .char_indices()
+            .nth(MAX_EXPRESSION_CHARS)
+            .map_or(input.len(), |(offset, _)| offset);
+        return Err(ParseError {
+            offset,
+            message: "expression exceeds the character limit".into(),
+        });
+    }
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
         return Err(ParseError {
@@ -56,12 +269,28 @@ pub fn parse(input: &str) -> Result<Expression, ParseError> {
             message: "expression is required".into(),
         });
     }
-    let mut parser = Parser { tokens, cursor: 0 };
+    if tokens.len() > MAX_EXPRESSION_TOKENS {
+        return Err(ParseError {
+            offset: tokens[MAX_EXPRESSION_TOKENS].offset,
+            message: "expression has too many tokens".into(),
+        });
+    }
+    let mut parser = Parser {
+        tokens,
+        cursor: 0,
+        nesting_depth: 0,
+    };
     let expression = parser.parse_or()?;
     if let Some(token) = parser.peek() {
         return Err(ParseError {
             offset: token.offset,
             message: "unexpected token".into(),
+        });
+    }
+    if ast_node_count(&expression) > MAX_EXPRESSION_AST_NODES {
+        return Err(ParseError {
+            offset: input.len(),
+            message: "expression has too many AST nodes".into(),
         });
     }
     Ok(expression)
@@ -133,7 +362,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 });
             }
             tokens.push(Token {
-                kind: TokenKind::Term(phrase.to_lowercase()),
+                kind: TokenKind::Term(default_case_fold_str(phrase)),
                 offset,
             });
             continue;
@@ -152,7 +381,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
             "AND" => TokenKind::And,
             "OR" => TokenKind::Or,
             "NOT" => TokenKind::Not,
-            _ => TokenKind::Term(word.to_lowercase()),
+            _ => TokenKind::Term(default_case_fold_str(word)),
         };
         tokens.push(Token { kind, offset });
     }
@@ -162,6 +391,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
 struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
+    nesting_depth: usize,
 }
 
 impl Parser {
@@ -195,8 +425,11 @@ impl Parser {
 
     fn parse_not(&mut self) -> Result<Expression, ParseError> {
         if matches!(self.peek().map(|token| &token.kind), Some(TokenKind::Not)) {
-            self.take();
-            return Ok(Expression::Not(Box::new(self.parse_not()?)));
+            let token = self.take().expect("NOT token");
+            self.enter_nesting(token.offset)?;
+            let expression = self.parse_not();
+            self.nesting_depth -= 1;
+            return Ok(Expression::Not(Box::new(expression?)));
         }
         self.parse_primary()
     }
@@ -211,7 +444,10 @@ impl Parser {
         match token.kind {
             TokenKind::Term(term) => Ok(Expression::Term(term)),
             TokenKind::LeftParen => {
-                let expression = self.parse_or()?;
+                self.enter_nesting(token.offset)?;
+                let expression = self.parse_or();
+                self.nesting_depth -= 1;
+                let expression = expression?;
                 let Some(closing) = self.take() else {
                     return Err(ParseError {
                         offset: token.offset,
@@ -230,6 +466,27 @@ impl Parser {
                 offset: token.offset,
                 message: "expected a term or parenthesized expression".into(),
             }),
+        }
+    }
+
+    fn enter_nesting(&mut self, offset: usize) -> Result<(), ParseError> {
+        if self.nesting_depth >= MAX_EXPRESSION_NESTING_DEPTH {
+            return Err(ParseError {
+                offset,
+                message: "expression nesting is too deep".into(),
+            });
+        }
+        self.nesting_depth += 1;
+        Ok(())
+    }
+}
+
+fn ast_node_count(expression: &Expression) -> usize {
+    match expression {
+        Expression::Term(_) => 1,
+        Expression::Not(expression) => 1 + ast_node_count(expression),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            1 + ast_node_count(left) + ast_node_count(right)
         }
     }
 }
@@ -276,6 +533,151 @@ mod tests {
             expression
                 .matches("EXT4-fs (vds): mounted with ordered data mode; AND remains literal")
         );
+    }
+
+    #[test]
+    fn chunk_matcher_finds_terms_across_chunks_and_utf8_boundaries() {
+        let expression = parse("ERROR AND 中").expect("expression");
+        let mut matcher = expression.chunk_matcher();
+        matcher.feed_bytes(b"prefix er");
+        matcher.feed_bytes(b"ror ");
+        matcher.feed_bytes(&[0xe4]);
+        matcher.feed_bytes(&[0xb8, 0xad]);
+        matcher.finish();
+
+        assert!(matcher.matches(&expression));
+    }
+
+    #[test]
+    fn chunk_matcher_matches_contextual_sigma_across_chunks() {
+        let expression = parse("ΟΣ").expect("expression");
+        assert!(expression.matches("ΟΣ"));
+
+        let mut matcher = expression.chunk_matcher();
+        matcher.feed_bytes("Ο".as_bytes());
+        matcher.feed_bytes("Σ".as_bytes());
+        matcher.finish();
+        assert!(matcher.matches(&expression));
+    }
+
+    #[test]
+    fn chunk_matcher_uses_case_folding_for_caseless_variants() {
+        let expression = parse("Σ").expect("expression");
+        for source in ["Σ", "σ", "ς"] {
+            assert!(expression.matches(source), "source: {source:?}");
+            let mut matcher = expression.chunk_matcher();
+            matcher.feed_bytes(source.as_bytes());
+            matcher.finish();
+            assert!(matcher.matches(&expression), "source: {source:?}");
+        }
+
+        let expression = parse("ß").expect("expression");
+        assert!(expression.matches("SS"));
+        let mut matcher = expression.chunk_matcher();
+        matcher.feed_bytes(b"S");
+        matcher.feed_bytes(b"S");
+        matcher.finish();
+        assert!(matcher.matches(&expression));
+    }
+
+    #[test]
+    fn chunk_matcher_uses_complete_unicode_sigma_context() {
+        for source in ["AΣ\u{0301}B", "ǅΣ"] {
+            let expression = parse(source).expect("expression");
+            assert!(expression.matches(source));
+
+            for split in 0..=source.len() {
+                let mut matcher = expression.chunk_matcher();
+                matcher.feed_bytes(&source.as_bytes()[..split]);
+                matcher.feed_bytes(&source.as_bytes()[split..]);
+                matcher.finish();
+                assert!(
+                    matcher.matches(&expression),
+                    "source: {source:?}, split: {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_matcher_decodes_invalid_bytes_in_one_pass() {
+        let expression = parse("\u{fffd}").expect("replacement expression");
+        let mut matcher = expression.chunk_matcher();
+        matcher.feed_bytes(&[0xff; 8_192]);
+        matcher.finish();
+        assert!(matcher.matches(&expression));
+    }
+
+    #[test]
+    fn chunk_matcher_matches_whole_line_for_all_byte_splits() {
+        let source = "prefix ΟΣ 中 suffix";
+        let expression = parse("ΟΣ").expect("expression");
+        let expected = expression.matches(source);
+
+        for split in 0..=source.len() {
+            let mut matcher = expression.chunk_matcher();
+            matcher.feed_bytes(&source.as_bytes()[..split]);
+            matcher.feed_bytes(&source.as_bytes()[split..]);
+            matcher.finish();
+            assert_eq!(matcher.matches(&expression), expected, "split at {split}");
+        }
+    }
+
+    #[test]
+    fn chunk_matcher_matches_whole_line_for_all_chunk_sizes() {
+        let cases = [
+            (
+                "ERROR AND 中文",
+                "prefix ERROR 中文 suffix".as_bytes().to_vec(),
+                "prefix ERROR 中文 suffix".to_owned(),
+            ),
+            (
+                "ΟΣ",
+                "prefix ΟΣ 中 suffix".as_bytes().to_vec(),
+                "prefix ΟΣ 中 suffix".to_owned(),
+            ),
+            (
+                "ß",
+                b"prefix SS suffix".to_vec(),
+                "prefix SS suffix".to_owned(),
+            ),
+            (
+                "ERROR",
+                vec![b'p', b'r', 0xff, b'E', b'R', b'R', b'O', b'R'],
+                String::from_utf8_lossy(&[b'p', b'r', 0xff, b'E', b'R', b'R', b'O', b'R'])
+                    .into_owned(),
+            ),
+        ];
+
+        for (expression_text, source, oracle_source) in cases {
+            let expression = parse(expression_text).expect("expression");
+            let expected = expression.matches(&oracle_source);
+
+            for chunk_size in 1..=source.len().max(1) {
+                let mut matcher = expression.chunk_matcher();
+                for chunk in source.chunks(chunk_size) {
+                    matcher.feed_bytes(chunk);
+                }
+                matcher.finish();
+
+                assert_eq!(
+                    matcher.matches(&expression),
+                    expected,
+                    "expression: {expression_text:?}, chunk size: {chunk_size}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_excessive_expression_complexity() {
+        assert!(parse(&"中".repeat(4_096)).is_ok());
+        assert!(parse(&"x".repeat(4_097)).is_err());
+        assert!(parse(&"😀".repeat(4_097)).is_err());
+        assert!(parse(&format!("{}x", "x OR ".repeat(64))).is_err());
+        assert!(parse(&format!("{}x", "NOT ".repeat(33))).is_err());
+        assert!(parse(&format!("{}x{}", "(".repeat(33), ")".repeat(33))).is_err());
+        assert!(parse(&(0..65).map(|_| "x").collect::<Vec<_>>().join(" OR ")).is_err());
     }
 
     #[test]

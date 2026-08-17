@@ -4,7 +4,7 @@ import { AuthPage } from './features/auth/AuthPage';
 import { AccountPage } from './features/auth/AccountPage';
 import { BundleView } from './features/files/FilesView';
 import { HomeView } from './features/files/HomeView';
-import { TempResultView } from './features/files/TempResultView';
+import { TempResultRoute } from './features/files/TempResultView';
 import { APP_VERSION } from './version';
 import './App.css';
 import { isAdmin } from './auth/permissions';
@@ -115,7 +115,7 @@ function App() {
           <Route path="/admin/auth-rate-limits" element={<AuthRateLimitsPage />} />
           <Route path="/issue/:issueCode" element={<BundleView />} />
           <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
-          <Route path="/temp-results/:resultId" element={<TempResultView />} />
+          <Route path="/temp-results/:resultId" element={<TempResultRoute />} />
         </Routes>
       </main>
     </div>

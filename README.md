@@ -151,12 +151,19 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
 | `RAIN_API_DEFAULT_LINE_PAGE_SIZE` | `5000` | 默认行分页大小 |
 | `RAIN_API_MAX_LINE_PAGE_SIZE` | `10000` | 最大行分页大小 |
+| `RAIN_API_MAX_LINE_PAGE_BYTES` | `16 MiB` | 文件和临时结果行分页的近似最大字节数 |
+| `RAIN_API_CONCURRENT_LINE_READS` | `8` | 文件和临时结果行接口的全局并发读取数 |
+| `RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT` | `2` | 每个客户端的并发行读取数 |
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
 | `RAIN_TEMP_RESULT_MAX_SIZE` | `64 MiB` | 单个临时搜索结果的 `.log/.meta/.idx` 总大小上限 |
 | `RAIN_TEMP_RESULT_MAX_TOTAL_SIZE` | `1 GiB` | 临时结果目录的数据库登记总容量上限 |
 | `RAIN_TEMP_RESULT_MAX_RECORDS` | `1000` | 临时结果最多保留的记录数 |
 | `RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS` | `2` | 并发物化临时结果的任务数 |
+| `RAIN_TEMP_RESULT_MAX_SOURCES` | `10000` | Issue 级临时结果最多解析的源文件数 |
+| `RAIN_TEMP_RESULT_MAX_SCAN_BYTES` | `1 GiB` | 单次临时结果物化允许扫描的源文件字节数 |
+| `RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS` | `30` | 单次临时结果物化的扫描超时时间（秒） |
+| — | `8 MiB` | Temp Result 单行物化前缀上限；超出部分继续参与表达式匹配，结果会标记为截断 |
 | `RAIN_SESSION_TTL_SECONDS` | `604800` | 登录 Session 有效期（秒），默认 7 天 |
 | `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
 | `RAIN_AUTH_ARGON2_CONCURRENCY` | `5` | Argon2 哈希与校验并发上限 |
@@ -215,8 +222,8 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 游客可以查看和搜索，但不能下载文件或临时搜索结果；创建 Issue、上传、删除 Issue、删除
 Bundle、删除文件节点以及删除临时搜索结果需要登录。详细搜索会生成可过期清理的临时
 结果文件，但仍属于游客可用的搜索流程。临时结果物化按 IP 每分钟最多 10 次；单个结果默认最多 64 MiB，
-目录默认最多 1 GiB 或 1000 条记录，并发物化默认最多 2 个任务。结果默认保留 7 天，
-访问结果会刷新过期时间。周期清理会原子认领过期记录为 `DELETING`，删除文件和数据库记录；
+目录默认最多 1 GiB 或 1000 条记录，并发物化默认最多 2 个任务。Preview 结果默认保留 30 分钟，
+完整结果默认保留 7 天；读取结果不会刷新过期时间。周期清理会原子认领过期记录为 `DELETING`，删除文件和数据库记录；
 服务重启后会继续处理遗留的 `DELETING` 记录，并清理陈旧的 `.part`、`.ready-*` 和无数据库记录的孤儿结果文件。
 物化中的结果先登记为 `STAGING` 并受活动 lease 保护，完成后才转为 `ACTIVE`。
 
@@ -259,7 +266,8 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 上传传输有前端进度；后台任务通过 `RECEIVING/EXTRACTING/INDEXING/PUBLISHING` 阶段提供处理状态，暂未提供阶段内百分比。
 - 上传接收阶段按单次请求限制文件总数和字节数，并受并发接收数与 `.tmp` 工作区全局字节预算限制；预算覆盖原始接收文件、递归解压后的 staging 文件和解压过程中的中间输出。接收字节上限为 Issue 最终内容上限的 2 倍，最终可浏览内容仍受 `RAIN_ISSUE_MAX_CONTENT_SIZE` 限制。Multipart 中的每个文件字段都会计入文件数量，即使字段内容为空。
 - 后台处理在 `.tmp/{task_id}/staging` 中完成解压和索引；真实文件同步写入内容寻址 BlobStore，完成或失败后 staging 工作区会被清理。
-- 临时搜索结果受单结果大小、全局总容量、记录数、并发物化数和按 IP 的请求频率共同限制；达到上限时不会继续创建结果文件。
+- 临时搜索结果受单结果大小、全局总容量、记录数、并发物化数和按 IP 的请求频率共同限制；Preview 结果固定保留 30 分钟，完整结果固定保留 7 天，读取不会滑动续期；达到上限时不会继续创建结果文件。
+- 文件和临时结果行分页同时受近似字节预算、全局并发读取数和单客户端并发读取数限制，避免少数超大分页请求占满内存或 I/O；当单行的 JSON 编码结果仍超过分页预算时，服务端会返回带 `[response truncated]` 标记的有界前缀，并继续推进分页游标。
 - 搜索关键词少于 3 个字符会被拒绝，以避免公开接口执行无界的全文扫描。
 - SQLite 使用 WAL 和 30 秒 busy timeout；日志索引每 5000 行批量提交一次，后台解压/索引任务默认最多 4 个并发，可通过 `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` 调整。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。

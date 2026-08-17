@@ -4,6 +4,7 @@ use crate::{
     AppState,
     auth::extractor::RequireBusinessUser,
     error::AppError,
+    log_expression::{MAX_EXPRESSION_BYTES, MAX_EXPRESSION_CHARS},
     models::saved_searches::{SavedSearchListQuery, SavedSearchPayload, SavedSearchResponse},
     repositories::saved_searches,
 };
@@ -12,7 +13,8 @@ fn normalize_and_validate(payload: &SavedSearchPayload) -> Result<SavedSearchPay
     if payload.name.trim().is_empty()
         || payload.name.chars().count() > 80
         || payload.query_text.trim().is_empty()
-        || payload.query_text.chars().count() > 4096
+        || payload.query_text.len() > MAX_EXPRESSION_BYTES
+        || payload.query_text.chars().count() > MAX_EXPRESSION_CHARS
         || !matches!(payload.search_type.as_str(), "FILENAME" | "DETAIL")
         || !payload.options.is_object()
     {

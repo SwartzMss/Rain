@@ -1,30 +1,44 @@
 use super::common::checked_page_end;
-use super::lifecycle::abort_staging_result;
-use super::lifecycle::load_and_renew;
-use super::lifecycle::load_record;
+use super::lifecycle::{abort_staging_result, acquire_materialization_lease};
+use super::lifecycle::{
+    acquire_active_result, finish_deleting_temp_result, load_active_unexpired_record, load_record,
+};
 use super::lifecycle::{check_temp_result_rate_limit, preview_page_size, to_response};
 use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
-    insert_staging_temp_result, publish_temp_result,
+    insert_staging_temp_result_with_retention, publish_temp_result_with_retention,
 };
 use super::storage::checked_temp_path;
 use super::storage::invalid_sidecar;
 use super::storage::{
-    read_indexed_lines, remove_result_files, result_storage_size, staging_path,
+    read_indexed_lines_bounded, remove_result_files, result_storage_size, staging_path,
     temp_result_too_large,
 };
 use super::*;
-use crate::services::temp_results::MaterializedPreview;
+use crate::services::temp_results::scan_timeout;
 
 enum MaterializeMode {
     Full,
-    Preview { from: i64, size: i64 },
+    Preview,
+}
+
+impl MaterializeMode {
+    fn retention(&self) -> Duration {
+        match self {
+            Self::Full => Duration::days(RETENTION_DAYS),
+            Self::Preview => Duration::minutes(30),
+        }
+    }
 }
 
 struct MaterializeOutcome {
     id: String,
     total: i64,
-    lines: Vec<PreviewLine>,
+}
+
+pub(crate) struct ResolvedSources {
+    sources: Vec<TempSource>,
+    _source_lease: Option<TempResultReadLease>,
 }
 
 async fn materialize_result(
@@ -34,6 +48,27 @@ async fn materialize_result(
     sources: &[TempSource],
     source_label: &str,
     mode: MaterializeMode,
+) -> Result<MaterializeOutcome, AppError> {
+    materialize_result_with_timeout(
+        state,
+        expression_text,
+        expression,
+        sources,
+        source_label,
+        mode,
+        std::time::Duration::from_secs(state.limits.temp_results.max_scan_duration_seconds),
+    )
+    .await
+}
+
+async fn materialize_result_with_timeout(
+    state: &web::Data<AppState>,
+    expression_text: &str,
+    expression: &log_expression::Expression,
+    sources: &[TempSource],
+    source_label: &str,
+    mode: MaterializeMode,
+    timeout: std::time::Duration,
 ) -> Result<MaterializeOutcome, AppError> {
     let id = Uuid::new_v4().simple().to_string();
     let directory = data_root(state).join("temp-results");
@@ -47,7 +82,16 @@ async fn materialize_result(
     let staging_meta_path = staging_path(&meta_path);
     let staging_index_path = staging_path(&index_path);
     let _staging_lease = register_staging_lease(state, &id);
-    insert_staging_temp_result(state, &id, expression_text, source_label, &output_path).await?;
+    let retention = mode.retention();
+    insert_staging_temp_result_with_retention(
+        state,
+        &id,
+        expression_text,
+        source_label,
+        &output_path,
+        retention,
+    )
+    .await?;
     let result = async {
         let mut output = File::create(&staging_output_path)
             .await
@@ -58,34 +102,20 @@ async fn materialize_result(
         let mut index = File::create(&staging_index_path)
             .await
             .map_err(AppError::Io)?;
-        let materialized = match mode {
-            MaterializeMode::Full => TempResultExecutor::write_matches(
+        let total = tokio::time::timeout(timeout, async {
+            TempResultExecutor::write_matches(
                 sources,
                 expression,
                 &mut output,
                 &mut metadata,
                 &mut index,
                 state.limits.temp_results.max_result_size,
+                state.limits.temp_results.max_scan_bytes,
             )
             .await
-            .map(|total| MaterializedPreview {
-                total,
-                lines: Vec::new(),
-            }),
-            MaterializeMode::Preview { from, size } => {
-                TempResultExecutor::materialize_preview(
-                    sources,
-                    expression,
-                    from,
-                    size,
-                    state.limits.temp_results.max_result_size,
-                    &mut output,
-                    &mut metadata,
-                    &mut index,
-                )
-                .await
-            }
-        }?;
+        })
+        .await
+        .map_err(|_| scan_timeout())??;
         drop(output);
         drop(metadata);
         drop(index);
@@ -105,28 +135,25 @@ async fn materialize_result(
         tokio::fs::rename(&staging_index_path, &index_path)
             .await
             .map_err(AppError::Io)?;
-        let transition = publish_temp_result(
+        let transition = publish_temp_result_with_retention(
             state,
             &id,
             expression_text,
             source_label,
             &output_path,
-            materialized.total,
+            total,
             i64::try_from(size_bytes).map_err(|_| temp_result_too_large())?,
+            retention,
         )
         .await?;
         if !matches!(transition, TransitionResult::Applied(())) {
             return Err(AppError::NotFound(format!("temporary result {id}")));
         }
-        Ok::<MaterializedPreview, AppError>(materialized)
+        Ok::<i64, AppError>(total)
     }
     .await;
     match result {
-        Ok(materialized) => Ok(MaterializeOutcome {
-            id,
-            total: materialized.total,
-            lines: materialized.lines,
-        }),
+        Ok(total) => Ok(MaterializeOutcome { id, total }),
         Err(error) => {
             abort_staging_result(state, &id, &output_path).await;
             Err(error)
@@ -154,9 +181,9 @@ struct IssueSourceRow {
 pub(crate) async fn resolve_sources(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
-) -> Result<Vec<TempSource>, AppError> {
+) -> Result<ResolvedSources, AppError> {
     if let Some(source_id) = payload.source_temp_id.as_deref() {
-        let source = load_and_renew(state, source_id).await?;
+        let (source, source_lease) = acquire_active_result(state, source_id).await?;
         let path = checked_temp_path(state, &source.storage_path)?;
         let meta_path = path.with_extension("meta");
         let index_path = path.with_extension("idx");
@@ -171,16 +198,27 @@ pub(crate) async fn resolve_sources(
                 "temporary result metadata or index is missing",
             ));
         }
-        return Ok(vec![TempSource {
-            path,
-            metadata_path: Some(meta_path),
-            label: source.name,
-            bundle_hash: None,
-            file_id: None,
-        }]);
+        return Ok(ResolvedSources {
+            sources: vec![TempSource {
+                path,
+                metadata_path: Some(meta_path),
+                label: source.name,
+                bundle_hash: None,
+                file_id: None,
+            }],
+            _source_lease: Some(source_lease),
+        });
     }
     if let Some(issue_code) = payload.issue_code.as_deref() {
         let issue_code = normalize_issue_code(issue_code)?;
+        let max_sources = i64::try_from(state.limits.temp_results.max_sources).map_err(|_| {
+            AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SOURCES cannot be represented on this platform".into(),
+            )
+        })?;
+        let query_limit = max_sources
+            .checked_add(1)
+            .ok_or_else(|| AppError::Config("RAIN_TEMP_RESULT_MAX_SOURCES is too large".into()))?;
         let rows = sqlx::query_as::<_, IssueSourceRow>(
             r#"
             SELECT f.id, f.name, f.path, f.size_bytes, f.line_count, f.mime_type,
@@ -189,16 +227,26 @@ pub(crate) async fn resolve_sources(
                    b.hash AS bundle_hash
             FROM files f
             JOIN bundles b ON b.id = f.bundle_id
+            JOIN issues i ON i.code = b.issue_code
             LEFT JOIN blobs bl ON bl.id = f.blob_id
-            WHERE b.issue_code = ? AND b.status = 'READY' AND f.is_dir = 0
+            WHERE b.issue_code = ? AND i.status = 'ACTIVE' AND b.status = 'READY' AND f.is_dir = 0
               AND EXISTS (SELECT 1 FROM log_segments ls WHERE ls.file_id = f.id)
             ORDER BY b.created_at, f.path
+            LIMIT ?
             "#,
         )
         .bind(&issue_code)
+        .bind(query_limit)
         .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
+        if rows.len() > state.limits.temp_results.max_sources {
+            return Err(AppError::public(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "TEMP_RESULT_SOURCE_LIMIT",
+                "临时结果源文件数量超过限制",
+            ));
+        }
         let mut sources = Vec::new();
         for row in rows {
             let file = FileRow {
@@ -230,7 +278,10 @@ pub(crate) async fn resolve_sources(
                 "ready log files for issue {issue_code}"
             )));
         }
-        return Ok(sources);
+        return Ok(ResolvedSources {
+            sources,
+            _source_lease: None,
+        });
     }
     let bundle_hash = payload
         .bundle_hash
@@ -247,13 +298,16 @@ pub(crate) async fn resolve_sources(
     let file = fetch_file(&state.db.pool, &bundle.id, file_id).await?;
     ensure_text_preview(&file)?;
     let path = resolve_file_path(&file, state.storage.blob_store.as_ref()).await?;
-    Ok(vec![TempSource {
-        path,
-        metadata_path: None,
-        label: file.name,
-        bundle_hash: Some(bundle.hash),
-        file_id: Some(file.id.to_string()),
-    }])
+    Ok(ResolvedSources {
+        sources: vec![TempSource {
+            path,
+            metadata_path: None,
+            label: file.name,
+            bundle_hash: Some(bundle.hash),
+            file_id: Some(file.id.to_string()),
+        }],
+        _source_lease: None,
+    })
 }
 
 pub(crate) fn source_label(sources: &[TempSource]) -> String {
@@ -264,127 +318,13 @@ pub(crate) fn source_label(sources: &[TempSource]) -> String {
     }
 }
 
-pub(crate) async fn create_preview_result(
-    request: HttpRequest,
-    payload: web::Json<PreviewTempResultRequest>,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, AppError> {
-    check_temp_result_rate_limit(&state, &request)?;
-    let _permit = state
-        .temp_results
-        .permits
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| {
-            AppError::api(
-                StatusCode::TOO_MANY_REQUESTS,
-                "TEMP_RESULT_BUSY",
-                "临时结果生成任务过多，请稍后重试",
-            )
-        })?;
-    ensure_temp_result_budget(&state).await?;
-    let expression_text = payload.expression.trim();
-    let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
-    let request = CreateTempResultRequest {
-        expression: expression_text.to_string(),
-        bundle_hash: payload.bundle_hash.clone(),
-        file_id: payload.file_id.clone(),
-        issue_code: payload.issue_code.clone(),
-        source_temp_id: payload.source_temp_id.clone(),
-    };
-    let sources = resolve_sources(&request, &state).await?;
-    let source_label = source_label(&sources);
-    let outcome = materialize_result(
-        &state,
-        expression_text,
-        &expression,
-        &sources,
-        &source_label,
-        MaterializeMode::Preview {
-            from: payload.from.unwrap_or(0).max(0),
-            size: preview_page_size(payload.size),
-        },
-    )
-    .await?;
-    if let Some(issue_code) = payload.issue_code.as_deref() {
-        touch_issue_activity_best_effort(
-            &state.db.pool,
-            &normalize_issue_code(issue_code)?,
-            "preview materialization",
-        )
-        .await;
-    }
-    Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
-        result_id: outcome.id,
-        total: outcome.total,
-        lines: outcome.lines,
-    }))
-}
-
-pub(crate) async fn create_full_result(
-    request: HttpRequest,
-    payload: web::Json<CreateTempResultRequest>,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, AppError> {
-    check_temp_result_rate_limit(&state, &request)?;
-    let _permit = state
-        .temp_results
-        .permits
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| {
-            AppError::api(
-                StatusCode::TOO_MANY_REQUESTS,
-                "TEMP_RESULT_BUSY",
-                "临时结果生成任务过多，请稍后重试",
-            )
-        })?;
-    ensure_temp_result_budget(&state).await?;
-    let expression_text = payload.expression.trim();
-    let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
-    let sources = resolve_sources(&payload, &state).await?;
-    let source_label = source_label(&sources);
-    let outcome = materialize_result(
-        &state,
-        expression_text,
-        &expression,
-        &sources,
-        &source_label,
-        MaterializeMode::Full,
-    )
-    .await?;
-    if let Some(issue_code) = payload.issue_code.as_deref() {
-        touch_issue_activity_best_effort(
-            &state.db.pool,
-            &normalize_issue_code(issue_code)?,
-            "full materialization",
-        )
-        .await;
-    }
-    let result = load_and_renew(&state, &outcome.id).await?;
-    Ok(HttpResponse::Created().json(to_response(result)))
-}
-
-pub(crate) async fn get_result(
-    id: web::Path<String>,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, AppError> {
-    let result = load_and_renew(&state, &id).await?;
-    Ok(HttpResponse::Ok().json(to_response(result)))
-}
-
-pub(crate) async fn get_result_lines(
-    id: web::Path<String>,
-    query: web::Query<LinesQuery>,
-    state: web::Data<AppState>,
-) -> Result<HttpResponse, AppError> {
-    let result = load_and_renew(&state, &id).await?;
-    let start = query.start.unwrap_or(0).max(0);
-    let limit = query
-        .limit
-        .unwrap_or(state.limits.api.default_line_page_size)
-        .clamp(1, state.limits.api.max_line_page_size);
-    let result_path = checked_temp_path(&state, &result.storage_path)?;
+async fn read_result_page(
+    state: &web::Data<AppState>,
+    result: &TempResultRecord,
+    start: i64,
+    limit: i64,
+) -> Result<(Vec<TempLine>, Option<i64>), AppError> {
+    let result_path = checked_temp_path(state, &result.storage_path)?;
     let meta_path = result_path.with_extension("meta");
     let index_path = result_path.with_extension("idx");
     let has_meta = tokio::fs::try_exists(&meta_path)
@@ -398,23 +338,182 @@ pub(crate) async fn get_result_lines(
             "temporary result metadata or index is missing",
         ));
     }
-    let lines = read_indexed_lines(
+    let lines = read_indexed_lines_bounded(
         &result_path,
         &meta_path,
         &index_path,
         start,
         limit,
         result.line_count,
+        state.limits.api.max_line_page_bytes,
     )
     .await?;
     let next_start = if start
         .checked_add(lines.len() as i64)
         .is_some_and(|end| end < result.line_count)
     {
-        Some(checked_page_end(start, limit)?)
+        Some(checked_page_end(start, lines.len() as i64)?)
     } else {
         None
     };
+    Ok((lines, next_start))
+}
+
+async fn cleanup_published_result_after_preview_failure(
+    state: &web::Data<AppState>,
+    result: &TempResultRecord,
+) {
+    match claim_active_for_delete(state, &result.id).await {
+        Ok(TransitionResult::Applied(())) => finish_deleting_temp_result(state, result).await,
+        Ok(TransitionResult::NotFound | TransitionResult::StateMismatch) => {}
+        Err(error) => tracing::warn!(
+            result_id = %result.id,
+            %error,
+            "published temporary result could not be claimed after preview failure"
+        ),
+    }
+}
+
+pub(crate) async fn create_preview_result(
+    request: HttpRequest,
+    payload: web::Json<PreviewTempResultRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    check_temp_result_rate_limit(&state, &request)?;
+    let _client_lease = acquire_materialization_lease(&state, &request)?;
+    let _permit = state
+        .temp_results
+        .permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::api(
+                StatusCode::TOO_MANY_REQUESTS,
+                "TEMP_RESULT_BUSY",
+                "临时结果生成任务过多，请稍后重试",
+            )
+        })?;
+    ensure_temp_result_budget(&state).await?;
+    let expression_text = payload.expression.trim();
+    let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
+    let start = payload.from.unwrap_or(0).max(0);
+    let limit = preview_page_size(
+        payload.size,
+        state.limits.api.default_line_page_size,
+        state.limits.api.max_line_page_size,
+    );
+    checked_page_end(start, limit)?;
+    let request = CreateTempResultRequest {
+        expression: expression_text.to_string(),
+        bundle_hash: payload.bundle_hash.clone(),
+        file_id: payload.file_id.clone(),
+        issue_code: payload.issue_code.clone(),
+        source_temp_id: payload.source_temp_id.clone(),
+    };
+    let resolved = resolve_sources(&request, &state).await?;
+    let source_label = source_label(&resolved.sources);
+    let outcome = materialize_result(
+        &state,
+        expression_text,
+        &expression,
+        &resolved.sources,
+        &source_label,
+        MaterializeMode::Preview,
+    )
+    .await?;
+    let (result, read_lease) = acquire_active_result(&state, &outcome.id).await?;
+    let page = read_result_page(&state, &result, start, limit).await;
+    drop(read_lease);
+    let (lines, next_start) = match page {
+        Ok(page) => page,
+        Err(error) => {
+            cleanup_published_result_after_preview_failure(&state, &result).await;
+            return Err(error);
+        }
+    };
+    if let Some(issue_code) = payload.issue_code.as_deref() {
+        touch_issue_activity_best_effort(
+            &state.db.pool,
+            &normalize_issue_code(issue_code)?,
+            "preview materialization",
+        )
+        .await;
+    }
+    Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
+        result_id: outcome.id,
+        total: outcome.total,
+        next_start,
+        lines,
+    }))
+}
+
+pub(crate) async fn create_full_result(
+    request: HttpRequest,
+    payload: web::Json<CreateTempResultRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    check_temp_result_rate_limit(&state, &request)?;
+    let _client_lease = acquire_materialization_lease(&state, &request)?;
+    let _permit = state
+        .temp_results
+        .permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::api(
+                StatusCode::TOO_MANY_REQUESTS,
+                "TEMP_RESULT_BUSY",
+                "临时结果生成任务过多，请稍后重试",
+            )
+        })?;
+    ensure_temp_result_budget(&state).await?;
+    let expression_text = payload.expression.trim();
+    let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
+    let resolved = resolve_sources(&payload, &state).await?;
+    let source_label = source_label(&resolved.sources);
+    let outcome = materialize_result(
+        &state,
+        expression_text,
+        &expression,
+        &resolved.sources,
+        &source_label,
+        MaterializeMode::Full,
+    )
+    .await?;
+    if let Some(issue_code) = payload.issue_code.as_deref() {
+        touch_issue_activity_best_effort(
+            &state.db.pool,
+            &normalize_issue_code(issue_code)?,
+            "full materialization",
+        )
+        .await;
+    }
+    let result = load_active_unexpired_record(&state, &outcome.id).await?;
+    Ok(HttpResponse::Created().json(to_response(result)))
+}
+
+pub(crate) async fn get_result(
+    id: web::Path<String>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let result = load_active_unexpired_record(&state, &id).await?;
+    Ok(HttpResponse::Ok().json(to_response(result)))
+}
+
+pub(crate) async fn get_result_lines(
+    request: HttpRequest,
+    id: web::Path<String>,
+    query: web::Query<LinesQuery>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let _line_read = state.acquire_line_read(&request_client_key(&request))?;
+    let (result, _read_lease) = acquire_active_result(&state, &id).await?;
+    let start = query.start.unwrap_or(0).max(0);
+    let limit = query
+        .limit
+        .unwrap_or(state.limits.api.default_line_page_size)
+        .clamp(1, state.limits.api.max_line_page_size);
+    let (lines, next_start) = read_result_page(&state, &result, start, limit).await?;
     Ok(HttpResponse::Ok().json(TempResultLines {
         start,
         limit,
@@ -429,7 +528,7 @@ pub(crate) async fn open_result_download(
     id: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<NamedFile, AppError> {
-    let result = load_and_renew(&state, &id).await?;
+    let (result, _read_lease) = acquire_active_result(&state, &id).await?;
     let file = NamedFile::open_async(checked_temp_path(&state, &result.storage_path)?)
         .await
         .map_err(AppError::Io)?
@@ -452,6 +551,9 @@ pub(crate) async fn delete_result(
             return Err(AppError::NotFound(format!("temporary result {id}")));
         }
     }
+    if super::storage::is_read_lease_active(&state, &result.id) {
+        return Ok(HttpResponse::NoContent().finish());
+    }
     let path = checked_temp_path(&state, &result.storage_path)?;
     remove_result_files(&path).await?;
     match delete_deleting_record(&state, &result.id).await? {
@@ -459,4 +561,243 @@ pub(crate) async fn delete_result(
         TransitionResult::NotFound | TransitionResult::StateMismatch => {}
     }
     Ok(HttpResponse::NoContent().finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::{Path, PathBuf},
+        time::Duration,
+    };
+
+    use actix_web::web;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use uuid::Uuid;
+
+    use super::{
+        MaterializeMode, materialize_result, materialize_result_with_timeout, resolve_sources,
+    };
+    use crate::{
+        AppState, config::AppLimits, db, error::AppError, log_expression,
+        routes::temp_results::CreateTempResultRequest, services::temp_results::TempSource,
+    };
+
+    fn test_path(suffix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("rain-temp-materialize-{}-{suffix}", Uuid::new_v4()))
+    }
+
+    async fn test_state(root: &Path, limits: AppLimits) -> web::Data<AppState> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        web::Data::new(AppState::new(pool, root.to_path_buf(), limits))
+    }
+
+    async fn assert_failed_materialization_is_clean(
+        state: &web::Data<AppState>,
+        source: TempSource,
+        expected: &'static str,
+        timeout: Option<Duration>,
+    ) {
+        let expression = log_expression::parse("ERROR").unwrap();
+        let result = match timeout {
+            Some(timeout) => {
+                materialize_result_with_timeout(
+                    state,
+                    "ERROR",
+                    &expression,
+                    &[source],
+                    "app.log",
+                    MaterializeMode::Full,
+                    timeout,
+                )
+                .await
+            }
+            None => {
+                materialize_result(
+                    state,
+                    "ERROR",
+                    &expression,
+                    &[source],
+                    "app.log",
+                    MaterializeMode::Full,
+                )
+                .await
+            }
+        };
+        let error = match result {
+            Ok(_) => panic!("materialization should fail with {expected}"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            AppError::PublicApi { code, .. } if code == expected
+        ));
+        let staging_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM temp_results WHERE status = 'STAGING'")
+                .fetch_one(&state.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(staging_count, 0);
+        assert!(state.temp_results.staging.lock().unwrap().is_empty());
+        let mut entries = tokio::fs::read_dir(super::data_root(state).join("temp-results"))
+            .await
+            .unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn scan_limit_cleans_staging_record_and_part_files() {
+        let root = test_path("scan-limit");
+        let source_path = root.join("source.log");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(&source_path, "ERROR ".repeat(1024))
+            .await
+            .unwrap();
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_scan_bytes = 32;
+        let state = test_state(&root, limits).await;
+
+        assert_failed_materialization_is_clean(
+            &state,
+            TempSource {
+                path: source_path,
+                metadata_path: None,
+                label: "app.log".into(),
+                bundle_hash: None,
+                file_id: None,
+            },
+            "TEMP_RESULT_SCAN_LIMIT",
+            None,
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn timeout_cleans_staging_record_and_part_files() {
+        let root = test_path("timeout");
+        let source_path = root.join("source.log");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(&source_path, "INFO\n".repeat((32 * 1024 * 1024) / 5))
+            .await
+            .unwrap();
+        let state = test_state(&root, AppLimits::default()).await;
+
+        assert_failed_materialization_is_clean(
+            &state,
+            TempSource {
+                path: source_path,
+                metadata_path: None,
+                label: "app.log".into(),
+                bundle_hash: None,
+                file_id: None,
+            },
+            "TEMP_RESULT_SCAN_TIMEOUT",
+            Some(Duration::from_millis(1)),
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn issue_source_resolution_rejects_more_than_the_configured_limit() {
+        let root = test_path("source-limit");
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_sources = 1;
+        let state = test_state(&root, limits).await;
+        sqlx::query("INSERT INTO issues(code, name) VALUES('ISSUE', 'Issue')")
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+        for (bundle_id, file_name) in [("bundle-a", "a.log"), ("bundle-b", "b.log")] {
+            sqlx::query(
+                "INSERT INTO bundles(id, issue_code, hash, name, status) VALUES(?, 'ISSUE', ?, ?, 'READY')",
+            )
+            .bind(bundle_id)
+            .bind(format!("hash-{bundle_id}"))
+            .bind(file_name)
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+            let file_id: i64 = sqlx::query_scalar(
+                "INSERT INTO files(bundle_id, name, path, is_dir) VALUES(?, ?, ?, 0) RETURNING id",
+            )
+            .bind(bundle_id)
+            .bind(file_name)
+            .bind(format!("/{file_name}"))
+            .fetch_one(&state.db.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO log_segments(bundle_id, file_id, content) VALUES(?, ?, 'ERROR')",
+            )
+            .bind(bundle_id)
+            .bind(file_id)
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+        }
+
+        let payload = CreateTempResultRequest {
+            expression: "ERROR".into(),
+            bundle_hash: None,
+            file_id: None,
+            issue_code: Some("ISSUE".into()),
+            source_temp_id: None,
+        };
+        let error = match resolve_sources(&payload, &state).await {
+            Ok(_) => panic!("source resolution must enforce the configured limit"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            AppError::PublicApi {
+                code: "TEMP_RESULT_SOURCE_LIMIT",
+                ..
+            }
+        ));
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn preview_failure_cleanup_removes_published_result() {
+        let root = test_path("preview-failure-cleanup");
+        let result_dir = root.join("temp-results");
+        tokio::fs::create_dir_all(&result_dir).await.unwrap();
+        let state = test_state(&root, AppLimits::default()).await;
+        let result_path = result_dir.join("preview-failure.log");
+        let meta_path = result_path.with_extension("meta");
+        let index_path = result_path.with_extension("idx");
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('preview-failure', 'ACTIVE', 'preview-failure.log', 'ERROR', 'app.log', ?, 1, 10, ?, ?)",
+        )
+        .bind(result_path.to_string_lossy().to_string())
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .execute(&state.db.pool)
+        .await
+        .unwrap();
+        for path in [&result_path, &meta_path, &index_path] {
+            tokio::fs::write(path, b"artifact").await.unwrap();
+        }
+
+        let result = super::load_record(&state, "preview-failure").await.unwrap();
+        super::cleanup_published_result_after_preview_failure(&state, &result).await;
+
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM temp_results WHERE id = 'preview-failure'")
+                .fetch_optional(&state.db.pool)
+                .await
+                .unwrap();
+        assert!(status.is_none());
+        for path in [result_path, meta_path, index_path] {
+            assert!(!path.exists());
+        }
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
 }

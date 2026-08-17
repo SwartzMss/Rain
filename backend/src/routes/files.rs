@@ -22,6 +22,7 @@ use crate::{
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
 use super::issues::{require_issue_owner, touch_issue_activity_best_effort};
+use super::temp_results::request_client_key;
 
 #[derive(Deserialize)]
 struct FilePath {
@@ -110,10 +111,12 @@ pub async fn get_file_content(
 
 #[get("/files/v1/{bundle_id}/files/{file_id}/lines")]
 pub async fn get_file_lines(
+    request: actix_web::HttpRequest,
     params: web::Path<FilePath>,
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    let _line_read = state.acquire_line_read(&request_client_key(&request))?;
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
     ensure_bundle_ready(&bundle)?;

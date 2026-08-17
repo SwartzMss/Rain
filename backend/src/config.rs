@@ -11,6 +11,7 @@ use crate::ingest::limits::{
 const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
+pub const MAX_TEMP_RESULT_LOGICAL_LINE_BYTES: u64 = 8 * MIB;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuredOutputMode {
@@ -283,6 +284,9 @@ pub struct ApiConfig {
     pub max_preview_line_size: u64,
     pub default_line_page_size: i64,
     pub max_line_page_size: i64,
+    pub max_line_page_bytes: u64,
+    pub concurrent_line_reads: usize,
+    pub concurrent_line_reads_per_client: usize,
     pub default_search_results: i64,
     pub max_search_results: i64,
 }
@@ -293,6 +297,9 @@ pub struct TempResultConfig {
     pub max_total_size: u64,
     pub max_records: i64,
     pub concurrent_materializations: usize,
+    pub max_sources: usize,
+    pub max_scan_bytes: u64,
+    pub max_scan_duration_seconds: u64,
 }
 
 impl Default for TempResultConfig {
@@ -302,6 +309,9 @@ impl Default for TempResultConfig {
             max_total_size: GIB,
             max_records: 1_000,
             concurrent_materializations: 2,
+            max_sources: 10_000,
+            max_scan_bytes: GIB,
+            max_scan_duration_seconds: 30,
         }
     }
 }
@@ -313,6 +323,9 @@ impl Default for ApiConfig {
             max_preview_line_size: 8 * MIB,
             default_line_page_size: 5_000,
             max_line_page_size: 10_000,
+            max_line_page_bytes: 16 * MIB,
+            concurrent_line_reads: 8,
+            concurrent_line_reads_per_client: 2,
             default_search_results: 50,
             max_search_results: 100,
         }
@@ -527,6 +540,18 @@ impl AppLimits {
                     "RAIN_API_MAX_LINE_PAGE_SIZE",
                     defaults.api.max_line_page_size,
                 )?,
+                max_line_page_bytes: env_size(
+                    "RAIN_API_MAX_LINE_PAGE_BYTES",
+                    defaults.api.max_line_page_bytes,
+                )?,
+                concurrent_line_reads: env_value(
+                    "RAIN_API_CONCURRENT_LINE_READS",
+                    defaults.api.concurrent_line_reads,
+                )?,
+                concurrent_line_reads_per_client: env_value(
+                    "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT",
+                    defaults.api.concurrent_line_reads_per_client,
+                )?,
                 default_search_results: env_value(
                     "RAIN_API_DEFAULT_SEARCH_RESULTS",
                     defaults.api.default_search_results,
@@ -553,6 +578,18 @@ impl AppLimits {
                     "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
                     defaults.temp_results.concurrent_materializations,
                 )?,
+                max_sources: env_value(
+                    "RAIN_TEMP_RESULT_MAX_SOURCES",
+                    defaults.temp_results.max_sources,
+                )?,
+                max_scan_bytes: env_size(
+                    "RAIN_TEMP_RESULT_MAX_SCAN_BYTES",
+                    defaults.temp_results.max_scan_bytes,
+                )?,
+                max_scan_duration_seconds: env_value(
+                    "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS",
+                    defaults.temp_results.max_scan_duration_seconds,
+                )?,
             },
         };
         limits.validate()?;
@@ -562,7 +599,7 @@ impl AppLimits {
     pub fn validate(&self) -> Result<(), AppError> {
         macro_rules! positive {
             ($value:expr, $name:literal) => {
-                if $value == 0 {
+                if $value <= 0 {
                     return Err(AppError::Config(format!(concat!(
                         $name,
                         " must be positive"
@@ -594,6 +631,15 @@ impl AppLimits {
             "RAIN_API_DEFAULT_LINE_PAGE_SIZE"
         );
         positive!(self.api.max_line_page_size, "RAIN_API_MAX_LINE_PAGE_SIZE");
+        positive!(self.api.max_line_page_bytes, "RAIN_API_MAX_LINE_PAGE_BYTES");
+        positive!(
+            self.api.concurrent_line_reads,
+            "RAIN_API_CONCURRENT_LINE_READS"
+        );
+        positive!(
+            self.api.concurrent_line_reads_per_client,
+            "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT"
+        );
         positive!(
             self.api.default_search_results,
             "RAIN_API_DEFAULT_SEARCH_RESULTS"
@@ -615,6 +661,23 @@ impl AppLimits {
             self.temp_results.concurrent_materializations,
             "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS"
         );
+        positive!(
+            self.temp_results.max_scan_bytes,
+            "RAIN_TEMP_RESULT_MAX_SCAN_BYTES"
+        );
+        positive!(
+            self.temp_results.max_scan_duration_seconds,
+            "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS"
+        );
+        positive!(
+            self.temp_results.max_sources,
+            "RAIN_TEMP_RESULT_MAX_SOURCES"
+        );
+        i64::try_from(self.temp_results.max_sources).map_err(|_| {
+            AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SOURCES cannot be represented as a database limit".into(),
+            )
+        })?;
         if self.temp_results.max_result_size > self.temp_results.max_total_size {
             return Err(AppError::Config(
                 "RAIN_TEMP_RESULT_MAX_SIZE must not exceed RAIN_TEMP_RESULT_MAX_TOTAL_SIZE".into(),
@@ -640,6 +703,11 @@ impl AppLimits {
         usize::try_from(self.api.max_preview_line_size).map_err(|_| {
             AppError::Config(
                 "RAIN_API_MAX_PREVIEW_LINE_SIZE cannot be represented on this platform".into(),
+            )
+        })?;
+        usize::try_from(self.temp_results.max_scan_bytes).map_err(|_| {
+            AppError::Config(
+                "RAIN_TEMP_RESULT_MAX_SCAN_BYTES cannot be represented on this platform".into(),
             )
         })?;
         Ok(())
@@ -907,6 +975,9 @@ mod tests {
         assert_eq!(limits.api.max_preview_line_size, 8 * 1024_u64.pow(2));
         assert_eq!(limits.api.default_line_page_size, 5_000);
         assert_eq!(limits.api.max_line_page_size, 10_000);
+        assert_eq!(limits.api.max_line_page_bytes, 16 * 1024_u64.pow(2));
+        assert_eq!(limits.api.concurrent_line_reads, 8);
+        assert_eq!(limits.api.concurrent_line_reads_per_client, 2);
     }
 
     #[test]
@@ -1060,6 +1131,65 @@ mod tests {
     }
 
     #[test]
+    fn environment_values_override_temp_result_scan_limits() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let bytes_name = "RAIN_TEMP_RESULT_MAX_SCAN_BYTES";
+        let duration_name = "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS";
+        let sources_name = "RAIN_TEMP_RESULT_MAX_SOURCES";
+        let page_bytes_name = "RAIN_API_MAX_LINE_PAGE_BYTES";
+        let reads_name = "RAIN_API_CONCURRENT_LINE_READS";
+        let client_reads_name = "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT";
+        let previous_bytes = std::env::var_os(bytes_name);
+        let previous_duration = std::env::var_os(duration_name);
+        let previous_sources = std::env::var_os(sources_name);
+        let previous_page_bytes = std::env::var_os(page_bytes_name);
+        let previous_reads = std::env::var_os(reads_name);
+        let previous_client_reads = std::env::var_os(client_reads_name);
+        unsafe {
+            std::env::set_var(bytes_name, "2 GiB");
+            std::env::set_var(duration_name, "45");
+            std::env::set_var(sources_name, "2048");
+            std::env::set_var(page_bytes_name, "4 MiB");
+            std::env::set_var(reads_name, "12");
+            std::env::set_var(client_reads_name, "3");
+        }
+
+        let limits = AppLimits::from_env().unwrap();
+
+        match previous_bytes {
+            Some(value) => unsafe { std::env::set_var(bytes_name, value) },
+            None => unsafe { std::env::remove_var(bytes_name) },
+        }
+        match previous_duration {
+            Some(value) => unsafe { std::env::set_var(duration_name, value) },
+            None => unsafe { std::env::remove_var(duration_name) },
+        }
+        match previous_sources {
+            Some(value) => unsafe { std::env::set_var(sources_name, value) },
+            None => unsafe { std::env::remove_var(sources_name) },
+        }
+        match previous_page_bytes {
+            Some(value) => unsafe { std::env::set_var(page_bytes_name, value) },
+            None => unsafe { std::env::remove_var(page_bytes_name) },
+        }
+        match previous_reads {
+            Some(value) => unsafe { std::env::set_var(reads_name, value) },
+            None => unsafe { std::env::remove_var(reads_name) },
+        }
+        match previous_client_reads {
+            Some(value) => unsafe { std::env::set_var(client_reads_name, value) },
+            None => unsafe { std::env::remove_var(client_reads_name) },
+        }
+        assert_eq!(limits.temp_results.max_scan_bytes, 2 * 1024_u64.pow(3));
+        assert_eq!(limits.temp_results.max_scan_duration_seconds, 45);
+        assert_eq!(limits.temp_results.max_sources, 2048);
+        assert_eq!(limits.api.max_line_page_bytes, 4 * 1024_u64.pow(2));
+        assert_eq!(limits.api.concurrent_line_reads, 12);
+        assert_eq!(limits.api.concurrent_line_reads_per_client, 3);
+    }
+
+    #[test]
     fn rejects_zero_indexed_and_preview_line_limits() {
         let mut limits = AppLimits::default();
         limits.indexing.max_indexed_line_size = 0;
@@ -1079,6 +1209,39 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("RAIN_API_MAX_PREVIEW_LINE_SIZE")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_sources = 0;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_TEMP_RESULT_MAX_SOURCES")
+        );
+    }
+
+    #[test]
+    fn rejects_negative_signed_page_and_record_limits() {
+        let mut limits = AppLimits::default();
+        limits.api.default_line_page_size = -1;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_API_DEFAULT_LINE_PAGE_SIZE")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_records = -1;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_TEMP_RESULT_MAX_RECORDS")
         );
     }
 
@@ -1103,6 +1266,16 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("RAIN_API_MAX_PREVIEW_LINE_SIZE")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.temp_results.max_scan_bytes = u64::MAX;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_TEMP_RESULT_MAX_SCAN_BYTES")
         );
     }
 

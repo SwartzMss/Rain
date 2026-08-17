@@ -1,5 +1,9 @@
 use super::common::checked_page_end;
 use super::*;
+use crate::services::json_size::{
+    JsonLinePageDecision, RESPONSE_TRUNCATED_LINE_MARKER, fit_json_line_to_page,
+    json_optional_string_encoded_len, json_string_encoded_len,
+};
 
 pub(crate) async fn result_storage_size(
     log_path: &Path,
@@ -24,6 +28,7 @@ pub(crate) fn temp_result_too_large() -> AppError {
     )
 }
 
+#[cfg(test)]
 pub(crate) async fn read_indexed_lines(
     result_path: &Path,
     meta_path: &Path,
@@ -31,6 +36,27 @@ pub(crate) async fn read_indexed_lines(
     start: i64,
     limit: i64,
     line_count: i64,
+) -> Result<Vec<TempLine>, AppError> {
+    read_indexed_lines_bounded(
+        result_path,
+        meta_path,
+        index_path,
+        start,
+        limit,
+        line_count,
+        u64::MAX,
+    )
+    .await
+}
+
+pub(crate) async fn read_indexed_lines_bounded(
+    result_path: &Path,
+    meta_path: &Path,
+    index_path: &Path,
+    start: i64,
+    limit: i64,
+    line_count: i64,
+    max_page_bytes: u64,
 ) -> Result<Vec<TempLine>, AppError> {
     if start >= line_count {
         return Ok(Vec::new());
@@ -68,6 +94,7 @@ pub(crate) async fn read_indexed_lines(
     let mut content = String::new();
     let mut metadata_line = String::new();
     let mut lines = Vec::new();
+    let mut page_bytes = 0_u64;
     let expected_end = checked_page_end(start, limit)?.min(line_count);
     while lines.len() < limit as usize {
         content.clear();
@@ -96,12 +123,57 @@ pub(crate) async fn read_indexed_lines(
         }
         let metadata = decode_sidecar::<MatchMetadata>(metadata_line.trim_end())?;
         if current >= start {
+            let content = content.trim_end_matches(['\r', '\n']);
+            let fixed_line_bytes =
+                json_optional_string_encoded_len(metadata.bundle_hash.as_deref())
+                    .saturating_add(json_optional_string_encoded_len(
+                        metadata.file_id.as_deref(),
+                    ))
+                    .saturating_add(json_string_encoded_len(&metadata.path))
+                    .saturating_add(256);
+            let decision = fit_json_line_to_page(
+                content,
+                fixed_line_bytes,
+                0,
+                page_bytes,
+                max_page_bytes,
+                RESPONSE_TRUNCATED_LINE_MARKER,
+            );
+            let (content, line_bytes, response_truncated) = match decision {
+                JsonLinePageDecision::Include {
+                    content,
+                    line_bytes,
+                    response_truncated,
+                } => (content, line_bytes, response_truncated),
+                JsonLinePageDecision::Defer => {
+                    if lines.is_empty() {
+                        return Err(AppError::public(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "LINE_PAGE_TOO_LARGE",
+                            "单行或行分页结果超过字节限制",
+                        ));
+                    }
+                    break;
+                }
+                JsonLinePageDecision::TooLarge => {
+                    if lines.is_empty() {
+                        return Err(AppError::public(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "LINE_PAGE_TOO_LARGE",
+                            "单行或行分页结果超过字节限制",
+                        ));
+                    }
+                    break;
+                }
+            };
+            page_bytes = page_bytes.saturating_add(line_bytes);
             lines.push(TempLine {
                 bundle_hash: metadata.bundle_hash,
                 file_id: metadata.file_id,
                 path: Some(metadata.path),
                 line_number: metadata.line_number,
-                content: content.trim_end_matches(['\r', '\n']).to_string(),
+                content,
+                truncated: metadata.truncated || response_truncated,
             });
         }
         current += 1;
@@ -239,6 +311,15 @@ pub(crate) fn is_staging_lease_active(state: &web::Data<AppState>, id: &str) -> 
         .unwrap_or(false)
 }
 
+pub(crate) fn is_read_lease_active(state: &web::Data<AppState>, id: &str) -> bool {
+    state
+        .temp_results
+        .reads
+        .lock()
+        .map(|reads| reads.contains_key(id))
+        .unwrap_or(false)
+}
+
 pub(crate) async fn remove_stale_file(path: &Path) {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {
@@ -267,7 +348,16 @@ pub(crate) fn checked_temp_path(
 
 #[cfg(test)]
 mod tests {
-    use super::staging_path;
+    use tokio::fs::File;
+    use uuid::Uuid;
+
+    use super::{read_indexed_lines, read_indexed_lines_bounded, staging_path};
+    use crate::{
+        config::MAX_TEMP_RESULT_LOGICAL_LINE_BYTES,
+        ingest::TRUNCATED_LINE_MARKER,
+        log_expression,
+        services::temp_results::{MatchMetadata, SparseCheckpoint, TempResultExecutor, TempSource},
+    };
 
     #[test]
     fn staging_artifact_uses_part_suffix() {
@@ -276,5 +366,206 @@ mod tests {
             staging_path(path),
             std::path::PathBuf::from("temp-results/result.log.part")
         );
+    }
+
+    #[tokio::test]
+    async fn indexed_reader_accepts_utf8_canonicalized_truncated_lines() {
+        let suffix = Uuid::new_v4();
+        let source_path = std::env::temp_dir().join(format!("rain-utf8-source-{suffix}.log"));
+        let result_path = std::env::temp_dir().join(format!("rain-utf8-result-{suffix}.log"));
+        let meta_path = std::env::temp_dir().join(format!("rain-utf8-result-{suffix}.meta"));
+        let index_path = std::env::temp_dir().join(format!("rain-utf8-result-{suffix}.idx"));
+        let prefix = "a".repeat(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES as usize - 1);
+        tokio::fs::write(&source_path, format!("{prefix}中\n"))
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("a").unwrap();
+        let mut result = File::create(&result_path).await.unwrap();
+        let mut metadata = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+        let preview = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            1,
+            usize::MAX as u64,
+            &mut result,
+            &mut metadata,
+            &mut index,
+            usize::MAX as u64,
+        )
+        .await
+        .unwrap();
+        drop(result);
+        drop(metadata);
+        drop(index);
+
+        let lines = read_indexed_lines(&result_path, &meta_path, &index_path, 0, 1, preview.total)
+            .await
+            .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].content.ends_with(TRUNCATED_LINE_MARKER));
+        assert!(lines[0].truncated);
+        assert!(
+            std::str::from_utf8(&tokio::fs::read(&result_path).await.unwrap()).is_ok(),
+            "materialized Temp Result must remain valid UTF-8"
+        );
+
+        let error = read_indexed_lines_bounded(
+            &result_path,
+            &meta_path,
+            &index_path,
+            0,
+            1,
+            preview.total,
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::AppError::PublicApi { code, .. } if code == "LINE_PAGE_TOO_LARGE"
+        ));
+
+        for path in [source_path, result_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_encoded_line_does_not_block_following_pages() {
+        let suffix = Uuid::new_v4();
+        let result_path = std::env::temp_dir().join(format!("rain-page-budget-{suffix}.log"));
+        let meta_path = std::env::temp_dir().join(format!("rain-page-budget-{suffix}.meta"));
+        let index_path = std::env::temp_dir().join(format!("rain-page-budget-{suffix}.idx"));
+        let result_content = format!("small\n{}\ntail\n", "\"".repeat(200));
+        let metadata = (0..3)
+            .map(|line_number| {
+                serde_json::to_string(&MatchMetadata {
+                    bundle_hash: None,
+                    file_id: None,
+                    path: "app.log".into(),
+                    line_number,
+                    truncated: false,
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        tokio::fs::write(&result_path, result_content)
+            .await
+            .unwrap();
+        tokio::fs::write(&meta_path, metadata).await.unwrap();
+        tokio::fs::write(
+            &index_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SparseCheckpoint {
+                    result_line: 0,
+                    log_offset: 0,
+                    meta_offset: 0,
+                })
+                .unwrap()
+            ),
+        )
+        .await
+        .unwrap();
+
+        let first_page =
+            read_indexed_lines_bounded(&result_path, &meta_path, &index_path, 0, 3, 3, 512)
+                .await
+                .unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].content, "small");
+        assert!(!first_page[0].truncated);
+
+        let following_page =
+            read_indexed_lines_bounded(&result_path, &meta_path, &index_path, 1, 1, 3, 512)
+                .await
+                .unwrap();
+        assert_eq!(following_page.len(), 1);
+        assert!(following_page[0].content.ends_with("[response truncated]"));
+        assert!(following_page[0].truncated);
+
+        let last_page =
+            read_indexed_lines_bounded(&result_path, &meta_path, &index_path, 2, 1, 3, 512)
+                .await
+                .unwrap();
+        assert_eq!(last_page.len(), 1);
+        assert_eq!(last_page[0].content, "tail");
+        assert!(!last_page[0].truncated);
+
+        for path in [result_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn page_budget_defers_complete_line_that_fits_on_an_empty_page() {
+        let suffix = Uuid::new_v4();
+        let result_path = std::env::temp_dir().join(format!("rain-page-defer-{suffix}.log"));
+        let meta_path = std::env::temp_dir().join(format!("rain-page-defer-{suffix}.meta"));
+        let index_path = std::env::temp_dir().join(format!("rain-page-defer-{suffix}.idx"));
+        let medium = "m".repeat(100);
+        tokio::fs::write(&result_path, format!("small\n{medium}\ntail\n"))
+            .await
+            .unwrap();
+        let metadata = (0..3)
+            .map(|line_number| {
+                serde_json::to_string(&MatchMetadata {
+                    bundle_hash: None,
+                    file_id: None,
+                    path: "app.log".into(),
+                    line_number,
+                    truncated: false,
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        tokio::fs::write(&meta_path, metadata).await.unwrap();
+        tokio::fs::write(
+            &index_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SparseCheckpoint {
+                    result_line: 0,
+                    log_offset: 0,
+                    meta_offset: 0,
+                })
+                .unwrap()
+            ),
+        )
+        .await
+        .unwrap();
+
+        let first_page =
+            read_indexed_lines_bounded(&result_path, &meta_path, &index_path, 0, 3, 3, 600)
+                .await
+                .unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].content, "small");
+        assert!(!first_page[0].truncated);
+
+        let second_page =
+            read_indexed_lines_bounded(&result_path, &meta_path, &index_path, 1, 1, 3, 600)
+                .await
+                .unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].content, medium);
+        assert!(!second_page[0].truncated);
+
+        for path in [result_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 }

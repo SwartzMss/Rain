@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -25,8 +25,7 @@ use crate::{
     log_expression,
     repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
     services::temp_results::{
-        MatchMetadata, PreviewLine, SparseCheckpoint, TempResultExecutor, TempSource,
-        select_checkpoint,
+        MatchMetadata, SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint,
     },
 };
 
@@ -39,6 +38,14 @@ const RETENTION_DAYS: i64 = 7;
 const ORPHAN_GRACE_PERIOD: StdDuration = StdDuration::from_secs(10 * 60);
 const TEMP_RESULT_RATE_LIMIT: usize = 10;
 const TEMP_RESULT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
+const TEMP_RESULT_IP_MAX_BUCKETS: usize = 1024;
+
+pub(crate) fn request_client_key(request: &HttpRequest) -> String {
+    request
+        .peer_addr()
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
 
 struct StagingLease {
     id: String,
@@ -61,6 +68,43 @@ fn register_staging_lease(state: &web::Data<AppState>, id: &str) -> StagingLease
         id: id.to_string(),
         registry: state.temp_results.staging.clone(),
     }
+}
+
+pub(crate) struct TempResultReadLease {
+    id: String,
+    registry: std::sync::Arc<std::sync::Mutex<HashMap<String, usize>>>,
+}
+
+impl Drop for TempResultReadLease {
+    fn drop(&mut self) {
+        if let Ok(mut reads) = self.registry.lock()
+            && let Some(count) = reads.get_mut(&self.id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                reads.remove(&self.id);
+            }
+        }
+    }
+}
+
+pub(crate) fn register_read_lease(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<TempResultReadLease, AppError> {
+    let mut reads = state.temp_results.reads.lock().map_err(|_| {
+        AppError::api(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TEMP_RESULT_UNAVAILABLE",
+            "临时结果服务暂时不可用",
+        )
+    })?;
+    let count = reads.entry(id.to_string()).or_insert(0);
+    *count = count.saturating_add(1);
+    Ok(TempResultReadLease {
+        id: id.to_string(),
+        registry: state.temp_results.reads.clone(),
+    })
 }
 
 fn invalid_expression(error: log_expression::ParseError) -> AppError {
@@ -141,13 +185,15 @@ pub(crate) struct TempLine {
     path: Option<String>,
     line_number: i64,
     content: String,
+    truncated: bool,
 }
 
 #[derive(Serialize)]
 struct MaterializedPreviewResponse {
     result_id: String,
     total: i64,
-    lines: Vec<PreviewLine>,
+    next_start: Option<i64>,
+    lines: Vec<TempLine>,
 }
 
 mod common;
@@ -275,6 +321,25 @@ mod tests {
         .await
         .unwrap();
 
+        let leased_log = temp_root.join("leased.log");
+        tokio::fs::write(&leased_log, "being read\n").await.unwrap();
+        tokio::fs::write(temp_root.join("leased.meta"), "{}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(temp_root.join("leased.idx"), "{}\n")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('leased-files', 'DELETING', 'l.log', 'x', 'x', ?, 1, 10, ?, ?)",
+        )
+        .bind(leased_log.to_string_lossy().to_string())
+        .bind(&created)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let read_lease = super::register_read_lease(&state, "leased-files").unwrap();
+
         let active_staging_log = temp_root.join("active-staging.log");
         tokio::fs::write(&active_staging_log, "still generating\n")
             .await
@@ -296,18 +361,48 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(remaining, 1);
+        assert_eq!(remaining, 2);
         assert!(!deleting_log.exists());
         assert!(active_staging_log.exists());
+        assert!(leased_log.exists());
         drop(lease);
         super::cleanup_expired(&state).await.unwrap();
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(remaining, 0);
+        assert_eq!(remaining, 1);
         assert!(!active_staging_log.exists());
+        assert!(leased_log.exists());
+        drop(read_lease);
+        super::cleanup_expired(&state).await.unwrap();
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert!(!leased_log.exists());
         let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_read_leases_are_reference_counted() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let state = web::Data::new(AppState::new(
+            pool,
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let first = super::register_read_lease(&state, "shared").unwrap();
+        let second = super::register_read_lease(&state, "shared").unwrap();
+        assert!(super::storage::is_read_lease_active(&state, "shared"));
+        drop(first);
+        assert!(super::storage::is_read_lease_active(&state, "shared"));
+        drop(second);
+        assert!(!super::storage::is_read_lease_active(&state, "shared"));
     }
 
     #[tokio::test]

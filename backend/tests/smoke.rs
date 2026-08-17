@@ -825,6 +825,7 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(temporary_preview["total"], 1);
+    assert!(temporary_preview["next_start"].is_null());
     let preview_result_id = temporary_preview["result_id"]
         .as_str()
         .expect("preview result id");
@@ -908,10 +909,28 @@ async fn upload_search_tree_and_delete_issue() {
     assert!(invalid_expression_message.contains("搜索条件无效"));
     assert!(invalid_expression_message.contains("位置"));
 
+    let guest_temporary_result_response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/temp-results")
+            .set_json(serde_json::json!({
+                "expression": "ERROR AND NOT timeout",
+                "bundle_hash": bundle_hash,
+                "file_id": app_file_id
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        guest_temporary_result_response.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
     let temporary_result_response = test::call_service(
         &app,
         test::TestRequest::post()
             .uri("/api/temp-results")
+            .cookie(auth_cookie.clone())
             .set_json(serde_json::json!({
                 "expression": "ERROR AND NOT timeout",
                 "bundle_hash": bundle_hash,
@@ -1003,6 +1022,21 @@ async fn upload_search_tree_and_delete_issue() {
         lines["lines"][0]["content"],
         "ERROR smoke works requestId=abcdef123456 中文连续文本"
     );
+
+    let beyond_file_lines: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{bundle_hash}/files/{app_file_id}/lines?start={}&limit=1",
+                i64::MAX
+            ))
+            .cookie(auth_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(beyond_file_lines["line_count"], 2);
+    assert_eq!(beyond_file_lines["lines"].as_array().unwrap().len(), 0);
+    assert!(beyond_file_lines["next_start"].is_null());
 
     let download = test::call_and_read_body(
         &app,
@@ -1267,6 +1301,53 @@ async fn upload_search_tree_and_delete_issue() {
         .as_str()
         .expect("second storage");
     assert_ne!(first_storage, second_storage);
+
+    sqlx::query("UPDATE issues SET status = 'DELETING' WHERE code = 'SMOKE'")
+        .execute(&pool)
+        .await
+        .expect("mark issue deleting");
+    let deleting_tree = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/files/v1/{bundle_hash}/files/root"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleting_tree.status(), StatusCode::NOT_FOUND);
+    let deleting_lines = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/api/files/v1/{bundle_hash}/files/{app_file_id}/lines"
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleting_lines.status(), StatusCode::NOT_FOUND);
+    let deleting_search = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/SMOKE/search?q=smoke&size=10")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleting_search.status(), StatusCode::NOT_FOUND);
+    let deleting_preview = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/temp-results/preview")
+            .set_json(serde_json::json!({
+                "expression": "ERROR AND smoke",
+                "issue_code": "SMOKE"
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(deleting_preview.status(), StatusCode::NOT_FOUND);
+    sqlx::query("UPDATE issues SET status = 'ACTIVE' WHERE code = 'SMOKE'")
+        .execute(&pool)
+        .await
+        .expect("restore issue status");
 
     let delete_response = test::call_service(
         &app,

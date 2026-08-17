@@ -19,7 +19,12 @@ type SearchResultViewerProps = {
   searchLoading: boolean;
   contentRef: React.RefObject<HTMLDivElement>;
   pageSizeOptions: readonly number[];
-  onLoadPage: (tab: SearchViewerTab | TempViewerTab, from: number, pageSize: number) => void;
+  onLoadPage: (
+    tab: SearchViewerTab | TempViewerTab,
+    from: number,
+    pageSize: number,
+    navigation: 'next' | 'previous' | 'reset'
+  ) => void;
   highlightTerm: string;
   renderHighlightedText: (text: string, keyword: string) => React.ReactNode;
   onOpenSource?: (hit: IssueLogSearchHit) => void;
@@ -43,11 +48,26 @@ export function SearchResultViewer({
   renderHighlightedText,
   onOpenSource
 }: SearchResultViewerProps) {
+  const pageHistory = activeViewerTab.pageHistory ?? [];
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
     hit: IssueLogSearchHit;
   } | null>(null);
+  const loadNextPage = () => {
+    const nextStart = activeViewerTab.from + results.length;
+    onLoadPage(activeViewerTab, nextStart, activeViewerTab.pageSize, 'next');
+  };
+
+  const loadPreviousPage = () => {
+    const previousStart = pageHistory[pageHistory.length - 1];
+    if (previousStart === undefined) return;
+    onLoadPage(activeViewerTab, previousStart, activeViewerTab.pageSize, 'previous');
+  };
+
+  const changePageSize = (nextPageSize: number) => {
+    onLoadPage(activeViewerTab, 0, nextPageSize, 'reset');
+  };
   if (searchLoading && results.length === 0) {
     return <p className="py-8 text-center text-sm text-slate-500">正在搜索...</p>;
   }
@@ -126,19 +146,19 @@ export function SearchResultViewer({
               className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 outline-none focus:border-cyan-500/60"
               value={activeViewerTab.pageSize}
               disabled={searchLoading}
-              onChange={(event) => onLoadPage(activeViewerTab, 0, Number(event.target.value))}
+              onChange={(event) => changePageSize(Number(event.target.value))}
             >
               {pageSizeOptions.map((size) => <option key={size} value={size}>{size} 行</option>)}
             </select>
           </label>
           <span>
-            第 {Math.floor(activeViewerTab.from / activeViewerTab.pageSize) + 1} / {Math.max(1, Math.ceil(activeViewerTab.total / activeViewerTab.pageSize))} 页
+            {activeViewerTab.from + 1} - {activeViewerTab.from + results.length} / {activeViewerTab.total}
           </span>
           <button
             type="button"
             className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-            disabled={activeViewerTab.from === 0 || searchLoading}
-            onClick={() => onLoadPage(activeViewerTab, Math.max(0, activeViewerTab.from - activeViewerTab.pageSize), activeViewerTab.pageSize)}
+            disabled={pageHistory.length === 0 || searchLoading}
+            onClick={loadPreviousPage}
           >
             上一页
           </button>
@@ -146,7 +166,7 @@ export function SearchResultViewer({
             type="button"
             className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
             disabled={activeViewerTab.from + results.length >= activeViewerTab.total || searchLoading}
-            onClick={() => onLoadPage(activeViewerTab, activeViewerTab.from + activeViewerTab.pageSize, activeViewerTab.pageSize)}
+            onClick={loadNextPage}
           >
             下一页
           </button>
