@@ -10,7 +10,6 @@ import type {
 } from "../../api/types";
 import { useAuth } from "../../auth/AuthContext";
 import { isAdmin } from "../../auth/permissions";
-import { AiProviderSettingsPanel } from "./AiProviderSettingsPanel";
 import {
   advanceCursor,
   currentCursor,
@@ -628,7 +627,6 @@ export function AdminSettingsPage() {
           </p>
           {sectionFeedback("issue-expiry")}
         </SettingsSection>
-        <AiProviderSettingsPanel />
       </div>
     </AdminGuard>
   );

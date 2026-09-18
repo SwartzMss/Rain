@@ -1,5 +1,4 @@
 import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { AccountPage } from '../src/features/auth/AccountPage';
@@ -16,13 +15,12 @@ vi.mock('../src/features/skills/SkillsPage', () => ({
 }));
 
 describe('account skills navigation', () => {
-  it('opens private skill management from the account page', async () => {
-    const user = userEvent.setup();
+  it('hides private skill management while keeping account security visible', () => {
     render(<MemoryRouter><AccountPage /></MemoryRouter>);
 
-    await user.click(screen.getByRole('tab', { name: '我的 Skills' }));
-
-    expect(screen.getByText('skill management')).toBeInTheDocument();
-    expect(screen.queryByLabelText('当前密码')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: '我的 Skills' })).not.toBeInTheDocument();
+    expect(screen.queryByText('skill management')).not.toBeInTheDocument();
+    expect(screen.getByText('账户安全')).toBeInTheDocument();
+    expect(screen.getByLabelText('当前密码')).toBeInTheDocument();
   });
 });
