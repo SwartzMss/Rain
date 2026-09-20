@@ -229,7 +229,7 @@ impl Default for UploadConfig {
         Self {
             concurrent_processing_tasks: 4,
             concurrent_receive_tasks: 4,
-            max_tmp_bytes: 16 * GIB,
+            max_tmp_bytes: 32 * GIB,
         }
     }
 }
@@ -434,7 +434,7 @@ impl AuthConfig {
 impl Default for AppLimits {
     fn default() -> Self {
         Self {
-            issue_max_content_size: 4 * GIB,
+            issue_max_content_size: 8 * GIB,
             upload: UploadConfig::default(),
             indexing: IndexingConfig::default(),
             api: ApiConfig::default(),
@@ -968,7 +968,7 @@ mod tests {
     #[test]
     fn defaults_expose_only_meaningful_workflow_limits() {
         let limits = AppLimits::default();
-        assert_eq!(limits.issue_max_content_size, 4 * 1024_u64.pow(3));
+        assert_eq!(limits.issue_max_content_size, 8 * 1024_u64.pow(3));
         assert_eq!(limits.upload.concurrent_processing_tasks, 4);
         assert_eq!(limits.indexing.max_indexed_line_size, 256 * 1024);
         assert_eq!(limits.api.file_preview_size, 64 * 1024);
