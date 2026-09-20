@@ -1406,6 +1406,32 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     .await;
     let auth_cookie = test_auth_cookie(&pool).await;
 
+    let anonymous = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/QUOTAFAIL/upload-limits")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let limits_response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/QUOTAFAIL/upload-limits")
+            .cookie(auth_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(limits_response.status(), StatusCode::OK);
+    assert_eq!(
+        limits_response.headers().get("cache-control").unwrap(),
+        "no-store, private"
+    );
+    let upload_limits: Value = test::read_body_json(limits_response).await;
+    assert_eq!(upload_limits["max_content_bytes"], 16);
+    assert_eq!(upload_limits["max_upload_bytes"], 32);
+    assert_eq!(upload_limits["remaining_content_bytes"], 16);
+
     let boundary = format!("rain-{}", Uuid::new_v4().simple());
     let response = test::call_service(
         &app,
@@ -1478,6 +1504,24 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     .await
     .expect("load exact bundle size");
     assert_eq!(ready_size, 16);
+    for status in ["PROCESSING", "READY"] {
+        sqlx::query("UPDATE bundles SET status = ? WHERE hash = ?")
+            .bind(status)
+            .bind(exact_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let upload_limits: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/issues/QUOTAFAIL/upload-limits")
+                .cookie(auth_cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(upload_limits["used_content_bytes"], 16);
+        assert_eq!(upload_limits["remaining_content_bytes"], 0);
+    }
     let delete = test::call_service(
         &app,
         test::TestRequest::delete()

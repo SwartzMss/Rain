@@ -195,6 +195,7 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(temp_results::download_temp_result)
                 .service(temp_results::delete_temp_result)
                 .service(uploads::upload_logs)
+                .service(uploads::get_upload_limits)
                 .service(uploads::get_upload_task),
         );
 }

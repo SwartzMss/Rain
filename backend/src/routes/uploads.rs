@@ -26,6 +26,36 @@ use crate::{
 
 use super::issues::{normalize_issue_code, require_issue_owner, touch_issue_activity_best_effort};
 
+#[get("/issues/{issue_code}/upload-limits")]
+pub async fn get_upload_limits(
+    user: RequireBusinessUser,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let issue_code = normalize_issue_code(&path.into_inner())?;
+    require_issue_owner(&state.db.pool, &issue_code, &user.0.id).await?;
+    // Match IssueQuota, including content reserved by processing uploads.
+    let used: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(content_size_bytes), 0) FROM bundles WHERE issue_code = ? AND status IN ('READY','PROCESSING')",
+    )
+    .bind(&issue_code)
+    .fetch_one(&state.db.pool)
+    .await
+    .map_err(AppError::Database)?;
+    let limit = state.limits.issue_max_content_size;
+    let archive = crate::config::ArchiveConfig::for_content_limit(limit);
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store, private"))
+        .json(serde_json::json!({
+            "max_upload_bytes": limit.saturating_mul(2),
+            "max_content_bytes": limit,
+            "used_content_bytes": used.max(0),
+            "remaining_content_bytes": limit.saturating_sub(used.max(0) as u64),
+            "max_archive_entries": archive.max_entries,
+            "max_compression_ratio": archive.max_compression_ratio,
+        })))
+}
+
 // scoped under /api in routes::register, so use relative path
 #[post("/issues/{issue_code}/uploads")]
 pub async fn upload_logs(
