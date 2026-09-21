@@ -1,4 +1,4 @@
-use sqlx::{Row, SqlitePool, migrate::Migrator};
+use sqlx::{Row, SqlitePool, migrate::Migrator, sqlite::SqlitePoolOptions};
 
 use crate::error::AppError;
 
@@ -572,23 +572,27 @@ const UNIQUE_CONSTRAINTS: &[(&str, &[&str])] = &[
 pub async fn prepare(pool: &SqlitePool, reset: bool) -> Result<(), AppError> {
     if reset {
         reset_schema(pool).await?;
-    }
-
-    match classify(pool).await? {
-        DatabaseState::Empty => {
-            tracing::info!(migration_state = "empty", "running database migrations");
-        }
-        DatabaseState::Legacy => {
-            tracing::info!(migration_state = "legacy", "validating database baseline");
-            validate_baseline(pool).await?;
-            backfill_legacy_event_times(pool).await?;
-            tracing::info!(
-                migration_state = "legacy",
-                "legacy database baseline validated"
-            );
-        }
-        DatabaseState::Managed => {
-            tracing::info!(migration_state = "managed", "checking database migrations");
+        tracing::info!(
+            migration_state = "reset",
+            "database schema reset; running database migrations"
+        );
+    } else {
+        match classify(pool).await? {
+            DatabaseState::Empty => {
+                tracing::info!(migration_state = "empty", "running database migrations");
+            }
+            DatabaseState::Legacy => {
+                tracing::info!(migration_state = "legacy", "validating database baseline");
+                validate_baseline(pool).await?;
+                backfill_legacy_event_times(pool).await?;
+                tracing::info!(
+                    migration_state = "legacy",
+                    "legacy database baseline validated"
+                );
+            }
+            DatabaseState::Managed => {
+                tracing::info!(migration_state = "managed", "checking database migrations");
+            }
         }
     }
 
@@ -693,6 +697,8 @@ async fn validate_baseline(pool: &SqlitePool) -> Result<(), AppError> {
         validate_columns(pool, table, columns).await?;
     }
 
+    validate_table_definitions(pool).await?;
+
     for (table, from, target, target_column, on_delete) in FOREIGN_KEYS {
         let matched: bool = sqlx::query_scalar(
             "SELECT EXISTS(
@@ -768,7 +774,48 @@ async fn validate_baseline(pool: &SqlitePool) -> Result<(), AppError> {
     )
     .await?;
 
+    validate_owned_triggers(pool).await?;
     validate_table_constraints(pool).await
+}
+
+async fn validate_table_definitions(pool: &SqlitePool) -> Result<(), AppError> {
+    let baseline_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .map_err(AppError::Database)?;
+    MIGRATOR.run(&baseline_pool).await.map_err(|error| {
+        AppError::Config(format!("database baseline generation failed: {error}"))
+    })?;
+
+    for (table, _) in REQUIRED_TABLES {
+        let actual = find_object(pool, table).await?;
+        let expected = find_object(&baseline_pool, table).await?;
+        let Some(actual) = actual else {
+            return Err(schema_error(table, "required table is missing"));
+        };
+        let Some(expected) = expected else {
+            return Err(schema_error(table, "migration baseline table is missing"));
+        };
+        if actual.kind != "table" {
+            return Err(schema_error(
+                table,
+                format!("object type is {}, expected table", actual.kind),
+            ));
+        }
+        let actual_sql = actual.sql.map(|sql| compact_sql(&sql)).unwrap_or_default();
+        let expected_sql = expected
+            .sql
+            .map(|sql| compact_sql(&sql))
+            .unwrap_or_default();
+        if actual_sql != expected_sql {
+            return Err(schema_error(
+                table,
+                "table definition differs from the migration baseline",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn validate_columns(
@@ -821,6 +868,22 @@ async fn validate_columns(
                 format!("default is {actual_default}, expected {expected_default}"),
             ));
         }
+    }
+
+    let actual_columns = rows
+        .iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::Database)?;
+    let expected_columns = requirements
+        .iter()
+        .map(|requirement| requirement.name.to_owned())
+        .collect::<Vec<_>>();
+    if actual_columns != expected_columns {
+        return Err(schema_error(
+            table,
+            format!("columns are {actual_columns:?}, expected {expected_columns:?}"),
+        ));
     }
     Ok(())
 }
@@ -951,6 +1014,31 @@ async fn validate_primary_keys(pool: &SqlitePool) -> Result<(), AppError> {
 }
 
 async fn validate_unique_constraints(pool: &SqlitePool) -> Result<(), AppError> {
+    for (table, _) in REQUIRED_TABLES {
+        let indexes: Vec<(String, i64, String)> = sqlx::query_as(
+            "SELECT name, \"unique\", origin
+             FROM pragma_index_list(?)",
+        )
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+        for (index_name, _, origin) in indexes {
+            match origin.as_str() {
+                "pk" | "u" => {}
+                "c" if REQUIRED_INDEXES
+                    .iter()
+                    .any(|index| index.table == *table && index.name == index_name) => {}
+                _ => {
+                    return Err(schema_error(
+                        index_name,
+                        format!("unknown index attached to Rain table {table}"),
+                    ));
+                }
+            }
+        }
+    }
+
     for (table, expected) in UNIQUE_CONSTRAINTS {
         let index_names: Vec<String> =
             sqlx::query_scalar("SELECT name FROM pragma_index_list(?) WHERE \"unique\" = 1")
@@ -980,6 +1068,36 @@ async fn validate_unique_constraints(pool: &SqlitePool) -> Result<(), AppError> 
                 table,
                 format!("missing UNIQUE constraint on {expected:?}"),
             ));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_owned_triggers(pool: &SqlitePool) -> Result<(), AppError> {
+    let mut rain_tables = REQUIRED_TABLES
+        .iter()
+        .map(|(table, _)| *table)
+        .collect::<Vec<_>>();
+    rain_tables.push("log_segments_fts");
+
+    for table in rain_tables {
+        let trigger_names: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+        )
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+        for trigger_name in trigger_names {
+            if !matches!(
+                trigger_name.as_str(),
+                "log_segments_fts_ai" | "log_segments_fts_ad" | "log_segments_fts_au"
+            ) {
+                return Err(schema_error(
+                    trigger_name,
+                    format!("unknown trigger attached to Rain table {table}"),
+                ));
+            }
         }
     }
     Ok(())
@@ -1541,6 +1659,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn incompatible_legacy_extra_column_fails_before_adoption() {
+        let pool = pool().await;
+        let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql").replacen(
+            "code TEXT PRIMARY KEY,\n            name TEXT NOT NULL,",
+            "code TEXT PRIMARY KEY,\n            name TEXT NOT NULL,\n            extra TEXT,",
+            1,
+        );
+        make_legacy_from_sql(&pool, &fixture).await;
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("extra Rain column must fail");
+        assert!(error.to_string().contains("issues"));
+    }
+
+    #[tokio::test]
+    async fn incompatible_legacy_extra_check_fails_before_adoption() {
+        let pool = pool().await;
+        let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql").replacen(
+            "status TEXT NOT NULL DEFAULT 'ACTIVE',\n            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,",
+            "status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (name != ''),\n            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,",
+            1,
+        );
+        make_legacy_from_sql(&pool, &fixture).await;
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("extra Rain CHECK must fail");
+        assert!(error.to_string().contains("issues"));
+    }
+
+    #[tokio::test]
+    async fn incompatible_legacy_extra_trigger_fails_before_adoption() {
+        let pool = pool().await;
+        make_legacy(&pool).await;
+        sqlx::query(
+            "CREATE TRIGGER custom_block_issue BEFORE INSERT ON issues BEGIN
+                SELECT RAISE(ABORT, 'blocked');
+            END",
+        )
+        .execute(&pool)
+        .await
+        .expect("create extra Rain trigger");
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("extra Rain trigger must fail");
+        assert!(error.to_string().contains("custom_block_issue"));
+    }
+
+    #[tokio::test]
+    async fn incompatible_legacy_extra_unique_index_fails_before_adoption() {
+        let pool = pool().await;
+        make_legacy(&pool).await;
+        sqlx::query("CREATE UNIQUE INDEX custom_issue_name_unique ON issues(name)")
+            .execute(&pool)
+            .await
+            .expect("create extra Rain unique index");
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("extra Rain UNIQUE index must fail");
+        assert!(error.to_string().contains("custom_issue_name_unique"));
+    }
+
+    #[tokio::test]
     async fn reset_recreates_schema_through_the_migration_chain() {
         let pool = pool().await;
         prepare(&pool, false).await.expect("initial migration");
@@ -1556,6 +1740,35 @@ mod tests {
             .await
             .expect("inspect reset schema");
         assert_eq!(issue_count, 0);
+        let migration_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 1 AND success = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect reset metadata");
+        assert_eq!(migration_count, 1);
+    }
+
+    #[tokio::test]
+    async fn reset_rebuilds_rain_schema_without_reclassifying_extra_objects() {
+        let pool = pool().await;
+        prepare(&pool, false).await.expect("initial migration");
+        sqlx::query("CREATE TABLE my_debug_table (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create unrelated table");
+
+        prepare(&pool, true)
+            .await
+            .expect("reset should bypass legacy classification");
+
+        let debug_table_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='my_debug_table')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect unrelated table");
+        assert!(debug_table_exists);
         let migration_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 1 AND success = 1",
         )
