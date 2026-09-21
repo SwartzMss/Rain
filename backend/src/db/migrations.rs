@@ -325,6 +325,13 @@ const IDX_SAVED_USER: &[&str] = &["user_id", "is_pinned", "sort_order", "updated
 const IDX_BLOB: &[&str] = &["blob_id"];
 const IDX_DELETED: &[&str] = &["deleted_at"];
 
+const INDEX_DESCENDING_COLUMNS: &[(&str, &[bool])] = &[
+    ("idx_bundles_issue", &[false, true]),
+    ("idx_admin_audit_created", &[true, true]),
+    ("idx_admin_audit_target", &[false, true]),
+    ("idx_saved_searches_user", &[false, true, false, true]),
+];
+
 const REQUIRED_INDEXES: &[IndexRequirement] = &[
     IndexRequirement {
         table: "skill_runs",
@@ -718,46 +725,46 @@ async fn validate_baseline(pool: &SqlitePool) -> Result<(), AppError> {
     validate_primary_keys(pool).await?;
     validate_unique_constraints(pool).await?;
 
-    validate_sql_object(
+    validate_sql_object_exact(
         pool,
         "log_segments_fts",
         "table",
-        &[
-            "USING FTS5",
-            "CONTENT='LOG_SEGMENTS'",
-            "CONTENT_ROWID='ID'",
-            "TOKENIZE='TRIGRAM'",
-        ],
+        "CREATE VIRTUAL TABLE log_segments_fts USING fts5(
+            content,
+            content='log_segments',
+            content_rowid='id',
+            tokenize='trigram'
+        )",
     )
     .await?;
-    validate_sql_object(
+    validate_sql_object_exact(
         pool,
         "log_segments_fts_ai",
         "trigger",
-        &[
-            "AFTER INSERT ON LOG_SEGMENTS",
-            "INSERT INTO LOG_SEGMENTS_FTS",
-        ],
+        "CREATE TRIGGER log_segments_fts_ai AFTER INSERT ON log_segments BEGIN
+            INSERT INTO log_segments_fts(rowid, content) VALUES (new.id, new.content);
+        END",
     )
     .await?;
-    validate_sql_object(
+    validate_sql_object_exact(
         pool,
         "log_segments_fts_ad",
         "trigger",
-        &[
-            "AFTER DELETE ON LOG_SEGMENTS",
-            "VALUES('DELETE',OLD.ID,OLD.CONTENT)",
-        ],
+        "CREATE TRIGGER log_segments_fts_ad AFTER DELETE ON log_segments BEGIN
+            INSERT INTO log_segments_fts(log_segments_fts, rowid, content)
+            VALUES ('delete', old.id, old.content);
+        END",
     )
     .await?;
-    validate_sql_object(
+    validate_sql_object_exact(
         pool,
         "log_segments_fts_au",
         "trigger",
-        &[
-            "AFTER UPDATE OF CONTENT ON LOG_SEGMENTS",
-            "VALUES('DELETE',OLD.ID,OLD.CONTENT)",
-        ],
+        "CREATE TRIGGER log_segments_fts_au AFTER UPDATE OF content ON log_segments BEGIN
+            INSERT INTO log_segments_fts(log_segments_fts, rowid, content)
+            VALUES ('delete', old.id, old.content);
+            INSERT INTO log_segments_fts(rowid, content) VALUES (new.id, new.content);
+        END",
     )
     .await?;
 
@@ -849,12 +856,20 @@ async fn validate_index(pool: &SqlitePool, requirement: &IndexRequirement) -> Re
         ));
     }
 
-    let columns: Vec<String> =
-        sqlx::query_scalar("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
-            .bind(requirement.name)
-            .fetch_all(pool)
-            .await
-            .map_err(AppError::Database)?;
+    let index_info: Vec<(String, i64, String)> = sqlx::query_as(
+        "SELECT name, \"desc\", coll
+         FROM pragma_index_xinfo(?)
+         WHERE key = 1
+         ORDER BY seqno",
+    )
+    .bind(requirement.name)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let columns = index_info
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect::<Vec<_>>();
     let expected = requirement
         .columns
         .iter()
@@ -864,6 +879,36 @@ async fn validate_index(pool: &SqlitePool, requirement: &IndexRequirement) -> Re
         return Err(schema_error(
             requirement.name,
             format!("columns are {columns:?}, expected {expected:?}"),
+        ));
+    }
+
+    let actual_descending = index_info
+        .iter()
+        .map(|(_, descending, _)| *descending != 0)
+        .collect::<Vec<_>>();
+    let expected_descending = INDEX_DESCENDING_COLUMNS
+        .iter()
+        .find(|(name, _)| *name == requirement.name)
+        .map(|(_, directions)| directions.to_vec())
+        .unwrap_or_else(|| vec![false; expected.len()]);
+    if actual_descending != expected_descending {
+        return Err(schema_error(
+            requirement.name,
+            format!("sort directions are {actual_descending:?}, expected {expected_descending:?}"),
+        ));
+    }
+
+    let actual_collations = index_info
+        .iter()
+        .map(|(_, _, collation)| collation.as_str())
+        .collect::<Vec<_>>();
+    if actual_collations
+        .iter()
+        .any(|collation| *collation != "BINARY")
+    {
+        return Err(schema_error(
+            requirement.name,
+            format!("collations are {actual_collations:?}, expected BINARY"),
         ));
     }
 
@@ -996,6 +1041,7 @@ async fn validate_table_constraints(pool: &SqlitePool) -> Result<(), AppError> {
         (
             "blobs",
             &[
+                "ID INTEGER PRIMARY KEY AUTOINCREMENT",
                 "CONTENT_HASH TEXT NOT NULL UNIQUE",
                 "SIZE_BYTES INTEGER NOT NULL CHECK(SIZE_BYTES>=0)",
                 "STORAGE_KEY TEXT NOT NULL UNIQUE",
@@ -1003,8 +1049,13 @@ async fn validate_table_constraints(pool: &SqlitePool) -> Result<(), AppError> {
         ),
         (
             "files",
-            &["CONSTRAINTFILES_BUNDLE_PATHUNIQUE(BUNDLE_ID,PATH)"],
+            &[
+                "ID INTEGER PRIMARY KEY AUTOINCREMENT",
+                "CONSTRAINTFILES_BUNDLE_PATHUNIQUE(BUNDLE_ID,PATH)",
+            ],
         ),
+        ("log_segments", &["ID INTEGER PRIMARY KEY AUTOINCREMENT"]),
+        ("log_line_offsets", &["PRIMARY KEY(FILE_ID,LINE_NUMBER)"]),
         (
             "temp_results",
             &[
@@ -1053,7 +1104,6 @@ async fn validate_table_constraints(pool: &SqlitePool) -> Result<(), AppError> {
                 "UNIQUE(RUN_ID,SEQUENCE)",
             ],
         ),
-        ("log_line_offsets", &["PRIMARY KEY(FILE_ID,LINE_NUMBER)"]),
     ];
     for (table, fragments) in REQUIRED_SQL_FRAGMENTS {
         let object = find_object(pool, table).await?;
@@ -1073,11 +1123,11 @@ async fn validate_table_constraints(pool: &SqlitePool) -> Result<(), AppError> {
     Ok(())
 }
 
-async fn validate_sql_object(
+async fn validate_sql_object_exact(
     pool: &SqlitePool,
     name: &str,
     expected_kind: &str,
-    fragments: &[&str],
+    expected_sql: &str,
 ) -> Result<(), AppError> {
     let object = find_object(pool, name).await?;
     let Some(object) = object else {
@@ -1092,14 +1142,13 @@ async fn validate_sql_object(
             format!("object type is {}, expected {expected_kind}", object.kind),
         ));
     }
-    let sql = object.sql.map(|sql| compact_sql(&sql)).unwrap_or_default();
-    for fragment in fragments {
-        if !sql.contains(&compact_sql(fragment)) {
-            return Err(schema_error(
-                name,
-                format!("definition is missing required fragment {fragment}"),
-            ));
-        }
+    let actual_sql = object.sql.map(|sql| compact_sql(&sql)).unwrap_or_default();
+    let expected_sql = compact_sql(expected_sql);
+    if actual_sql != expected_sql {
+        return Err(schema_error(
+            name,
+            "definition differs from the migration baseline",
+        ));
     }
     Ok(())
 }
@@ -1189,6 +1238,10 @@ mod tests {
 
     async fn make_legacy(pool: &sqlx::SqlitePool) {
         let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql");
+        make_legacy_from_sql(pool, fixture).await;
+    }
+
+    async fn make_legacy_from_sql(pool: &sqlx::SqlitePool, fixture: &str) {
         for statement in fixture.split("-- RAIN_LEGACY_STATEMENT").skip(1) {
             let statement = statement.trim();
             if !statement.is_empty() {
@@ -1376,6 +1429,114 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("inspect failed FTS adoption state");
+        assert!(!metadata_exists);
+    }
+
+    #[tokio::test]
+    async fn incompatible_legacy_fts_trigger_with_extra_logic_fails_before_adoption() {
+        let pool = pool().await;
+        make_legacy(&pool).await;
+        sqlx::query("DROP TRIGGER log_segments_fts_ai")
+            .execute(&pool)
+            .await
+            .expect("remove original legacy FTS trigger");
+        sqlx::query(
+            "CREATE TRIGGER log_segments_fts_ai AFTER INSERT ON log_segments BEGIN
+                INSERT INTO log_segments_fts(rowid, content) VALUES (new.id, new.content);
+                UPDATE issues SET name = name WHERE 0;
+            END",
+        )
+        .execute(&pool)
+        .await
+        .expect("create altered legacy FTS trigger");
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("altered legacy FTS trigger must fail");
+        assert!(error.to_string().contains("log_segments_fts_ai"));
+        let metadata_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect failed FTS adoption state");
+        assert!(!metadata_exists);
+    }
+
+    #[tokio::test]
+    async fn incompatible_legacy_index_sort_order_fails_before_adoption() {
+        let pool = pool().await;
+        make_legacy(&pool).await;
+        sqlx::query("DROP INDEX idx_bundles_issue")
+            .execute(&pool)
+            .await
+            .expect("remove original legacy index");
+        sqlx::query("CREATE INDEX idx_bundles_issue ON bundles (issue_code ASC, created_at ASC)")
+            .execute(&pool)
+            .await
+            .expect("create altered legacy index");
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("altered legacy index sort order must fail");
+        assert!(error.to_string().contains("idx_bundles_issue"));
+        let metadata_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect failed index adoption state");
+        assert!(!metadata_exists);
+    }
+
+    #[tokio::test]
+    async fn incompatible_legacy_index_collation_fails_before_adoption() {
+        let pool = pool().await;
+        make_legacy(&pool).await;
+        sqlx::query("DROP INDEX idx_bundles_issue")
+            .execute(&pool)
+            .await
+            .expect("remove original legacy index");
+        sqlx::query(
+            "CREATE INDEX idx_bundles_issue ON bundles (issue_code ASC, created_at COLLATE NOCASE ASC)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create altered legacy index");
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("altered legacy index collation must fail");
+        assert!(error.to_string().contains("idx_bundles_issue"));
+        let metadata_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect failed index adoption state");
+        assert!(!metadata_exists);
+    }
+
+    #[tokio::test]
+    async fn incompatible_legacy_autoincrement_definition_fails_before_adoption() {
+        let pool = pool().await;
+        let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql").replacen(
+            "id INTEGER PRIMARY KEY AUTOINCREMENT",
+            "id INTEGER PRIMARY KEY",
+            1,
+        );
+        make_legacy_from_sql(&pool, &fixture).await;
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("missing AUTOINCREMENT must fail");
+        assert!(error.to_string().contains("blobs"));
+        let metadata_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect failed AUTOINCREMENT adoption state");
         assert!(!metadata_exists);
     }
 
