@@ -927,6 +927,17 @@ mod tests {
     }
 
     #[test]
+    fn extracts_the_minimum_and_maximum_event_time_from_segment_content() {
+        let first = parse_event_time_ms("2026-08-14T09:32:15 first");
+        let second = parse_event_time_ms("2026-08-14T09:33:15 second");
+        let (start, end) =
+            event_time_range("2026-08-14T09:32:15 first\nnoise\n2026-08-14T09:33:15 second");
+
+        assert_eq!(start, first);
+        assert_eq!(end, second);
+    }
+
+    #[test]
     fn ignores_timestamps_without_a_date_or_with_absolute_time_syntax() {
         assert_eq!(parse_event_time_ms("09:32:15 error"), None);
         assert_eq!(parse_event_time_ms("[E][09:32:15][worker] error"), None);
@@ -936,17 +947,6 @@ mod tests {
             parse_event_time_ms("prefix 2026-08-14T09:32:15 message"),
             None
         );
-    }
-
-    #[test]
-    fn extracts_the_minimum_and_maximum_event_time_from_segment_content() {
-        let first = parse_event_time_ms("2026-08-14T09:32:15 first");
-        let second = parse_event_time_ms("2026-08-14T09:33:15 second");
-        let (start, end) =
-            event_time_range("2026-08-14T09:32:15 first\nnoise\n2026-08-14T09:33:15 second");
-
-        assert_eq!(start, first);
-        assert_eq!(end, second);
     }
 
     #[test]
