@@ -294,13 +294,23 @@ pub async fn revoke_others_for_user(
 }
 
 pub async fn cleanup_expired_or_revoked(pool: &SqlitePool) -> Result<u64, AppError> {
-    Ok(sqlx::query(
-        "DELETE FROM user_sessions WHERE datetime(expires_at) <= CURRENT_TIMESTAMP OR revoked_at IS NOT NULL",
-    )
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?
-    .rows_affected())
+    let mut removed = 0;
+    loop {
+        let affected = crate::db::write::run(pool, "cleanup expired sessions", &(), |conn, _| Box::pin(async move {
+            Ok(sqlx::query(
+                "DELETE FROM user_sessions WHERE rowid IN (SELECT rowid FROM user_sessions WHERE datetime(expires_at) <= CURRENT_TIMESTAMP OR revoked_at IS NOT NULL LIMIT 100)",
+            )
+            .execute(conn)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected())
+        })).await?;
+        removed += affected;
+        if affected < 100 {
+            return Ok(removed);
+        }
+        tokio::task::yield_now().await;
+    }
 }
 
 #[cfg(test)]

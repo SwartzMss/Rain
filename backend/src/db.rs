@@ -385,13 +385,25 @@ pub async fn cleanup_expired_bundles(
     }
 
     for bundle in &bundles {
-        sqlx::query(
-            "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+        let claimed = write::run(
+            pool,
+            "claim expired bundle for deletion",
+            &bundle.id,
+            |conn, bundle_id| {
+                Box::pin(async move {
+                    Ok(sqlx::query("UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL AND status IN ('READY', 'FAILED')")
+                        .bind(bundle_id)
+                        .execute(conn)
+                        .await
+                        .map_err(AppError::Database)?
+                        .rows_affected())
+                })
+            },
         )
-        .bind(&bundle.id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
+        .await?;
+        if claimed != 1 {
+            continue;
+        }
         finish_bundle_deletion(pool, &bundle.id).await?;
     }
 
@@ -401,11 +413,22 @@ pub async fn cleanup_expired_bundles(
 pub async fn finish_bundle_deletion(pool: &SqlitePool, bundle_id: &str) -> Result<(), AppError> {
     let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id, None).await?;
     cleanup_bundle_content_batched_inner(pool, bundle_id, CLEANUP_BATCH_SIZE, None).await?;
-    sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
+    write::run(
+        pool,
+        "finalize bundle deletion",
+        &bundle_id,
+        |conn, bundle_id| {
+            Box::pin(async move {
+                sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
+                    .bind(bundle_id)
+                    .execute(conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                Ok(())
+            })
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -423,13 +446,35 @@ pub async fn finish_bundle_deletion_with_inactive_lease(
     };
     let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id, Some((pool, lease))).await?;
     cleanup_bundle_content_batched_inner(pool, bundle_id, CLEANUP_BATCH_SIZE, Some(lease)).await?;
-    require_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds).await?;
-    sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
-    require_inactive_issue_lease(pool, issue_code, lease_token, lease_seconds).await?;
+    let input = (bundle_id, issue_code, lease_token, lease_seconds);
+    write::run(
+        pool,
+        "finalize leased bundle deletion",
+        &input,
+        |conn, &(bundle_id, issue_code, lease_token, lease_seconds)| {
+            Box::pin(async move {
+                let modifier = format!("+{lease_seconds} seconds");
+                let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason IN ('INACTIVE', 'MANUAL') AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
+                    .bind(modifier)
+                    .bind(issue_code)
+                    .bind(lease_token)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?
+                    .rows_affected();
+                if renewed != 1 {
+                    return Err(AppError::Conflict(format!("inactive cleanup lease for issue {issue_code} was lost")));
+                }
+                sqlx::query("UPDATE bundles SET status = 'DELETED', content_size_bytes = 0 WHERE id = ? AND status = 'DELETING'")
+                    .bind(bundle_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                Ok(())
+            })
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -444,16 +489,26 @@ pub async fn renew_inactive_issue_lease(
             "inactive cleanup lease must be positive".into(),
         ));
     }
-    let modifier = format!("+{lease_seconds} seconds");
-    let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason IN ('INACTIVE', 'MANUAL') AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
-        .bind(modifier)
-        .bind(issue_code)
-        .bind(lease_token)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
-    Ok(renewed == 1)
+    let input = (issue_code, lease_token, lease_seconds);
+    write::run(
+        pool,
+        "renew inactive cleanup lease",
+        &input,
+        |conn, &(issue_code, lease_token, lease_seconds)| {
+            Box::pin(async move {
+                let modifier = format!("+{lease_seconds} seconds");
+                Ok(sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason IN ('INACTIVE', 'MANUAL') AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
+                    .bind(modifier)
+                    .bind(issue_code)
+                    .bind(lease_token)
+                    .execute(conn)
+                    .await
+                    .map_err(AppError::Database)?
+                    .rows_affected() == 1)
+            })
+        },
+    )
+    .await
 }
 
 async fn require_inactive_issue_lease(
@@ -487,8 +542,10 @@ pub async fn resume_deleting_bundles(pool: &SqlitePool) -> Result<u64, AppError>
 }
 
 pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
-    let result = sqlx::query(
-        r#"
+    let result = write::run(pool, "fail stale processing bundles", &(), |conn, _| {
+        Box::pin(async move {
+            Ok(sqlx::query(
+                r#"
         UPDATE bundles
         SET failure_stage = process_stage,
             failure_code = 'PROCESS_INTERRUPTED',
@@ -497,20 +554,30 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
             failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
         WHERE status IN ('PENDING', 'PROCESSING')
         "#,
-    )
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
+            )
+            .execute(conn)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected())
+        })
+    })
+    .await?;
 
-    Ok(result.rows_affected())
+    Ok(result)
 }
 
 pub async fn fail_stale_processing_bundles_before(
     pool: &SqlitePool,
     created_before: &str,
 ) -> Result<u64, AppError> {
-    let result = sqlx::query(
-        r#"
+    let result = write::run(
+        pool,
+        "fail stale processing bundles before cutoff",
+        &created_before,
+        |conn, created_before| {
+            Box::pin(async move {
+                Ok(sqlx::query(
+                    r#"
         UPDATE bundles
         SET failure_stage = process_stage,
             failure_code = 'PROCESS_INTERRUPTED',
@@ -520,13 +587,18 @@ pub async fn fail_stale_processing_bundles_before(
         WHERE status IN ('PENDING', 'PROCESSING')
           AND datetime(created_at) <= datetime(?)
         "#,
+                )
+                .bind(created_before)
+                .execute(conn)
+                .await
+                .map_err(AppError::Database)?
+                .rows_affected())
+            })
+        },
     )
-    .bind(created_before)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
+    .await?;
 
-    Ok(result.rows_affected())
+    Ok(result)
 }
 
 #[derive(FromRow)]
