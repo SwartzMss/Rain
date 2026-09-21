@@ -153,6 +153,16 @@ pub async fn recover_active_before(
 
 pub async fn cleanup_expired(pool: &SqlitePool, retention_seconds: u64) -> Result<u64, AppError> {
     let modifier = format!("-{retention_seconds} seconds");
-    Ok(sqlx::query("DELETE FROM skill_runs WHERE status IN ('SUCCEEDED','FAILED','CANCELLED') AND datetime(completed_at) <= datetime('now', ?)")
-        .bind(modifier).execute(pool).await.map_err(AppError::Database)?.rows_affected())
+    let mut removed = 0;
+    loop {
+        let affected = crate::db::write::run(pool, "expired-skill-runs", &modifier, |conn, modifier| Box::pin(async move {
+            Ok(sqlx::query("DELETE FROM skill_runs WHERE id IN (SELECT id FROM skill_runs WHERE status IN ('SUCCEEDED','FAILED','CANCELLED') AND datetime(completed_at) <= datetime('now', ?) LIMIT 100)")
+                .bind(modifier).execute(conn).await.map_err(AppError::Database)?.rows_affected())
+        })).await?;
+        removed += affected;
+        if affected < 100 {
+            return Ok(removed);
+        }
+        tokio::task::yield_now().await;
+    }
 }

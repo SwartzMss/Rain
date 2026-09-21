@@ -15,8 +15,6 @@ use crate::{
 
 use super::lifecycle::{failure_details, set_bundle_stage};
 
-const FAILURE_STATUS_RETRY_DELAYS_MS: [u64; 2] = [100, 250];
-
 #[cfg(test)]
 async fn move_bundle_directory_with_retry_using<R, Fut>(
     source: &Path,
@@ -106,55 +104,43 @@ pub async fn finalize_bundle_failed(
     failure: &AppError,
 ) {
     let failure = failure_details(failure);
-    let max_attempts = FAILURE_STATUS_RETRY_DELAYS_MS.len() + 1;
-    let mut terminal_state_persisted = false;
-
-    for attempt in 1..=max_attempts {
-        let result = sqlx::query(
-            r#"
+    let result = crate::db::write::run(
+        pool,
+        "finalize failed bundle",
+        &(
+            bundle_id,
+            failure.code,
+            failure.reason.as_str(),
+            failure.retryable,
+        ),
+        |conn, &(bundle_id, code, reason, retryable)| {
+            Box::pin(async move {
+                sqlx::query(
+                    r#"
             UPDATE bundles
             SET failure_stage = process_stage,
                 failure_code = ?, failure_reason = ?, retryable = ?,
                 status = 'FAILED'
             WHERE id = ?
             "#,
-        )
-        .bind(failure.code)
-        .bind(&failure.reason)
-        .bind(failure.retryable)
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
-        .map_err(AppError::Database);
-        match result {
-            Ok(()) => {
-                terminal_state_persisted = true;
-                break;
-            }
-            Err(error) => {
-                error!(
-                    bundle_id,
-                    bundle_hash,
-                    attempt,
-                    max_attempts,
-                    error = %error,
-                    "failed to persist terminal upload state"
-                );
-                if attempt < max_attempts {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        FAILURE_STATUS_RETRY_DELAYS_MS[attempt - 1],
-                    ))
-                    .await;
-                }
-            }
-        }
-    }
-
-    if !terminal_state_persisted {
+                )
+                .bind(code)
+                .bind(reason)
+                .bind(retryable)
+                .bind(bundle_id)
+                .execute(conn)
+                .await
+                .map(|_| ())
+                .map_err(AppError::Database)
+            })
+        },
+    )
+    .await;
+    if let Err(error) = result {
         error!(
             bundle_id,
             bundle_hash,
+            %error,
             "upload terminal state could not be persisted; startup recovery will retry"
         );
     }
@@ -167,10 +153,22 @@ pub async fn finalize_bundle_failed(
             "failed to clean database artifacts for failed upload"
         );
     }
-    if let Err(error) = sqlx::query("UPDATE bundles SET content_size_bytes = 0 WHERE id = ?")
-        .bind(bundle_id)
-        .execute(pool)
-        .await
+    if let Err(error) = crate::db::write::run(
+        pool,
+        "release failed bundle quota",
+        &(bundle_id,),
+        |conn, &(bundle_id,)| {
+            Box::pin(async move {
+                sqlx::query("UPDATE bundles SET content_size_bytes = 0 WHERE id = ?")
+                    .bind(bundle_id)
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(AppError::Database)
+            })
+        },
+    )
+    .await
     {
         error!(
             bundle_id,
@@ -199,34 +197,29 @@ pub async fn finalize_bundle_ready_with_retry(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
 ) -> Result<(), AppError> {
-    let mut last_error: Option<AppError> = None;
-    for attempt in 1..=3 {
-        match finalize_bundle_ready(pool, bundle_id).await {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                error!(
-                    bundle_id = %bundle_id,
-                    attempt,
-                    error = %error,
-                    "failed to finalize uploaded log bundle"
-                );
-                last_error = Some(error);
-                tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
-            }
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| AppError::Database(sqlx::Error::RowNotFound)))
+    finalize_bundle_ready(pool, bundle_id).await
 }
 
 async fn finalize_bundle_ready(pool: &sqlx::SqlitePool, bundle_id: &str) -> Result<(), AppError> {
     set_bundle_stage(pool, bundle_id, "PUBLISHING").await?;
-    sqlx::query("UPDATE bundles SET status = 'READY' WHERE id = ? AND status = 'PROCESSING'")
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
-    Ok(())
+    crate::db::write::run(
+        pool,
+        "finalize ready bundle",
+        &(bundle_id,),
+        |conn, &(bundle_id,)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE bundles SET status = 'READY' WHERE id = ? AND status = 'PROCESSING'",
+                )
+                .bind(bundle_id)
+                .execute(conn)
+                .await
+                .map_err(AppError::Database)?;
+                Ok(())
+            })
+        },
+    )
+    .await
 }
 
 async fn cleanup_failed_bundle_database_artifacts(

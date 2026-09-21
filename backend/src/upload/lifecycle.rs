@@ -7,28 +7,38 @@ pub async fn reserve_upload_bundle(
     bundle_hash: &str,
     uploader_user_id: &str,
 ) -> Result<(), AppError> {
-    let result = sqlx::query(
-        r#"
-        INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, uploader_user_id, size_bytes)
-        SELECT ?, code, ?, '正在接收上传', 'PENDING', 'RECEIVING', ?, 0
-        FROM issues
-        WHERE code = ? AND status = 'ACTIVE' AND owner_user_id = ?
-        "#,
+    crate::db::write::run(
+        pool,
+        "reserve upload bundle",
+        &(bundle_id, issue_code, bundle_hash, uploader_user_id),
+        |conn, &(bundle_id, issue_code, bundle_hash, uploader_user_id)| {
+            Box::pin(async move {
+                let result = sqlx::query(
+                    r#"
+                    INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, uploader_user_id, size_bytes)
+                    SELECT ?, code, ?, '正在接收上传', 'PENDING', 'RECEIVING', ?, 0
+                    FROM issues
+                    WHERE code = ? AND status = 'ACTIVE' AND owner_user_id = ?
+                    "#,
+                )
+                .bind(bundle_id)
+                .bind(bundle_hash)
+                .bind(uploader_user_id)
+                .bind(issue_code)
+                .bind(uploader_user_id)
+                .execute(conn)
+                .await
+                .map_err(AppError::Database)?;
+                if result.rows_affected() != 1 {
+                    return Err(AppError::Conflict(format!(
+                        "issue {issue_code} is missing, being deleted, or not owned by the uploader"
+                    )));
+                }
+                Ok(())
+            })
+        },
     )
-    .bind(bundle_id)
-    .bind(bundle_hash)
-    .bind(uploader_user_id)
-    .bind(issue_code)
-    .bind(uploader_user_id)
-    .execute(pool)
     .await
-    .map_err(AppError::Database)?;
-    if result.rows_affected() != 1 {
-        return Err(AppError::Conflict(format!(
-            "issue {issue_code} is missing, being deleted, or not owned by the uploader"
-        )));
-    }
-    Ok(())
 }
 
 pub async fn finalize_upload_reservation(
@@ -37,27 +47,49 @@ pub async fn finalize_upload_reservation(
     bundle_name: &str,
     total_bytes: u64,
 ) -> Result<(), AppError> {
-    let result = sqlx::query("UPDATE bundles SET name=?, size_bytes=?, status='PROCESSING' WHERE id=? AND status='PENDING' AND process_stage='RECEIVING'")
-        .bind(bundle_name)
-        .bind(total_bytes as i64)
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
-    if result.rows_affected() != 1 {
-        return Err(AppError::Conflict(
-            "upload reservation is missing or no longer pending".into(),
-        ));
-    }
-    Ok(())
+    crate::db::write::run(
+        pool,
+        "finalize upload reservation",
+        &(bundle_id, bundle_name, total_bytes),
+        |conn, &(bundle_id, bundle_name, total_bytes)| {
+            Box::pin(async move {
+                let result = sqlx::query("UPDATE bundles SET name=?, size_bytes=?, status='PROCESSING' WHERE id=? AND status='PENDING' AND process_stage='RECEIVING'")
+                    .bind(bundle_name)
+                    .bind(total_bytes as i64)
+                    .bind(bundle_id)
+                    .execute(conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                if result.rows_affected() != 1 {
+                    return Err(AppError::Conflict(
+                        "upload reservation is missing or no longer pending".into(),
+                    ));
+                }
+                Ok(())
+            })
+        },
+    )
+    .await
 }
 
 pub async fn remove_upload_reservation(pool: &sqlx::SqlitePool, bundle_id: &str) {
-    if let Err(error) = sqlx::query(
-        "DELETE FROM bundles WHERE id=? AND status='PENDING' AND process_stage='RECEIVING'",
+    if let Err(error) = crate::db::write::run(
+        pool,
+        "remove upload reservation",
+        &(bundle_id,),
+        |conn, &(bundle_id,)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "DELETE FROM bundles WHERE id=? AND status='PENDING' AND process_stage='RECEIVING'",
+                )
+                .bind(bundle_id)
+                .execute(conn)
+                .await
+                .map(|_| ())
+                .map_err(AppError::Database)
+            })
+        },
     )
-    .bind(bundle_id)
-    .execute(pool)
     .await
     {
         tracing::warn!(bundle_id, %error, "failed to remove upload reservation");
@@ -73,29 +105,39 @@ pub async fn create_processing_bundle(
     total_bytes: u64,
     uploader_user_id: Option<&str>,
 ) -> Result<(), AppError> {
-    let result = sqlx::query(
-        r#"
-        INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, uploader_user_id, size_bytes)
-        SELECT ?, code, ?, ?, 'PROCESSING', 'RECEIVING', ?, ?
-        FROM issues
-        WHERE code = ? AND status = 'ACTIVE'
-        "#,
+    crate::db::write::run(
+        pool,
+        "create processing bundle",
+        &(bundle_id, issue_code, bundle_hash, bundle_name, total_bytes, uploader_user_id),
+        |conn, &(bundle_id, issue_code, bundle_hash, bundle_name, total_bytes, uploader_user_id)| {
+            Box::pin(async move {
+                let result = sqlx::query(
+                    r#"
+                    INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, uploader_user_id, size_bytes)
+                    SELECT ?, code, ?, ?, 'PROCESSING', 'RECEIVING', ?, ?
+                    FROM issues
+                    WHERE code = ? AND status = 'ACTIVE'
+                    "#,
+                )
+                .bind(bundle_id)
+                .bind(bundle_hash)
+                .bind(bundle_name)
+                .bind(uploader_user_id)
+                .bind(Some(total_bytes as i64))
+                .bind(issue_code)
+                .execute(conn)
+                .await
+                .map_err(AppError::Database)?;
+                if result.rows_affected() == 0 {
+                    return Err(AppError::Conflict(format!(
+                        "issue {issue_code} is missing or being deleted"
+                    )));
+                }
+                Ok(())
+            })
+        },
     )
-    .bind(bundle_id)
-    .bind(bundle_hash)
-    .bind(bundle_name)
-    .bind(uploader_user_id)
-    .bind(Some(total_bytes as i64))
-    .bind(issue_code)
-    .execute(pool)
     .await
-    .map_err(AppError::Database)?;
-    if result.rows_affected() == 0 {
-        return Err(AppError::Conflict(format!(
-            "issue {issue_code} is missing or being deleted"
-        )));
-    }
-    Ok(())
 }
 
 pub(crate) async fn set_bundle_stage(
@@ -109,13 +151,25 @@ pub(crate) async fn set_bundle_stage(
     ) {
         return Err(AppError::Config(format!("invalid bundle stage: {stage}")));
     }
-    sqlx::query("UPDATE bundles SET process_stage = ? WHERE id = ? AND status = 'PROCESSING'")
-        .bind(stage)
-        .bind(bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
-    Ok(())
+    crate::db::write::run(
+        pool,
+        "set bundle stage",
+        &(bundle_id, stage),
+        |conn, &(bundle_id, stage)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE bundles SET process_stage = ? WHERE id = ? AND status = 'PROCESSING'",
+                )
+                .bind(stage)
+                .bind(bundle_id)
+                .execute(conn)
+                .await
+                .map_err(AppError::Database)?;
+                Ok(())
+            })
+        },
+    )
+    .await
 }
 
 pub(crate) struct FailureDetails {
@@ -168,6 +222,40 @@ mod tests {
         create_processing_bundle, remove_upload_reservation, reserve_upload_bundle,
         set_bundle_stage, user_facing_failure_reason,
     };
+
+    #[tokio::test]
+    async fn upload_metadata_waits_for_gate_before_borrowing_connection() {
+        use std::time::Duration;
+
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('GATE', 'Gate')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let guard = crate::db::write::acquire(&pool).await;
+        let write = create_processing_bundle(&pool, "gated", "GATE", "gated-hash", "name", 1, None);
+        tokio::pin!(write);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut write)
+                .await
+                .is_err()
+        );
+        // A queued upload must leave the pool available to reads.
+        let count: i64 = tokio::time::timeout(
+            Duration::from_secs(1),
+            sqlx::query_scalar("SELECT COUNT(*) FROM bundles").fetch_one(&pool),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(count, 0);
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), write)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn bundle_creation_requires_an_active_issue_atomically() {
