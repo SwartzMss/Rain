@@ -284,8 +284,11 @@ async fn claim_manual_recovery(
     token: &str,
     seconds: u64,
 ) -> Result<bool, AppError> {
-    let changed = sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now', '+' || ? || ' seconds'), deletion_retry_at=NULL WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND (deletion_retry_at IS NULL OR datetime(deletion_retry_at) <= datetime('now')) AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
-        .bind(token).bind(seconds as i64).bind(code).execute(pool).await.map_err(AppError::Database)?.rows_affected();
+    let input = (token, seconds as i64, code);
+    let changed = crate::db::write::run(pool, "claim manual issue deletion", &input, |conn, (token, seconds, code)| Box::pin(async move {
+        Ok(sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now', '+' || ? || ' seconds'), deletion_retry_at=NULL WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND (deletion_retry_at IS NULL OR datetime(deletion_retry_at) <= datetime('now')) AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
+            .bind(token).bind(seconds).bind(code).execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
     Ok(changed == 1)
 }
 
@@ -293,19 +296,28 @@ async fn normalize_legacy_manual_deletion(
     pool: &sqlx::SqlitePool,
     code: &str,
 ) -> Result<(), AppError> {
+    crate::db::write::run(pool, "normalize legacy manual deletion", &code, |conn, code| Box::pin(async move {
     sqlx::query(
         "UPDATE issues SET deletion_reason='MANUAL', deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_retry_at=NULL WHERE code=? AND status='DELETING' AND deletion_reason IS NULL",
     )
     .bind(code)
-    .execute(pool)
+    .execute(conn)
     .await
     .map_err(AppError::Database)?;
+    Ok(())
+    })).await?;
     Ok(())
 }
 
 async fn schedule_manual_retry(pool: &sqlx::SqlitePool, code: &str, token: &str) {
-    let _ = sqlx::query("UPDATE issues SET deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_attempts=deletion_attempts+1, deletion_retry_at=datetime('now', '+' || MIN((deletion_attempts + 1) * 60, 3600) || ' seconds') WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND deletion_lease_token=?")
-        .bind(code).bind(token).execute(pool).await;
+    let input = (code, token);
+    if let Err(error) = crate::db::write::run(pool, "schedule manual issue deletion retry", &input, |conn, (code, token)| Box::pin(async move {
+        sqlx::query("UPDATE issues SET deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_attempts=deletion_attempts+1, deletion_retry_at=datetime('now', '+' || MIN((deletion_attempts + 1) * 60, 3600) || ' seconds') WHERE code=? AND status='DELETING' AND deletion_reason='MANUAL' AND deletion_lease_token=?")
+            .bind(code).bind(token).execute(conn).await.map_err(AppError::Database)?;
+        Ok(())
+    })).await {
+        tracing::warn!(issue_code = code, %error, "failed to schedule manual issue cleanup retry");
+    }
 }
 
 async fn cleanup_inactive_issues_with_lease(
@@ -406,17 +418,13 @@ async fn claim_inactive_issue(
     lease_token: &str,
     lease_seconds: u64,
 ) -> Result<bool, AppError> {
-    let lease_modifier = format!("+{lease_seconds} seconds");
-    let claimed = sqlx::query("UPDATE issues SET status='DELETING', deletion_reason='INACTIVE', inactive_claim_days=?, deletion_lease_token=?, deletion_lease_until=datetime('now',?), deletion_retry_at=NULL, deletion_attempts=0 WHERE code=? AND status='ACTIVE' AND datetime(last_activity_at) < datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM bundles WHERE bundles.issue_code=issues.code AND bundles.status IN ('PENDING','PROCESSING'))")
-        .bind(days as i64)
-        .bind(lease_token)
-        .bind(lease_modifier)
-        .bind(code)
-        .bind(modifier)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
+    let input = (days as i64, lease_token, lease_seconds, code, modifier);
+    let claimed = crate::db::write::run(pool, "claim inactive issue deletion", &input, |conn, (days, lease_token, lease_seconds, code, modifier)| Box::pin(async move {
+        let lease_modifier = format!("+{lease_seconds} seconds");
+        Ok(sqlx::query("UPDATE issues SET status='DELETING', deletion_reason='INACTIVE', inactive_claim_days=?, deletion_lease_token=?, deletion_lease_until=datetime('now',?), deletion_retry_at=NULL, deletion_attempts=0 WHERE code=? AND status='ACTIVE' AND datetime(last_activity_at) < datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM bundles WHERE bundles.issue_code=issues.code AND bundles.status IN ('PENDING','PROCESSING'))")
+            .bind(days).bind(lease_token).bind(lease_modifier).bind(code).bind(modifier)
+            .execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
     Ok(claimed == 1)
 }
 
@@ -426,25 +434,22 @@ async fn claim_inactive_recovery(
     lease_token: &str,
     lease_seconds: u64,
 ) -> Result<bool, AppError> {
-    let lease_modifier = format!("+{lease_seconds} seconds");
-    let claimed = sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now',?) WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND inactive_claim_days IS NOT NULL AND (deletion_retry_at IS NULL OR datetime(deletion_retry_at) <= datetime('now')) AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
-        .bind(lease_token)
-        .bind(lease_modifier)
-        .bind(code)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
+    let input = (lease_token, lease_seconds, code);
+    let claimed = crate::db::write::run(pool, "claim inactive issue recovery", &input, |conn, (lease_token, lease_seconds, code)| Box::pin(async move {
+        let lease_modifier = format!("+{lease_seconds} seconds");
+        Ok(sqlx::query("UPDATE issues SET deletion_lease_token=?, deletion_lease_until=datetime('now',?) WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND inactive_claim_days IS NOT NULL AND (deletion_retry_at IS NULL OR datetime(deletion_retry_at) <= datetime('now')) AND (deletion_lease_until IS NULL OR datetime(deletion_lease_until) <= datetime('now'))")
+            .bind(lease_token).bind(lease_modifier).bind(code).execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
     Ok(claimed == 1)
 }
 
 async fn schedule_inactive_retry(pool: &sqlx::SqlitePool, code: &str, lease_token: &str) {
-    if let Err(error) = sqlx::query("UPDATE issues SET deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_attempts=deletion_attempts+1, deletion_retry_at=datetime('now', '+' || MIN((deletion_attempts + 1) * 60, 3600) || ' seconds') WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=?")
-        .bind(code)
-        .bind(lease_token)
-        .execute(pool)
-        .await
-    {
+    let input = (code, lease_token);
+    if let Err(error) = crate::db::write::run(pool, "schedule inactive issue deletion retry", &input, |conn, (code, lease_token)| Box::pin(async move {
+        sqlx::query("UPDATE issues SET deletion_lease_token=NULL, deletion_lease_until=NULL, deletion_attempts=deletion_attempts+1, deletion_retry_at=datetime('now', '+' || MIN((deletion_attempts + 1) * 60, 3600) || ' seconds') WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=?")
+            .bind(code).bind(lease_token).execute(conn).await.map_err(AppError::Database)?;
+        Ok(())
+    })).await {
         tracing::warn!(issue_code = code, %error, "failed to schedule inactive issue cleanup retry");
     }
 }
@@ -469,13 +474,12 @@ async fn finish_auto_issue_deletion(
         require_inactive_lease(pool, code, lease_token, lease_seconds).await?;
         if bundle.status != "DELETED" {
             if bundle.status != "DELETING" {
-                sqlx::query(
-                    "UPDATE bundles SET status='DELETING', deleted_at=CURRENT_TIMESTAMP WHERE id=?",
-                )
-                .bind(&bundle.id)
-                .execute(pool)
-                .await
-                .map_err(AppError::Database)?;
+                let bundle_id = bundle.id.clone();
+                crate::db::write::run(pool, "claim automatic bundle deletion", &bundle_id, |conn, bundle_id| Box::pin(async move {
+                    sqlx::query("UPDATE bundles SET status='DELETING', deleted_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('DELETING', 'DELETED')")
+                        .bind(bundle_id).execute(conn).await.map_err(AppError::Database)?;
+                    Ok(())
+                })).await?;
             }
             finish_bundle_deletion_with_inactive_lease(
                 pool,
@@ -488,31 +492,32 @@ async fn finish_auto_issue_deletion(
         }
         require_inactive_lease(pool, code, lease_token, lease_seconds).await?;
     }
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
-        .bind(code)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-    let deleted = sqlx::query("DELETE FROM issues WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=?")
-        .bind(code)
-        .bind(lease_token)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
-    if deleted != 1 {
-        tx.rollback().await.map_err(AppError::Database)?;
-        return Ok(false);
-    }
-    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,action,old_value,new_value) VALUES(?,'SYSTEM','ISSUE_AUTO_EXPIRED',?,?)")
-        .bind(Uuid::new_v4().to_string())
-        .bind(format!("issue={code};owner={};last_activity_at={last_activity_at}", owner.unwrap_or("")))
-        .bind(format!("inactive_days={days};bundles={}", bundles.len()))
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-    tx.commit().await.map_err(AppError::Database)?;
+    let audit_id = Uuid::new_v4().to_string();
+    let owner = owner.unwrap_or("").to_owned();
+    let input = (
+        code,
+        lease_token,
+        audit_id,
+        owner,
+        last_activity_at,
+        days as i64,
+        bundles.len() as i64,
+    );
+    crate::db::write::run(pool, "finish automatic issue deletion", &input, |conn, (code, lease_token, audit_id, owner, last_activity_at, days, bundles)| Box::pin(async move {
+        sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
+            .bind(code).execute(&mut *conn).await.map_err(AppError::Database)?;
+        let issue_deleted = sqlx::query("DELETE FROM issues WHERE code=? AND status='DELETING' AND deletion_reason='INACTIVE' AND deletion_lease_token=?")
+            .bind(code).bind(lease_token).execute(&mut *conn).await.map_err(AppError::Database)?.rows_affected();
+        if issue_deleted != 1 {
+            return Err(AppError::Conflict(format!("inactive cleanup lease for issue {code} was lost")));
+        }
+        sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,action,old_value,new_value) VALUES(?,'SYSTEM','ISSUE_AUTO_EXPIRED',?,?)")
+            .bind(audit_id)
+            .bind(format!("issue={code};owner={owner};last_activity_at={last_activity_at}"))
+            .bind(format!("inactive_days={days};bundles={bundles}"))
+            .execute(&mut *conn).await.map_err(AppError::Database)?;
+        Ok(())
+    })).await?;
     Ok(true)
 }
 
@@ -663,20 +668,18 @@ pub async fn delete_issue_bundle(
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("bundle {bundle_hash}")))?;
     reject_processing_bundle(&bundle)?;
-    sqlx::query(
-        "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
-    )
-    .bind(&bundle.id)
-    .execute(&state.db.pool)
-    .await
-    .map_err(AppError::Database)?;
+    let bundle_id = bundle.id.clone();
+    crate::db::write::run(&state.db.pool, "claim bundle deletion", &bundle_id, |conn, bundle_id| Box::pin(async move {
+        sqlx::query("UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND status NOT IN ('DELETING', 'DELETED')")
+            .bind(bundle_id).execute(conn).await.map_err(AppError::Database)?;
+        Ok(())
+    })).await?;
 
     // Finish request-scoped writes before the heavyweight cleanup can compete for
     // SQLite's single writer lock.
     touch_issue_activity_best_effort(&state.db.pool, &issue_code, "bundle deletion").await;
 
     let pool = state.db.pool.clone();
-    let bundle_id = bundle.id.clone();
     tokio::spawn(async move {
         if let Err(error) = crate::db::finish_bundle_deletion(&pool, &bundle_id).await {
             tracing::error!(bundle_id, %error, "background bundle deletion failed; it will be retried at startup");
@@ -694,13 +697,10 @@ pub async fn delete_issue(
 ) -> Result<HttpResponse, AppError> {
     let issue_code =
         require_issue_owner_for_delete(&state.db.pool, &path.into_inner(), &user.0.id).await?;
-    let claimed =
-        sqlx::query("UPDATE issues SET status = 'DELETING', deletion_reason = 'MANUAL', inactive_claim_days = NULL, deletion_lease_token = NULL, deletion_lease_until = NULL, deletion_retry_at = NULL, deletion_attempts = 0 WHERE code = ? AND status = 'ACTIVE'")
-            .bind(&issue_code)
-            .execute(&state.db.pool)
-            .await
-            .map_err(AppError::Database)?
-            .rows_affected();
+    let claimed = crate::db::write::run(&state.db.pool, "claim manual issue deletion", &issue_code, |conn, issue_code| Box::pin(async move {
+        Ok(sqlx::query("UPDATE issues SET status = 'DELETING', deletion_reason = 'MANUAL', inactive_claim_days = NULL, deletion_lease_token = NULL, deletion_lease_until = NULL, deletion_retry_at = NULL, deletion_attempts = 0 WHERE code = ? AND status = 'ACTIVE'")
+            .bind(issue_code).execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
     let newly_claimed = claimed == 1;
     if claimed == 0 {
         let issue_state: Option<(String, Option<String>)> =
@@ -744,13 +744,16 @@ pub async fn delete_issue(
 
     if let Err(error) = reject_processing_bundles(&bundles) {
         if newly_claimed {
+            crate::db::write::run(&state.db.pool, "restore issue after deletion rejection", &issue_code, |conn, issue_code| Box::pin(async move {
             sqlx::query(
                 "UPDATE issues SET status = 'ACTIVE', deletion_reason = NULL, inactive_claim_days = NULL, deletion_lease_token = NULL, deletion_lease_until = NULL, deletion_retry_at = NULL, deletion_attempts = 0 WHERE code = ? AND status = 'DELETING'",
             )
-            .bind(&issue_code)
-            .execute(&state.db.pool)
+            .bind(issue_code)
+            .execute(conn)
             .await
             .map_err(AppError::Database)?;
+            Ok(())
+            })).await?;
         }
         return Err(error);
     }
@@ -811,13 +814,12 @@ async fn finish_manual_issue_deletion(
             continue;
         }
         if bundle.status != "DELETING" {
-            sqlx::query(
-                "UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
-            )
-            .bind(&bundle.id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+            let bundle_id = bundle.id.clone();
+            crate::db::write::run(pool, "claim manual bundle deletion", &bundle_id, |conn, bundle_id| Box::pin(async move {
+                sqlx::query("UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND status NOT IN ('DELETING', 'DELETED')")
+                    .bind(bundle_id).execute(conn).await.map_err(AppError::Database)?;
+                Ok(())
+            })).await?;
         }
         crate::db::finish_bundle_deletion_with_inactive_lease(
             pool,
@@ -829,26 +831,17 @@ async fn finish_manual_issue_deletion(
         .await?;
     }
 
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
-        .bind(issue_code)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?;
-    let deleted = sqlx::query("DELETE FROM issues WHERE code = ? AND status = 'DELETING' AND deletion_reason = 'MANUAL' AND deletion_lease_token = ?")
-        .bind(issue_code)
-        .bind(lease_token)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
-    if deleted != 1 {
-        tx.rollback().await.map_err(AppError::Database)?;
-        return Err(AppError::Conflict(
-            "manual issue deletion lease was lost".into(),
-        ));
-    }
-    tx.commit().await.map_err(AppError::Database)?;
+    let input = (issue_code, lease_token);
+    crate::db::write::run(pool, "finish manual issue deletion", &input, |conn, (issue_code, lease_token)| Box::pin(async move {
+        sqlx::query("DELETE FROM saved_searches WHERE scope_type='ISSUE' AND scope_key=?")
+            .bind(issue_code).execute(&mut *conn).await.map_err(AppError::Database)?;
+        let deleted = sqlx::query("DELETE FROM issues WHERE code = ? AND status = 'DELETING' AND deletion_reason = 'MANUAL' AND deletion_lease_token = ?")
+            .bind(issue_code).bind(lease_token).execute(&mut *conn).await.map_err(AppError::Database)?.rows_affected();
+        if deleted != 1 {
+            return Err(AppError::Conflict("manual issue deletion lease was lost".into()));
+        }
+        Ok(())
+    })).await?;
     Ok(())
 }
 

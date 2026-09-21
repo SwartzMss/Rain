@@ -70,8 +70,11 @@ pub async fn find_active_owned(
 }
 
 pub async fn mark_running(pool: &SqlitePool, id: &str) -> Result<bool, AppError> {
-    Ok(sqlx::query("UPDATE skill_runs SET status='RUNNING',started_at=CURRENT_TIMESTAMP WHERE id=? AND status='QUEUED' AND cancel_requested=0")
-        .bind(id).execute(pool).await.map_err(AppError::Database)?.rows_affected() == 1)
+    let affected = crate::db::write::run(pool, "mark skill run running", &id, |conn, id| Box::pin(async move {
+        Ok(sqlx::query("UPDATE skill_runs SET status='RUNNING',started_at=CURRENT_TIMESTAMP WHERE id=? AND status='QUEUED' AND cancel_requested=0")
+            .bind(id).execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
+    Ok(affected == 1)
 }
 
 pub async fn update_progress(
@@ -80,9 +83,13 @@ pub async fn update_progress(
     iterations: usize,
     calls: usize,
 ) -> Result<bool, AppError> {
-    Ok(sqlx::query("UPDATE skill_runs SET iteration_count=?,tool_call_count=? WHERE id=? AND status='RUNNING' AND cancel_requested=0")
-        .bind(iterations as i64).bind(calls as i64).bind(id)
-        .execute(pool).await.map_err(AppError::Database)?.rows_affected() == 1)
+    let input = (id, iterations as i64, calls as i64);
+    let affected = crate::db::write::run(pool, "update skill run progress", &input, |conn, &(id, iterations, calls)| Box::pin(async move {
+        Ok(sqlx::query("UPDATE skill_runs SET iteration_count=?,tool_call_count=? WHERE id=? AND status='RUNNING' AND cancel_requested=0")
+            .bind(iterations).bind(calls).bind(id)
+            .execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
+    Ok(affected == 1)
 }
 
 pub struct NewSkillRunStep<'a> {
@@ -98,33 +105,42 @@ pub struct NewSkillRunStep<'a> {
 }
 
 pub async fn record_step(pool: &SqlitePool, step: &NewSkillRunStep<'_>) -> Result<bool, AppError> {
-    let affected = sqlx::query("INSERT INTO skill_run_steps(id,run_id,sequence,iteration,tool_name,arguments_summary,hit_count,evidence_json,elapsed_ms,status) SELECT ?,?,?,?,?,?,?,?,?,? FROM skill_runs WHERE id=? AND status='RUNNING' AND cancel_requested=0")
-        .bind(Uuid::new_v4().to_string())
-        .bind(step.run_id)
-        .bind(step.sequence as i64)
-        .bind(step.iteration as i64)
-        .bind(step.tool_name)
-        .bind(step.arguments_summary)
-        .bind(step.hit_count as i64)
-        .bind(step.evidence_json)
-        .bind(step.elapsed_ms.min(i64::MAX as u64) as i64)
-        .bind(step.status)
-        .bind(step.run_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
+    let input = (
+        Uuid::new_v4().to_string(),
+        step.run_id,
+        step.sequence as i64,
+        step.iteration as i64,
+        step.tool_name,
+        step.arguments_summary,
+        step.hit_count as i64,
+        step.evidence_json,
+        step.elapsed_ms.min(i64::MAX as u64) as i64,
+        step.status,
+    );
+    let affected = crate::db::write::run(pool, "record skill run step", &input, |conn, (id, run_id, sequence, iteration, tool_name, arguments_summary, hit_count, evidence_json, elapsed_ms, status)| Box::pin(async move {
+        Ok(sqlx::query("INSERT INTO skill_run_steps(id,run_id,sequence,iteration,tool_name,arguments_summary,hit_count,evidence_json,elapsed_ms,status) SELECT ?,?,?,?,?,?,?,?,?,? FROM skill_runs WHERE id=? AND status='RUNNING' AND cancel_requested=0")
+            .bind(id).bind(run_id).bind(sequence).bind(iteration).bind(tool_name).bind(arguments_summary).bind(hit_count).bind(evidence_json).bind(elapsed_ms).bind(status).bind(run_id)
+            .execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
     Ok(affected == 1)
 }
 
 pub async fn cancel(pool: &SqlitePool, id: &str, user_id: &str) -> Result<bool, AppError> {
-    Ok(sqlx::query("UPDATE skill_runs SET cancel_requested=1,status='CANCELLED',completed_at=CURRENT_TIMESTAMP,error_code=NULL,error_message=NULL WHERE id=? AND user_id=? AND status IN ('QUEUED','RUNNING')")
-        .bind(id).bind(user_id).execute(pool).await.map_err(AppError::Database)?.rows_affected() == 1)
+    let input = (id, user_id);
+    let affected = crate::db::write::run(pool, "cancel skill run", &input, |conn, (id, user_id)| Box::pin(async move {
+        Ok(sqlx::query("UPDATE skill_runs SET cancel_requested=1,status='CANCELLED',completed_at=CURRENT_TIMESTAMP,error_code=NULL,error_message=NULL WHERE id=? AND user_id=? AND status IN ('QUEUED','RUNNING')")
+            .bind(id).bind(user_id).execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
+    Ok(affected == 1)
 }
 
 pub async fn complete(pool: &SqlitePool, id: &str, result_json: &str) -> Result<bool, AppError> {
-    Ok(sqlx::query("UPDATE skill_runs SET status='SUCCEEDED',result_json=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND status='RUNNING' AND cancel_requested=0")
-        .bind(result_json).bind(id).execute(pool).await.map_err(AppError::Database)?.rows_affected() == 1)
+    let input = (id, result_json);
+    let affected = crate::db::write::run(pool, "complete skill run", &input, |conn, (id, result_json)| Box::pin(async move {
+        Ok(sqlx::query("UPDATE skill_runs SET status='SUCCEEDED',result_json=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND status='RUNNING' AND cancel_requested=0")
+            .bind(result_json).bind(id).execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
+    Ok(affected == 1)
 }
 
 pub async fn fail(
@@ -133,22 +149,30 @@ pub async fn fail(
     code: &str,
     message: &str,
 ) -> Result<bool, AppError> {
-    Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code=?,error_message=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('QUEUED','RUNNING') AND cancel_requested=0")
-        .bind(code).bind(message).bind(id).execute(pool).await.map_err(AppError::Database)?.rows_affected() == 1)
+    let input = (id, code, message);
+    let affected = crate::db::write::run(pool, "fail skill run", &input, |conn, (id, code, message)| Box::pin(async move {
+        Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code=?,error_message=?,completed_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('QUEUED','RUNNING') AND cancel_requested=0")
+            .bind(code).bind(message).bind(id).execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await?;
+    Ok(affected == 1)
 }
 
 pub async fn recover_active(pool: &SqlitePool) -> Result<u64, AppError> {
-    Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code='SERVICE_RESTARTED',error_message='服务重启导致任务中断',completed_at=CURRENT_TIMESTAMP WHERE status IN ('QUEUED','RUNNING')")
-        .execute(pool).await.map_err(AppError::Database)?.rows_affected())
+    crate::db::write::run(pool, "recover active skill runs", &(), |conn, _| Box::pin(async move {
+        Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code='SERVICE_RESTARTED',error_message='服务重启导致任务中断',completed_at=CURRENT_TIMESTAMP WHERE status IN ('QUEUED','RUNNING')")
+            .execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await
 }
 
 pub async fn recover_active_before(
     pool: &SqlitePool,
     created_before: &str,
 ) -> Result<u64, AppError> {
-    Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code='SERVICE_RESTARTED',error_message='服务重启导致任务中断',completed_at=CURRENT_TIMESTAMP WHERE status IN ('QUEUED','RUNNING') AND datetime(created_at) <= datetime(?)")
-        .bind(created_before)
-        .execute(pool).await.map_err(AppError::Database)?.rows_affected())
+    crate::db::write::run(pool, "recover active skill runs before cutoff", &created_before, |conn, created_before| Box::pin(async move {
+        Ok(sqlx::query("UPDATE skill_runs SET status='FAILED',error_code='SERVICE_RESTARTED',error_message='服务重启导致任务中断',completed_at=CURRENT_TIMESTAMP WHERE status IN ('QUEUED','RUNNING') AND datetime(created_at) <= datetime(?)")
+            .bind(created_before)
+            .execute(conn).await.map_err(AppError::Database)?.rows_affected())
+    })).await
 }
 
 pub async fn cleanup_expired(pool: &SqlitePool, retention_seconds: u64) -> Result<u64, AppError> {

@@ -5,32 +5,32 @@ pub async fn delete_file_tree(
     bundle_id: &str,
     root_file_id: i64,
 ) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let input = (bundle_id, root_file_id);
+    crate::db::write::run(pool, "delete file tree", &input, |conn, &(bundle_id, root_file_id)| {
+        Box::pin(async move {
+            let deleted_file = sqlx::query_scalar::<_, i64>(
+                "DELETE FROM files WHERE bundle_id = ? AND id = ? RETURNING id",
+            )
+            .bind(bundle_id)
+            .bind(root_file_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            if deleted_file.is_none() {
+                return Err(AppError::NotFound(format!("file {root_file_id}")));
+            }
 
-    let deleted_file = sqlx::query_scalar::<_, i64>(
-        "DELETE FROM files WHERE bundle_id = ? AND id = ? RETURNING id",
-    )
-    .bind(bundle_id)
-    .bind(root_file_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-    if deleted_file.is_none() {
-        return Err(AppError::NotFound(format!("file {root_file_id}")));
-    }
-
-    sqlx::query(
-        "UPDATE bundles SET content_size_bytes = (SELECT COALESCE(SUM(CASE WHEN json_extract(meta, '$.preview_kind') = 'archive' THEN 0 ELSE size_bytes END), 0) FROM files WHERE bundle_id = ? AND is_dir = 0) WHERE id = ?",
-    )
-    .bind(bundle_id)
-    .bind(bundle_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-
-    tx.commit().await.map_err(AppError::Database)?;
-
-    Ok(())
+            sqlx::query(
+                "UPDATE bundles SET content_size_bytes = (SELECT COALESCE(SUM(CASE WHEN json_extract(meta, '$.preview_kind') = 'archive' THEN 0 ELSE size_bytes END), 0) FROM files WHERE bundle_id = ? AND is_dir = 0) WHERE id = ?",
+            )
+            .bind(bundle_id)
+            .bind(bundle_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            Ok(())
+        })
+    }).await
 }
 
 #[cfg(test)]

@@ -80,6 +80,16 @@ pub(crate) async fn insert_staging_temp_result_with_retention(
     let created_at = Utc::now();
     let expires_at = created_at + retention;
     let name = format!("filtered-{}.log", &id[..8]);
+    let input = (
+        id,
+        expression,
+        source_label,
+        output_path.to_string_lossy().to_string(),
+        name,
+        created_at.to_rfc3339(),
+        expires_at.to_rfc3339(),
+    );
+    crate::db::write::run(&state.db.pool, "insert staging temp result", &input, |conn, (id, expression, source_label, output_path, name, created_at, expires_at)| Box::pin(async move {
     sqlx::query(
         r#"
         INSERT INTO temp_results
@@ -92,12 +102,14 @@ pub(crate) async fn insert_staging_temp_result_with_retention(
     .bind(name)
     .bind(expression)
     .bind(source_label)
-    .bind(output_path.to_string_lossy().to_string())
-    .bind(created_at.to_rfc3339())
-    .bind(expires_at.to_rfc3339())
-    .execute(&state.db.pool)
+    .bind(output_path)
+    .bind(created_at)
+    .bind(expires_at)
+    .execute(conn)
     .await
     .map_err(AppError::Database)?;
+    Ok(())
+    })).await?;
     Ok(())
 }
 
@@ -138,27 +150,48 @@ pub(crate) async fn publish_temp_result_with_retention(
     let _capacity_guard = state.temp_results.capacity_lock.lock().await;
     ensure_temp_result_capacity(state, size_bytes, Some(id)).await?;
     let expires_at = (Utc::now() + retention).to_rfc3339();
-    let updated = sqlx::query(
-        r#"
+    let output_path = output_path.to_string_lossy().to_string();
+    let input = (
+        id,
+        expression,
+        source_label,
+        output_path,
+        line_count,
+        size_bytes,
+        expires_at,
+    );
+    let updated = crate::db::write::run(
+        &state.db.pool,
+        "publish temp result",
+        &input,
+        |conn, (id, expression, source_label, output_path, line_count, size_bytes, expires_at)| {
+            Box::pin(async move {
+                Ok(sqlx::query(
+                    r#"
         UPDATE temp_results
         SET status = ?, expression = ?, source_label = ?, storage_path = ?,
             line_count = ?, size_bytes = ?, expires_at = ?
         WHERE id = ? AND status = ?
         "#,
+                )
+                .bind(TempResultStatus::Active.as_str())
+                .bind(expression)
+                .bind(source_label)
+                .bind(output_path)
+                .bind(line_count)
+                .bind(size_bytes)
+                .bind(expires_at)
+                .bind(id)
+                .bind(TempResultStatus::Staging.as_str())
+                .execute(conn)
+                .await
+                .map_err(AppError::Database)?
+                .rows_affected())
+            })
+        },
     )
-    .bind(TempResultStatus::Active.as_str())
-    .bind(expression)
-    .bind(source_label)
-    .bind(output_path.to_string_lossy().to_string())
-    .bind(line_count)
-    .bind(size_bytes)
-    .bind(expires_at)
-    .bind(id)
-    .bind(TempResultStatus::Staging.as_str())
-    .execute(&state.db.pool)
-    .await
-    .map_err(AppError::Database)?;
-    if updated.rows_affected() != 1 {
+    .await?;
+    if updated != 1 {
         return classify_transition_failure(state, id).await;
     }
     Ok(TransitionResult::Applied(()))
@@ -168,14 +201,32 @@ pub(crate) async fn claim_staging_for_delete(
     state: &web::Data<AppState>,
     id: &str,
 ) -> Result<TransitionResult<()>, AppError> {
-    let updated = sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
-        .bind(TempResultStatus::Deleting.as_str())
-        .bind(id)
-        .bind(TempResultStatus::Staging.as_str())
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-    if updated.rows_affected() == 1 {
+    let input = (
+        id,
+        TempResultStatus::Deleting.as_str(),
+        TempResultStatus::Staging.as_str(),
+    );
+    let updated = crate::db::write::run(
+        &state.db.pool,
+        "claim staging temp result deletion",
+        &input,
+        |conn, (id, deleting, staging)| {
+            Box::pin(async move {
+                Ok(
+                    sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
+                        .bind(deleting)
+                        .bind(id)
+                        .bind(staging)
+                        .execute(conn)
+                        .await
+                        .map_err(AppError::Database)?
+                        .rows_affected(),
+                )
+            })
+        },
+    )
+    .await?;
+    if updated == 1 {
         return Ok(TransitionResult::Applied(()));
     }
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_results WHERE id = ?)")
@@ -194,14 +245,32 @@ pub(crate) async fn claim_active_for_delete(
     state: &web::Data<AppState>,
     id: &str,
 ) -> Result<TransitionResult<()>, AppError> {
-    let updated = sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
-        .bind(TempResultStatus::Deleting.as_str())
-        .bind(id)
-        .bind(TempResultStatus::Active.as_str())
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-    if updated.rows_affected() == 1 {
+    let input = (
+        id,
+        TempResultStatus::Deleting.as_str(),
+        TempResultStatus::Active.as_str(),
+    );
+    let updated = crate::db::write::run(
+        &state.db.pool,
+        "claim active temp result deletion",
+        &input,
+        |conn, (id, deleting, active)| {
+            Box::pin(async move {
+                Ok(
+                    sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
+                        .bind(deleting)
+                        .bind(id)
+                        .bind(active)
+                        .execute(conn)
+                        .await
+                        .map_err(AppError::Database)?
+                        .rows_affected(),
+                )
+            })
+        },
+    )
+    .await?;
+    if updated == 1 {
         Ok(TransitionResult::Applied(()))
     } else {
         classify_transition_failure(state, id).await
@@ -212,13 +281,27 @@ pub(crate) async fn delete_deleting_record(
     state: &web::Data<AppState>,
     id: &str,
 ) -> Result<TransitionResult<()>, AppError> {
-    let updated = sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = ?")
-        .bind(id)
-        .bind(TempResultStatus::Deleting.as_str())
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-    if updated.rows_affected() == 1 {
+    let input = (id, TempResultStatus::Deleting.as_str());
+    let updated = crate::db::write::run(
+        &state.db.pool,
+        "delete temp result record",
+        &input,
+        |conn, (id, deleting)| {
+            Box::pin(async move {
+                Ok(
+                    sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = ?")
+                        .bind(id)
+                        .bind(deleting)
+                        .execute(conn)
+                        .await
+                        .map_err(AppError::Database)?
+                        .rows_affected(),
+                )
+            })
+        },
+    )
+    .await?;
+    if updated == 1 {
         return Ok(TransitionResult::Applied(()));
     }
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_results WHERE id = ?)")
