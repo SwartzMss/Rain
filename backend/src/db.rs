@@ -15,7 +15,9 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::error::AppError;
 
-pub const CLEANUP_BATCH_SIZE: u64 = 1_000;
+pub mod write;
+
+pub const CLEANUP_BATCH_SIZE: u64 = 100;
 const LARGE_CLEANUP_CHECKPOINT_ROWS: u64 = 10_000;
 const LOG_SEGMENT_BACKFILL_BATCH_SIZE: i64 = 500;
 static HEAVY_CLEANUP_WRITER: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
@@ -302,13 +304,23 @@ async fn delete_bundle_rows_in_batches(
                 .await?;
         }
         let batch_started = Instant::now();
-        let affected = sqlx::query(statement)
-            .bind(bundle_id)
-            .bind(batch_size as i64)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?
-            .rows_affected();
+        let affected = write::run(
+            pool,
+            phase,
+            &(statement, bundle_id, batch_size),
+            |conn, &(statement, bundle_id, batch_size)| {
+                Box::pin(async move {
+                    Ok(sqlx::query(statement)
+                        .bind(bundle_id)
+                        .bind(batch_size as i64)
+                        .execute(conn)
+                        .await
+                        .map_err(AppError::Database)?
+                        .rows_affected())
+                })
+            },
+        )
+        .await?;
         if affected == 0 {
             break;
         }

@@ -36,51 +36,61 @@ impl IssueQuota {
             AppError::Config("RAIN_ISSUE_MAX_CONTENT_SIZE exceeds SQLite range".into())
         })?;
 
-        let result = sqlx::query(
-            r#"
-            UPDATE bundles
-            SET content_size_bytes = content_size_bytes + ?
-            WHERE id = ?
-              AND issue_code = ?
-              AND status = 'PROCESSING'
-              AND (
-                SELECT COALESCE(SUM(content_size_bytes), 0)
-                FROM bundles
-                WHERE issue_code = ? AND status IN ('READY', 'PROCESSING')
-              ) <= ? - ?
-            "#,
-        )
-        .bind(bytes)
-        .bind(&self.bundle_id)
-        .bind(&self.issue_code)
-        .bind(&self.issue_code)
-        .bind(limit)
-        .bind(bytes)
-        .execute(&self.pool)
-        .await
-        .map_err(AppError::Database)?;
+        crate::db::write::run(
+            &self.pool,
+            "reserve issue quota",
+            &(self.bundle_id.as_str(), self.issue_code.as_str(), bytes, limit),
+            |conn, &(bundle_id, issue_code, bytes, limit)| {
+                Box::pin(async move {
+                        let result = sqlx::query(
+                            r#"
+                            UPDATE bundles
+                            SET content_size_bytes = content_size_bytes + ?
+                            WHERE id = ?
+                              AND issue_code = ?
+                              AND status = 'PROCESSING'
+                              AND (
+                                SELECT COALESCE(SUM(content_size_bytes), 0)
+                                FROM bundles
+                                WHERE issue_code = ? AND status IN ('READY', 'PROCESSING')
+                              ) <= ? - ?
+                            "#,
+                        )
+                        .bind(bytes)
+                        .bind(bundle_id)
+                        .bind(issue_code)
+                        .bind(issue_code)
+                        .bind(limit)
+                        .bind(bytes)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
 
-        if result.rows_affected() == 1 {
-            return Ok(());
-        }
+                        if result.rows_affected() == 1 {
+                            return Ok(());
+                        }
 
-        let usage: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(content_size_bytes), 0) FROM bundles WHERE issue_code = ? AND status IN ('READY', 'PROCESSING')",
+                        let usage: i64 = sqlx::query_scalar(
+                            "SELECT COALESCE(SUM(content_size_bytes), 0) FROM bundles WHERE issue_code = ? AND status IN ('READY', 'PROCESSING')",
+                        )
+                        .bind(issue_code)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
+                        Err(AppError::public(
+                            StatusCode::BAD_REQUEST,
+                            "ISSUE_QUOTA_EXCEEDED",
+                            format!(
+                                "Issue 内容超过 {} 上限；当前已使用 {}，本次新增内容至少 {}",
+                                format_binary_size(limit as u64),
+                                format_binary_size(usage.max(0) as u64),
+                                format_binary_size(bytes as u64)
+                            ),
+                        ))
+                })
+            },
         )
-        .bind(&self.issue_code)
-        .fetch_one(&self.pool)
         .await
-        .map_err(AppError::Database)?;
-        Err(AppError::public(
-            StatusCode::BAD_REQUEST,
-            "ISSUE_QUOTA_EXCEEDED",
-            format!(
-                "Issue 内容超过 {} 上限；当前已使用 {}，本次新增内容至少 {}",
-                format_binary_size(self.limit),
-                format_binary_size(usage.max(0) as u64),
-                format_binary_size(bytes as u64)
-            ),
-        ))
     }
 
     #[cfg(test)]
@@ -106,5 +116,47 @@ fn format_binary_size(bytes: u64) -> String {
         format!("{} KiB", bytes / KIB)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn competing_reservations_cannot_exceed_issue_quota() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('QUOTA', 'Quota')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for id in ["first", "second"] {
+            crate::upload::lifecycle::create_processing_bundle(&pool, id, "QUOTA", id, id, 0, None)
+                .await
+                .unwrap();
+        }
+        let first = IssueQuota::new(pool.clone(), "QUOTA", "first", 10);
+        let second = IssueQuota::new(pool.clone(), "QUOTA", "second", 10);
+        let (left, right) = tokio::join!(first.reserve(6), second.reserve(6));
+        assert_ne!(left.is_ok(), right.is_ok());
+        let error = left.err().or(right.err()).unwrap();
+        assert!(matches!(
+            error,
+            AppError::PublicApi {
+                code: "ISSUE_QUOTA_EXCEEDED",
+                ..
+            }
+        ));
+        assert_eq!(
+            first.reserved_bytes().await.unwrap() + second.reserved_bytes().await.unwrap(),
+            6
+        );
+        // The failed transaction must release admission and leave no quota charge.
+        second.reserve(4).await.unwrap();
+        assert_eq!(
+            first.reserved_bytes().await.unwrap() + second.reserved_bytes().await.unwrap(),
+            10
+        );
     }
 }

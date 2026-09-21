@@ -354,6 +354,16 @@ impl AuthRuntime {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ReadinessSnapshot {
+    pub(crate) checked_at: Instant,
+    pub(crate) database_ok: bool,
+    pub(crate) storage_ok: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct ReadinessCache(pub(crate) AsyncMutex<Option<ReadinessSnapshot>>);
+
 pub struct AppState {
     pub db: DatabaseContext,
     pub storage: StorageContext,
@@ -366,6 +376,7 @@ pub struct AppState {
     pub skill_runs: SkillRunRuntime,
     pub skill_reviews: SkillReviewRuntime,
     pub recovery: Arc<RecoveryRuntime>,
+    pub(crate) readiness_cache: ReadinessCache,
     pub issue_inactive_days: AtomicUsize,
     pub limits: AppLimits,
 }
@@ -484,6 +495,7 @@ impl AppState {
             skill_runs: SkillRunRuntime::default(),
             skill_reviews: SkillReviewRuntime::new(2, 5, Duration::from_secs(60 * 60)),
             recovery: Arc::new(RecoveryRuntime::ready()),
+            readiness_cache: ReadinessCache::default(),
             issue_inactive_days: AtomicUsize::new(0),
             limits,
         }

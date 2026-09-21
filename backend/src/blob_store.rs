@@ -230,8 +230,14 @@ pub async fn persist_blob(
     let stored = store.put(source).await?;
     let size_bytes = i64::try_from(stored.size_bytes)
         .map_err(|_| AppError::BadRequest("blob is too large".into()))?;
-    let blob_id: i64 = sqlx::query_scalar(
-        r#"
+    let blob_id: i64 = crate::db::write::run(
+        pool,
+        "persist blob",
+        &(&stored, size_bytes),
+        |conn, &(stored, size_bytes)| {
+            Box::pin(async move {
+                sqlx::query_scalar(
+                    r#"
         INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state)
         VALUES (?, ?, ?, ?, 'STAGING')
         ON CONFLICT(content_hash) DO UPDATE SET
@@ -245,14 +251,18 @@ pub async fn persist_blob(
             unreferenced_at = NULL
         RETURNING id
         "#,
+                )
+                .bind(&stored.content_hash)
+                .bind(size_bytes)
+                .bind(stored.storage_backend)
+                .bind(&stored.storage_key)
+                .fetch_one(conn)
+                .await
+                .map_err(AppError::Database)
+            })
+        },
     )
-    .bind(&stored.content_hash)
-    .bind(size_bytes)
-    .bind(stored.storage_backend)
-    .bind(&stored.storage_key)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
+    .await?;
 
     // `put` has already verified or published the content. After the database
     // claim, recheck presence and size to close the upload/GC race without
@@ -267,11 +277,22 @@ pub async fn persist_blob(
             || republished.storage_key != stored.storage_key
             || !stored_blob_is_valid(store, &republished).await?
         {
-            sqlx::query("UPDATE blobs SET state = 'CORRUPTED' WHERE id = ? AND state = 'STAGING'")
-                .bind(blob_id)
-                .execute(pool)
-                .await
-                .map_err(AppError::Database)?;
+            crate::db::write::run(
+                pool,
+                "mark failed blob publication",
+                &(blob_id,),
+                |conn, &(blob_id,)| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE blobs SET state = 'CORRUPTED' WHERE id = ? AND state = 'STAGING'")
+                            .bind(blob_id)
+                            .execute(conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(AppError::Database)
+                    })
+                },
+            )
+            .await?;
             return Err(AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "blob publication verification failed",
@@ -329,22 +350,44 @@ pub async fn mark_blob_ready(
     };
     if !stored_blob_is_valid(store, &stored).await? {
         let missing = !store.exists(&stored.storage_key).await?;
-        sqlx::query("UPDATE blobs SET state = ? WHERE id = ? AND state = 'STAGING'")
-            .bind(if missing { "MISSING" } else { "CORRUPTED" })
-            .bind(blob_id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+        crate::db::write::run(
+            pool,
+            "mark invalid staging blob",
+            &(blob_id, missing),
+            |conn, &(blob_id, missing)| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE blobs SET state = ? WHERE id = ? AND state = 'STAGING'")
+                        .bind(if missing { "MISSING" } else { "CORRUPTED" })
+                        .bind(blob_id)
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(AppError::Database)
+                })
+            },
+        )
+        .await?;
         return Err(AppError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "blob failed READY publication verification",
         )));
     }
-    sqlx::query("UPDATE blobs SET state = 'READY', verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'STAGING'")
-        .bind(blob_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
+    crate::db::write::run(
+        pool,
+        "mark blob ready",
+        &(blob_id,),
+        |conn, &(blob_id,)| {
+            Box::pin(async move {
+                sqlx::query("UPDATE blobs SET state = 'READY', verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'STAGING'")
+                    .bind(blob_id)
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(AppError::Database)
+            })
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -361,11 +404,23 @@ pub async fn recover_pending_blobs(
     .map_err(AppError::Database)?;
     let mut stats = BlobRecoveryStats::default();
     for (id, expected_hash, expected_size, storage_key) in staging {
-        if let Err(error) = sqlx::query(
-            "UPDATE blobs SET last_attempt_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'STAGING'",
+        if let Err(error) = crate::db::write::run(
+            pool,
+            "record blob recovery attempt",
+            &(id,),
+            |conn, &(id,)| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE blobs SET last_attempt_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'STAGING'",
+                    )
+                        .bind(id)
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(AppError::Database)
+                })
+            },
         )
-        .bind(id)
-        .execute(pool)
         .await
         {
             stats.failed += 1;
@@ -383,15 +438,25 @@ pub async fn recover_pending_blobs(
             } else {
                 "MISSING"
             };
-            sqlx::query(
-            "UPDATE blobs SET state = ?, verified_at = CASE WHEN ? = 'READY' THEN CURRENT_TIMESTAMP ELSE verified_at END WHERE id = ? AND state = 'STAGING'",
+            crate::db::write::run(
+                pool,
+                "recover blob state",
+                &(id, state),
+                |conn, &(id, state)| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "UPDATE blobs SET state = ?, verified_at = CASE WHEN ? = 'READY' THEN CURRENT_TIMESTAMP ELSE verified_at END WHERE id = ? AND state = 'STAGING'",
+                        )
+                            .bind(state)
+                            .bind(state)
+                            .bind(id)
+                            .execute(conn)
+                            .await
+                            .map_err(AppError::Database)
+                    })
+                },
             )
-                .bind(state)
-                .bind(state)
-                .bind(id)
-                .execute(pool)
-                .await
-                .map_err(AppError::Database)
+            .await
         }
         .await;
         match result {
@@ -470,13 +535,19 @@ pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Resu
             .verify(&storage_key, &expected_hash, expected_size)
             .await?
         {
-            sqlx::query(
-                "UPDATE blobs SET verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'",
-            )
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+            crate::db::write::run(pool, "record healthy blob audit", &(id,), |conn, &(id,)| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE blobs SET verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'",
+                    )
+                        .bind(id)
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(AppError::Database)
+                })
+            })
+            .await?;
             continue;
         }
         let state = if store.exists(&storage_key).await? {
@@ -484,12 +555,23 @@ pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Resu
         } else {
             "MISSING"
         };
-        sqlx::query("UPDATE blobs SET state = ?, verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'")
-            .bind(state)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+        crate::db::write::run(
+            pool,
+            "record unhealthy blob audit",
+            &(id, state),
+            |conn, &(id, state)| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE blobs SET state = ?, verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'")
+                            .bind(state)
+                            .bind(id)
+                            .execute(conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(AppError::Database)
+                })
+            },
+        )
+        .await?;
         unhealthy += 1;
     }
     Ok(unhealthy)
@@ -564,17 +646,31 @@ pub async fn garbage_collect_unreferenced_blobs_with_grace(
     let mut removed = 0u64;
     for (id, storage_key, state) in anomalies {
         if state == "MISSING" {
-            removed += sqlx::query(
-                "DELETE FROM blobs WHERE id = ? AND state = 'MISSING' AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)",
+            removed += crate::db::write::run(
+                pool,
+                "collect missing blob",
+                &(id,),
+                |conn, &(id,)| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "DELETE FROM blobs WHERE id = ? AND state = 'MISSING' AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)",
+                        )
+                                .bind(id)
+                                .execute(conn)
+                                .await
+                                .map(|result| result.rows_affected())
+                                .map_err(AppError::Database)
+                    })
+                },
             )
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?
-            .rows_affected();
+            .await?;
             continue;
         }
 
+        // Keep the DB claim locked through deletion: releasing it before filesystem
+        // I/O would allow publication/reference creation to race with removal.
+        // This operation must not be replayed by the DB-only retry helper.
+        let _write_guard = crate::db::write::acquire(pool).await;
         let mut delete_tx = pool.begin().await.map_err(AppError::Database)?;
         let claimed = sqlx::query(
             r#"
@@ -606,52 +702,64 @@ pub async fn garbage_collect_unreferenced_blobs_with_grace(
         removed += 1;
     }
 
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    sqlx::query(
-        r#"
+    let grace = format!("-{grace_hours} hours");
+    let rows = crate::db::write::run(
+        pool,
+        "claim unreferenced blobs",
+        &(store.backend_name(), grace.as_str()),
+        |conn, &(backend, grace)| {
+            Box::pin(async move {
+                sqlx::query(
+                    r#"
         UPDATE blobs AS b SET unreferenced_at = NULL
         WHERE unreferenced_at IS NOT NULL
           AND EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
         "#,
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-    sqlx::query(
-        r#"
+                )
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                sqlx::query(
+                    r#"
         UPDATE blobs AS b SET unreferenced_at = CURRENT_TIMESTAMP
         WHERE state = 'READY' AND unreferenced_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
         "#,
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-    let grace = format!("-{grace_hours} hours");
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        r#"
+                )
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                let rows: Vec<(i64, String)> = sqlx::query_as(
+                    r#"
         SELECT id, storage_key FROM blobs b
         WHERE storage_backend = ?
           AND state IN ('READY', 'PENDING_DELETE')
           AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
           AND (state = 'PENDING_DELETE' OR datetime(unreferenced_at) <= datetime('now', ?))
         "#,
+                )
+                .bind(backend)
+                .bind(grace)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                for (id, _) in &rows {
+                    sqlx::query("UPDATE blobs SET state = 'PENDING_DELETE' WHERE id = ?")
+                        .bind(id)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
+                }
+                Ok(rows)
+            })
+        },
     )
-    .bind(store.backend_name())
-    .bind(grace)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-    for (id, _) in &rows {
-        sqlx::query("UPDATE blobs SET state = 'PENDING_DELETE' WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-    }
-    tx.commit().await.map_err(AppError::Database)?;
+    .await?;
 
     for (id, storage_key) in &rows {
+        // As above, retain the reference check and filesystem deletion in the
+        // same manually coordinated transaction; never retry the filesystem I/O.
+        let _write_guard = crate::db::write::acquire(pool).await;
         let mut delete_tx = pool.begin().await.map_err(AppError::Database)?;
         let claimed = sqlx::query(
             r#"
@@ -754,6 +862,7 @@ mod tests {
     struct DeleteAfterFirstPutStore {
         inner: LocalCasBlobStore,
         puts: AtomicUsize,
+        delete_gate_pool: Option<SqlitePool>,
     }
 
     #[async_trait]
@@ -802,6 +911,21 @@ mod tests {
         }
 
         async fn delete(&self, storage_key: &str) -> Result<(), AppError> {
+            if let Some(pool) = &self.delete_gate_pool {
+                assert!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(10),
+                        crate::db::write::acquire(pool),
+                    )
+                    .await
+                    .is_err(),
+                    "GC must hold admission through filesystem deletion"
+                );
+                return Err(AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "simulated deletion failure",
+                )));
+            }
             self.inner.delete(storage_key).await
         }
     }
@@ -817,6 +941,7 @@ mod tests {
         let store = DeleteAfterFirstPutStore {
             inner: LocalCasBlobStore::new(root.clone()),
             puts: AtomicUsize::new(0),
+            delete_gate_pool: None,
         };
 
         let blob_id = persist_blob(&pool, &store, &source).await.unwrap();
@@ -831,6 +956,46 @@ mod tests {
         assert_eq!(state, "STAGING");
         mark_blob_ready(&pool, &store, blob_id).await.unwrap();
         let _ = fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn gc_holds_gate_during_delete_and_rolls_back_failed_deletions() {
+        let root = std::env::temp_dir().join(format!("rain-gc-gate-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).await.unwrap();
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        let store = DeleteAfterFirstPutStore {
+            inner: LocalCasBlobStore::new(root.clone()),
+            puts: AtomicUsize::new(1),
+            delete_gate_pool: Some(pool.clone()),
+        };
+        for state in ["CORRUPTED", "READY"] {
+            sqlx::query("INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES (?, 1, 'local', ?, ?)")
+                .bind(state).bind(format!("blobs/{state}")).bind(state)
+                .execute(&pool).await.unwrap();
+        }
+        assert_eq!(
+            garbage_collect_unreferenced_blobs_with_grace(&pool, &store, 0)
+                .await
+                .unwrap(),
+            0
+        );
+        let states: Vec<String> = sqlx::query_scalar("SELECT state FROM blobs ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        // Corrupted claims roll back; normal GC's separately committed claim
+        // remains pending so a later maintenance pass can retry deletion.
+        assert_eq!(states, ["CORRUPTED", "PENDING_DELETE"]);
+        // Both manual transactions must release the gate on the error path.
+        let guard = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            crate::db::write::acquire(&pool),
+        )
+        .await
+        .unwrap();
+        drop(guard);
+        fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
