@@ -1,9 +1,12 @@
+use std::borrow::Cow;
+
 use sqlx::{Row, SqlitePool, migrate::Migrator, sqlite::SqlitePoolOptions};
 
 use crate::error::AppError;
 
 pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 const LEGACY_EVENT_TIME_BACKFILL_BATCH_SIZE: i64 = 500;
+const LEGACY_BASELINE_VERSION: i64 = 1;
 
 macro_rules! col {
     ($name:literal, $type_name:literal, $not_null:literal, $default:expr) => {
@@ -570,6 +573,14 @@ const UNIQUE_CONSTRAINTS: &[(&str, &[&str])] = &[
 ];
 
 pub async fn prepare(pool: &SqlitePool, reset: bool) -> Result<(), AppError> {
+    prepare_with_migrator(pool, reset, &MIGRATOR).await
+}
+
+async fn prepare_with_migrator(
+    pool: &SqlitePool,
+    reset: bool,
+    migrator: &Migrator,
+) -> Result<(), AppError> {
     if reset {
         reset_schema(pool).await?;
         tracing::info!(
@@ -583,7 +594,7 @@ pub async fn prepare(pool: &SqlitePool, reset: bool) -> Result<(), AppError> {
             }
             DatabaseState::Legacy => {
                 tracing::info!(migration_state = "legacy", "validating database baseline");
-                validate_baseline(pool).await?;
+                validate_baseline(pool, migrator).await?;
                 backfill_legacy_event_times(pool).await?;
                 tracing::info!(
                     migration_state = "legacy",
@@ -596,12 +607,12 @@ pub async fn prepare(pool: &SqlitePool, reset: bool) -> Result<(), AppError> {
         }
     }
 
-    MIGRATOR
+    migrator
         .run(pool)
         .await
         .map_err(|error| AppError::Config(format!("database migration failed: {error}")))?;
 
-    let latest_migration = MIGRATOR.iter().map(|migration| migration.version).max();
+    let latest_migration = migrator.iter().map(|migration| migration.version).max();
     tracing::info!(?latest_migration, "database migrations ready");
     Ok(())
 }
@@ -688,7 +699,7 @@ async fn backfill_legacy_event_times(pool: &SqlitePool) -> Result<(), AppError> 
     Ok(())
 }
 
-async fn validate_baseline(pool: &SqlitePool) -> Result<(), AppError> {
+async fn validate_baseline(pool: &SqlitePool, migrator: &Migrator) -> Result<(), AppError> {
     for (table, columns) in REQUIRED_TABLES {
         let object = find_object(pool, table).await?;
         if object.as_ref().is_none_or(|object| object.kind != "table") {
@@ -697,32 +708,9 @@ async fn validate_baseline(pool: &SqlitePool) -> Result<(), AppError> {
         validate_columns(pool, table, columns).await?;
     }
 
-    validate_table_definitions(pool).await?;
+    let baseline_pool = legacy_baseline_pool(migrator).await?;
 
-    for (table, from, target, target_column, on_delete) in FOREIGN_KEYS {
-        let matched: bool = sqlx::query_scalar(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_foreign_key_list(?)
-                WHERE \"table\" = ? AND \"from\" = ? AND \"to\" = ? AND upper(on_delete) = ?
-            )",
-        )
-        .bind(table)
-        .bind(target)
-        .bind(from)
-        .bind(target_column)
-        .bind(on_delete)
-        .fetch_one(pool)
-        .await
-        .map_err(AppError::Database)?;
-        if !matched {
-            return Err(schema_error(
-                table,
-                format!(
-                    "missing foreign key {from} -> {target}.{target_column} ON DELETE {on_delete}"
-                ),
-            ));
-        }
-    }
+    validate_foreign_keys(pool).await?;
 
     for index in REQUIRED_INDEXES {
         validate_index(pool, index).await?;
@@ -775,47 +763,42 @@ async fn validate_baseline(pool: &SqlitePool) -> Result<(), AppError> {
     .await?;
 
     validate_owned_triggers(pool).await?;
+    validate_check_constraints(pool, &baseline_pool).await?;
     validate_table_constraints(pool).await
 }
 
-async fn validate_table_definitions(pool: &SqlitePool) -> Result<(), AppError> {
+async fn legacy_baseline_pool(migrator: &Migrator) -> Result<SqlitePool, AppError> {
+    if !migrator
+        .iter()
+        .any(|migration| migration.version == LEGACY_BASELINE_VERSION)
+    {
+        return Err(AppError::Config(format!(
+            "database baseline generation failed: migration version {LEGACY_BASELINE_VERSION} is missing"
+        )));
+    }
     let baseline_pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
         .map_err(AppError::Database)?;
-    MIGRATOR.run(&baseline_pool).await.map_err(|error| {
-        AppError::Config(format!("database baseline generation failed: {error}"))
-    })?;
-
-    for (table, _) in REQUIRED_TABLES {
-        let actual = find_object(pool, table).await?;
-        let expected = find_object(&baseline_pool, table).await?;
-        let Some(actual) = actual else {
-            return Err(schema_error(table, "required table is missing"));
-        };
-        let Some(expected) = expected else {
-            return Err(schema_error(table, "migration baseline table is missing"));
-        };
-        if actual.kind != "table" {
-            return Err(schema_error(
-                table,
-                format!("object type is {}, expected table", actual.kind),
-            ));
-        }
-        let actual_sql = actual.sql.map(|sql| compact_sql(&sql)).unwrap_or_default();
-        let expected_sql = expected
-            .sql
-            .map(|sql| compact_sql(&sql))
-            .unwrap_or_default();
-        if actual_sql != expected_sql {
-            return Err(schema_error(
-                table,
-                "table definition differs from the migration baseline",
-            ));
-        }
-    }
-    Ok(())
+    let baseline_migrator = Migrator {
+        migrations: Cow::Owned(
+            migrator
+                .iter()
+                .filter(|migration| migration.version <= LEGACY_BASELINE_VERSION)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+    };
+    baseline_migrator
+        .run(&baseline_pool)
+        .await
+        .map_err(|error| {
+            AppError::Config(format!("database baseline generation failed: {error}"))
+        })?;
+    Ok(baseline_pool)
 }
 
 async fn validate_columns(
@@ -823,11 +806,13 @@ async fn validate_columns(
     table: &str,
     requirements: &[ColumnRequirement],
 ) -> Result<(), AppError> {
-    let rows = sqlx::query("SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info(?)")
-        .bind(table)
-        .fetch_all(pool)
-        .await
-        .map_err(AppError::Database)?;
+    let rows = sqlx::query(
+        "SELECT name, type, \"notnull\", dflt_value, hidden FROM pragma_table_xinfo(?)",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
 
     for requirement in requirements {
         let Some(row) = rows.iter().find(|row| {
@@ -868,6 +853,13 @@ async fn validate_columns(
                 format!("default is {actual_default}, expected {expected_default}"),
             ));
         }
+        let hidden: i64 = row.try_get("hidden").map_err(AppError::Database)?;
+        if hidden != 0 {
+            return Err(schema_error(
+                format!("{table}.{}", requirement.name),
+                "generated or hidden columns are not compatible with the baseline",
+            ));
+        }
     }
 
     let actual_columns = rows
@@ -879,6 +871,10 @@ async fn validate_columns(
         .iter()
         .map(|requirement| requirement.name.to_owned())
         .collect::<Vec<_>>();
+    let mut actual_columns = actual_columns;
+    let mut expected_columns = expected_columns;
+    actual_columns.sort();
+    expected_columns.sort();
     if actual_columns != expected_columns {
         return Err(schema_error(
             table,
@@ -1023,9 +1019,19 @@ async fn validate_unique_constraints(pool: &SqlitePool) -> Result<(), AppError> 
         .fetch_all(pool)
         .await
         .map_err(AppError::Database)?;
+        let mut actual_table_unique = Vec::new();
         for (index_name, _, origin) in indexes {
             match origin.as_str() {
-                "pk" | "u" => {}
+                "pk" => {}
+                "u" => {
+                    let actual: Vec<String> =
+                        sqlx::query_scalar("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+                            .bind(&index_name)
+                            .fetch_all(pool)
+                            .await
+                            .map_err(AppError::Database)?;
+                    actual_table_unique.push(actual);
+                }
                 "c" if REQUIRED_INDEXES
                     .iter()
                     .any(|index| index.table == *table && index.name == index_name) => {}
@@ -1036,6 +1042,27 @@ async fn validate_unique_constraints(pool: &SqlitePool) -> Result<(), AppError> 
                     ));
                 }
             }
+        }
+
+        let mut expected_table_unique = UNIQUE_CONSTRAINTS
+            .iter()
+            .filter(|(expected_table, _)| *expected_table == *table)
+            .map(|(_, columns)| {
+                columns
+                    .iter()
+                    .map(|column| (*column).to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        actual_table_unique.sort();
+        expected_table_unique.sort();
+        if actual_table_unique != expected_table_unique {
+            return Err(schema_error(
+                table,
+                format!(
+                    "UNIQUE constraints are {actual_table_unique:?}, expected {expected_table_unique:?}"
+                ),
+            ));
         }
     }
 
@@ -1073,6 +1100,60 @@ async fn validate_unique_constraints(pool: &SqlitePool) -> Result<(), AppError> 
     Ok(())
 }
 
+async fn validate_foreign_keys(pool: &SqlitePool) -> Result<(), AppError> {
+    for (table, _) in REQUIRED_TABLES {
+        let rows = sqlx::query(
+            "SELECT \"table\", \"from\", \"to\", on_update, on_delete, \"match\"
+             FROM pragma_foreign_key_list(?)",
+        )
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let mut actual = Vec::with_capacity(rows.len());
+        for row in rows {
+            actual.push((
+                row.try_get::<String, _>("table")
+                    .map_err(AppError::Database)?,
+                row.try_get::<String, _>("from")
+                    .map_err(AppError::Database)?,
+                row.try_get::<String, _>("to").map_err(AppError::Database)?,
+                row.try_get::<String, _>("on_update")
+                    .map_err(AppError::Database)?,
+                row.try_get::<String, _>("on_delete")
+                    .map_err(AppError::Database)?,
+                row.try_get::<String, _>("match")
+                    .map_err(AppError::Database)?,
+            ));
+        }
+
+        let mut expected = FOREIGN_KEYS
+            .iter()
+            .filter(|(expected_table, _, _, _, _)| *expected_table == *table)
+            .map(|(_, from, target, target_column, on_delete)| {
+                (
+                    (*target).to_owned(),
+                    (*from).to_owned(),
+                    (*target_column).to_owned(),
+                    "NO ACTION".to_owned(),
+                    (*on_delete).to_owned(),
+                    "NONE".to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        actual.sort();
+        expected.sort();
+        if actual != expected {
+            return Err(schema_error(
+                table,
+                format!("foreign keys are {actual:?}, expected {expected:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn validate_owned_triggers(pool: &SqlitePool) -> Result<(), AppError> {
     let mut rain_tables = REQUIRED_TABLES
         .iter()
@@ -1098,6 +1179,31 @@ async fn validate_owned_triggers(pool: &SqlitePool) -> Result<(), AppError> {
                     format!("unknown trigger attached to Rain table {table}"),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+async fn validate_check_constraints(
+    pool: &SqlitePool,
+    baseline_pool: &SqlitePool,
+) -> Result<(), AppError> {
+    for (table, _) in REQUIRED_TABLES {
+        let actual = find_object(pool, table)
+            .await?
+            .and_then(|object| object.sql)
+            .map(|sql| extract_check_constraints(&sql))
+            .unwrap_or_default();
+        let expected = find_object(baseline_pool, table)
+            .await?
+            .and_then(|object| object.sql)
+            .map(|sql| extract_check_constraints(&sql))
+            .unwrap_or_default();
+        if actual != expected {
+            return Err(schema_error(
+                table,
+                format!("CHECK constraints are {actual:?}, expected {expected:?}"),
+            ));
         }
     }
     Ok(())
@@ -1293,11 +1399,120 @@ async fn find_object(pool: &SqlitePool, name: &str) -> Result<Option<SqliteObjec
 }
 
 fn compact_sql(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>()
-        .to_uppercase()
+    let mut compact = String::with_capacity(value.len());
+    let mut quote = None;
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        if let Some(delimiter) = quote {
+            compact.push(character);
+            if character == delimiter {
+                if characters.peek().copied() == Some(delimiter) {
+                    compact.push(characters.next().expect("quoted SQL delimiter was peeked"));
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+
+        let delimiter = match character {
+            '\'' | '"' | '`' => Some(character),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(delimiter) = delimiter {
+            compact.push(character);
+            quote = Some(delimiter);
+        } else if !character.is_whitespace() {
+            compact.extend(character.to_uppercase());
+        }
+    }
+    compact
+}
+
+fn extract_check_constraints(sql: &str) -> Vec<String> {
+    let compact = compact_sql(sql);
+    let characters = compact.chars().collect::<Vec<_>>();
+    let mut checks = Vec::new();
+    let mut index = 0;
+    let mut quote = None;
+    while index < characters.len() {
+        if let Some(delimiter) = quote {
+            if characters[index] == delimiter {
+                if characters.get(index + 1) == Some(&delimiter) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        let delimiter = match characters[index] {
+            '\'' | '"' | '`' => Some(characters[index]),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(delimiter) = delimiter {
+            quote = Some(delimiter);
+            index += 1;
+            continue;
+        }
+        if characters[index..].starts_with(&['C', 'H', 'E', 'C', 'K'])
+            && (index == 0 || !is_sql_identifier_character(characters[index - 1]))
+            && characters.get(index + 5) == Some(&'(')
+        {
+            let open = index + 5;
+            if let Some(close) = matching_parenthesis(&characters, open) {
+                checks.push(characters[open + 1..close].iter().collect());
+                index = close + 1;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    checks.sort();
+    checks
+}
+
+fn matching_parenthesis(characters: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut quote = None;
+    let mut index = open;
+    while index < characters.len() {
+        if let Some(delimiter) = quote {
+            if characters[index] == delimiter {
+                if characters.get(index + 1) == Some(&delimiter) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        let delimiter = match characters[index] {
+            '\'' | '"' | '`' => Some(characters[index]),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(delimiter) = delimiter {
+            quote = Some(delimiter);
+        } else if characters[index] == '(' {
+            depth += 1;
+        } else if characters[index] == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_sql_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
 }
 
 fn schema_error(object: impl std::fmt::Display, reason: impl std::fmt::Display) -> AppError {
@@ -1347,7 +1562,7 @@ mod tests {
 
     use sqlx::migrate::{Migration, MigrationType, Migrator};
 
-    use super::{MIGRATOR, prepare};
+    use super::{MIGRATOR, prepare, prepare_with_migrator};
     use crate::db::init_pool;
 
     async fn pool() -> sqlx::SqlitePool {
@@ -1477,6 +1692,101 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("inspect adopted metadata");
+        assert_eq!(metadata_count, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_adoption_validates_v1_before_running_future_migrations() {
+        let pool = pool().await;
+        make_legacy(&pool).await;
+
+        let mut migrations = MIGRATOR.migrations.to_vec();
+        migrations.push(Migration::new(
+            2,
+            Cow::Borrowed("test future legacy migration"),
+            MigrationType::Simple,
+            Cow::Borrowed("ALTER TABLE issues ADD COLUMN migration_v2_marker TEXT;"),
+        ));
+        let migrator = Migrator {
+            migrations: Cow::Owned(migrations),
+            ignore_missing: false,
+            locking: true,
+        };
+
+        prepare_with_migrator(&pool, false, &migrator)
+            .await
+            .expect("adopt legacy v1 schema and run future migration");
+
+        let marker_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('issues')
+                WHERE name = 'migration_v2_marker'
+            )",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect future migration column");
+        assert!(marker_exists);
+        let versions: Vec<i64> = sqlx::query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE success = 1 ORDER BY version",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("inspect legacy future migration metadata");
+        assert_eq!(versions, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn legacy_database_with_historical_optional_column_order_is_adopted() {
+        let pool = pool().await;
+        let fixture = include_str!("../../tests/fixtures/legacy_pre_optional_columns.sql");
+        make_legacy_from_sql(&pool, fixture).await;
+
+        for statement in [
+            "ALTER TABLE skill_runs ADD COLUMN analysis_start_time TEXT",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_end_time TEXT",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_start_ms INTEGER",
+            "ALTER TABLE skill_runs ADD COLUMN analysis_end_ms INTEGER",
+            "ALTER TABLE log_segments ADD COLUMN event_time_start_ms INTEGER",
+            "ALTER TABLE log_segments ADD COLUMN event_time_end_ms INTEGER",
+            "ALTER TABLE log_segments ADD COLUMN event_time_indexed INTEGER NOT NULL DEFAULT 0",
+            "CREATE INDEX idx_logs_file_event_time ON log_segments (file_id, event_time_start_ms, event_time_end_ms)",
+            "CREATE INDEX idx_logs_event_time_indexed ON log_segments (event_time_indexed, id)",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("apply historical optional-column upgrade");
+        }
+
+        prepare(&pool, false)
+            .await
+            .expect("adopt legacy schema upgraded by historical ensure statements");
+
+        let skill_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('skill_runs') ORDER BY cid")
+                .fetch_all(&pool)
+                .await
+                .expect("inspect historical skill_runs columns");
+        assert_eq!(
+            skill_columns.last().map(String::as_str),
+            Some("analysis_end_ms")
+        );
+        let log_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('log_segments') ORDER BY cid")
+                .fetch_all(&pool)
+                .await
+                .expect("inspect historical log_segments columns");
+        assert_eq!(
+            log_columns.last().map(String::as_str),
+            Some("event_time_indexed")
+        );
+        let metadata_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 1 AND success = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect historical adoption metadata");
         assert_eq!(metadata_count, 1);
     }
 
