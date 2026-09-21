@@ -172,6 +172,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE` | `20` | 同一 IP 每分钟登录尝试上限 |
 | `RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES` | `10` | 同一用户名每 5 分钟失败登录上限 |
 | `RAIN_ISSUE_INACTIVE_DAYS` | `0` | Issue 非活跃自动过期天数；0 关闭，启用范围 7–30 |
+| `RAIN_CLEANUP_EXEMPT_USERS` | 空 | 逗号分隔的用户白名单；这些用户的 Issue 不参与自动非活跃清理，支持大小写输入 |
 | `RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR` | `10` | 同一 IP 每小时注册尝试上限 |
 | `RAIN_AI_BASE_URL` | — | OpenAI-compatible API 的 `/v1` Base URL；作为数据库配置的兜底 |
 | `RAIN_AI_API_KEY` | — | 环境变量 Provider 的 API Key |
@@ -260,7 +261,7 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 登录后的原始文件下载。
 - 用户私有 Skill 管理、当前版本质量评估，以及 Issue 范围的受限 AI 诊断。
 - 删除 Issue、Bundle、单个文件节点。
-- 可选过期清理：设置 `RAIN_RETENTION_DAYS` 后启动时清理过期上传。
+- Issue 自动清理按 owner 的非活跃状态执行；需要保留某些用户的 Issue 时设置 `RAIN_CLEANUP_EXEMPT_USERS`。旧的 `RAIN_RETENTION_DAYS` 已废弃并会被忽略。
 
 ## 当前限制
 

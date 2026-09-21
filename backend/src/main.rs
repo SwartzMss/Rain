@@ -12,8 +12,8 @@ use backend::{
     },
     config::AppConfig,
     db::{
-        capture_recovery_cutoff, cleanup_expired_bundles, fail_stale_processing_bundles_before,
-        init_pool, load_or_initialize_system_settings, prepare_schema, resume_deleting_bundles,
+        capture_recovery_cutoff, fail_stale_processing_bundles_before, init_pool,
+        load_or_initialize_system_settings, prepare_schema, resume_deleting_bundles,
     },
     routes::register,
 };
@@ -47,6 +47,12 @@ async fn main() -> std::io::Result<()> {
         .with(fmt::layer())
         .with(fmt::layer().with_ansi(false).with_writer(file_writer))
         .init();
+
+    if config.legacy_retention_configured {
+        warn!(
+            "RAIN_RETENTION_DAYS is deprecated and ignored; Issue inactivity cleanup is controlled by RAIN_ISSUE_INACTIVE_DAYS"
+        );
+    }
 
     info!(
         database_url = %config.database_url,
@@ -138,15 +144,6 @@ async fn main() -> std::io::Result<()> {
     })
     .await;
 
-    if let Some(retention_days) = config.retention_days {
-        run_optional_recovery_stage(
-            "expired-bundle-cleanup",
-            STARTUP_RECOVERY_TIMEOUT,
-            cleanup_expired_bundles(&pool, retention_days),
-        )
-        .await;
-    }
-
     info!(
         host = %config.host,
         port = config.port,
@@ -162,6 +159,41 @@ async fn main() -> std::io::Result<()> {
         config.auth.clone(),
         config.ai_provider.clone(),
         blob_store,
+    );
+    app_state.issue_cleanup_policy = Arc::new(config.issue_cleanup_policy.clone());
+    for username in config.issue_cleanup_policy.usernames() {
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE username_normalized = ?)",
+        )
+        .bind(username)
+        .fetch_one(&app_state.db.pool)
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => warn!(
+                username,
+                "cleanup exempt username is not currently registered"
+            ),
+            Err(error) => warn!(username, %error, "could not verify cleanup exempt username"),
+        }
+    }
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM issues LEFT JOIN users cleanup_owner ON cleanup_owner.id = issues.owner_user_id WHERE issues.status='DELETING' AND issues.deletion_reason='INACTIVE' AND EXISTS (SELECT 1 FROM json_each(?) exempt WHERE exempt.value = cleanup_owner.username_normalized)",
+    )
+    .bind(config.issue_cleanup_policy.exempt_usernames_json())
+    .fetch_one(&app_state.db.pool)
+    .await
+    {
+        Ok(count) if count > 0 => warn!(
+            paused_inactive_deletions = count,
+            "inactive Issue deletions are pending recovery"
+        ),
+        Ok(_) => {}
+        Err(error) => warn!(%error, "could not inspect pending inactive Issue deletions"),
+    }
+    info!(
+        exempt_user_count = config.issue_cleanup_policy.len(),
+        "configured Issue cleanup exemptions"
     );
     app_state.recovery = recovery_runtime.clone();
     app_state

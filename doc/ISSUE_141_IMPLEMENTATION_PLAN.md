@@ -21,7 +21,7 @@
 
 | 路径 | 实施方式 | 边界 |
 | --- | --- | --- |
-| `db.rs::cleanup_expired_bundles` | 每个 Bundle 的 DELETING claim 使用 `run` | claim 内重新检查状态及过期条件，成功后才启动清理；不锁整个循环 |
+| Issue 自动清理链路（原 `db.rs::cleanup_expired_bundles` 已由 #143 移除） | 每个 Bundle 的 DELETING claim 使用 `run` | Issue owner、状态和租约在 claim 内重新检查，成功后才启动清理；不锁整个循环 |
 | `finish_bundle_deletion` | 最后的 DELETED / quota 清零更新使用 `run` | 保留现有分批删除和 cleanup semaphore |
 | `finish_bundle_deletion_with_inactive_lease` | 带租约的每批删除及最终状态更新，在同一事务内验证/续租 | 防止等待 admission 后继续使用过期 token |
 | `renew_inactive_issue_lease` | 对外 pool 包装使用 `run`；新增接收 connection 的内部 helper | 内部 helper 不再次申请 admission |

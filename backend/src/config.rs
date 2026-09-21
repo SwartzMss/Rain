@@ -7,6 +7,7 @@ use crate::ingest::limits::{
     MAX_ARCHIVE_COMPRESSION_RATIO, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_OUTPUT_PATH_CHARS,
     MAX_ARCHIVE_PATH_DEPTH, MAX_ARCHIVE_RECURSION_DEPTH,
 };
+use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 
 const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
@@ -751,7 +752,8 @@ pub struct AppConfig {
     pub data_root: PathBuf,
     pub log_dir: PathBuf,
     pub reset_db: bool,
-    pub retention_days: Option<u64>,
+    pub legacy_retention_configured: bool,
+    pub issue_cleanup_policy: IssueCleanupPolicy,
     pub issue_inactive_days: usize,
     pub limits: AppLimits,
     pub auth: AuthConfig,
@@ -788,15 +790,12 @@ impl AppConfig {
             .parse::<bool>()
             .map_err(|err| AppError::Config(format!("invalid RESET_DB: {err}")))?;
 
-        let retention_days = match env::var("RAIN_RETENTION_DAYS") {
-            Ok(value) if !value.trim().is_empty() => {
-                let days = value.parse::<u64>().map_err(|err| {
-                    AppError::Config(format!("invalid RAIN_RETENTION_DAYS: {err}"))
-                })?;
-                if days == 0 { None } else { Some(days) }
-            }
-            _ => None,
-        };
+        let legacy_retention_configured = env::var_os("RAIN_RETENTION_DAYS").is_some();
+        let (issue_cleanup_policy, ignored_cleanup_users) =
+            IssueCleanupPolicy::from_csv(env::var("RAIN_CLEANUP_EXEMPT_USERS").ok().as_deref());
+        for username in ignored_cleanup_users {
+            eprintln!("warning: ignoring invalid RAIN_CLEANUP_EXEMPT_USERS entry: {username}");
+        }
         let issue_inactive_days =
             parse_issue_inactive_days(env::var("RAIN_ISSUE_INACTIVE_DAYS").ok().as_deref())?;
 
@@ -820,7 +819,8 @@ impl AppConfig {
             data_root,
             log_dir,
             reset_db,
-            retention_days,
+            legacy_retention_configured,
+            issue_cleanup_policy,
             issue_inactive_days,
             limits,
             auth,
