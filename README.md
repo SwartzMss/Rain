@@ -49,6 +49,8 @@ cd backend
 cargo run
 ```
 
+启动时会先执行 SQLx 数据库 migration，再进行恢复阶段和启动 HTTP 服务。空数据库会创建当前 baseline；已有无 migration metadata 的旧数据库会先验证完整 schema，缺失或被人工改坏的表、索引、约束或 FTS 定义会直接阻止启动。详细规则见 [`doc/DB.md`](doc/DB.md)。
+
 打开 `http://localhost:8080` 即可使用应用。
 
 健康检查：
@@ -303,7 +305,7 @@ Windows 手动验证时，可在启用 Defender 或目录索引的环境上传�
 RESET_DB=true
 ```
 
-注意：`RESET_DB=true` 会重建表，并清空配置的数据目录，仅适合本地调试。
+注意：`RESET_DB=true` 会删除当前应用 schema 和 migration metadata，再通过同一 migration chain 重建表，并清空配置的数据目录，仅适合本地调试或测试；不要在生产环境用它代替数据库升级。
 
 ## 常用命令
 
@@ -397,4 +399,4 @@ RAIN_BOOTSTRAP_ADMIN_USERNAME=admin
 RAIN_BOOTSTRAP_ADMIN_PASSWORD=<至少 8 个字符的强密码>
 ```
 
-启动会在 Schema 准备完成后原子创建唯一的 `ACTIVE + ADMIN` 运营账户和审计记录。后续启动只验证数据库中恰好存在一个有效管理员，`.env` 不会覆盖密码或创建第二个管理员；管理员不能被提升、降级、停用、转让或强制注销。普通用户和游客可读取共享数据，只有管理员能新建 Issue、上传或删除共享数据；管理员可在 `/admin` 管理普通用户状态、Session 和审计日志。本版本按全新安装部署，不兼容旧数据库 Schema。
+启动会在 Schema migration 完成后原子创建唯一的 `ACTIVE + ADMIN` 运营账户和审计记录。后续启动只验证数据库中恰好存在一个有效管理员，`.env` 不会覆盖密码或创建第二个管理员；管理员不能被提升、降级、停用、转让或强制注销。普通用户和游客可读取共享数据，只有管理员能新建 Issue、上传或删除共享数据；管理员可在 `/admin` 管理普通用户状态、Session 和审计日志。已有数据库必须通过当前 baseline compatibility validation；不兼容的旧 schema 会 fail fast，不会自动删除数据。

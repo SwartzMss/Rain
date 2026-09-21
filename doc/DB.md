@@ -1,6 +1,8 @@
 # 数据库设计概览
 
-当前默认使用 SQLite，数据库文件由 `DATABASE_URL` 控制，默认示例为 `sqlite://./data/rain.db`。后端启动时会自动创建数据库文件的父目录，并执行 `CREATE TABLE IF NOT EXISTS` 初始化表结构。
+当前默认使用 SQLite，数据库文件由 `DATABASE_URL` 控制，默认示例为 `sqlite://./data/rain.db`。后端启动时会自动创建数据库文件的父目录，并在 recovery、后台任务和 HTTP 服务启动前运行 `backend/migrations/` 中的 SQLx migration。
+
+数据库迁移由 `_sqlx_migrations` 表记录版本、checksum、执行结果和耗时。空数据库会执行 `0001_initial.sql`；已有但没有 migration metadata 的数据库会先进行严格的 baseline compatibility validation，再由同一个 SQLx Migrator 记录 `0001`。已经受管理的数据库会检查 dirty 状态、checksum 和版本顺序，然后只执行未应用的 migration。
 
 ## 设计取舍
 
@@ -14,7 +16,9 @@
 - Bundle 清理默认每批 100 行；删除仍通过触发器维护 FTS 索引。Blob GC 的文件删除继续保留原有数据库事务保护，不重放文件系统副作用。`/readyz` 的写入/回滚探测也参与排队，缓存和并发探测合并按 AppState 隔离。
 - 写入日志包含操作名、尝试次数、排队耗时与事务阶段耗时；索引批次失败还包含 Bundle、文件与 chunk 信息。该机制不协调外部进程，也不能消除磁盘或 FTS 运算本身的耗时。
 - 当前 `meta` 以 JSON 字符串存储在 TEXT 列中；后续如要对象存储或多节点部署，关键存储路径应提升为明确列。
-- 首个正式版本发布前不维护历史 Schema 兼容层；开发阶段结构变化后应重建本地数据库。正式发布后再引入版本化迁移工具。
+- 以后 schema 变化只能新增递增编号的 SQLx migration，不应再向启动路径添加无版本的 `ensure_*` 补列或补索引逻辑。
+- legacy baseline 校验只允许完整且与当前 `0001` 兼容的 schema；缺表、缺列、关键约束/索引/FTS 定义不匹配的数据库会在 recovery 和 HTTP 启动前 fail fast，不会自动删除、重建或猜测修复业务表。
+- `RESET_DB=true` 会删除当前应用 schema、migration metadata 和配置的数据目录，再通过同一条 migration chain 重建，只适合明确的本地开发/测试操作，不是生产升级方案。生产升级应先备份数据库并让正常启动执行 pending migrations。
 
 ## 表：issues
 
@@ -76,7 +80,7 @@
 - `chunk_index` INTEGER：文件内 chunk 序号，从 0 开始。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 - 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`、`idx_logs_file_event_time`、`idx_logs_event_time_indexed (event_time_indexed, id)`；全文检索走 `log_segments_fts`。带时间范围的 Skill Run 仅选择两个 wall-clock 事件时间边界均已知且与主窗口相交的 chunk。
-- 旧数据库启动时通过幂等 schema ensure 补列，`event_time_indexed` 默认 `0`；历史回填按 `id` keyset 分批，每批使用独立事务，只处理状态为 `0` 的记录。事务失败会回滚该批，下一次启动可继续；成功处理但无法解析的记录保留 NULL 边界并标记为 `1`。回填使用 `COALESCE`，不会覆盖已有部分边界，也不会更新正文，因此不触发 FTS 内容重建。
+- `0001_initial.sql` 固化了这些事件时间列和索引的 schema 定义；迁移不会覆盖正文或业务数据。未知或只有部分升级痕迹的旧数据库不会通过补列继续运行，而是要求先恢复到受支持的完整 baseline。
 
 ## 表：log_line_offsets
 

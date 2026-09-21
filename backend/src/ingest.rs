@@ -58,18 +58,6 @@ pub(crate) fn parse_event_time_ms(line: &str) -> Option<i64> {
     wall_clock::parse(&timestamp).and_then(wall_clock::comparison_key)
 }
 
-pub(crate) fn event_time_range(content: &str) -> (Option<i64>, Option<i64>) {
-    content
-        .lines()
-        .filter_map(parse_event_time_ms)
-        .fold((None, None), |(start, end), timestamp| {
-            (
-                Some(start.map_or(timestamp, |current: i64| current.min(timestamp))),
-                Some(end.map_or(timestamp, |current: i64| current.max(timestamp))),
-            )
-        })
-}
-
 pub struct ProcessFileOptions<'a> {
     pub pool: &'a sqlx::SqlitePool,
     pub bundle_id: &'a str,
@@ -908,10 +896,9 @@ mod tests {
     };
     use super::{
         ArchiveBudget, IndexBatchBudget, IssueQuota, LogChunk, PreparedDirectoryEntry,
-        archive_parent_depth, event_time_range, extract_gzip_file, extracted_directory_meta,
-        extracted_entry_meta, flush_log_chunks, gzip_output_name, insert_directory_children,
-        insert_line_offsets, parse_event_time_ms, sanitize_archive_path, uploaded_file_meta,
-        validate_extracted_path,
+        archive_parent_depth, extract_gzip_file, extracted_directory_meta, extracted_entry_meta,
+        flush_log_chunks, gzip_output_name, insert_directory_children, insert_line_offsets,
+        parse_event_time_ms, sanitize_archive_path, uploaded_file_meta, validate_extracted_path,
     };
 
     #[test]
@@ -936,17 +923,6 @@ mod tests {
             parse_event_time_ms("prefix 2026-08-14T09:32:15 message"),
             None
         );
-    }
-
-    #[test]
-    fn extracts_the_minimum_and_maximum_event_time_from_segment_content() {
-        let first = parse_event_time_ms("2026-08-14T09:32:15 first");
-        let second = parse_event_time_ms("2026-08-14T09:33:15 second");
-        let (start, end) =
-            event_time_range("2026-08-14T09:32:15 first\nnoise\n2026-08-14T09:33:15 second");
-
-        assert_eq!(start, first);
-        assert_eq!(end, second);
     }
 
     #[test]
