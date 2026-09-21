@@ -176,9 +176,21 @@ pub fn init_pool(database_url: &str) -> Result<SqlitePool, AppError> {
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(30));
 
-    Ok(SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_lazy_with(options))
+    // SQLx enables SQLite's shared in-memory cache for `sqlite::memory:`.
+    // That makes independently-created test pools share one database, so
+    // parallel tests can observe and overwrite each other's rows. Keep an
+    // in-memory pool single-connection and private while leaving file-backed
+    // production pools unchanged.
+    let in_memory = options.clone().get_filename() == Path::new(":memory:");
+    let options = if in_memory {
+        options.shared_cache(false)
+    } else {
+        options
+    };
+
+    let pool_options = SqlitePoolOptions::new().max_connections(if in_memory { 1 } else { 5 });
+
+    Ok(pool_options.connect_lazy_with(options))
 }
 
 pub async fn prepare_schema(pool: &SqlitePool, reset: bool) -> Result<(), AppError> {

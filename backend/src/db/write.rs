@@ -158,6 +158,30 @@ mod tests {
         (root, pool, external)
     }
 
+    async fn cleanup_fixture(root: PathBuf, pool: SqlitePool, external: SqlitePool) {
+        pool.close().await;
+        external.close().await;
+        drop(pool);
+        drop(external);
+
+        for attempt in 0..50 {
+            match std::fs::remove_dir_all(&root) {
+                Ok(()) => return,
+                Err(error)
+                    if attempt < 49
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::PermissionDenied
+                                | std::io::ErrorKind::DirectoryNotEmpty
+                        ) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("failed to remove test fixture: {error}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn busy_replays_whole_transaction_without_duplicate_writes() {
         let (root, pool, external) = fixture().await;
@@ -219,9 +243,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        pool.close().await;
-        external.close().await;
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup_fixture(root, pool, external).await;
     }
 
     #[tokio::test]
@@ -278,9 +300,7 @@ mod tests {
                 .unwrap(),
             20
         );
-        pool.close().await;
-        other.close().await;
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup_fixture(root, pool, other).await;
     }
 
     #[tokio::test]
@@ -309,9 +329,7 @@ mod tests {
                 .unwrap(),
             0
         );
-        pool.close().await;
-        external.close().await;
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup_fixture(root, pool, external).await;
     }
 
     #[tokio::test]
@@ -357,8 +375,6 @@ mod tests {
                 .unwrap(),
             1
         );
-        pool.close().await;
-        external.close().await;
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup_fixture(root, pool, external).await;
     }
 }
