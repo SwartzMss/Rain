@@ -1755,17 +1755,14 @@ async fn issue_creation_and_upload_require_existing_issue() {
         .execute(&pool)
         .await
         .expect("age bundle");
-    let removed = db::cleanup_expired_bundles(&pool, 1)
-        .await
-        .expect("cleanup expired bundles");
-    assert_eq!(removed, 1);
-    let still_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issues WHERE code = ?)")
-            .bind("NEW001")
-            .fetch_one(&pool)
-            .await
-            .expect("issue exists after cleanup");
-    assert!(still_exists);
+    let old_bundle_still_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM bundles WHERE issue_code = ? AND status = 'READY')",
+    )
+    .bind("NEW001")
+    .fetch_one(&pool)
+    .await
+    .expect("bundle exists after aging");
+    assert!(old_bundle_still_exists);
 
     let delete_empty = test::call_service(
         &app,

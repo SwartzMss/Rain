@@ -8,7 +8,7 @@ use std::{
 use once_cell::sync::Lazy;
 
 use sqlx::{
-    FromRow, SqlitePool,
+    SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -357,55 +357,6 @@ async fn delete_bundle_rows_in_batches(
     Ok(stats)
 }
 
-pub async fn cleanup_expired_bundles(
-    pool: &SqlitePool,
-    retention_days: u64,
-) -> Result<u64, AppError> {
-    let cutoff = format!("-{retention_days} days");
-    let bundles = sqlx::query_as::<_, ExpiredBundle>(
-        r#"
-        SELECT id
-        FROM bundles
-        WHERE deleted_at IS NULL
-          AND status IN ('READY', 'FAILED')
-          AND datetime(created_at) < datetime('now', ?)
-        "#,
-    )
-    .bind(cutoff)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    if bundles.is_empty() {
-        return Ok(0);
-    }
-
-    for bundle in &bundles {
-        let claimed = write::run(
-            pool,
-            "claim expired bundle for deletion",
-            &bundle.id,
-            |conn, bundle_id| {
-                Box::pin(async move {
-                    Ok(sqlx::query("UPDATE bundles SET status = 'DELETING', deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL AND status IN ('READY', 'FAILED')")
-                        .bind(bundle_id)
-                        .execute(conn)
-                        .await
-                        .map_err(AppError::Database)?
-                        .rows_affected())
-                })
-            },
-        )
-        .await?;
-        if claimed != 1 {
-            continue;
-        }
-        finish_bundle_deletion(pool, &bundle.id).await?;
-    }
-
-    Ok(bundles.len() as u64)
-}
-
 pub async fn finish_bundle_deletion(pool: &SqlitePool, bundle_id: &str) -> Result<(), AppError> {
     let _cleanup_permit = acquire_heavy_cleanup_writer(bundle_id, None).await?;
     cleanup_bundle_content_batched_inner(pool, bundle_id, CLEANUP_BATCH_SIZE, None).await?;
@@ -595,11 +546,6 @@ pub async fn fail_stale_processing_bundles_before(
     .await?;
 
     Ok(result)
-}
-
-#[derive(FromRow)]
-struct ExpiredBundle {
-    id: String,
 }
 
 fn ensure_sqlite_parent(database_url: &str) -> Result<(), AppError> {

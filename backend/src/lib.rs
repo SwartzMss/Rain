@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AiProviderEnv, AppLimits, AuthConfig};
 use crate::error::AppError;
+use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 
 #[derive(Debug, Clone)]
 pub struct RequestLogId(pub String);
@@ -378,6 +379,7 @@ pub struct AppState {
     pub recovery: Arc<RecoveryRuntime>,
     pub(crate) readiness_cache: ReadinessCache,
     pub issue_inactive_days: AtomicUsize,
+    pub issue_cleanup_policy: Arc<IssueCleanupPolicy>,
     pub limits: AppLimits,
 }
 
@@ -497,6 +499,7 @@ impl AppState {
             recovery: Arc::new(RecoveryRuntime::ready()),
             readiness_cache: ReadinessCache::default(),
             issue_inactive_days: AtomicUsize::new(0),
+            issue_cleanup_policy: Arc::new(IssueCleanupPolicy::default()),
             limits,
         }
     }

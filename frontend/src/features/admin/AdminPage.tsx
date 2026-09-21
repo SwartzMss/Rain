@@ -623,7 +623,7 @@ export function AdminSettingsPage() {
             >
               i
             </span>
-            配置将在下一次后台扫描任务执行时生效，扫描任务通常每隔一段时间自动运行。
+            配置将在下一次后台扫描任务执行时生效，扫描任务通常每隔一段时间自动运行。部署配置中的豁免用户不会参与自动清理。
           </p>
           {sectionFeedback("issue-expiry")}
         </SettingsSection>
