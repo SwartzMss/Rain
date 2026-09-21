@@ -3,6 +3,7 @@ use sqlx::{Row, SqlitePool, migrate::Migrator};
 use crate::error::AppError;
 
 pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+const LEGACY_EVENT_TIME_BACKFILL_BATCH_SIZE: i64 = 500;
 
 macro_rules! col {
     ($name:literal, $type_name:literal, $not_null:literal, $default:expr) => {
@@ -528,6 +529,39 @@ const FOREIGN_KEYS: &[(&str, &str, &str, &str, &str)] = &[
     ("skill_run_steps", "run_id", "skill_runs", "id", "CASCADE"),
 ];
 
+const PRIMARY_KEYS: &[(&str, &[&str])] = &[
+    ("users", &["id"]),
+    ("system_settings", &["id"]),
+    ("admin_audit_logs", &["id"]),
+    ("user_sessions", &["id"]),
+    ("saved_searches", &["id"]),
+    ("issues", &["code"]),
+    ("bundles", &["id"]),
+    ("blobs", &["id"]),
+    ("files", &["id"]),
+    ("log_segments", &["id"]),
+    ("log_line_offsets", &["file_id", "line_number"]),
+    ("temp_results", &["id"]),
+    ("user_skills", &["id"]),
+    ("skill_reviews", &["skill_id"]),
+    ("ai_provider_settings", &["id"]),
+    ("skill_runs", &["id"]),
+    ("skill_run_steps", &["id"]),
+    ("rain_ready_probe", &["id"]),
+];
+
+const UNIQUE_CONSTRAINTS: &[(&str, &[&str])] = &[
+    ("users", &["username_normalized"]),
+    ("user_sessions", &["token_hash"]),
+    ("saved_searches", &["user_id", "name"]),
+    ("bundles", &["hash"]),
+    ("blobs", &["content_hash"]),
+    ("blobs", &["storage_key"]),
+    ("files", &["bundle_id", "path"]),
+    ("user_skills", &["owner_user_id", "name"]),
+    ("skill_run_steps", &["run_id", "sequence"]),
+];
+
 pub async fn prepare(pool: &SqlitePool, reset: bool) -> Result<(), AppError> {
     if reset {
         reset_schema(pool).await?;
@@ -540,6 +574,7 @@ pub async fn prepare(pool: &SqlitePool, reset: bool) -> Result<(), AppError> {
         DatabaseState::Legacy => {
             tracing::info!(migration_state = "legacy", "validating database baseline");
             validate_baseline(pool).await?;
+            backfill_legacy_event_times(pool).await?;
             tracing::info!(
                 migration_state = "legacy",
                 "legacy database baseline validated"
@@ -584,6 +619,64 @@ async fn classify(pool: &SqlitePool) -> Result<DatabaseState, AppError> {
     })
 }
 
+async fn backfill_legacy_event_times(pool: &SqlitePool) -> Result<(), AppError> {
+    let mut last_id = 0_i64;
+    let mut rows = 0_i64;
+    let mut batches = 0_i64;
+
+    loop {
+        let mut tx = pool.begin().await.map_err(AppError::Database)?;
+        let segments: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, content
+             FROM log_segments
+             WHERE id > ? AND event_time_indexed = 0
+             ORDER BY id
+             LIMIT ?",
+        )
+        .bind(last_id)
+        .bind(LEGACY_EVENT_TIME_BACKFILL_BATCH_SIZE)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+        if segments.is_empty() {
+            tx.commit().await.map_err(AppError::Database)?;
+            break;
+        }
+
+        let batch_last_id = segments
+            .last()
+            .map(|(id, _)| *id)
+            .expect("non-empty event-time batch has a last id");
+        for (id, content) in segments {
+            let (start_ms, end_ms) = crate::ingest::event_time_range(&content);
+            sqlx::query(
+                "UPDATE log_segments
+                 SET event_time_start_ms = COALESCE(event_time_start_ms, ?),
+                     event_time_end_ms = COALESCE(event_time_end_ms, ?),
+                     event_time_indexed = 1
+                 WHERE id = ? AND event_time_indexed = 0",
+            )
+            .bind(start_ms)
+            .bind(end_ms)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+            rows += 1;
+        }
+        tx.commit().await.map_err(AppError::Database)?;
+        batches += 1;
+        last_id = batch_last_id;
+    }
+
+    if rows > 0 {
+        tracing::info!(rows, batches, "legacy event-time backfill completed");
+    } else {
+        tracing::debug!("legacy event-time backfill found no pending rows");
+    }
+    Ok(())
+}
+
 async fn validate_baseline(pool: &SqlitePool) -> Result<(), AppError> {
     for (table, columns) in REQUIRED_TABLES {
         let object = find_object(pool, table).await?;
@@ -621,6 +714,9 @@ async fn validate_baseline(pool: &SqlitePool) -> Result<(), AppError> {
     for index in REQUIRED_INDEXES {
         validate_index(pool, index).await?;
     }
+
+    validate_primary_keys(pool).await?;
+    validate_unique_constraints(pool).await?;
 
     validate_sql_object(
         pool,
@@ -787,31 +883,177 @@ async fn validate_index(pool: &SqlitePool, requirement: &IndexRequirement) -> Re
     Ok(())
 }
 
+async fn validate_primary_keys(pool: &SqlitePool) -> Result<(), AppError> {
+    for (table, expected) in PRIMARY_KEYS {
+        let actual: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk")
+                .bind(table)
+                .fetch_all(pool)
+                .await
+                .map_err(AppError::Database)?;
+        let expected = expected
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect::<Vec<_>>();
+        if actual != expected {
+            return Err(schema_error(
+                table,
+                format!("primary key is {actual:?}, expected {expected:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_unique_constraints(pool: &SqlitePool) -> Result<(), AppError> {
+    for (table, expected) in UNIQUE_CONSTRAINTS {
+        let index_names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_index_list(?) WHERE \"unique\" = 1")
+                .bind(table)
+                .fetch_all(pool)
+                .await
+                .map_err(AppError::Database)?;
+        let expected = expected
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect::<Vec<_>>();
+        let mut found = false;
+        for index_name in index_names {
+            let actual: Vec<String> =
+                sqlx::query_scalar("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+                    .bind(index_name)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(AppError::Database)?;
+            if actual == expected {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(schema_error(
+                table,
+                format!("missing UNIQUE constraint on {expected:?}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn validate_table_constraints(pool: &SqlitePool) -> Result<(), AppError> {
     const REQUIRED_SQL_FRAGMENTS: &[(&str, &[&str])] = &[
         (
             "users",
-            &["CHECK(ROLE!='ADMIN'ORSTATUS='ACTIVE')", "UNIQUE"],
+            &[
+                "USERNAME_NORMALIZED TEXT NOT NULL UNIQUE",
+                "STATUS TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(STATUS IN('ACTIVE','DISABLED'))",
+                "ROLE TEXT NOT NULL DEFAULT 'USER' CHECK(ROLE IN('USER','ADMIN'))",
+                "CHECK(ROLE!='ADMIN'ORSTATUS='ACTIVE')",
+            ],
         ),
+        (
+            "system_settings",
+            &[
+                "CHECK(ID=1)",
+                "ALLOW_REGISTRATION INTEGER NOT NULL CHECK(ALLOW_REGISTRATION IN(0,1))",
+                "LOGIN_IP_LIMIT_PER_MINUTE INTEGER NOT NULL DEFAULT 20 CHECK(LOGIN_IP_LIMIT_PER_MINUTE BETWEEN 1 AND 1000)",
+                "LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES INTEGER NOT NULL DEFAULT 10 CHECK(LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES BETWEEN 1 AND 100)",
+                "ISSUE_INACTIVE_DAYS INTEGER NOT NULL DEFAULT 0 CHECK(ISSUE_INACTIVE_DAYS=0ORISSUE_INACTIVE_DAYS BETWEEN 7 AND 30)",
+            ],
+        ),
+        (
+            "admin_audit_logs",
+            &["ACTOR_TYPE TEXT NOT NULL CHECK(ACTOR_TYPE IN('USER','SYSTEM'))"],
+        ),
+        ("user_sessions", &["TOKEN_HASH TEXT NOT NULL UNIQUE"]),
         (
             "saved_searches",
             &[
+                "NAME TEXT COLLATE NOCASE NOT NULL",
+                "SEARCH_TYPE TEXT NOT NULL CHECK(SEARCH_TYPE IN('FILENAME','DETAIL'))",
                 "UNIQUE(USER_ID,NAME)",
-                "SCOPE_TYPE='GLOBAL'",
-                "SCOPE_TYPE='ISSUE'",
+                "SCOPE_TYPE TEXT NOT NULL DEFAULT 'GLOBAL' CHECK(SCOPE_TYPE IN('GLOBAL','ISSUE'))",
+                "(SCOPE_TYPE='GLOBAL'AND SCOPE_KEY IS NULL)OR(SCOPE_TYPE='ISSUE'AND SCOPE_KEY IS NOT NULL)",
             ],
         ),
-        ("issues", &["DELETION_REASONISNULL", "DELETION_ATTEMPTS>=0"]),
+        (
+            "issues",
+            &[
+                "STATUS TEXT NOT NULL DEFAULT 'ACTIVE'",
+                "DELETION_REASON TEXT CHECK(DELETION_REASON IS NULL OR DELETION_REASON IN('MANUAL','INACTIVE'))",
+                "INACTIVE_CLAIM_DAYS INTEGER CHECK(INACTIVE_CLAIM_DAYS BETWEEN 1 AND 30)",
+                "DELETION_REASONISNULL",
+                "DELETION_ATTEMPTS INTEGER NOT NULL DEFAULT 0 CHECK(DELETION_ATTEMPTS>=0)",
+            ],
+        ),
         (
             "bundles",
-            &["CONTENT_SIZE_BYTES>=0", "HASH TEXT NOT NULL UNIQUE"],
+            &[
+                "HASH TEXT NOT NULL UNIQUE",
+                "CONTENT_SIZE_BYTES INTEGER NOT NULL DEFAULT 0 CHECK(CONTENT_SIZE_BYTES>=0)",
+            ],
+        ),
+        (
+            "blobs",
+            &[
+                "CONTENT_HASH TEXT NOT NULL UNIQUE",
+                "SIZE_BYTES INTEGER NOT NULL CHECK(SIZE_BYTES>=0)",
+                "STORAGE_KEY TEXT NOT NULL UNIQUE",
+            ],
         ),
         (
             "files",
             &["CONSTRAINTFILES_BUNDLE_PATHUNIQUE(BUNDLE_ID,PATH)"],
         ),
+        (
+            "temp_results",
+            &[
+                "STATUS TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(STATUS IN('STAGING','ACTIVE','DELETING'))",
+            ],
+        ),
+        (
+            "user_skills",
+            &[
+                "NAME TEXT COLLATE NOCASE NOT NULL",
+                "VERSION INTEGER NOT NULL DEFAULT 1 CHECK(VERSION>0)",
+                "ENABLED INTEGER NOT NULL DEFAULT 1 CHECK(ENABLED IN(0,1))",
+                "UNIQUE(OWNER_USER_ID,NAME)",
+            ],
+        ),
+        (
+            "skill_reviews",
+            &[
+                "SKILL_VERSION INTEGER NOT NULL CHECK(SKILL_VERSION>0)",
+                "OVERALL_SCORE INTEGER NOT NULL CHECK(OVERALL_SCORE BETWEEN 0 AND 100)",
+            ],
+        ),
+        (
+            "ai_provider_settings",
+            &[
+                "CHECK(ID=1)",
+                "REQUEST_TIMEOUT_SECONDS INTEGER NOT NULL CHECK(REQUEST_TIMEOUT_SECONDS BETWEEN 1 AND 300)",
+            ],
+        ),
+        (
+            "skill_runs",
+            &[
+                "SKILL_VERSION INTEGER NOT NULL CHECK(SKILL_VERSION>0)",
+                "STATUS TEXT NOT NULL CHECK(STATUS IN('QUEUED','RUNNING','SUCCEEDED','FAILED','CANCELLED'))",
+                "ITERATION_COUNT INTEGER NOT NULL DEFAULT 0 CHECK(ITERATION_COUNT>=0)",
+                "TOOL_CALL_COUNT INTEGER NOT NULL DEFAULT 0 CHECK(TOOL_CALL_COUNT>=0)",
+                "CANCEL_REQUESTED INTEGER NOT NULL DEFAULT 0 CHECK(CANCEL_REQUESTED IN(0,1))",
+            ],
+        ),
+        (
+            "skill_run_steps",
+            &[
+                "SEQUENCE INTEGER NOT NULL CHECK(SEQUENCE>=0)",
+                "ITERATION INTEGER NOT NULL CHECK(ITERATION>=0)",
+                "ELAPSED_MS INTEGER NOT NULL DEFAULT 0 CHECK(ELAPSED_MS>=0)",
+                "UNIQUE(RUN_ID,SEQUENCE)",
+            ],
+        ),
         ("log_line_offsets", &["PRIMARY KEY(FILE_ID,LINE_NUMBER)"]),
-        ("skill_run_steps", &["UNIQUE(RUN_ID,SEQUENCE)"]),
     ];
     for (table, fragments) in REQUIRED_SQL_FRAGMENTS {
         let object = find_object(pool, table).await?;
@@ -946,11 +1188,16 @@ mod tests {
     }
 
     async fn make_legacy(pool: &sqlx::SqlitePool) {
-        MIGRATOR.run(pool).await.expect("create legacy schema");
-        sqlx::query("DROP TABLE _sqlx_migrations")
-            .execute(pool)
-            .await
-            .expect("remove migration metadata");
+        let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql");
+        for statement in fixture.split("-- RAIN_LEGACY_STATEMENT").skip(1) {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement)
+                    .execute(pool)
+                    .await
+                    .expect("create legacy schema fixture");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1005,6 +1252,61 @@ mod tests {
                 .await
                 .expect("inspect idempotent metadata");
         assert_eq!(migration_count, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_adoption_resumes_event_time_backfill_before_recording_metadata() {
+        let pool = pool().await;
+        make_legacy(&pool).await;
+        sqlx::query("INSERT INTO issues(code, name) VALUES ('EVENTS', 'Events')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query(
+            "INSERT INTO bundles(id, issue_code, hash, name) VALUES ('EVENT-BUNDLE', 'EVENTS', 'EVENT-HASH', 'Events')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files(bundle_id, name, path, is_dir) VALUES ('EVENT-BUNDLE', 'events.log', '/events.log', 0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert file");
+        let segment_id: i64 = sqlx::query_scalar(
+            "INSERT INTO log_segments(bundle_id, file_id, content) VALUES ('EVENT-BUNDLE', ?, '2026-08-14T09:32:15 first\nnoise\n2026-08-14T09:33:15 second') RETURNING id",
+        )
+        .bind(file_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert pending event-time segment");
+
+        prepare(&pool, false).await.expect("adopt legacy schema");
+
+        let indexed: (i64, Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT event_time_indexed, event_time_start_ms, event_time_end_ms FROM log_segments WHERE id = ?",
+        )
+        .bind(segment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read backfilled event-time segment");
+        assert_eq!(indexed.0, 1);
+        assert_eq!(
+            indexed.1,
+            crate::ingest::parse_event_time_ms("2026-08-14T09:32:15 first")
+        );
+        assert_eq!(
+            indexed.2,
+            crate::ingest::parse_event_time_ms("2026-08-14T09:33:15 second")
+        );
+        let metadata_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 1 AND success = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect adopted metadata");
+        assert_eq!(metadata_count, 1);
     }
 
     #[tokio::test]
