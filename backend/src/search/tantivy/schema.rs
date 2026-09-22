@@ -15,6 +15,7 @@ pub struct BundleSchema {
     pub event_time_start: Field,
     pub event_time_end: Field,
     pub event_time_indexed: Field,
+    pub timeline: Field,
     pub path: Field,
 }
 
@@ -61,6 +62,7 @@ pub fn build_schema() -> BundleSchema {
         "event_time_indexed",
         tantivy::schema::NumericOptions::default().set_stored(),
     );
+    let timeline = builder.add_text_field("timeline", TextOptions::default().set_stored());
     BundleSchema {
         schema: builder.build(),
         content,
@@ -71,6 +73,7 @@ pub fn build_schema() -> BundleSchema {
         event_time_start,
         event_time_end,
         event_time_indexed,
+        timeline,
         path,
     }
 }

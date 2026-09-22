@@ -382,6 +382,7 @@ pub struct AppState {
     pub issue_inactive_days: AtomicUsize,
     pub issue_cleanup_policy: Arc<IssueCleanupPolicy>,
     pub limits: AppLimits,
+    pub search_backend: crate::search::publication::SearchBackendKind,
 }
 
 const MAX_LINE_READ_CLIENTS: usize = 1024;
@@ -502,6 +503,7 @@ impl AppState {
             issue_inactive_days: AtomicUsize::new(0),
             issue_cleanup_policy: Arc::new(IssueCleanupPolicy::default()),
             limits,
+            search_backend: crate::search::publication::SearchBackendKind::SqliteFts,
         }
     }
 

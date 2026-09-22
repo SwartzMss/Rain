@@ -19,6 +19,7 @@ fn tantivy_candidate_hits_require_exact_contiguous_text_after_ngram_filtering() 
                 line_end: Some(chunk_index),
                 event_time_start_ms: None,
                 event_time_end_ms: None,
+                timeline: Some("all".into()),
                 content: content.into(),
                 path: "/fixture.log".into(),
             })

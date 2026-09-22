@@ -255,3 +255,11 @@ PR0/PR1 是当前可先执行的工作包；后续 PR 开始前，以前一阶�
 - 新 Bundle 创建时写入 `sqlite_fts/BUILDING`，legacy SQLite 完成后在同一 writer 事务把索引元数据置为 `READY`，Bundle 更新增加 publication-ready 条件，避免未来 backend 未发布时静默进入 READY。
 - 新增只使用内部 Bundle id 与 generation 的 artifact 路径校验；Tantivy 选择、artifact 验证、崩溃恢复、删除 lease 和混合后端查询仍未接入。
 - 串行 smoke 9 passed/1 ignored；迁移、READY 元数据、publication 路径和现有 skill/indexing 集成测试通过。组合并发 smoke 曾重现既有固定轮询/reader 争用抖动，单独串行重跑通过。
+
+### 2026-09-22：PR3 Tantivy 单 Bundle 发布闭环
+
+- 新增 `RAIN_SEARCH_BACKEND` 配置，默认 `sqlite_fts`；只有启用 `tantivy-search` feature 的构建才能选择 `tantivy`。
+- 上传任务在处理开始时 claim 新 generation，从规范化 `log_segments` 以 64 chunk 批次送入有界 Tantivy pipeline；writer 完成后执行目录 rename、重新打开和文档数校验，再把 publication 标为 `READY`。
+- Bundle finalizer 现在只接受 SQLite legacy/ready 或已发布的 Tantivy `READY` 元数据；Tantivy publication 未完成时不会把 Bundle 置为 `READY`。
+- Bundle 内容搜索按 publication backend 路由到 Tantivy；Issue-wide 搜索和已有 Bundle 保持 SQLite，避免在混合后端查询尚未完成前改变语义。
+- 新增 `search_publication` 集成测试，覆盖 generation claim、artifact publish/reopen、READY 元数据和 Bundle 查询；默认与 feature 构建均通过 check，Tantivy feature 库 clippy 通过。

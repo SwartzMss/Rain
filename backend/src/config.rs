@@ -7,6 +7,7 @@ use crate::ingest::limits::{
     MAX_ARCHIVE_COMPRESSION_RATIO, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_OUTPUT_PATH_CHARS,
     MAX_ARCHIVE_PATH_DEPTH, MAX_ARCHIVE_RECURSION_DEPTH,
 };
+use crate::search::publication::SearchBackendKind;
 use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 
 const KIB: u64 = 1024;
@@ -760,6 +761,7 @@ pub struct AppConfig {
     pub ai_provider: AiProviderEnv,
     pub skill_run_limits: SkillRunLimits,
     pub bootstrap_admin: BootstrapAdminConfig,
+    pub search_backend: SearchBackendKind,
 }
 
 impl AppConfig {
@@ -802,6 +804,8 @@ impl AppConfig {
         let limits = AppLimits::from_env()?;
         let auth = AuthConfig::from_env()?;
         let ai_provider = AiProviderEnv::from_env()?;
+        let search_backend =
+            SearchBackendKind::parse(optional_env("RAIN_SEARCH_BACKEND")?.as_deref())?;
         let bootstrap_admin = BootstrapAdminConfig {
             username: env::var("RAIN_BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".into()),
             password: env::var("RAIN_BOOTSTRAP_ADMIN_PASSWORD").unwrap_or_default(),
@@ -827,6 +831,7 @@ impl AppConfig {
             ai_provider,
             skill_run_limits: SkillRunLimits::default(),
             bootstrap_admin,
+            search_backend,
         })
     }
 }

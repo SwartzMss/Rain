@@ -118,6 +118,7 @@ mod tests {
                     line_end: Some(index),
                     event_time_start_ms: None,
                     event_time_end_ms: None,
+                    timeline: Some("all".into()),
                     content: format!("marker chunk {index}"),
                     path: "/app.log".into(),
                 }])

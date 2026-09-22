@@ -215,17 +215,29 @@ async fn finalize_bundle_ready(pool: &sqlx::SqlitePool, bundle_id: &str) -> Resu
                 .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;
-                let publication = sqlx::query(
-                    "UPDATE bundle_search_indexes SET state = 'READY', built_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ? AND backend = 'sqlite_fts' AND state IN ('LEGACY', 'BUILDING', 'READY')",
+                let publication: Option<(String, String)> = sqlx::query_as(
+                    "SELECT backend, state FROM bundle_search_indexes WHERE bundle_id = ?",
                 )
                 .bind(bundle_id)
-                .execute(&mut *conn)
+                .fetch_optional(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;
-                if publication.rows_affected() != 1 {
-                    return Err(AppError::Conflict(
-                        "search index publication is not ready for this bundle".into(),
-                    ));
+                match publication.as_ref() {
+                    Some((backend, state)) if backend == "tantivy" && state == "READY" => {}
+                    Some((backend, state)) if backend == "sqlite_fts" && matches!(state.as_str(), "LEGACY" | "BUILDING" | "READY") => {
+                        sqlx::query(
+                            "UPDATE bundle_search_indexes SET state = 'READY', built_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ? AND backend = 'sqlite_fts' AND state IN ('LEGACY', 'BUILDING', 'READY')",
+                        )
+                        .bind(bundle_id)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
+                    }
+                    _ => {
+                        return Err(AppError::Conflict(
+                            "search index publication is not ready for this bundle".into(),
+                        ));
+                    }
                 }
                 sqlx::query(
                     "UPDATE bundles SET status = 'READY' WHERE id = ? AND status = 'PROCESSING' AND EXISTS (SELECT 1 FROM bundle_search_indexes WHERE bundle_id = bundles.id AND state = 'READY')",

@@ -13,6 +13,7 @@ use crate::{
     config::{ArchiveConfig, IndexingConfig},
     error::AppError,
     ingest::{ArchiveBudget, IssueQuota, ProcessFileOptions, process_uploaded_file},
+    search::publication::SearchBackendKind,
 };
 
 use super::{
@@ -86,6 +87,7 @@ pub struct UploadJob {
     pub files: Vec<UploadedFile>,
     pub receive_reservation: ReceiveReservation,
     pub temp_cleanup_queue: TempCleanupQueue,
+    pub search_backend: SearchBackendKind,
 }
 
 pub fn spawn_upload_job(job: UploadJob) {
@@ -194,6 +196,50 @@ pub fn spawn_upload_job(job: UploadJob) {
 }
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
+    let generation = claim_search_publication(job).await?;
+    let result = process_upload_files_and_publish(job, generation).await;
+    if let Err(error) = &result
+        && let Some(generation) = generation
+    {
+        crate::search::publication::mark_publication_failed(
+            &job.pool,
+            &job.bundle_id,
+            SearchBackendKind::Tantivy,
+            generation,
+            "BUILD_FAILED",
+        )
+        .await;
+        tracing::warn!(bundle_id = %job.bundle_id, generation, %error, "Tantivy publication failed");
+    }
+    result
+}
+
+async fn claim_search_publication(job: &UploadJob) -> Result<Option<i64>, AppError> {
+    if job.search_backend == SearchBackendKind::SqliteFts {
+        return Ok(None);
+    }
+    #[cfg(feature = "tantivy-search")]
+    {
+        return crate::search::publication::claim_publication(
+            &job.pool,
+            &job.bundle_id,
+            SearchBackendKind::Tantivy,
+        )
+        .await
+        .map(Some);
+    }
+    #[cfg(not(feature = "tantivy-search"))]
+    {
+        Err(AppError::Config(
+            "Tantivy backend requires the tantivy-search feature".into(),
+        ))
+    }
+}
+
+async fn process_upload_files_and_publish(
+    job: &UploadJob,
+    generation: Option<i64>,
+) -> Result<(), AppError> {
     let archive_budget = ArchiveBudget::new(job.archive_config.clone())
         .with_temp_budget(job.receive_reservation.temp_budget());
     let issue_quota = IssueQuota::new(
@@ -238,6 +284,9 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
         );
     }
 
+    if let Some(generation) = generation {
+        publish_search_publication(job, generation).await?;
+    }
     finalize_bundle_ready_with_retry(&job.pool, &job.bundle_id).await?;
     info!(
         metric = "upload_to_ready",
@@ -247,4 +296,23 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
     );
     let _ = fs::remove_dir_all(job.staging_root.join(&job.bundle_hash)).await;
     Ok(())
+}
+
+#[cfg(feature = "tantivy-search")]
+async fn publish_search_publication(job: &UploadJob, generation: i64) -> Result<(), AppError> {
+    crate::search::tantivy::publication::publish_bundle(
+        &job.pool,
+        &job.data_root,
+        &job.temp_dir,
+        &job.bundle_id,
+        generation,
+    )
+    .await
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+async fn publish_search_publication(_job: &UploadJob, _generation: i64) -> Result<(), AppError> {
+    Err(AppError::Config(
+        "Tantivy backend requires the tantivy-search feature".into(),
+    ))
 }

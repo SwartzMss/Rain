@@ -1,7 +1,7 @@
 # Tantivy bundle-index prototype
 
-The `tantivy-search` feature adds an opt-in prototype for the next indexing
-stage. It is not selected by uploads or production routes yet.
+The `tantivy-search` feature adds an opt-in per-Bundle search backend. The
+default build continues to use SQLite FTS.
 
 The prototype stores one cleaned log chunk per document and keeps the file,
 chunk, line, path, and event-time metadata needed for later filtering. A
@@ -26,9 +26,13 @@ cargo clippy --manifest-path backend/Cargo.toml --locked \
   --features tantivy-search --lib -- -D warnings
 ```
 
-Publication, crash recovery, deletion visibility, exact HTTP totals, and
-production ingest routing remain later steps. The database now records one
-`bundle_search_indexes` row per Bundle and the legacy SQLite path marks that
-row `READY` in the same writer transaction as Bundle readiness. Tantivy still
-cannot be selected by uploads, and no existing Bundle is switched to it by
-this change.
+Use `RAIN_SEARCH_BACKEND=tantivy` with a `--features tantivy-search` build to
+select the backend for new uploads. The upload worker claims a generation,
+builds it from normalized SQLite chunks through the bounded pipeline, reopens
+and verifies the artifact, and only then allows the Bundle to become READY.
+The Bundle content search route reads that published generation. Issue-wide
+search and existing Bundles remain on SQLite until mixed-backend publication is
+implemented.
+
+The current implementation still needs crash recovery and large-file
+comparison work before we can claim an end-to-end performance improvement.

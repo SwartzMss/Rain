@@ -145,3 +145,20 @@ pub trait SearchIndex: Send + Sync {
     ) -> Result<SkillSearchResult, AppError>;
     async fn commit_batch(&self, batch: IndexBatch) -> Result<(), AppError>;
 }
+
+pub async fn search_tantivy_bundle(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+) -> Result<ContentSearchResult, AppError> {
+    #[cfg(feature = "tantivy-search")]
+    {
+        tantivy::search_bundle(path, request).await
+    }
+    #[cfg(not(feature = "tantivy-search"))]
+    {
+        let _ = (path, request);
+        Err(AppError::Config(
+            "Tantivy backend requires the tantivy-search feature".into(),
+        ))
+    }
+}

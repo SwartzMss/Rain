@@ -14,6 +14,7 @@ pub struct IndexedChunk {
     pub line_end: Option<i64>,
     pub event_time_start_ms: Option<i64>,
     pub event_time_end_ms: Option<i64>,
+    pub timeline: Option<String>,
     pub content: String,
     pub path: String,
 }
@@ -67,6 +68,9 @@ impl BundleIndexWriter {
             fields.event_time_indexed,
             chunk.event_time_start_ms.is_some() && chunk.event_time_end_ms.is_some(),
         );
+        if let Some(value) = &chunk.timeline {
+            document.add_text(fields.timeline, value);
+        }
         document.add_text(fields.path, &chunk.path);
         self.writer
             .add_document(document)
@@ -92,6 +96,28 @@ impl BundleIndexWriter {
             document_count,
         })
     }
+}
+
+/// Reopen a committed bundle index and verify that Tantivy can read its
+/// metadata. Publication calls this after the staging directory is moved into
+/// its immutable generation path.
+pub fn open_committed(path: impl AsRef<Path>) -> Result<CommittedBundleIndex, AppError> {
+    let fields = super::schema::build_schema();
+    let directory = MmapDirectory::open(path.as_ref())
+        .map_err(|error| AppError::Config(format!("open Tantivy directory: {error}")))?;
+    let index = Index::open(directory)
+        .map_err(|error| AppError::Config(format!("open committed Tantivy index: {error}")))?;
+    index
+        .tokenizers()
+        .register(TOKENIZER_NAME, tokenizer::analyzer());
+    let reader = index
+        .reader()
+        .map_err(|error| AppError::Config(format!("open committed Tantivy reader: {error}")))?;
+    Ok(CommittedBundleIndex {
+        index,
+        fields,
+        document_count: reader.searcher().num_docs(),
+    })
 }
 
 pub struct CommittedBundleIndex {

@@ -161,6 +161,7 @@ async fn main() -> std::io::Result<()> {
         blob_store,
     );
     app_state.issue_cleanup_policy = Arc::new(config.issue_cleanup_policy.clone());
+    app_state.search_backend = config.search_backend;
     for username in config.issue_cleanup_policy.usernames() {
         match sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM users WHERE username_normalized = ?)",

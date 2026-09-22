@@ -7,7 +7,7 @@ use crate::{
     models::logs::{LogSearchHit, LogSearchResponse},
     search::{
         ContentSearchRequest, ContentSearchScope, FilenameSearchRequest, SearchIndex,
-        sqlite::SqliteFtsSearchIndex,
+        publication::artifact_relative_path, search_tantivy_bundle, sqlite::SqliteFtsSearchIndex,
     },
 };
 
@@ -74,19 +74,40 @@ async fn search_logs_inner(
     if search_term.chars().count() < 3 {
         return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
-    let result = SqliteFtsSearchIndex::new(state.db.pool.clone())
-        .search_content(ContentSearchRequest {
-            scope: ContentSearchScope::Bundle {
-                bundle_id: bundle.id.clone(),
-                timeline,
-                file_id,
-            },
-            query: search_term.to_owned(),
-            path_like,
-            from,
-            size,
-        })
-        .await?;
+    let request = ContentSearchRequest {
+        scope: ContentSearchScope::Bundle {
+            bundle_id: bundle.id.clone(),
+            timeline,
+            file_id,
+        },
+        query: search_term.to_owned(),
+        path_like,
+        from,
+        size,
+    };
+    let publication: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT backend, state, generation FROM bundle_search_indexes WHERE bundle_id = ?",
+    )
+    .bind(&bundle.id)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(AppError::Database)?;
+    let result = match publication {
+        Some((backend, state_name, generation)) if backend == "tantivy" => {
+            if state_name != "READY" {
+                return Err(AppError::Conflict(
+                    "Bundle search index is not ready".into(),
+                ));
+            }
+            let artifact = artifact_relative_path(&bundle.id, generation)?;
+            search_tantivy_bundle(state.storage.data_root.join(artifact), request).await?
+        }
+        _ => {
+            SqliteFtsSearchIndex::new(state.db.pool.clone())
+                .search_content(request)
+                .await?
+        }
+    };
     let total = result.total;
     let truncated = result.truncated;
     let rows = result.rows;

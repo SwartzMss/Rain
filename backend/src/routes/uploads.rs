@@ -202,6 +202,7 @@ pub async fn upload_logs(
         files: upload.files,
         receive_reservation: upload.receive_reservation,
         temp_cleanup_queue: state.upload.temp_cleanup_queue.clone(),
+        search_backend: state.search_backend,
     });
 
     info!(

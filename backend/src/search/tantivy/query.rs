@@ -22,6 +22,7 @@ pub struct SearchHit {
     pub chunk_index: i64,
     pub line_start: Option<i64>,
     pub line_end: Option<i64>,
+    pub timeline: Option<String>,
     pub content: String,
     pub path: String,
 }
@@ -102,6 +103,10 @@ impl CandidateSearch {
             let line_end = document
                 .get_first(self.index.fields.line_end)
                 .and_then(|value| value.as_i64());
+            let timeline = document
+                .get_first(self.index.fields.timeline)
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
             let path = document
                 .get_first(self.index.fields.path)
                 .and_then(|value| value.as_str())
@@ -112,6 +117,7 @@ impl CandidateSearch {
                 chunk_index,
                 line_start,
                 line_end,
+                timeline,
                 content: content.to_owned(),
                 path,
             });
