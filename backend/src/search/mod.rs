@@ -3,6 +3,7 @@ use async_trait::async_trait;
 
 use crate::error::AppError;
 
+pub mod publication;
 pub mod sqlite;
 #[cfg(feature = "tantivy-search")]
 pub mod tantivy;

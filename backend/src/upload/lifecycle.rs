@@ -26,7 +26,7 @@ pub async fn reserve_upload_bundle(
                 .bind(uploader_user_id)
                 .bind(issue_code)
                 .bind(uploader_user_id)
-                .execute(conn)
+                .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;
                 if result.rows_affected() != 1 {
@@ -34,6 +34,13 @@ pub async fn reserve_upload_bundle(
                         "issue {issue_code} is missing, being deleted, or not owned by the uploader"
                     )));
                 }
+                sqlx::query(
+                    "INSERT OR IGNORE INTO bundle_search_indexes (bundle_id, backend, state) VALUES (?, 'sqlite_fts', 'BUILDING')",
+                )
+                .bind(bundle_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
                 Ok(())
             })
         },
@@ -83,7 +90,7 @@ pub async fn remove_upload_reservation(pool: &sqlx::SqlitePool, bundle_id: &str)
                     "DELETE FROM bundles WHERE id=? AND status='PENDING' AND process_stage='RECEIVING'",
                 )
                 .bind(bundle_id)
-                .execute(conn)
+                .execute(&mut *conn)
                 .await
                 .map(|_| ())
                 .map_err(AppError::Database)
@@ -125,7 +132,7 @@ pub async fn create_processing_bundle(
                 .bind(uploader_user_id)
                 .bind(Some(total_bytes as i64))
                 .bind(issue_code)
-                .execute(conn)
+                .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;
                 if result.rows_affected() == 0 {
@@ -133,6 +140,13 @@ pub async fn create_processing_bundle(
                         "issue {issue_code} is missing or being deleted"
                     )));
                 }
+                sqlx::query(
+                    "INSERT OR IGNORE INTO bundle_search_indexes (bundle_id, backend, state) VALUES (?, 'sqlite_fts', 'BUILDING')",
+                )
+                .bind(bundle_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
                 Ok(())
             })
         },

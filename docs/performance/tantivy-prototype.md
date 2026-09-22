@@ -27,6 +27,8 @@ cargo clippy --manifest-path backend/Cargo.toml --locked \
 ```
 
 Publication, crash recovery, deletion visibility, exact HTTP totals, and
-production ingest routing remain later steps. No existing Bundle is switched
-to this index by this change.
-
+production ingest routing remain later steps. The database now records one
+`bundle_search_indexes` row per Bundle and the legacy SQLite path marks that
+row `READY` in the same writer transaction as Bundle readiness. Tantivy still
+cannot be selected by uploads, and no existing Bundle is switched to it by
+this change.

@@ -248,3 +248,10 @@ PR0/PR1 是当前可先执行的工作包；后续 PR 开始前，以前一阶�
 - 查询只用有限 n-gram 生成候选，再对 stored chunk 做连续不区分大小写复核；覆盖 `abcd` 不匹配 `abc ... bcd`、重复 n-gram 和中文。
 - 新增 `search_backend_parity` feature 集成测试和原型文档；发布、恢复、删除可见性、精确 HTTP total 及生产 ingest 接入留到后续 PR。
 - 已通过 feature 下的原型测试与 `clippy --features tantivy-search --lib -D warnings`；尚未用真实大文件宣称性能收益。
+
+### 2026-09-22：PR3 发布元数据基础
+
+- 新增 `0003_search_indexes.sql`，为每个 Bundle 持久化 backend、schema/tokenizer 版本、generation、artifact key 和 publication state；迁移会给旧 Bundle 显式回填 `sqlite_fts/LEGACY`。
+- 新 Bundle 创建时写入 `sqlite_fts/BUILDING`，legacy SQLite 完成后在同一 writer 事务把索引元数据置为 `READY`，Bundle 更新增加 publication-ready 条件，避免未来 backend 未发布时静默进入 READY。
+- 新增只使用内部 Bundle id 与 generation 的 artifact 路径校验；Tantivy 选择、artifact 验证、崩溃恢复、删除 lease 和混合后端查询仍未接入。
+- 串行 smoke 9 passed/1 ignored；迁移、READY 元数据、publication 路径和现有 skill/indexing 集成测试通过。组合并发 smoke 曾重现既有固定轮询/reader 争用抖动，单独串行重跑通过。
