@@ -1571,12 +1571,21 @@ mod tests {
         init_pool("sqlite::memory:").expect("init sqlite pool")
     }
 
+    fn normalize_legacy_fixture(fixture: &str) -> String {
+        fixture.replace("\r\n", "\n")
+    }
+
+    fn legacy_fixture() -> String {
+        normalize_legacy_fixture(include_str!("../../tests/fixtures/legacy_pre_145.sql"))
+    }
+
     async fn make_legacy(pool: &sqlx::SqlitePool) {
-        let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql");
-        make_legacy_from_sql(pool, fixture).await;
+        let fixture = legacy_fixture();
+        make_legacy_from_sql(pool, &fixture).await;
     }
 
     async fn make_legacy_from_sql(pool: &sqlx::SqlitePool, fixture: &str) {
+        let fixture = normalize_legacy_fixture(fixture);
         for statement in fixture.split("-- RAIN_LEGACY_STATEMENT").skip(1) {
             let statement = statement.trim();
             if !statement.is_empty() {
@@ -1586,6 +1595,23 @@ mod tests {
                     .expect("create legacy schema fixture");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_fixture_replacements_survive_windows_line_endings() {
+        let windows_fixture = legacy_fixture().replace('\n', "\r\n");
+        let fixture = normalize_legacy_fixture(&windows_fixture).replacen(
+            "code TEXT PRIMARY KEY,\n            name TEXT NOT NULL,",
+            "code TEXT PRIMARY KEY,\n            name TEXT NOT NULL,\n            extra TEXT,",
+            1,
+        );
+        let pool = pool().await;
+        make_legacy_from_sql(&pool, &fixture).await;
+
+        let error = prepare(&pool, false)
+            .await
+            .expect_err("extra Rain column must fail with Windows line endings");
+        assert!(error.to_string().contains("issues"));
     }
 
     #[tokio::test]
@@ -1956,7 +1982,7 @@ mod tests {
     #[tokio::test]
     async fn incompatible_legacy_autoincrement_definition_fails_before_adoption() {
         let pool = pool().await;
-        let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql").replacen(
+        let fixture = legacy_fixture().replacen(
             "id INTEGER PRIMARY KEY AUTOINCREMENT",
             "id INTEGER PRIMARY KEY",
             1,
@@ -1979,7 +2005,7 @@ mod tests {
     #[tokio::test]
     async fn incompatible_legacy_extra_column_fails_before_adoption() {
         let pool = pool().await;
-        let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql").replacen(
+        let fixture = legacy_fixture().replacen(
             "code TEXT PRIMARY KEY,\n            name TEXT NOT NULL,",
             "code TEXT PRIMARY KEY,\n            name TEXT NOT NULL,\n            extra TEXT,",
             1,
@@ -1995,7 +2021,7 @@ mod tests {
     #[tokio::test]
     async fn incompatible_legacy_extra_check_fails_before_adoption() {
         let pool = pool().await;
-        let fixture = include_str!("../../tests/fixtures/legacy_pre_145.sql").replacen(
+        let fixture = legacy_fixture().replacen(
             "status TEXT NOT NULL DEFAULT 'ACTIVE',\n            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,",
             "status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (name != ''),\n            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,",
             1,

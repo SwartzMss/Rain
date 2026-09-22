@@ -1352,7 +1352,7 @@ mod tests {
         .await
         .unwrap();
         pool.close().await;
-        std::fs::remove_dir_all(root).unwrap();
+        crate::db::write::remove_fixture_dir(root).await;
     }
 
     #[tokio::test]

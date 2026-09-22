@@ -16,6 +16,27 @@ use crate::error::AppError;
 static WRITERS: Lazy<StdMutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = Lazy::new(Default::default);
 const MAX_ATTEMPTS: u32 = 3;
 
+#[cfg(test)]
+pub(crate) fn retryable_fixture_cleanup_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::DirectoryNotEmpty
+    ) || error.raw_os_error() == Some(32)
+}
+
+#[cfg(test)]
+pub(crate) async fn remove_fixture_dir(root: PathBuf) {
+    for attempt in 0..50 {
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => return,
+            Err(error) if attempt < 49 && retryable_fixture_cleanup_error(&error) => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("failed to remove test fixture: {error}"),
+        }
+    }
+}
+
 /// FIFO admission shared by pools pointing at the same database. Acquire before
 /// borrowing a connection, and release after each transaction (not each job).
 pub async fn acquire(pool: &SqlitePool) -> OwnedMutexGuard<()> {
@@ -163,23 +184,13 @@ mod tests {
         external.close().await;
         drop(pool);
         drop(external);
+        remove_fixture_dir(root).await;
+    }
 
-        for attempt in 0..50 {
-            match std::fs::remove_dir_all(&root) {
-                Ok(()) => return,
-                Err(error)
-                    if attempt < 49
-                        && matches!(
-                            error.kind(),
-                            std::io::ErrorKind::PermissionDenied
-                                | std::io::ErrorKind::DirectoryNotEmpty
-                        ) =>
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => panic!("failed to remove test fixture: {error}"),
-            }
-        }
+    #[test]
+    fn windows_sharing_violations_are_retryable_fixture_cleanup_errors() {
+        let error = std::io::Error::from_raw_os_error(32);
+        assert!(super::retryable_fixture_cleanup_error(&error));
     }
 
     #[tokio::test]
