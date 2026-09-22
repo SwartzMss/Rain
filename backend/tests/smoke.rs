@@ -12,6 +12,7 @@ use backend::{
     db,
     repositories::{sessions, users},
     routes,
+    services::file_deletion::process_file_deletion_jobs,
 };
 use chrono::{Duration, Utc};
 use flate2::{Compression, write::GzEncoder};
@@ -673,7 +674,14 @@ async fn upload_search_tree_and_delete_issue() {
             .to_request(),
     )
     .await;
-    assert_eq!(delete_dir_response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(delete_dir_response.status(), StatusCode::ACCEPTED);
+    let delete_job: Value = test::read_body_json(delete_dir_response).await;
+    assert_eq!(delete_job["status"], "QUEUED");
+    for _ in 0..4 {
+        process_file_deletion_jobs(&pool)
+            .await
+            .expect("process directory deletion job");
+    }
     let extracted_after_delete: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()

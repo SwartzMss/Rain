@@ -37,7 +37,7 @@ pub async fn fetch_file(
         r#"
         SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
                f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
-        FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
+        FROM visible_files f LEFT JOIN blobs b ON b.id = f.blob_id
         WHERE f.bundle_id = ? AND f.id = ?
         LIMIT 1
         "#,
@@ -60,7 +60,7 @@ pub async fn fetch_children(
             r#"
             SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
                    f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
-            FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
+            FROM visible_files f LEFT JOIN blobs b ON b.id = f.blob_id
             WHERE f.bundle_id = ? AND f.parent_id = ?
             ORDER BY is_dir DESC, name ASC
             "#,
@@ -74,7 +74,7 @@ pub async fn fetch_children(
             r#"
             SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
                    f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
-            FROM files f LEFT JOIN blobs b ON b.id = f.blob_id
+            FROM visible_files f LEFT JOIN blobs b ON b.id = f.blob_id
             WHERE f.bundle_id = ? AND f.parent_id IS NULL
             ORDER BY is_dir DESC, name ASC
             "#,

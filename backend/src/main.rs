@@ -254,6 +254,9 @@ async fn main() -> std::io::Result<()> {
     background_tasks.push(backend::routes::spawn_manual_issue_cleanup(
         shared_state.clone(),
     ));
+    background_tasks.push(backend::routes::spawn_file_deletion_cleanup(
+        shared_state.clone(),
+    ));
 
     let server = HttpServer::new(move || {
         App::new()

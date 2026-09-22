@@ -15,7 +15,7 @@ use crate::{
     models::files::{FileNode, FileNodeResponse},
     repositories::files::{fetch_children, fetch_file, resolve_file_path, to_file_node},
     services::{
-        file_deletion::delete_file_tree,
+        file_deletion::{FileDeletionJobResponse, enqueue_file_deletion, load_file_deletion_job},
         file_reader::{read_file_lines, read_file_preview},
     },
 };
@@ -211,9 +211,18 @@ pub async fn delete_file_node(
     let parsed_id = file_id
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
-    let _record = fetch_file(&state.db.pool, &bundle.id, parsed_id).await?;
-    delete_file_tree(&state.db.pool, &bundle.id, parsed_id).await?;
+    let job = enqueue_file_deletion(&state.db.pool, &bundle.id, parsed_id, &user.0.id).await?;
     touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "file deletion").await;
 
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::Accepted().json(FileDeletionJobResponse::from(job)))
+}
+
+#[get("/file-deletion-jobs/{job_id}")]
+pub async fn get_file_deletion_job(
+    user: RequireBusinessUser,
+    job_id: web::Path<String>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let job = load_file_deletion_job(&state.db.pool, &job_id, &user.0.id).await?;
+    Ok(HttpResponse::Ok().json(FileDeletionJobResponse::from(job)))
 }

@@ -95,6 +95,25 @@ pub fn spawn_manual_issue_cleanup(
     )
 }
 
+pub fn spawn_file_deletion_cleanup(
+    state: web::Data<crate::AppState>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "file-deletion-cleanup",
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(30),
+        move || {
+            let pool = state.db.pool.clone();
+            async move {
+                crate::services::file_deletion::process_file_deletion_jobs(&pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        },
+    )
+}
+
 async fn prevent_session_response_caching(
     request: ServiceRequest,
     next: Next<impl MessageBody>,
@@ -186,6 +205,7 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(files::get_file_lines)
                 .service(files::download_file)
                 .service(files::delete_file_node)
+                .service(files::get_file_deletion_job)
                 .service(logs::search_issue_logs)
                 .service(logs::search_logs)
                 .service(temp_results::create_temp_result)
