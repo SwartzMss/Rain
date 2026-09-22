@@ -2,7 +2,7 @@ use std::path::Path;
 
 use futures_util::TryStreamExt;
 use sqlx::SqlitePool;
-use tokio::fs;
+use tokio::{fs, sync::Semaphore};
 
 use crate::{
     error::AppError,
@@ -39,6 +39,8 @@ pub async fn publish_bundle(
     temp_dir: &Path,
     bundle_id: &str,
     generation: i64,
+    writer_permits: std::sync::Arc<Semaphore>,
+    writer_heap_size_bytes: usize,
 ) -> Result<(), AppError> {
     let relative = artifact_relative_path(bundle_id, generation)?;
     let staging = temp_dir
@@ -55,7 +57,17 @@ pub async fn publish_bundle(
             .map_err(AppError::Io)?;
     }
 
-    let pipeline = BoundedBundlePipeline::start(staging.clone(), PipelineConfig::default())?;
+    let _writer_permit = writer_permits
+        .acquire_owned()
+        .await
+        .map_err(|_| AppError::Conflict("Tantivy writer admission is shutting down".into()))?;
+    let pipeline = BoundedBundlePipeline::start(
+        staging.clone(),
+        PipelineConfig {
+            writer_heap_size_bytes,
+            ..PipelineConfig::default()
+        },
+    )?;
     let mut stream = sqlx::query_as::<_, SegmentRow>(
         "SELECT ls.file_id, f.path, ls.timeline, ls.content, ls.line_offset, ls.line_end, ls.chunk_index, ls.event_time_start_ms, ls.event_time_end_ms FROM log_segments ls JOIN visible_files f ON f.id = ls.file_id WHERE ls.bundle_id = ? ORDER BY ls.id",
     )

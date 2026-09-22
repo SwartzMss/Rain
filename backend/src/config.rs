@@ -272,6 +272,21 @@ pub struct IndexingConfig {
     pub max_indexed_line_size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    pub tantivy_max_writers: usize,
+    pub tantivy_writer_heap_size: u64,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            tantivy_max_writers: 1,
+            tantivy_writer_heap_size: 64 * MIB,
+        }
+    }
+}
+
 impl Default for IndexingConfig {
     fn default() -> Self {
         Self {
@@ -339,6 +354,7 @@ pub struct AppLimits {
     pub issue_max_content_size: u64,
     pub upload: UploadConfig,
     pub indexing: IndexingConfig,
+    pub search: SearchConfig,
     pub api: ApiConfig,
     pub temp_results: TempResultConfig,
 }
@@ -439,6 +455,7 @@ impl Default for AppLimits {
             issue_max_content_size: 8 * GIB,
             upload: UploadConfig::default(),
             indexing: IndexingConfig::default(),
+            search: SearchConfig::default(),
             api: ApiConfig::default(),
             temp_results: TempResultConfig::default(),
         }
@@ -523,6 +540,16 @@ impl AppLimits {
                 max_indexed_line_size: env_size(
                     "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE",
                     defaults.indexing.max_indexed_line_size,
+                )?,
+            },
+            search: SearchConfig {
+                tantivy_max_writers: env_value(
+                    "RAIN_SEARCH_TANTIVY_MAX_WRITERS",
+                    defaults.search.tantivy_max_writers,
+                )?,
+                tantivy_writer_heap_size: env_size(
+                    "RAIN_SEARCH_TANTIVY_WRITER_HEAP",
+                    defaults.search.tantivy_writer_heap_size,
                 )?,
             },
             api: ApiConfig {
@@ -622,6 +649,14 @@ impl AppLimits {
         positive!(
             self.indexing.max_indexed_line_size,
             "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE"
+        );
+        positive!(
+            self.search.tantivy_max_writers,
+            "RAIN_SEARCH_TANTIVY_MAX_WRITERS"
+        );
+        positive!(
+            self.search.tantivy_writer_heap_size,
+            "RAIN_SEARCH_TANTIVY_WRITER_HEAP"
         );
         positive!(self.api.file_preview_size, "RAIN_API_FILE_PREVIEW_SIZE");
         positive!(

@@ -263,3 +263,9 @@ PR0/PR1 是当前可先执行的工作包；后续 PR 开始前，以前一阶�
 - Bundle finalizer 现在只接受 SQLite legacy/ready 或已发布的 Tantivy `READY` 元数据；Tantivy publication 未完成时不会把 Bundle 置为 `READY`。
 - Bundle 内容搜索按 publication backend 路由到 Tantivy；Issue-wide 搜索和已有 Bundle 保持 SQLite，避免在混合后端查询尚未完成前改变语义。
 - 新增 `search_publication` 集成测试，覆盖 generation claim、artifact publish/reopen、READY 元数据和 Bundle 查询；默认与 feature 构建均通过 check，Tantivy feature 库 clippy 通过。
+
+### 2026-09-22：PR4 writer admission 第一阶段
+
+- 新增 `RAIN_SEARCH_TANTIVY_MAX_WRITERS` 与 `RAIN_SEARCH_TANTIVY_WRITER_HEAP`，默认只允许一个 64 MiB writer；所有 Tantivy Bundle publication 共用 admission semaphore。
+- Upload worker 在启动 Tantivy pipeline 前获取 writer permit，permit 覆盖 batch 消费、commit、reopen 校验和 publication，避免单任务有界但并发任务把 writer heap 线性叠加。
+- 这一步只完成 writer 资源预算；查询 fan-out、磁盘 I/O admission 和真实大文件 1/2/4 并发对照仍留在 PR4 后续验收。

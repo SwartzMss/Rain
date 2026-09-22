@@ -88,6 +88,8 @@ pub struct UploadJob {
     pub receive_reservation: ReceiveReservation,
     pub temp_cleanup_queue: TempCleanupQueue,
     pub search_backend: SearchBackendKind,
+    pub search_writer_permits: Arc<Semaphore>,
+    pub search_writer_heap_size_bytes: usize,
 }
 
 pub fn spawn_upload_job(job: UploadJob) {
@@ -306,6 +308,8 @@ async fn publish_search_publication(job: &UploadJob, generation: i64) -> Result<
         &job.temp_dir,
         &job.bundle_id,
         generation,
+        job.search_writer_permits.clone(),
+        job.search_writer_heap_size_bytes,
     )
     .await
 }

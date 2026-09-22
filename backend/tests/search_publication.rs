@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
 use backend::{
     db,
     search::{
@@ -46,9 +49,17 @@ async fn publishes_reopens_and_searches_a_bundle_index() {
     let generation = claim_publication(&pool, "bundle-pub", SearchBackendKind::Tantivy)
         .await
         .unwrap();
-    publish_bundle(&pool, &root, &root.join(".tmp"), "bundle-pub", generation)
-        .await
-        .unwrap();
+    publish_bundle(
+        &pool,
+        &root,
+        &root.join(".tmp"),
+        "bundle-pub",
+        generation,
+        Arc::new(Semaphore::new(1)),
+        16 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
 
     let state: (String, String) = sqlx::query_as(
         "SELECT backend,state FROM bundle_search_indexes WHERE bundle_id='bundle-pub'",

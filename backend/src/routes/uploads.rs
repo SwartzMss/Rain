@@ -203,6 +203,8 @@ pub async fn upload_logs(
         receive_reservation: upload.receive_reservation,
         temp_cleanup_queue: state.upload.temp_cleanup_queue.clone(),
         search_backend: state.search_backend,
+        search_writer_permits: state.search.tantivy_writer_permits.clone(),
+        search_writer_heap_size_bytes: state.search.tantivy_writer_heap_size_bytes,
     });
 
     info!(

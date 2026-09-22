@@ -34,5 +34,10 @@ The Bundle content search route reads that published generation. Issue-wide
 search and existing Bundles remain on SQLite until mixed-backend publication is
 implemented.
 
+Tantivy writers also pass through a process-wide admission semaphore. The
+defaults allow one writer with a 64 MiB heap; `RAIN_SEARCH_TANTIVY_MAX_WRITERS`
+and `RAIN_SEARCH_TANTIVY_WRITER_HEAP` set the aggregate writer budget for
+larger machines.
+
 The current implementation still needs crash recovery and large-file
 comparison work before we can claim an end-to-end performance improvement.
