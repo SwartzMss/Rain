@@ -239,3 +239,12 @@ PR0/PR1 是当前可先执行的工作包；后续 PR 开始前，以前一阶�
 - `commit_batch` 已实现为原子 SQLite 适配器并覆盖批次边界、完整 `RETURNING` 校验和部分插入回滚；当前 ingest 仍使用原有 `LogChunk` 写路径，避免在本 PR 同时改变生产写入内存所有权和临界区。LogChunk 搬移及生产切换留给有界流水线 PR。
 - 适配器单元测试、305 个库测试（两个并发敏感测试串行重跑通过）、`skill_tools` 10 个、`smoke` 9 个和 `indexing_metrics` 2 个测试通过；`cargo fmt --check`、`cargo check --locked`、生产库 `clippy -D warnings` 通过。
 - broad smoke 首次并发编译期间曾在 BINARY 小上传处超过固定 2 秒轮询窗口；随后独立完整 smoke 通过，未观察到搜索相关失败。
+
+### 2026-09-22：PR2 Tantivy 原型与有界写入
+
+- 添加可选 `tantivy-search` feature，锁定 Tantivy 0.26.2；默认构建和生产路由仍使用 SQLite FTS。
+- 新增 per-Bundle schema、2–20 字符 n-gram tokenizer、stored cleaned content 和文件/chunk/行/事件时间字段。
+- 新增有界生产者/消费者管道：默认最多缓存 2 个 batch，writer 在 blocking pool 中运行并限制 64 MiB heap；发送端停止或 writer 失败时不会继续无限生产。
+- 查询只用有限 n-gram 生成候选，再对 stored chunk 做连续不区分大小写复核；覆盖 `abcd` 不匹配 `abc ... bcd`、重复 n-gram 和中文。
+- 新增 `search_backend_parity` feature 集成测试和原型文档；发布、恢复、删除可见性、精确 HTTP total 及生产 ingest 接入留到后续 PR。
+- 已通过 feature 下的原型测试与 `clippy --features tantivy-search --lib -D warnings`；尚未用真实大文件宣称性能收益。

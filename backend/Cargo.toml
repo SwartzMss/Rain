@@ -3,6 +3,10 @@ name = "backend"
 version = "0.0.1"
 edition = "2024"
 
+[features]
+default = []
+tantivy-search = ["dep:tantivy"]
+
 [dependencies]
 actix-web = "4"
 actix-multipart = "0.6"
@@ -48,6 +52,7 @@ async-stream = "0.3"
 tokio-util = "0.7"
 zhconv = { version = "0.4.1", default-features = false, features = ["compress", "opencc"] }
 caseless = "0.2"
+tantivy = { version = "0.26.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
