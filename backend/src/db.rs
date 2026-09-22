@@ -836,4 +836,56 @@ mod tests {
         .expect("search trigram substring");
         assert_eq!(matches, 1);
     }
+
+    #[tokio::test]
+    async fn tantivy_owned_bundles_skip_sqlite_fts_shadow_writes() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues(code,name) VALUES('BACKEND','Backend')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES ('tantivy-bundle','BACKEND','hash-tantivy','Tantivy','PROCESSING'),('sqlite-bundle','BACKEND','hash-sqlite','SQLite','PROCESSING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,state) VALUES ('tantivy-bundle','tantivy','BUILDING'),('sqlite-bundle','sqlite_fts','BUILDING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let tantivy_file: i64 = sqlx::query_scalar(
+            "INSERT INTO files(bundle_id,name,path,is_dir) VALUES ('tantivy-bundle','a.log','/a.log',0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let sqlite_file: i64 = sqlx::query_scalar(
+            "INSERT INTO files(bundle_id,name,path,is_dir) VALUES ('sqlite-bundle','b.log','/b.log',0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO log_segments(bundle_id,file_id,content) VALUES ('tantivy-bundle',?,'tantivy marker'),('sqlite-bundle',?,'sqlite marker')")
+            .bind(tantivy_file)
+            .bind(sqlite_file)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let tantivy_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'tantivy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let sqlite_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM log_segments_fts WHERE log_segments_fts MATCH 'sqlite'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tantivy_rows, 0);
+        assert_eq!(sqlite_rows, 1);
+    }
 }

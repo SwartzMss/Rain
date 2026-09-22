@@ -269,3 +269,4 @@ PR0/PR1 是当前可先执行的工作包；后续 PR 开始前，以前一阶�
 - 新增 `RAIN_SEARCH_TANTIVY_MAX_WRITERS` 与 `RAIN_SEARCH_TANTIVY_WRITER_HEAP`，默认只允许一个 64 MiB writer；所有 Tantivy Bundle publication 共用 admission semaphore。
 - Upload worker 在启动 Tantivy pipeline 前获取 writer permit，permit 覆盖 batch 消费、commit、reopen 校验和 publication，避免单任务有界但并发任务把 writer heap 线性叠加。
 - 这一步只完成 writer 资源预算；查询 fan-out、磁盘 I/O admission 和真实大文件 1/2/4 并发对照仍留在 PR4 后续验收。
+- 新增 migration `0004_tantivy_skip_sqlite_fts`：Tantivy-owned Bundle 的 log segment 不再写 SQLite FTS5 shadow table，保留 legacy/SQLite Bundle 的 trigger 语义，消除双重索引写入的主要重复成本。

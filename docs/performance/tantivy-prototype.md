@@ -34,6 +34,11 @@ The Bundle content search route reads that published generation. Issue-wide
 search and existing Bundles remain on SQLite until mixed-backend publication is
 implemented.
 
+Migration `0004` makes the FTS5 shadow triggers conditional on the Bundle
+backend. Tantivy-owned uploads therefore keep the normalized `log_segments`
+rows but avoid duplicating every chunk into SQLite FTS during ingest; legacy and
+SQLite-owned Bundles retain the original trigger path.
+
 Tantivy writers also pass through a process-wide admission semaphore. The
 defaults allow one writer with a 64 MiB heap; `RAIN_SEARCH_TANTIVY_MAX_WRITERS`
 and `RAIN_SEARCH_TANTIVY_WRITER_HEAP` set the aggregate writer budget for
