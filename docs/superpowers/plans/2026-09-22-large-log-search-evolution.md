@@ -231,3 +231,11 @@ PR0/PR1 是当前可先执行的工作包；后续 PR 开始前，以前一阶�
 - 成功/失败计数集成测试通过；真实 SQLITE_BUSY 重试和等待 writer 时取消的回归测试通过。
 - 完成独立需求审查与代码质量审查；剩余完整测试及 release 压测完成后记录实际结论。
 - 扩展 `clippy --all-targets` 发现现有 `skill_runs.rs` 单元素循环、`services/file_reader.rs` 测试默认值赋值告警；保持本次范围，标准 CI 的 clippy 命令通过。
+
+### 2026-09-22：PR1 搜索边界抽离
+
+- 新增 `SearchIndex` owned 请求/结果契约和 SQLite FTS 实现；Bundle 内容、Issue 内容、文件名和 skill 搜索均通过适配器执行。
+- 保留三类入口的原有策略：HTTP 内容搜索仍要求至少 3 个字符并返回精确分页总数，文件名搜索继续做转义后的大小写不敏感子串匹配，skill 搜索继续区分 FTS 与带 `file_id` 的两字符 literal，并保留时间范围 coverage。
+- `commit_batch` 已实现为原子 SQLite 适配器并覆盖批次边界、完整 `RETURNING` 校验和部分插入回滚；当前 ingest 仍使用原有 `LogChunk` 写路径，避免在本 PR 同时改变生产写入内存所有权和临界区。LogChunk 搬移及生产切换留给有界流水线 PR。
+- 适配器单元测试、305 个库测试（两个并发敏感测试串行重跑通过）、`skill_tools` 10 个、`smoke` 9 个和 `indexing_metrics` 2 个测试通过；`cargo fmt --check`、`cargo check --locked`、生产库 `clippy -D warnings` 通过。
+- broad smoke 首次并发编译期间曾在 BINARY 小上传处超过固定 2 秒轮询窗口；随后独立完整 smoke 通过，未观察到搜索相关失败。

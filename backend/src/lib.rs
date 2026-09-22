@@ -9,6 +9,7 @@ pub mod log_expression;
 pub mod models;
 pub mod repositories;
 pub mod routes;
+pub mod search;
 pub mod services;
 pub mod skill_schema;
 pub mod upload;
