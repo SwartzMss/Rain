@@ -129,6 +129,12 @@ struct PreparedDirectoryEntry {
     blob_id: Option<i64>,
 }
 
+struct PendingIndexFile {
+    file_id: i64,
+    disk_path: PathBuf,
+    size_bytes: u64,
+}
+
 pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<(), AppError> {
     let ProcessFileOptions {
         pool,
@@ -218,8 +224,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         )
         .await?;
 
-        update_process_stage(pool, bundle_id, "INDEXING").await?;
-        ingest_directory(
+        let pending_index_files = ingest_directory(
             pool,
             bundle_id,
             dir_id,
@@ -227,14 +232,27 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             format!("{}/{extracted_dir_name}", bundle_hash),
             archive_budget,
             issue_quota,
-            indexing,
             blob_store.clone(),
             1,
         )
         .await?;
+
+        if !pending_index_files.is_empty() {
+            update_process_stage(pool, bundle_id, "INDEXING").await?;
+            for pending in pending_index_files {
+                ingest_text_file(
+                    pool,
+                    bundle_id,
+                    pending.file_id,
+                    &pending.disk_path,
+                    pending.size_bytes,
+                    indexing,
+                )
+                .await?;
+            }
+        }
     }
 
-    update_process_stage(pool, bundle_id, "INDEXING").await?;
     Ok(())
 }
 
@@ -255,10 +273,9 @@ fn ingest_directory<'a>(
     relative_root: String,
     archive_budget: ArchiveBudget,
     issue_quota: IssueQuota,
-    indexing: &'a IndexingConfig,
     blob_store: std::sync::Arc<dyn BlobStore>,
     archive_depth: usize,
-) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<Vec<PendingIndexFile>, AppError>> + Send + 'a>> {
     Box::pin(async move {
         let mut read_dir = fs::read_dir(&dir_path)
             .await
@@ -329,6 +346,7 @@ fn ingest_directory<'a>(
         for blob_id in prepared.iter().filter_map(|entry| entry.blob_id) {
             mark_blob_ready(pool, blob_store.as_ref(), blob_id).await?;
         }
+        let mut pending_index_files = Vec::new();
         for (entry, record_id) in prepared.into_iter().zip(record_ids) {
             let PreparedDirectoryEntry {
                 disk_path,
@@ -341,34 +359,31 @@ fn ingest_directory<'a>(
             } = entry;
 
             if is_dir {
-                ingest_directory(
-                    pool,
-                    bundle_id,
-                    record_id,
-                    disk_path,
-                    format!("{relative_root}/{name}"),
-                    archive_budget.clone(),
-                    issue_quota.clone(),
-                    indexing,
-                    blob_store.clone(),
-                    archive_depth,
-                )
-                .await?;
+                pending_index_files.extend(
+                    ingest_directory(
+                        pool,
+                        bundle_id,
+                        record_id,
+                        disk_path,
+                        format!("{relative_root}/{name}"),
+                        archive_budget.clone(),
+                        issue_quota.clone(),
+                        blob_store.clone(),
+                        archive_depth,
+                    )
+                    .await?,
+                );
                 continue;
             }
 
             if preview_kind == PreviewKind::Text
                 && let Some(size) = size_bytes
             {
-                ingest_text_file(
-                    pool,
-                    bundle_id,
-                    record_id,
-                    &disk_path,
-                    size as u64,
-                    indexing,
-                )
-                .await?;
+                pending_index_files.push(PendingIndexFile {
+                    file_id: record_id,
+                    disk_path: disk_path.clone(),
+                    size_bytes: size as u64,
+                });
             }
 
             if preview_kind == PreviewKind::Archive {
@@ -416,23 +431,24 @@ fn ingest_directory<'a>(
                     None,
                 )
                 .await?;
-                ingest_directory(
-                    pool,
-                    bundle_id,
-                    dir_id,
-                    extracted_dir,
-                    extracted_db_path.trim_start_matches('/').to_string(),
-                    archive_budget.clone(),
-                    issue_quota.clone(),
-                    indexing,
-                    blob_store.clone(),
-                    archive_depth + 1,
-                )
-                .await?;
+                pending_index_files.extend(
+                    ingest_directory(
+                        pool,
+                        bundle_id,
+                        dir_id,
+                        extracted_dir,
+                        extracted_db_path.trim_start_matches('/').to_string(),
+                        archive_budget.clone(),
+                        issue_quota.clone(),
+                        blob_store.clone(),
+                        archive_depth + 1,
+                    )
+                    .await?,
+                );
             }
         }
 
-        Ok(())
+        Ok(pending_index_files)
     })
 }
 

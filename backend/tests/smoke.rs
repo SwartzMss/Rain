@@ -406,6 +406,19 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(depth_fail_tree.status(), StatusCode::CONFLICT);
+    let depth_fail_issue: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/DEPTHFAIL")
+            .cookie(auth_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(depth_fail_issue["log_bundles"][0]["stage"], "FAILED");
+    assert_eq!(
+        depth_fail_issue["log_bundles"][0]["failure_stage"],
+        "EXTRACTING"
+    );
 
     let binary_boundary = format!("rain-{}", Uuid::new_v4().simple());
     let executable_bytes = [b'M', b'Z', 0, 1, 2, 3, 255];
@@ -1385,6 +1398,85 @@ async fn upload_search_tree_and_delete_issue() {
     )
     .await;
     assert_eq!(missing_task.status(), StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+async fn nested_archive_limit_failure_reports_extracting_stage() {
+    let test_dir = TestDir::new("rain-nested-archive-limit");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let data_root = test_dir.path.join("uploads");
+    fs::create_dir_all(&data_root).expect("create data root");
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    insert_issues(&pool, &["NESTEDLIMIT"]).await;
+    let limits = AppLimits {
+        issue_max_content_size: 4 * 1024,
+        ..AppLimits::default()
+    };
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                data_root,
+                limits,
+            )))
+            .configure(routes::register),
+    )
+    .await;
+    let auth_cookie = test_auth_cookie(&pool).await;
+
+    let first_payload = (0..3000)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let second_payload = (0..3000)
+        .map(|index| ((index * 17) % 251) as u8)
+        .collect::<Vec<_>>();
+    let inner_zip = zip_bytes(&[
+        ("first.log", first_payload.as_slice()),
+        ("second.log", second_payload.as_slice()),
+    ]);
+    let outer_zip = zip_bytes(&[("inner.zip", inner_zip.as_slice())]);
+    let boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let response: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/NESTEDLIMIT/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            ))
+            .set_payload(multipart_body_bytes(
+                &boundary,
+                "NESTEDLIMIT",
+                "outer.zip",
+                "application/zip",
+                &outer_zip,
+            ))
+            .cookie(auth_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response["status"], "PROCESSING");
+    wait_for_issue_status(&pool, "NESTEDLIMIT", "FAILED").await;
+
+    let failure_stage: Option<String> =
+        sqlx::query_scalar("SELECT failure_stage FROM bundles WHERE issue_code = 'NESTEDLIMIT'")
+            .fetch_one(&pool)
+            .await
+            .expect("load nested archive failure stage");
+    assert_eq!(failure_stage.as_deref(), Some("EXTRACTING"));
+
+    let issue: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/issues/NESTEDLIMIT")
+            .cookie(auth_cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(issue["log_bundles"][0]["failure_stage"], "EXTRACTING");
 }
 
 #[actix_web::test]
