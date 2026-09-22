@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthContext';
 import { normalizeApiError, rainApi } from '../../api/client';
@@ -13,6 +13,7 @@ import { useIssues } from './hooks/useIssues';
 import { useUploadTask } from './hooks/useUploadTask';
 import { isUser } from '../../auth/permissions';
 import { IssueExpirationNotice } from './components/IssueExpirationNotice';
+import type { FileDeletionJobResponse } from '../../api/types';
 
 export function HomeView() {
   const navigate = useNavigate();
@@ -25,6 +26,7 @@ export function HomeView() {
   const [createIssueError, setCreateIssueError] = useState<string | null>(null);
   const [deletingIssue, setDeletingIssue] = useState<string | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [deletionJob, setDeletionJob] = useState<{ label: string; job: FileDeletionJobResponse } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
 
   const issues = useIssues();
@@ -70,6 +72,7 @@ export function HomeView() {
       const nextIssue = issues.selectIssue(value);
       if (nextIssue && nextIssue !== previousIssue) {
         upload.resetSelection();
+        setDeletionJob(null);
       }
     },
     [issues, upload]
@@ -128,7 +131,9 @@ export function HomeView() {
           setDeletingKey(row.key);
           try {
             if (row.file) {
-              await rainApi.deleteFile(row.bundleHash, String(row.file.id));
+              const job = await rainApi.deleteFile(row.bundleHash, String(row.file.id));
+              setDeletionJob({ label: target, job });
+              setConfirmDialog(null);
               await bundles.loadBundleFiles(row.bundleHash);
             } else {
               await rainApi.deleteBundle(issues.currentIssueCode, row.bundleHash);
@@ -145,6 +150,26 @@ export function HomeView() {
     },
     [bundles, issues]
   );
+
+  useEffect(() => {
+    if (!deletionJob || deletionJob.job.status === 'SUCCEEDED' || deletionJob.job.status === 'SUPERSEDED') {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      rainApi.fetchFileDeletionJob(deletionJob.job.job_id)
+        .then((job) => setDeletionJob((current) => current ? { ...current, job } : null))
+        .catch(() => undefined);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [deletionJob]);
+
+  const deletionStatus = deletionJob?.job.status === 'RETRY_WAIT'
+    ? '清理暂未完成，系统将自动重试'
+    : deletionJob?.job.status === 'SUCCEEDED'
+      ? '删除完成'
+      : deletionJob?.job.status === 'SUPERSEDED'
+        ? '已由日志包删除任务接管'
+        : '后台删除中';
 
   return (
     <div className="grid min-h-[calc(100vh-72px)] gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
@@ -204,6 +229,15 @@ export function HomeView() {
             />
           ) : null}
         </div>
+
+        {deletionJob ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <span className="font-semibold">{deletionJob.label}</span>：{deletionStatus}
+            {deletionJob.job.status === 'RETRY_WAIT' && deletionJob.job.last_error_code ? (
+              <span className="ml-2 text-amber-700">（{deletionJob.job.last_error_code}）</span>
+            ) : null}
+          </div>
+        ) : null}
 
         <UploadFileTable
           bundlesError={bundles.bundlesError}

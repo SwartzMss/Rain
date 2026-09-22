@@ -75,7 +75,7 @@ pub async fn search_logs(
             SELECT COUNT(*) FROM (
                 SELECT ls.id
                 FROM log_segments ls
-                JOIN files f ON f.id = ls.file_id
+                JOIN visible_files f ON f.id = ls.file_id
                 WHERE ls.bundle_id = ?
                   AND (? IS NULL OR ls.timeline = ?)
                   AND (? IS NULL OR f.path LIKE ?)
@@ -108,7 +108,7 @@ pub async fn search_logs(
         SELECT ls.content, ls.file_id, ls.timeline, ls.line_offset AS offset,
                ls.line_end, ls.chunk_index, f.path
         FROM log_segments ls
-        JOIN files f ON f.id = ls.file_id
+        JOIN visible_files f ON f.id = ls.file_id
         WHERE ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
@@ -137,7 +137,7 @@ pub async fn search_logs(
             r#"
         SELECT COUNT(*) FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
-        JOIN files f ON f.id = ls.file_id
+        JOIN visible_files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
@@ -165,7 +165,7 @@ pub async fn search_logs(
         SELECT ls.id, ls.file_id, f.path, ls.timeline, ls.line_offset AS offset,
                ls.line_end, ls.chunk_index, ls.content
         FROM log_segments ls
-        JOIN files f ON f.id = ls.file_id
+        JOIN visible_files f ON f.id = ls.file_id
         WHERE ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
           AND (? IS NULL OR f.path LIKE ?)
@@ -206,7 +206,7 @@ pub async fn search_logs(
                ls.content AS content
         FROM log_segments ls
         JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
-        JOIN files f ON f.id = ls.file_id
+        JOIN visible_files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND ls.bundle_id = ?
           AND (? IS NULL OR ls.timeline = ?)
@@ -330,7 +330,7 @@ pub async fn search_issue_logs(
                 FROM log_segments ls
                 JOIN bundles b ON b.id = ls.bundle_id
                 JOIN issues i ON i.code = b.issue_code
-                JOIN files f ON f.id = ls.file_id
+                JOIN visible_files f ON f.id = ls.file_id
                 WHERE b.issue_code = ?
                   AND i.status = 'ACTIVE'
                   AND b.status = 'READY'
@@ -360,7 +360,7 @@ pub async fn search_issue_logs(
         FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN issues i ON i.code = b.issue_code
-        JOIN files f ON f.id = ls.file_id
+        JOIN visible_files f ON f.id = ls.file_id
         WHERE b.issue_code = ?
           AND i.status = 'ACTIVE'
           AND b.status = 'READY'
@@ -387,7 +387,7 @@ pub async fn search_issue_logs(
         JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN issues i ON i.code = b.issue_code
-        JOIN files f ON f.id = ls.file_id
+        JOIN visible_files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND b.issue_code = ?
           AND i.status = 'ACTIVE'
@@ -413,7 +413,7 @@ pub async fn search_issue_logs(
         FROM log_segments ls
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN issues i ON i.code = b.issue_code
-        JOIN files f ON f.id = ls.file_id
+        JOIN visible_files f ON f.id = ls.file_id
         WHERE b.issue_code = ?
           AND i.status = 'ACTIVE'
           AND b.status = 'READY'
@@ -452,7 +452,7 @@ pub async fn search_issue_logs(
         JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
         JOIN bundles b ON b.id = ls.bundle_id
         JOIN issues i ON i.code = b.issue_code
-        JOIN files f ON f.id = ls.file_id
+        JOIN visible_files f ON f.id = ls.file_id
         WHERE log_segments_fts MATCH ?
           AND b.issue_code = ?
           AND i.status = 'ACTIVE'
@@ -514,7 +514,7 @@ async fn search_issue_files(
     let total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
-        FROM files f
+        FROM visible_files f
         JOIN bundles b ON b.id = f.bundle_id
         JOIN issues i ON i.code = b.issue_code
         WHERE b.issue_code = ?
@@ -540,7 +540,7 @@ async fn search_issue_files(
                f.name,
                CASE WHEN f.parent_id IS NULL THEN f.name ELSE f.path END AS path,
                b.hash AS bundle_hash
-        FROM files f
+        FROM visible_files f
         JOIN bundles b ON b.id = f.bundle_id
         JOIN issues i ON i.code = b.issue_code
         WHERE b.issue_code = ?

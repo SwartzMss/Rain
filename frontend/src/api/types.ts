@@ -110,6 +110,21 @@ export interface FileNode {
   meta?: Record<string, unknown>;
 }
 
+export interface FileDeletionJobResponse {
+  job_id: string;
+  status: 'QUEUED' | 'RUNNING' | 'RETRY_WAIT' | 'SUCCEEDED' | 'SUPERSEDED';
+  phase: 'WALK' | 'OFFSETS' | 'SEGMENTS' | 'REMOVE_NODE' | 'RECONCILE';
+  deleted_files: number;
+  deleted_offsets: number;
+  deleted_segments: number;
+  attempts: number;
+  next_retry_at: string | null;
+  last_error_code: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
 export interface FileNodeResponse {
   node: FileNode;
   children?: FileNode[];

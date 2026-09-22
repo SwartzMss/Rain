@@ -225,7 +225,7 @@ pub(crate) async fn resolve_sources(
                    f.status, f.meta, f.blob_id, bl.storage_backend, bl.storage_key,
                    bl.state AS blob_state,
                    b.hash AS bundle_hash
-            FROM files f
+            FROM visible_files f
             JOIN bundles b ON b.id = f.bundle_id
             JOIN issues i ON i.code = b.issue_code
             LEFT JOIN blobs bl ON bl.id = f.blob_id

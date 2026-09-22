@@ -257,7 +257,7 @@ async fn cleanup_bundle_content_batched_inner(
             bundle_id,
             batch_size,
             "files",
-            "DELETE FROM files WHERE rowid IN (SELECT rowid FROM files WHERE bundle_id = ? LIMIT ?)",
+            "DELETE FROM files WHERE rowid IN (SELECT f.rowid FROM files f WHERE f.bundle_id = ? AND NOT EXISTS (SELECT 1 FROM files child WHERE child.parent_id = f.id) AND NOT EXISTS (SELECT 1 FROM log_line_offsets offsets WHERE offsets.file_id = f.id) AND NOT EXISTS (SELECT 1 FROM log_segments segments WHERE segments.file_id = f.id) LIMIT ?)",
             lease,
         )
         .await?,

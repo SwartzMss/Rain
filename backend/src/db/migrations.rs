@@ -1523,6 +1523,7 @@ fn schema_error(object: impl std::fmt::Display, reason: impl std::fmt::Display) 
 
 async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
     let statements = [
+        "DROP VIEW IF EXISTS visible_files",
         "DROP TRIGGER IF EXISTS log_segments_fts_ai",
         "DROP TRIGGER IF EXISTS log_segments_fts_ad",
         "DROP TRIGGER IF EXISTS log_segments_fts_au",
@@ -1539,6 +1540,7 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "DROP TABLE IF EXISTS users",
         "DROP TABLE IF EXISTS temp_results",
         "DROP TABLE IF EXISTS rain_ready_probe",
+        "DROP TABLE IF EXISTS file_deletion_jobs",
         "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
@@ -1701,8 +1703,14 @@ mod tests {
         make_legacy(&pool).await;
 
         let mut migrations = MIGRATOR.migrations.to_vec();
+        let future_version = MIGRATOR
+            .iter()
+            .map(|migration| migration.version)
+            .max()
+            .expect("baseline migrations have a version")
+            + 1;
         migrations.push(Migration::new(
-            2,
+            future_version,
             Cow::Borrowed("test future legacy migration"),
             MigrationType::Simple,
             Cow::Borrowed("ALTER TABLE issues ADD COLUMN migration_v2_marker TEXT;"),
@@ -1733,7 +1741,7 @@ mod tests {
         .fetch_all(&pool)
         .await
         .expect("inspect legacy future migration metadata");
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, (1..=future_version).collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -2109,8 +2117,14 @@ mod tests {
         prepare(&pool, false).await.expect("initial migration");
 
         let mut migrations = MIGRATOR.migrations.to_vec();
+        let future_version = MIGRATOR
+            .iter()
+            .map(|migration| migration.version)
+            .max()
+            .expect("baseline migrations have a version")
+            + 1;
         migrations.push(Migration::new(
-            2,
+            future_version,
             Cow::Borrowed("test marker"),
             MigrationType::Simple,
             Cow::Borrowed(
@@ -2126,8 +2140,9 @@ mod tests {
         migrator.run(&pool).await.expect("run future migration");
         migrator.run(&pool).await.expect("restart future migration");
         let marker_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 2 AND success = 1",
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ? AND success = 1",
         )
+        .bind(future_version)
         .fetch_one(&pool)
         .await
         .expect("inspect future migration metadata");

@@ -17,9 +17,22 @@ import type {
   Credentials,
   User,
   SavedSearch,
-  SavedSearchPayload
-  , AdminUserPage, AuditLogPage, UserStatus, RegistrationStatus, RegistrationSettings, AuthRateLimitsResponse,
-  UserSkill, UserSkillSummary, SkillPayload, SkillReview, AiProviderSettings, SkillRun, SkillRunResult, SkillRunTimeScopeRequest
+  SavedSearchPayload,
+  AdminUserPage,
+  AuditLogPage,
+  UserStatus,
+  RegistrationStatus,
+  RegistrationSettings,
+  AuthRateLimitsResponse,
+  UserSkill,
+  UserSkillSummary,
+  SkillPayload,
+  SkillReview,
+  AiProviderSettings,
+  SkillRun,
+  SkillRunResult,
+  SkillRunTimeScopeRequest,
+  FileDeletionJobResponse
 } from './types';
 
 const API_BASE_URL = '';
@@ -240,7 +253,10 @@ export const rainApi = {
     return `${API_BASE_URL}/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}/download`;
   },
   deleteFile(bundleId: string, fileId: string) {
-    return request<void>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}`, { method: 'DELETE' });
+    return request<FileDeletionJobResponse>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}`, { method: 'DELETE' });
+  },
+  fetchFileDeletionJob(jobId: string) {
+    return request<FileDeletionJobResponse>(`/api/file-deletion-jobs/${encodePathSegment(jobId)}`);
   },
   deleteBundle(issueCode: string, bundleHash: string) {
     return request<void>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/bundles/${encodePathSegment(bundleHash)}`, { method: 'DELETE' });

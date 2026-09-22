@@ -299,7 +299,7 @@ impl<'a> SkillToolExecutor<'a> {
         .await
         .map_err(AppError::Database)?;
         let (file_count, directory_count, indexed_text_file_count): (i64, i64, i64) = sqlx::query_as(
-            "SELECT COALESCE(SUM(CASE WHEN f.is_dir=0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN f.is_dir=1 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN f.is_dir=0 AND f.line_count IS NOT NULL THEN 1 ELSE 0 END),0) FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY'",
+            "SELECT COALESCE(SUM(CASE WHEN f.is_dir=0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN f.is_dir=1 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN f.is_dir=0 AND f.line_count IS NOT NULL THEN 1 ELSE 0 END),0) FROM visible_files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY'",
         )
         .bind(issue_code)
         .fetch_one(&self.state.db.pool)
@@ -313,7 +313,7 @@ impl<'a> SkillToolExecutor<'a> {
         .await
         .map_err(AppError::Database)?;
         let mut bundles: Vec<BundleRow> = sqlx::query_as(
-            "SELECT b.hash,substr(b.name,1,512) AS name,COALESCE(SUM(CASE WHEN f.is_dir=0 THEN 1 ELSE 0 END),0) AS file_count,COALESCE(SUM(CASE WHEN f.is_dir=0 AND f.line_count IS NOT NULL THEN 1 ELSE 0 END),0) AS indexed_text_file_count,b.content_size_bytes AS content_bytes FROM bundles b LEFT JOIN files f ON f.bundle_id=b.id WHERE b.issue_code=? AND b.status='READY' GROUP BY b.id ORDER BY b.hash ASC LIMIT ?",
+            "SELECT b.hash,substr(b.name,1,512) AS name,COALESCE(SUM(CASE WHEN f.is_dir=0 THEN 1 ELSE 0 END),0) AS file_count,COALESCE(SUM(CASE WHEN f.is_dir=0 AND f.line_count IS NOT NULL THEN 1 ELSE 0 END),0) AS indexed_text_file_count,b.content_size_bytes AS content_bytes FROM bundles b LEFT JOIN visible_files f ON f.bundle_id=b.id WHERE b.issue_code=? AND b.status='READY' GROUP BY b.id ORDER BY b.hash ASC LIMIT ?",
         )
         .bind(issue_code)
         .bind((MAX_MANIFEST_BUNDLES + 1) as i64)
@@ -323,7 +323,7 @@ impl<'a> SkillToolExecutor<'a> {
         let mut truncated = bundles.len() > MAX_MANIFEST_BUNDLES;
         bundles.truncate(MAX_MANIFEST_BUNDLES);
         let mut extensions: Vec<CountRow> = sqlx::query_as(
-            "SELECT lower('.' || json_extract('[' || replace(json_quote(f.name),'.','\",\"') || ']','$[#-1]')) AS extension,COUNT(*) AS file_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 AND instr(f.name,'.')>1 AND substr(f.name,-1)<>'.' GROUP BY extension ORDER BY file_count DESC,extension ASC LIMIT ?",
+            "SELECT lower('.' || json_extract('[' || replace(json_quote(f.name),'.','\",\"') || ']','$[#-1]')) AS extension,COUNT(*) AS file_count FROM visible_files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 AND instr(f.name,'.')>1 AND substr(f.name,-1)<>'.' GROUP BY extension ORDER BY file_count DESC,extension ASC LIMIT ?",
         )
         .bind(issue_code)
         .bind((MAX_MANIFEST_EXTENSIONS + 1) as i64)
@@ -333,7 +333,7 @@ impl<'a> SkillToolExecutor<'a> {
         truncated |= extensions.len() > MAX_MANIFEST_EXTENSIONS;
         extensions.truncate(MAX_MANIFEST_EXTENSIONS);
         let mut prefixes: Vec<PrefixRow> = sqlx::query_as(
-            "SELECT CASE WHEN f.path LIKE '/%' AND instr(substr(f.path,2),'/')>0 THEN rtrim(substr(f.path,1,instr(substr(f.path,2),'/')+1),'/') WHEN f.path LIKE '/%' THEN '/' WHEN instr(f.path,'/')>0 THEN '/' || substr(f.path,1,instr(f.path,'/')-1) ELSE '/' END AS prefix,COUNT(*) AS file_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 GROUP BY prefix ORDER BY file_count DESC,prefix ASC LIMIT ?",
+            "SELECT CASE WHEN f.path LIKE '/%' AND instr(substr(f.path,2),'/')>0 THEN rtrim(substr(f.path,1,instr(substr(f.path,2),'/')+1),'/') WHEN f.path LIKE '/%' THEN '/' WHEN instr(f.path,'/')>0 THEN '/' || substr(f.path,1,instr(f.path,'/')-1) ELSE '/' END AS prefix,COUNT(*) AS file_count FROM visible_files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 GROUP BY prefix ORDER BY file_count DESC,prefix ASC LIMIT ?",
         )
         .bind(issue_code)
         .bind((MAX_MANIFEST_PREFIXES + 1) as i64)
@@ -343,7 +343,7 @@ impl<'a> SkillToolExecutor<'a> {
         truncated |= prefixes.len() > MAX_MANIFEST_PREFIXES;
         prefixes.truncate(MAX_MANIFEST_PREFIXES);
         let mut largest_files: Vec<LargestFileRow> = sqlx::query_as(
-            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,1024) AS path,COALESCE(f.size_bytes,0) AS size_bytes,f.line_count FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 ORDER BY COALESCE(f.size_bytes,0) DESC,f.id ASC LIMIT ?",
+            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,1024) AS path,COALESCE(f.size_bytes,0) AS size_bytes,f.line_count FROM visible_files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.is_dir=0 ORDER BY COALESCE(f.size_bytes,0) DESC,f.id ASC LIMIT ?",
         )
         .bind(issue_code)
         .bind((MAX_MANIFEST_LARGEST_FILES + 1) as i64)
@@ -410,7 +410,7 @@ impl<'a> SkillToolExecutor<'a> {
             )
         });
         let mut rows: Vec<Row> = sqlx::query_as(
-            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,length(f.path)>4096 AS path_truncated,f.is_dir,f.size_bytes,f.line_count,f.mime_type,f.meta FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.id>? AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') ORDER BY f.id LIMIT 501",
+            "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,length(f.path)>4096 AS path_truncated,f.is_dir,f.size_bytes,f.line_count,f.mime_type,f.meta FROM visible_files f JOIN bundles b ON b.id=f.bundle_id WHERE b.issue_code=? AND b.status='READY' AND f.id>? AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') ORDER BY f.id LIMIT 501",
         )
         .bind(&self.context.issue_code)
         .bind(cursor)
@@ -553,7 +553,7 @@ impl<'a> SkillToolExecutor<'a> {
         {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
             let marker: Option<i64> = sqlx::query_scalar(
-                "SELECT 1 FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (ls.event_time_indexed != 1 OR ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE LIMIT 1",
+                "SELECT 1 FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN visible_files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (ls.event_time_indexed != 1 OR ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE LIMIT 1",
             )
             .bind(&self.context.issue_code)
             .bind(file_id.expect("short search file_id was validated"))
@@ -569,7 +569,7 @@ impl<'a> SkillToolExecutor<'a> {
         } else if applied_scope.is_some() {
             let fts = format!("\"{}\"", query.replace('"', "\"\""));
             let marker: Option<i64> = sqlx::query_scalar(
-                "SELECT 1 FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (ls.event_time_indexed != 1 OR ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) LIMIT 1",
+                "SELECT 1 FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (ls.event_time_indexed != 1 OR ls.event_time_start_ms IS NULL OR ls.event_time_end_ms IS NULL) LIMIT 1",
             )
             .bind(fts)
             .bind(&self.context.issue_code)
@@ -589,7 +589,7 @@ impl<'a> SkillToolExecutor<'a> {
         let rows: Vec<HitRow> = if search_mode == SearchMode::ShortLiteral {
             let literal_pattern = format!("%{}%", escape_like_pattern(query));
             sqlx::query_as(
-                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR (ls.event_time_indexed = 1 AND ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,substr(ls.content,max(1,instr(lower(ls.content),lower(?))-96),400) AS snippet FROM log_segments ls JOIN bundles b ON b.id=ls.bundle_id JOIN visible_files f ON f.id=ls.file_id WHERE b.issue_code=? AND b.status='READY' AND ls.file_id=? AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR (ls.event_time_indexed = 1 AND ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) AND ls.content LIKE ? ESCAPE '\\' COLLATE NOCASE ORDER BY ls.id LIMIT ?",
             )
             .bind(query)
             .bind(&self.context.issue_code)
@@ -609,7 +609,7 @@ impl<'a> SkillToolExecutor<'a> {
         } else {
             let fts = format!("\"{}\"", query.replace('"', "\"\""));
             sqlx::query_as(
-                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,snippet(log_segments_fts,0,'','','',64) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (? IS NULL OR (ls.event_time_indexed = 1 AND ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) ORDER BY rank LIMIT ?",
+                "SELECT f.id AS file_id,b.hash AS bundle_hash,substr(f.path,1,4096) AS path,ls.line_offset AS start_line,ls.line_end AS end_line,snippet(log_segments_fts,0,'','','',64) AS snippet FROM log_segments_fts JOIN log_segments ls ON ls.id=log_segments_fts.rowid JOIN bundles b ON b.id=ls.bundle_id JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND b.status='READY' AND (? IS NULL OR b.hash=? COLLATE NOCASE) AND (? IS NULL OR f.path LIKE ? ESCAPE '\\') AND (? IS NULL OR f.id=?) AND (? IS NULL OR (ls.event_time_indexed = 1 AND ls.event_time_start_ms IS NOT NULL AND ls.event_time_end_ms IS NOT NULL AND ls.event_time_end_ms >= ? AND ls.event_time_start_ms <= ?)) ORDER BY rank LIMIT ?",
             )
             .bind(fts)
             .bind(&self.context.issue_code)
@@ -672,7 +672,7 @@ impl<'a> SkillToolExecutor<'a> {
             return Ok(json!({ "duplicate": true, "lines": [] }));
         }
         let record: FileRow = sqlx::query_as(
-            "SELECT f.id,f.parent_id,f.name,f.path,f.is_dir,f.size_bytes,f.line_count,f.mime_type,f.status,f.meta,f.blob_id,bl.storage_backend,bl.storage_key,bl.state AS blob_state FROM files f JOIN bundles b ON b.id=f.bundle_id LEFT JOIN blobs bl ON bl.id=f.blob_id WHERE f.id=? AND b.issue_code=? AND b.status='READY' LIMIT 1",
+            "SELECT f.id,f.parent_id,f.name,f.path,f.is_dir,f.size_bytes,f.line_count,f.mime_type,f.status,f.meta,f.blob_id,bl.storage_backend,bl.storage_key,bl.state AS blob_state FROM visible_files f JOIN bundles b ON b.id=f.bundle_id LEFT JOIN blobs bl ON bl.id=f.blob_id WHERE f.id=? AND b.issue_code=? AND b.status='READY' LIMIT 1",
         )
         .bind(file_id)
         .bind(&self.context.issue_code)
@@ -681,7 +681,7 @@ impl<'a> SkillToolExecutor<'a> {
         .map_err(AppError::Database)?
         .ok_or_else(|| AppError::NotFound("file is outside the run Issue".into()))?;
         let bundle_hash: String = sqlx::query_scalar(
-            "SELECT b.hash FROM files f JOIN bundles b ON b.id=f.bundle_id WHERE f.id=? AND b.issue_code=? AND b.status='READY' LIMIT 1",
+            "SELECT b.hash FROM visible_files f JOIN bundles b ON b.id=f.bundle_id WHERE f.id=? AND b.issue_code=? AND b.status='READY' LIMIT 1",
         )
         .bind(file_id)
         .bind(&self.context.issue_code)
