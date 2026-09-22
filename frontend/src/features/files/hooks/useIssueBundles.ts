@@ -207,6 +207,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   return {
     bundleFiles,
     bundles,
+    hasProcessingBundles: hasActiveBundles,
     canWrite,
     inactivityExpiry,
     ownerUsername,

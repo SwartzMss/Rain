@@ -67,14 +67,14 @@ export function UploadFileTable({
                         下载
                       </a>
                     ) : null}
-                    {row.status === 'PROCESSING' || row.status === 'PENDING' ? (
-                      <span className="mr-4 text-slate-500">等待完成</span>
+                    {row.stage === 'UPLOADING' || row.status === 'PROCESSING' || row.status === 'PENDING' ? (
+                      <span role="status" className="mr-4 text-amber-700">处理中，暂不可删除</span>
                     ) : null}
-                    {canWrite && row.stage !== 'UPLOADING' && row.bundleHash ? (
+                    {canWrite && row.stage !== 'UPLOADING' && row.bundleHash && row.status !== 'PROCESSING' && row.status !== 'PENDING' ? (
                       <button
                         type="button"
                         className="text-rose-600 hover:text-rose-700 disabled:text-slate-600"
-                        disabled={deleting || row.status === 'PROCESSING' || row.status === 'PENDING'}
+                        disabled={deleting}
                         onClick={() => onDeleteRow(row)}
                       >
                         {deleting ? '删除中...' : '删除'}
