@@ -491,6 +491,12 @@ pub async fn resume_deleting_bundles(pool: &SqlitePool) -> Result<u64, AppError>
 pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, AppError> {
     let result = write::run(pool, "fail stale processing bundles", &(), |conn, _| {
         Box::pin(async move {
+            sqlx::query(
+                "UPDATE bundle_search_indexes SET state = 'FAILED', last_error_code = 'PROCESS_INTERRUPTED', updated_at = CURRENT_TIMESTAMP WHERE state = 'BUILDING' AND bundle_id IN (SELECT id FROM bundles WHERE status IN ('PENDING', 'PROCESSING'))",
+            )
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
             Ok(sqlx::query(
                 r#"
         UPDATE bundles
@@ -523,6 +529,13 @@ pub async fn fail_stale_processing_bundles_before(
         &created_before,
         |conn, created_before| {
             Box::pin(async move {
+                sqlx::query(
+                    "UPDATE bundle_search_indexes SET state = 'FAILED', last_error_code = 'PROCESS_INTERRUPTED', updated_at = CURRENT_TIMESTAMP WHERE state = 'BUILDING' AND bundle_id IN (SELECT id FROM bundles WHERE status IN ('PENDING', 'PROCESSING') AND datetime(created_at) <= datetime(?))",
+                )
+                .bind(created_before)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
                 Ok(sqlx::query(
                     r#"
         UPDATE bundles

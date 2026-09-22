@@ -114,6 +114,12 @@ async fn main() -> std::io::Result<()> {
     {
         recovery_runtime.mark_stale_processing_bundles_ready();
     }
+    run_optional_recovery_stage(
+        "unpublished-search-artifact-cleanup",
+        STARTUP_RECOVERY_TIMEOUT,
+        backend::search::publication::cleanup_unpublished_artifacts(&pool, &config.data_root),
+    )
+    .await;
     if run_optional_recovery_stage(
         "stale-skill-runs",
         STARTUP_RECOVERY_TIMEOUT,

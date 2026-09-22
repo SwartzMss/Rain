@@ -178,6 +178,24 @@ pub async fn finalize_bundle_failed(
         );
     }
 
+    let unpublished_generation: Option<i64> = sqlx::query_scalar(
+        "SELECT generation FROM bundle_search_indexes WHERE bundle_id = ? AND state IN ('BUILDING', 'FAILED') AND generation > 0",
+    )
+    .bind(bundle_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)
+    .unwrap_or_else(|error| {
+        error!(bundle_id, %error, "failed to load unpublished search generation for cleanup");
+        None
+    });
+    if let Some(generation) = unpublished_generation {
+        let _ = crate::search::publication::cleanup_publication_artifact(
+            data_root, bundle_id, generation,
+        )
+        .await;
+    }
+
     for path in [staging_root.join(bundle_hash), data_root.join(bundle_hash)] {
         match fs::remove_dir_all(&path).await {
             Ok(()) => {}

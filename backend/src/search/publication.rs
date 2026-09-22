@@ -196,6 +196,44 @@ pub async fn mark_publication_failed(
     }
 }
 
+/// Remove only unpublished generations. READY artifacts are intentionally left
+/// untouched so a failed rebuild cannot make an existing Bundle disappear
+/// from search.
+pub async fn cleanup_unpublished_artifacts(
+    pool: &SqlitePool,
+    data_root: &std::path::Path,
+) -> Result<u64, AppError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT bundle_id, generation FROM bundle_search_indexes WHERE state IN ('BUILDING', 'FAILED') AND generation > 0",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut removed = 0_u64;
+    for (bundle_id, generation) in rows {
+        if cleanup_publication_artifact(data_root, &bundle_id, generation).await? {
+            removed = removed.saturating_add(1);
+        }
+    }
+    Ok(removed)
+}
+
+pub async fn cleanup_publication_artifact(
+    data_root: &std::path::Path,
+    bundle_id: &str,
+    generation: i64,
+) -> Result<bool, AppError> {
+    let path = data_root.join(artifact_relative_path(bundle_id, generation)?);
+    match tokio::fs::remove_dir_all(&path).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            tracing::warn!(bundle_id, generation, path = %path.display(), %error, "failed to remove unpublished search artifact");
+            Ok(false)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SearchBackendKind, artifact_relative_path};
