@@ -13,7 +13,9 @@ import { useIssues } from './hooks/useIssues';
 import { useUploadTask } from './hooks/useUploadTask';
 import { isUser } from '../../auth/permissions';
 import { IssueExpirationNotice } from './components/IssueExpirationNotice';
+import { IssueDeleteButton } from './components/IssueDeleteButton';
 import type { FileDeletionJobResponse } from '../../api/types';
+import { normalizeDeletionError } from './deleteFeedback';
 
 export function HomeView() {
   const navigate = useNavigate();
@@ -112,7 +114,8 @@ export function HomeView() {
               upload.resetSelection();
             }
           } catch (error) {
-            issues.setIssuesError(normalizeApiError(error));
+            issues.setIssuesError(normalizeDeletionError(error));
+            await bundles.loadBundles(code).catch(() => undefined);
           } finally {
             setDeletingIssue(null);
           }
@@ -141,7 +144,11 @@ export function HomeView() {
             }
             await issues.loadIssues();
           } catch (error) {
-            bundles.setBundlesError(normalizeApiError(error));
+            bundles.setBundlesError(normalizeDeletionError(error));
+            await Promise.allSettled([
+              bundles.loadBundles(issues.currentIssueCode),
+              issues.loadIssues()
+            ]);
           } finally {
             setDeletingKey(null);
           }
@@ -202,16 +209,13 @@ export function HomeView() {
                 expiry={bundles.inactivityExpiry}
               />
             </div>
-            {canWrite && issues.currentIssueCode ? (
-              <button
-                type="button"
-                className="rounded-lg border border-rose-500/60 px-4 py-2 text-sm font-semibold text-rose-600 transition hover:bg-rose-500/10 disabled:opacity-60"
-                disabled={deletingIssue === issues.currentIssueCode}
-                onClick={() => deleteIssue(issues.currentIssueCode)}
-              >
-                删除 Issue
-              </button>
-            ) : null}
+            <IssueDeleteButton
+              issueCode={issues.currentIssueCode}
+              canWrite={canWrite}
+              blocked={upload.uploading || bundles.hasProcessingBundles}
+              deleting={deletingIssue === issues.currentIssueCode}
+              onDelete={() => deleteIssue(issues.currentIssueCode)}
+            />
           </div>
 
           {canWrite ? (

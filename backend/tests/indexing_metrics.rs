@@ -66,6 +66,7 @@ async fn process(fail: bool) -> Events {
             issue_quota: IssueQuota::new(pool.clone(), "METRICS", "bundle", 1024 * 1024),
             indexing: &IndexingConfig::default(),
             search_index: None,
+            preflighted: false,
         }).await;
         assert_eq!(result.is_err(), fail);
         pool.close().await;

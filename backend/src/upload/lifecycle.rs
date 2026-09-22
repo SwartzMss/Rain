@@ -161,7 +161,7 @@ pub(crate) async fn set_bundle_stage(
 ) -> Result<(), AppError> {
     if !matches!(
         stage,
-        "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
+        "RECEIVING" | "VALIDATING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
     ) {
         return Err(AppError::Config(format!("invalid bundle stage: {stage}")));
     }

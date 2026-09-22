@@ -312,6 +312,7 @@ describe('upload and bundle polling behavior', () => {
     const { result, unmount } = renderHook(() => useIssueBundles('ISSUE-1', onIssueMissing));
     await settle();
     expect(result.current.bundles).toEqual([bundle('pending', 'PENDING')]);
+    expect(result.current.hasProcessingBundles).toBe(true);
     expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -319,6 +320,7 @@ describe('upload and bundle polling behavior', () => {
     });
     expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
     expect(result.current.bundles).toEqual([bundle('pending', 'READY')]);
+    expect(result.current.hasProcessingBundles).toBe(false);
     unmount();
   });
 
@@ -336,12 +338,14 @@ describe('upload and bundle polling behavior', () => {
     });
     expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(2);
     expect(result.current.bundles[0].status.upload_status).toBe('PROCESSING');
+    expect(result.current.hasProcessingBundles).toBe(true);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
     expect(rainApi.fetchIssueBundles).toHaveBeenCalledTimes(3);
     expect(result.current.bundles[0].status.upload_status).toBe('READY');
+    expect(result.current.hasProcessingBundles).toBe(false);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);

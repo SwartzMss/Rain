@@ -14,6 +14,7 @@ use sqlx::{
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::error::AppError;
+use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 
 mod migrations;
 pub mod write;
@@ -401,7 +402,7 @@ pub async fn finish_bundle_deletion_with_inactive_lease(
         |conn, &(bundle_id, issue_code, lease_token, lease_seconds)| {
             Box::pin(async move {
                 let modifier = format!("+{lease_seconds} seconds");
-                let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND deletion_reason IN ('INACTIVE', 'MANUAL') AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
+                let renewed = sqlx::query("UPDATE issues SET deletion_lease_until=datetime('now', ?) WHERE code=? AND status='DELETING' AND (deletion_reason='MANUAL' OR (deletion_reason='INACTIVE' AND NOT EXISTS (SELECT 1 FROM users cleanup_owner, json_each((SELECT cleanup_exempt_usernames_json FROM system_settings WHERE id=1)) exempt WHERE cleanup_owner.id=issues.owner_user_id AND exempt.value=cleanup_owner.username_normalized))) AND deletion_lease_token=? AND datetime(deletion_lease_until) > datetime('now')")
                     .bind(modifier)
                     .bind(issue_code)
                     .bind(lease_token)
@@ -633,13 +634,50 @@ pub async fn load_or_initialize_system_settings(
     Ok((row.0, ip, username, issue_inactive_days))
 }
 
+/// Loads the database-owned cleanup whitelist. The environment value is only
+/// used to seed a database that has never had this setting initialized.
+pub async fn load_or_initialize_cleanup_exempt_users(
+    pool: &SqlitePool,
+    legacy_policy: &IssueCleanupPolicy,
+) -> Result<IssueCleanupPolicy, AppError> {
+    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, 1)")
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
+    let mut tx = pool.begin().await.map_err(AppError::Database)?;
+    let initialized: i64 = sqlx::query_scalar(
+        "SELECT cleanup_exempt_users_initialized FROM system_settings WHERE id=1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::Database)?;
+    let json: String = if initialized == 0 {
+        let json = legacy_policy.exempt_usernames_json().to_owned();
+        sqlx::query("UPDATE system_settings SET cleanup_exempt_usernames_json=?, cleanup_exempt_users_initialized=1, updated_at=CURRENT_TIMESTAMP WHERE id=1")
+            .bind(&json)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+        json
+    } else {
+        sqlx::query_scalar("SELECT cleanup_exempt_usernames_json FROM system_settings WHERE id=1")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::Database)?
+    };
+    tx.commit().await.map_err(AppError::Database)?;
+    IssueCleanupPolicy::from_json(&json).map_err(AppError::Config)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
+
     use super::{
         ACTIVE_CLEANUPS, QUEUED_CLEANUPS, acquire_heavy_cleanup_writer, checkpoint_wal,
-        load_or_initialize_system_settings,
+        load_or_initialize_cleanup_exempt_users, load_or_initialize_system_settings,
     };
 
     #[tokio::test]
@@ -746,6 +784,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(days, 15);
+    }
+
+    #[tokio::test]
+    async fn cleanup_exempt_users_migrate_once_and_database_wins_afterward() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true).await.expect("schema");
+        let (legacy, _) = IssueCleanupPolicy::from_csv(Some("Alice"));
+        let loaded = load_or_initialize_cleanup_exempt_users(&pool, &legacy)
+            .await
+            .expect("initial whitelist");
+        assert!(loaded.is_exempt("alice"));
+
+        sqlx::query("UPDATE system_settings SET cleanup_exempt_usernames_json='[\"bob\"]', cleanup_exempt_users_initialized=1")
+            .execute(&pool)
+            .await
+            .expect("database whitelist");
+        let loaded = load_or_initialize_cleanup_exempt_users(&pool, &legacy)
+            .await
+            .expect("persisted whitelist");
+        assert!(loaded.is_exempt("BOB"));
+        assert!(!loaded.is_exempt("alice"));
     }
 
     #[tokio::test]

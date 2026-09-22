@@ -9,7 +9,30 @@ use crate::{
     auth::{UserRole, UserStatus, extractor::RequireAdmin},
     error::AppError,
     models::admin::*,
+    services::issue_cleanup_policy::IssueCleanupPolicy,
 };
+
+type SettingsRow = (i64, String, Option<String>, i64, i64, i64, String);
+type ExistingSettingsRow = (i64, i64, i64, i64, String);
+
+async fn fetch_settings(pool: &sqlx::SqlitePool) -> Result<RegistrationSettings, AppError> {
+    let row: SettingsRow = sqlx::query_as(
+        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes, s.issue_inactive_days, s.cleanup_exempt_usernames_json FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let policy = IssueCleanupPolicy::from_json(&row.6).map_err(AppError::Config)?;
+    Ok(RegistrationSettings {
+        allow_registration: row.0,
+        updated_at: row.1,
+        updated_by_username: row.2,
+        login_ip_limit_per_minute: row.3,
+        login_username_failure_limit_per_5_minutes: row.4,
+        issue_inactive_days: row.5,
+        cleanup_exempt_usernames: policy.usernames_sorted(),
+    })
+}
 
 fn limit(value: Option<i64>) -> Result<i64, AppError> {
     let value = value.unwrap_or(50);
@@ -271,9 +294,7 @@ pub async fn get_settings(
         state.auth_runtime.registration_allowed(),
     )
     .await?;
-    let settings = sqlx::query_as::<_, RegistrationSettings>(
-        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes, s.issue_inactive_days FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
-    ).fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
+    let settings = fetch_settings(&state.db.pool).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "allow_registration": settings.allow_registration != 0,
         "updated_at": settings.updated_at,
@@ -281,6 +302,7 @@ pub async fn get_settings(
         "login_ip_limit_per_minute": settings.login_ip_limit_per_minute,
         "login_username_failure_limit_per_5_minutes": settings.login_username_failure_limit_per_5_minutes,
         "issue_inactive_days": settings.issue_inactive_days,
+        "cleanup_exempt_usernames": settings.cleanup_exempt_usernames,
     })))
 }
 
@@ -292,13 +314,13 @@ pub async fn update_settings(
     body: web::Json<UpdateRegistrationSettings>,
 ) -> Result<HttpResponse, AppError> {
     let _settings_guard = state.auth_runtime.registration_settings_lock.lock().await;
-    let old: (i64, i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days FROM system_settings WHERE id=1")
-        .fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
         .bind(state.auth_runtime.registration_allowed() as i64)
         .execute(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
+    let old: ExistingSettingsRow = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days, cleanup_exempt_usernames_json FROM system_settings WHERE id=1")
+        .fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
     let ip_limit = body.login_ip_limit_per_minute.unwrap_or_else(|| {
         state
             .auth_runtime
@@ -334,10 +356,33 @@ pub async fn update_settings(
                 )
             })?,
     };
+    let cleanup_policy = match body.cleanup_exempt_usernames.as_ref() {
+        None => None,
+        Some(None) => {
+            return Err(AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVALID_CLEANUP_EXEMPT_USERS",
+                "自动清理白名单必须为用户名数组",
+            ));
+        }
+        Some(Some(usernames)) => Some(IssueCleanupPolicy::from_usernames(usernames).map_err(
+            |username| {
+                AppError::public(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_CLEANUP_EXEMPT_USERS",
+                    format!("自动清理白名单中的用户名无效：{username}"),
+                )
+            },
+        )?),
+    };
+    let cleanup_json = cleanup_policy
+        .as_ref()
+        .map(|policy| policy.exempt_usernames_json().to_owned())
+        .unwrap_or_else(|| old.4.clone());
     let mut settings_tx = state.db.pool.begin().await.map_err(AppError::Database)?;
     let allow_registration = body.allow_registration.unwrap_or(old.0 != 0);
-    sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, issue_inactive_days=?, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
-        .bind(allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(issue_inactive_days as i64).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
+    sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, issue_inactive_days=?, cleanup_exempt_usernames_json=?, cleanup_exempt_users_initialized=1, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
+        .bind(allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(issue_inactive_days as i64).bind(&cleanup_json).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
     let mut auth_changes = Vec::new();
     if old.0 != allow_registration as i64 {
         auth_changes.push(format!(
@@ -353,6 +398,7 @@ pub async fn update_settings(
         auth_changes.push(format!("username_limit:{}->{username_limit}", old.2));
     }
     let issue_changed = old.3 != issue_inactive_days as i64;
+    let cleanup_changed = old.4 != cleanup_json;
     let client_ip = req.peer_addr().map(|address| address.ip().to_string());
     let user_agent = req
         .headers()
@@ -383,6 +429,18 @@ pub async fn update_settings(
             .await
             .map_err(AppError::Database)?;
     }
+    if cleanup_changed {
+        sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?,'ISSUE_CLEANUP_EXEMPT_USERS_UPDATED',?,?,?,?)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&admin.0.id)
+            .bind(&old.4)
+            .bind(&cleanup_json)
+            .bind(client_ip.as_deref())
+            .bind(user_agent.as_deref())
+            .execute(&mut *settings_tx)
+            .await
+            .map_err(AppError::Database)?;
+    }
     settings_tx.commit().await.map_err(AppError::Database)?;
     state
         .auth_runtime
@@ -398,9 +456,7 @@ pub async fn update_settings(
     state
         .issue_inactive_days
         .store(issue_inactive_days, std::sync::atomic::Ordering::Release);
-    let settings = sqlx::query_as::<_, RegistrationSettings>(
-        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes, s.issue_inactive_days FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
-    ).fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
+    let settings = fetch_settings(&state.db.pool).await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "allow_registration": settings.allow_registration != 0,
         "updated_at": settings.updated_at,
@@ -408,6 +464,7 @@ pub async fn update_settings(
         "login_ip_limit_per_minute": settings.login_ip_limit_per_minute,
         "login_username_failure_limit_per_5_minutes": settings.login_username_failure_limit_per_5_minutes,
         "issue_inactive_days": settings.issue_inactive_days,
+        "cleanup_exempt_usernames": settings.cleanup_exempt_usernames,
     })))
 }
 

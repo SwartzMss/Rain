@@ -91,6 +91,21 @@ pub struct ProcessFileOptions<'a> {
     pub issue_quota: IssueQuota,
     pub indexing: &'a IndexingConfig,
     pub search_index: Option<Arc<dyn IngestIndex>>,
+    pub preflighted: bool,
+}
+
+pub struct PreflightFileOptions<'a> {
+    pub pool: &'a sqlx::SqlitePool,
+    pub bundle_id: &'a str,
+    pub bundle_hash: &'a str,
+    pub data_root: &'a Path,
+    pub storage_name: &'a str,
+    pub original_name: &'a str,
+    pub content_type: Option<&'a str>,
+    pub source_path: &'a Path,
+    pub size_bytes: u64,
+    pub archive_budget: ArchiveBudget,
+    pub issue_quota: IssueQuota,
 }
 
 fn uploaded_file_meta(
@@ -135,6 +150,162 @@ struct PreparedDirectoryEntry {
     blob_id: Option<i64>,
 }
 
+pub async fn preflight_uploaded_file(options: PreflightFileOptions<'_>) -> Result<(), AppError> {
+    let PreflightFileOptions {
+        pool,
+        bundle_id,
+        bundle_hash,
+        data_root,
+        storage_name,
+        original_name,
+        content_type,
+        source_path,
+        size_bytes,
+        archive_budget,
+        issue_quota,
+    } = options;
+
+    let bundle_dir = data_root.join(bundle_hash);
+    fs::create_dir_all(&bundle_dir)
+        .await
+        .map_err(|error| io_error_at("create bundle staging directory", &bundle_dir, error))?;
+    let disk_path = bundle_dir.join(storage_name);
+    move_or_copy_file(source_path, &disk_path).await?;
+    let mime_type = effective_mime_type(original_name, content_type);
+    let preview_kind = classify_file(&disk_path, original_name, mime_type.as_deref()).await?;
+
+    if preview_kind != PreviewKind::Archive {
+        issue_quota.reserve(size_bytes).await?;
+        return Ok(());
+    }
+
+    let extracted_dir_name = format!("{storage_name}_extracted");
+    let extracted_dir = bundle_dir.join(&extracted_dir_name);
+    fs::create_dir_all(&extracted_dir).await.map_err(|error| {
+        io_error_at("create archive extraction directory", &extracted_dir, error)
+    })?;
+    update_process_stage(pool, bundle_id, "EXTRACTING").await?;
+    extract_archive(
+        original_name,
+        &disk_path,
+        &extracted_dir,
+        archive_budget.clone(),
+    )
+    .await?;
+    update_process_stage(pool, bundle_id, "VALIDATING").await?;
+    preflight_directory(
+        pool,
+        bundle_id,
+        extracted_dir,
+        format!("{bundle_hash}/{extracted_dir_name}"),
+        archive_budget,
+        issue_quota,
+        1,
+    )
+    .await
+}
+
+fn preflight_directory<'a>(
+    pool: &'a sqlx::SqlitePool,
+    bundle_id: &'a str,
+    dir_path: PathBuf,
+    relative_root: String,
+    archive_budget: ArchiveBudget,
+    issue_quota: IssueQuota,
+    archive_depth: usize,
+) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut read_dir = fs::read_dir(&dir_path)
+            .await
+            .map_err(|error| io_error_at("read extracted directory", &dir_path, error))?;
+        let mut entries = Vec::new();
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|error| io_error_at("read extracted directory entry", &dir_path, error))?
+        {
+            entries.push(entry.path());
+        }
+        entries.sort();
+
+        for disk_path in entries {
+            let name = disk_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let metadata = fs::metadata(&disk_path)
+                .await
+                .map_err(|error| io_error_at("read extracted entry metadata", &disk_path, error))?;
+            if metadata.is_dir() {
+                preflight_directory(
+                    pool,
+                    bundle_id,
+                    disk_path,
+                    format!("{relative_root}/{name}"),
+                    archive_budget.clone(),
+                    issue_quota.clone(),
+                    archive_depth,
+                )
+                .await?;
+                continue;
+            }
+
+            let mime_type = effective_mime_type(&name, None);
+            let preview_kind = classify_file(&disk_path, &name, mime_type.as_deref()).await?;
+            if preview_kind != PreviewKind::Archive {
+                issue_quota.reserve(metadata.len()).await?;
+                continue;
+            }
+
+            update_process_stage(pool, bundle_id, "EXTRACTING").await?;
+            let db_path = format!("/{}/{}", relative_root.trim_start_matches('/'), name);
+            if archive_depth >= archive_budget.config.max_recursion_depth {
+                return Err(AppError::BadRequest(format!(
+                    "archive recursion is too deep; max {}: {db_path}",
+                    archive_budget.config.max_recursion_depth
+                )));
+            }
+            let extracted_dir_name = format!("{name}_extracted");
+            let extracted_dir = dir_path.join(&extracted_dir_name);
+            validate_extracted_path(
+                &extracted_dir,
+                &db_path,
+                archive_budget.config.max_output_path_chars,
+            )?;
+            if fs::metadata(&extracted_dir).await.is_ok() {
+                return Err(AppError::BadRequest(format!(
+                    "archive extraction output already exists: {}",
+                    extracted_dir.display()
+                )));
+            }
+            fs::create_dir_all(&extracted_dir).await.map_err(|error| {
+                io_error_at(
+                    "create nested archive extraction directory",
+                    &extracted_dir,
+                    error,
+                )
+            })?;
+            extract_archive(&name, &disk_path, &extracted_dir, archive_budget.clone()).await?;
+            update_process_stage(pool, bundle_id, "VALIDATING").await?;
+            preflight_directory(
+                pool,
+                bundle_id,
+                extracted_dir,
+                format!("{db_path}_extracted")
+                    .trim_start_matches('/')
+                    .to_string(),
+                archive_budget.clone(),
+                issue_quota.clone(),
+                archive_depth + 1,
+            )
+            .await?;
+        }
+
+        Ok(())
+    })
+}
+
 pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<(), AppError> {
     let ProcessFileOptions {
         pool,
@@ -152,6 +323,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         issue_quota,
         indexing,
         search_index,
+        preflighted,
     } = options;
     let search_index: Arc<dyn IngestIndex> =
         search_index.unwrap_or_else(|| Arc::new(SqliteFtsSearchIndex::new(pool.clone())));
@@ -162,10 +334,12 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         .map_err(|error| io_error_at("create bundle staging directory", &bundle_dir, error))?;
 
     let disk_path = bundle_dir.join(storage_name);
-    move_or_copy_file(source_path, &disk_path).await?;
+    if !preflighted {
+        move_or_copy_file(source_path, &disk_path).await?;
+    }
     let mime_type = effective_mime_type(original_name, content_type);
     let preview_kind = classify_file(&disk_path, original_name, mime_type.as_deref()).await?;
-    if preview_kind != PreviewKind::Archive {
+    if !preflighted && preview_kind != PreviewKind::Archive {
         issue_quota.reserve(size_bytes).await?;
     }
 
@@ -196,7 +370,9 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     )
     .await?;
 
-    update_process_stage(pool, bundle_id, "EXTRACTING").await?;
+    if !preflighted {
+        update_process_stage(pool, bundle_id, "EXTRACTING").await?;
+    }
     if preview_kind == PreviewKind::Text {
         update_process_stage(pool, bundle_id, "INDEXING").await?;
         ingest_text_file(
@@ -214,18 +390,30 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     if preview_kind == PreviewKind::Archive {
         let extracted_dir_name = format!("{storage_name}_extracted");
         let extracted_dir = bundle_dir.join(&extracted_dir_name);
-        fs::create_dir_all(&extracted_dir).await.map_err(|error| {
-            io_error_at("create archive extraction directory", &extracted_dir, error)
-        })?;
+        if preflighted {
+            if fs::metadata(&extracted_dir).await.is_err() {
+                return Err(AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "preflighted archive output is missing: {}",
+                        extracted_dir.display()
+                    ),
+                )));
+            }
+        } else {
+            fs::create_dir_all(&extracted_dir).await.map_err(|error| {
+                io_error_at("create archive extraction directory", &extracted_dir, error)
+            })?;
 
-        update_process_stage(pool, bundle_id, "EXTRACTING").await?;
-        extract_archive(
-            original_name,
-            &disk_path,
-            &extracted_dir,
-            archive_budget.clone(),
-        )
-        .await?;
+            update_process_stage(pool, bundle_id, "EXTRACTING").await?;
+            extract_archive(
+                original_name,
+                &disk_path,
+                &extracted_dir,
+                archive_budget.clone(),
+            )
+            .await?;
+        }
 
         let extracted_relative_path = format!("/{bundle_hash}/{extracted_dir_name}");
         let dir_meta = extracted_directory_meta(original_name, extracted_dir_name.as_str());
@@ -257,11 +445,11 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             blob_store.clone(),
             1,
             search_index.clone(),
+            preflighted,
         )
         .await?;
     }
 
-    update_process_stage(pool, bundle_id, "INDEXING").await?;
     Ok(())
 }
 
@@ -271,6 +459,42 @@ async fn update_process_stage(
     stage: &str,
 ) -> Result<(), AppError> {
     set_bundle_stage(pool, bundle_id, stage).await
+}
+
+async fn is_preflight_archive_output(path: &Path) -> Result<bool, AppError> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let Some(source_name) = name.strip_suffix("_extracted") else {
+        return Ok(false);
+    };
+    if source_name.is_empty() {
+        return Ok(false);
+    }
+    let source_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(source_name);
+    let metadata = match fs::metadata(&source_path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(io_error_at(
+                "read preflight archive source",
+                &source_path,
+                error,
+            ));
+        }
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    let mime_type = effective_mime_type(source_name, None);
+    Ok(
+        classify_file(&source_path, source_name, mime_type.as_deref()).await?
+            == PreviewKind::Archive,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -286,6 +510,7 @@ fn ingest_directory<'a>(
     blob_store: std::sync::Arc<dyn BlobStore>,
     archive_depth: usize,
     search_index: Arc<dyn IngestIndex>,
+    preflighted: bool,
 ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
     Box::pin(async move {
         let mut read_dir = fs::read_dir(&dir_path)
@@ -300,6 +525,16 @@ fn ingest_directory<'a>(
             entries.push(entry.path());
         }
         entries.sort();
+        if preflighted {
+            let mut visible_entries = Vec::with_capacity(entries.len());
+            for disk_path in entries {
+                if is_preflight_archive_output(&disk_path).await? {
+                    continue;
+                }
+                visible_entries.push(disk_path);
+            }
+            entries = visible_entries;
+        }
 
         let mut prepared = Vec::with_capacity(entries.len());
         for disk_path in entries {
@@ -322,7 +557,7 @@ fn ingest_directory<'a>(
             } else {
                 classify_file(&disk_path, &name, mime_type.as_deref()).await?
             };
-            if !is_dir && preview_kind != PreviewKind::Archive {
+            if !preflighted && !is_dir && preview_kind != PreviewKind::Archive {
                 issue_quota.reserve(metadata.len()).await?;
             }
             let meta = extracted_entry_meta(
@@ -391,6 +626,7 @@ fn ingest_directory<'a>(
                     blob_store.clone(),
                     archive_depth,
                     search_index.clone(),
+                    preflighted,
                 )
                 .await?;
                 continue;
@@ -412,13 +648,6 @@ fn ingest_directory<'a>(
             }
 
             if preview_kind == PreviewKind::Archive {
-                if archive_depth >= archive_budget.config.max_recursion_depth {
-                    return Err(AppError::BadRequest(format!(
-                        "archive recursion is too deep; max {}: {db_path}",
-                        archive_budget.config.max_recursion_depth
-                    )));
-                }
-
                 let extracted_dir_name = format!("{name}_extracted");
                 let extracted_dir = dir_path.join(&extracted_dir_name);
                 validate_extracted_path(
@@ -426,20 +655,39 @@ fn ingest_directory<'a>(
                     &db_path,
                     archive_budget.config.max_output_path_chars,
                 )?;
-                if fs::metadata(&extracted_dir).await.is_ok() {
-                    return Err(AppError::BadRequest(format!(
-                        "archive extraction output already exists: {}",
-                        extracted_dir.display()
-                    )));
+                if preflighted {
+                    if fs::metadata(&extracted_dir).await.is_err() {
+                        return Err(AppError::Io(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!(
+                                "preflighted archive output is missing: {}",
+                                extracted_dir.display()
+                            ),
+                        )));
+                    }
+                } else {
+                    if archive_depth >= archive_budget.config.max_recursion_depth {
+                        return Err(AppError::BadRequest(format!(
+                            "archive recursion is too deep; max {}: {db_path}",
+                            archive_budget.config.max_recursion_depth
+                        )));
+                    }
+                    if fs::metadata(&extracted_dir).await.is_ok() {
+                        return Err(AppError::BadRequest(format!(
+                            "archive extraction output already exists: {}",
+                            extracted_dir.display()
+                        )));
+                    }
+                    fs::create_dir_all(&extracted_dir).await.map_err(|error| {
+                        io_error_at(
+                            "create nested archive extraction directory",
+                            &extracted_dir,
+                            error,
+                        )
+                    })?;
+                    extract_archive(&name, &disk_path, &extracted_dir, archive_budget.clone())
+                        .await?;
                 }
-                fs::create_dir_all(&extracted_dir).await.map_err(|error| {
-                    io_error_at(
-                        "create nested archive extraction directory",
-                        &extracted_dir,
-                        error,
-                    )
-                })?;
-                extract_archive(&name, &disk_path, &extracted_dir, archive_budget.clone()).await?;
 
                 let extracted_db_path = format!("{db_path}_extracted");
                 let dir_meta = extracted_directory_meta(name.as_str(), extracted_dir_name.as_str());
@@ -468,6 +716,7 @@ fn ingest_directory<'a>(
                     blob_store.clone(),
                     archive_depth + 1,
                     search_index.clone(),
+                    preflighted,
                 )
                 .await?;
             }

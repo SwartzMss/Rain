@@ -12,7 +12,10 @@ use crate::{
     blob_store::BlobStore,
     config::{ArchiveConfig, IndexingConfig},
     error::AppError,
-    ingest::{ArchiveBudget, IssueQuota, ProcessFileOptions, process_uploaded_file},
+    ingest::{
+        ArchiveBudget, IssueQuota, PreflightFileOptions, ProcessFileOptions,
+        preflight_uploaded_file, process_uploaded_file,
+    },
     search::publication::SearchBackendKind,
 };
 
@@ -269,6 +272,25 @@ async fn process_upload_files_and_publish(
         &job.bundle_id,
         job.issue_max_content_size,
     );
+
+    crate::upload::lifecycle::set_bundle_stage(&job.pool, &job.bundle_id, "VALIDATING").await?;
+    for uploaded in &job.files {
+        preflight_uploaded_file(PreflightFileOptions {
+            pool: &job.pool,
+            bundle_id: &job.bundle_id,
+            bundle_hash: &job.bundle_hash,
+            data_root: &job.staging_root,
+            storage_name: &uploaded.storage_name,
+            original_name: &uploaded.original_name,
+            content_type: uploaded.content_type.as_deref(),
+            source_path: &uploaded.temp_path,
+            size_bytes: uploaded.size_bytes,
+            archive_budget: archive_budget.clone(),
+            issue_quota: issue_quota.clone(),
+        })
+        .await?;
+    }
+
     for (file_index, uploaded) in job.files.iter().enumerate() {
         let file_started = Instant::now();
         debug!(
@@ -294,6 +316,7 @@ async fn process_upload_files_and_publish(
             issue_quota: issue_quota.clone(),
             indexing: &job.indexing_config,
             search_index: search_build_to_index(&search_build),
+            preflighted: true,
         })
         .await?;
         debug!(
