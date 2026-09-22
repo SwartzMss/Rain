@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { IssueSelector } from '../src/features/files/components/IssueSelector';
 import { UploadFileTable } from '../src/features/files/components/UploadFileTable';
 import { UploadPanel } from '../src/features/files/components/UploadPanel';
+import { IssueDeleteButton } from '../src/features/files/components/IssueDeleteButton';
 import { AuthProvider } from '../src/auth/AuthContext';
 import { rainApi } from '../src/api/client';
 
@@ -53,6 +54,33 @@ describe('write permission behavior', () => {
     expect(screen.queryByRole('button', { name: '删除' })).not.toBeInTheDocument();
     rerender(<AuthProvider><UploadFileTable bundlesError={null} currentIssueCode="ISSUE" deletingKey={null} fileRows={[row]} canWrite onDeleteRow={vi.fn()} /></AuthProvider>);
     expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument();
+  });
+
+  it('hides file deletion while a Bundle is processing and shows the reason', async () => {
+    vi.mocked(rainApi.me).mockResolvedValue({ authenticated: true, user: { id: 'u', username: 'u', role: 'USER' } });
+    const processingRow = {
+      ...row,
+      status: 'PROCESSING' as const,
+      stage: 'EXTRACTING' as const
+    };
+    render(<AuthProvider><UploadFileTable bundlesError={null} currentIssueCode="ISSUE" deletingKey={null} fileRows={[processingRow]} canWrite onDeleteRow={vi.fn()} /></AuthProvider>);
+    expect(await screen.findByText('解压中')).toBeInTheDocument();
+    expect(await screen.findByText('处理中，暂不可删除')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '删除' })).not.toBeInTheDocument();
+  });
+
+  it('disables Issue deletion while upload processing and restores it afterward', () => {
+    const onDelete = vi.fn();
+    const { rerender } = render(<IssueDeleteButton issueCode="ISSUE" canWrite blocked deleting={false} onDelete={onDelete} />);
+    expect(screen.getByRole('button', { name: '删除 Issue' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('处理中，暂不可删除');
+    fireEvent.click(screen.getByRole('button', { name: '删除 Issue' }));
+    expect(onDelete).not.toHaveBeenCalled();
+
+    rerender(<IssueDeleteButton issueCode="ISSUE" canWrite={true} blocked={false} deleting={false} onDelete={onDelete} />);
+    expect(screen.getByRole('button', { name: '删除 Issue' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '删除 Issue' }));
+    expect(onDelete).toHaveBeenCalledTimes(1);
   });
 
   it('disables upload selection for guests and enables it for writable users', () => {
