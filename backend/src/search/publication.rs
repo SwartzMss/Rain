@@ -10,7 +10,7 @@ use crate::error::AppError;
 
 pub const SQLITE_FTS_SCHEMA_VERSION: i64 = 1;
 pub const TANTIVY_SCHEMA_VERSION: i64 = 1;
-pub const TANTIVY_TOKENIZER_VERSION: i64 = 1;
+pub const TANTIVY_TOKENIZER_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchBackendKind {

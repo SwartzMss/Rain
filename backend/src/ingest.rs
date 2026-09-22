@@ -1,11 +1,12 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
+#[cfg(any(feature = "tantivy-search", test))]
 use sqlx::{QueryBuilder, Sqlite};
 use std::{
-    collections::HashMap,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::Arc,
 };
 use tokio::fs;
 use tokio::io::BufReader;
@@ -15,6 +16,7 @@ use crate::{
     config::IndexingConfig,
     error::AppError,
     file_classification::{PreviewKind, classify_file, effective_mime_type},
+    search::{IndexBatch, IndexChunk, IngestIndex, sqlite::SqliteFtsSearchIndex},
     services::wall_clock,
     upload::lifecycle::set_bundle_stage,
 };
@@ -39,7 +41,9 @@ use limits::{
     INDEX_COMMIT_TARGET_BYTES, LINE_OFFSET_INTERVAL,
 };
 
+#[cfg(any(feature = "tantivy-search", test))]
 const LINE_OFFSET_BATCH_SIZE: usize = 500;
+#[cfg(any(feature = "tantivy-search", test))]
 const SEGMENT_BATCH_SIZE: usize = 100;
 static EVENT_TIMESTAMP_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
@@ -86,6 +90,7 @@ pub struct ProcessFileOptions<'a> {
     pub archive_budget: ArchiveBudget,
     pub issue_quota: IssueQuota,
     pub indexing: &'a IndexingConfig,
+    pub search_index: Option<Arc<dyn IngestIndex>>,
 }
 
 fn uploaded_file_meta(
@@ -146,7 +151,10 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         archive_budget,
         issue_quota,
         indexing,
+        search_index,
     } = options;
+    let search_index: Arc<dyn IngestIndex> =
+        search_index.unwrap_or_else(|| Arc::new(SqliteFtsSearchIndex::new(pool.clone())));
 
     let bundle_dir = data_root.join(bundle_hash);
     fs::create_dir_all(&bundle_dir)
@@ -191,7 +199,16 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     update_process_stage(pool, bundle_id, "EXTRACTING").await?;
     if preview_kind == PreviewKind::Text {
         update_process_stage(pool, bundle_id, "INDEXING").await?;
-        ingest_text_file(pool, bundle_id, file_id, &disk_path, size_bytes, indexing).await?;
+        ingest_text_file(
+            bundle_id,
+            file_id,
+            &relative_path,
+            &disk_path,
+            size_bytes,
+            indexing,
+            search_index.clone(),
+        )
+        .await?;
     }
 
     if preview_kind == PreviewKind::Archive {
@@ -239,6 +256,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             indexing,
             blob_store.clone(),
             1,
+            search_index.clone(),
         )
         .await?;
     }
@@ -267,6 +285,7 @@ fn ingest_directory<'a>(
     indexing: &'a IndexingConfig,
     blob_store: std::sync::Arc<dyn BlobStore>,
     archive_depth: usize,
+    search_index: Arc<dyn IngestIndex>,
 ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
     Box::pin(async move {
         let mut read_dir = fs::read_dir(&dir_path)
@@ -371,6 +390,7 @@ fn ingest_directory<'a>(
                     indexing,
                     blob_store.clone(),
                     archive_depth,
+                    search_index.clone(),
                 )
                 .await?;
                 continue;
@@ -380,12 +400,13 @@ fn ingest_directory<'a>(
                 && let Some(size) = size_bytes
             {
                 ingest_text_file(
-                    pool,
                     bundle_id,
                     record_id,
+                    &db_path,
                     &disk_path,
                     size as u64,
                     indexing,
+                    search_index.clone(),
                 )
                 .await?;
             }
@@ -446,6 +467,7 @@ fn ingest_directory<'a>(
                     indexing,
                     blob_store.clone(),
                     archive_depth + 1,
+                    search_index.clone(),
                 )
                 .await?;
             }
@@ -591,26 +613,36 @@ async fn move_or_copy_file(source: &Path, destination: &Path) -> Result<(), AppE
 }
 
 async fn ingest_text_file(
-    pool: &sqlx::SqlitePool,
     bundle_id: &str,
     file_id: i64,
+    path: &str,
     disk_path: &Path,
     _size_bytes: u64,
     indexing: &IndexingConfig,
+    search_index: Arc<dyn IngestIndex>,
 ) -> Result<(), AppError> {
     let mut metrics = metrics::FileIndexMetrics::new(bundle_id, file_id);
-    let result =
-        ingest_text_file_inner(pool, bundle_id, file_id, disk_path, indexing, &mut metrics).await;
+    let result = ingest_text_file_inner(
+        bundle_id,
+        file_id,
+        path,
+        disk_path,
+        indexing,
+        search_index,
+        &mut metrics,
+    )
+    .await;
     metrics.outcome = if result.is_ok() { "success" } else { "error" };
     result
 }
 
 async fn ingest_text_file_inner(
-    pool: &sqlx::SqlitePool,
     bundle_id: &str,
     file_id: i64,
+    path: &str,
     disk_path: &Path,
     indexing: &IndexingConfig,
+    search_index: Arc<dyn IngestIndex>,
     metrics: &mut metrics::FileIndexMetrics<'_>,
 ) -> Result<(), AppError> {
     let file = fs::File::open(disk_path)
@@ -673,7 +705,16 @@ async fn ingest_text_file_inner(
                 chunk = LogChunk::new(chunk_index, INDEX_CHUNK_TARGET_BYTES);
             }
             metrics.set_writing(true);
-            commit_index_batch(pool, bundle_id, file_id, &pending_chunks, &offsets, None).await?;
+            commit_index_batch(
+                bundle_id,
+                file_id,
+                path,
+                &pending_chunks,
+                &offsets,
+                None,
+                search_index.as_ref(),
+            )
+            .await?;
             metrics.set_writing(false);
             metrics.indexed_bytes += pending_chunks
                 .iter()
@@ -693,12 +734,13 @@ async fn ingest_text_file_inner(
     }
     metrics.set_writing(true);
     commit_index_batch(
-        pool,
         bundle_id,
         file_id,
+        path,
         &pending_chunks,
         &offsets,
         Some(line_number),
+        search_index.as_ref(),
     )
     .await?;
     metrics.set_writing(false);
@@ -712,35 +754,35 @@ async fn ingest_text_file_inner(
 }
 
 async fn commit_index_batch(
-    pool: &sqlx::SqlitePool,
     bundle_id: &str,
     file_id: i64,
+    path: &str,
     chunks: &[LogChunk],
     offsets: &[(i64, i64)],
     final_line_count: Option<i64>,
+    search_index: &dyn IngestIndex,
 ) -> Result<(), AppError> {
     let started = std::time::Instant::now();
-    let result = crate::db::write::run(
-        pool,
-        "index-batch",
-        &(bundle_id, file_id, chunks, offsets, final_line_count),
-        |conn, &(bundle_id, file_id, chunks, offsets, final_line_count)| {
-            Box::pin(async move {
-                flush_log_chunks(conn, bundle_id, file_id, chunks).await?;
-                insert_line_offsets(conn, file_id, offsets).await?;
-                if let Some(line_count) = final_line_count {
-                    sqlx::query("UPDATE files SET line_count = ? WHERE id = ?")
-                        .bind(line_count)
-                        .bind(file_id)
-                        .execute(conn)
-                        .await
-                        .map_err(AppError::Database)?;
-                }
-                Ok(())
-            })
-        },
-    )
-    .await;
+    let result = search_index
+        .commit_ingest_batch(IndexBatch {
+            bundle_id: bundle_id.to_owned(),
+            file_id,
+            path: path.to_owned(),
+            chunks: chunks
+                .iter()
+                .map(|chunk| IndexChunk {
+                    chunk_index: chunk.chunk_index,
+                    line_start: chunk.line_start,
+                    line_end: chunk.line_end,
+                    event_time_start_ms: chunk.event_time_start_ms,
+                    event_time_end_ms: chunk.event_time_end_ms,
+                    content: chunk.content().to_owned(),
+                })
+                .collect(),
+            offsets: offsets.to_owned(),
+            final_line_count,
+        })
+        .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     if let Err(error) = &result {
         tracing::error!(bundle_id, file_id, first_chunk = ?chunks.first().map(|chunk| chunk.chunk_index), chunks = chunks.len(), offsets = offsets.len(), elapsed_ms, %error, "index batch failed after write retries");
@@ -757,6 +799,72 @@ async fn commit_index_batch(
     result
 }
 
+/// Persist the control-plane portion of a Tantivy batch without copying the
+/// cleaned chunk body into SQLite. Tantivy owns the searchable/stored content;
+/// SQLite retains row identity, offsets, event ranges, and line counts needed
+/// by file navigation and lifecycle cleanup.
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn persist_sparse_index_batches(
+    pool: &sqlx::SqlitePool,
+    batches: &[IndexBatch],
+) -> Result<(), AppError> {
+    crate::db::write::run(pool, "index-batch", &batches, |conn, batches| {
+        Box::pin(async move {
+            for batch in *batches {
+                for segment_batch in batch.chunks.chunks(SEGMENT_BATCH_SIZE) {
+                    let mut segments = QueryBuilder::<Sqlite>::new(
+                        "INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index, event_time_start_ms, event_time_end_ms, event_time_indexed) ",
+                    );
+                    segments.push_values(segment_batch, |mut row, chunk| {
+                        row.push_bind(&batch.bundle_id)
+                            .push_bind(batch.file_id)
+                            .push_bind("all")
+                            // Keep the historical NOT NULL schema while avoiding
+                            // copying the cleaned body into SQLite.
+                            .push_bind("")
+                            .push_bind(chunk.line_start)
+                            .push_bind(chunk.line_end)
+                            .push_bind(chunk.chunk_index)
+                            .push_bind(chunk.event_time_start_ms)
+                            .push_bind(chunk.event_time_end_ms)
+                            .push_bind(1_i64);
+                    });
+                    segments.push(" RETURNING id, chunk_index");
+                    let returned = segments
+                        .build_query_as::<(i64, i64)>()
+                        .fetch_all(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
+                    if returned.len() != segment_batch.len()
+                        || returned
+                            .iter()
+                            .map(|(_, chunk_index)| *chunk_index)
+                            .collect::<std::collections::HashSet<_>>()
+                            .len()
+                            != segment_batch.len()
+                    {
+                        return Err(AppError::Database(sqlx::Error::Protocol(
+                            "sparse log segment insert did not return every chunk".into(),
+                        )));
+                    }
+                }
+                insert_line_offsets(&mut *conn, batch.file_id, &batch.offsets).await?;
+                if let Some(line_count) = batch.final_line_count {
+                    sqlx::query("UPDATE files SET line_count = ? WHERE id = ?")
+                        .bind(line_count)
+                        .bind(batch.file_id)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
+                }
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[cfg(any(feature = "tantivy-search", test))]
 async fn insert_line_offsets(
     tx: &mut sqlx::SqliteConnection,
     file_id: i64,
@@ -776,6 +884,56 @@ async fn insert_line_offsets(
             .execute(&mut *tx)
             .await
             .map_err(AppError::Database)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn flush_log_chunks(
+    tx: &mut sqlx::SqliteConnection,
+    bundle_id: &str,
+    file_id: i64,
+    chunks: &[LogChunk],
+) -> Result<(), AppError> {
+    for batch in chunks.chunks(SEGMENT_BATCH_SIZE) {
+        let mut segments = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index, event_time_start_ms, event_time_end_ms, event_time_indexed) ",
+        );
+        segments.push_values(batch, |mut row, chunk| {
+            row.push_bind(bundle_id)
+                .push_bind(file_id)
+                .push_bind("all")
+                .push_bind(chunk.content())
+                .push_bind(chunk.line_start)
+                .push_bind(chunk.line_end)
+                .push_bind(chunk.chunk_index)
+                .push_bind(chunk.event_time_start_ms)
+                .push_bind(chunk.event_time_end_ms)
+                .push_bind(1_i64);
+        });
+        segments.push(" RETURNING id, chunk_index");
+        let returned = segments
+            .build_query_as::<(i64, i64)>()
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(AppError::Database)?;
+        let mut segment_ids = std::collections::HashMap::with_capacity(returned.len());
+        for (segment_id, chunk_index) in returned {
+            if segment_ids.insert(chunk_index, segment_id).is_some() {
+                return Err(AppError::Database(sqlx::Error::Protocol(format!(
+                    "duplicate returned log chunk index {chunk_index}"
+                ))));
+            }
+        }
+        if segment_ids.len() != batch.len()
+            || batch
+                .iter()
+                .any(|chunk| !segment_ids.contains_key(&chunk.chunk_index))
+        {
+            return Err(AppError::Database(sqlx::Error::Protocol(
+                "log segment insert did not return every chunk".into(),
+            )));
+        }
     }
     Ok(())
 }
@@ -877,62 +1035,6 @@ impl LogChunk {
     }
 }
 
-async fn flush_log_chunks(
-    tx: &mut sqlx::SqliteConnection,
-    bundle_id: &str,
-    file_id: i64,
-    chunks: &[LogChunk],
-) -> Result<(), AppError> {
-    for batch in chunks.chunks(SEGMENT_BATCH_SIZE) {
-        let mut segments = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO log_segments (bundle_id, file_id, timeline, content, line_offset, line_end, chunk_index, event_time_start_ms, event_time_end_ms, event_time_indexed) ",
-        );
-        segments.push_values(batch, |mut row, chunk| {
-            row.push_bind(bundle_id)
-                .push_bind(file_id)
-                .push_bind("all")
-                .push_bind(chunk.content())
-                .push_bind(chunk.line_start)
-                .push_bind(chunk.line_end)
-                .push_bind(chunk.chunk_index)
-                .push_bind(chunk.event_time_start_ms)
-                .push_bind(chunk.event_time_end_ms)
-                .push_bind(1_i64);
-        });
-        segments.push(" RETURNING id, chunk_index");
-        let returned = segments
-            .build_query_as::<(i64, i64)>()
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-        let mut segment_ids = HashMap::with_capacity(returned.len());
-        for (segment_id, chunk_index) in returned {
-            if segment_ids.insert(chunk_index, segment_id).is_some() {
-                return Err(AppError::Database(sqlx::Error::Protocol(format!(
-                    "duplicate returned log chunk index {chunk_index}"
-                ))));
-            }
-        }
-        if segment_ids.len() != batch.len() {
-            return Err(AppError::Database(sqlx::Error::Protocol(
-                "log segment insert did not return every chunk".into(),
-            )));
-        }
-        if batch
-            .iter()
-            .any(|chunk| !segment_ids.contains_key(&chunk.chunk_index))
-        {
-            return Err(AppError::Database(sqlx::Error::Protocol(
-                "log segment insert returned an unexpected chunk index".into(),
-            )));
-        }
-
-        // log_segments_fts is an external-content table maintained by triggers.
-    }
-
-    Ok(())
-}
-
 fn io_error(err: std::io::Error) -> AppError {
     AppError::Io(err)
 }
@@ -949,9 +1051,10 @@ mod tests {
     use std::{
         io::Write,
         path::{Path, PathBuf},
+        sync::Arc,
     };
 
-    use crate::{config::ArchiveConfig, error::AppError};
+    use crate::{config::ArchiveConfig, error::AppError, search::sqlite::SqliteFtsSearchIndex};
     use flate2::{Compression, write::GzEncoder};
 
     use super::limits::{
@@ -1341,19 +1444,37 @@ mod tests {
         let path = root.join("app.log");
         std::fs::write(&path, &lines).unwrap();
         let config = crate::config::IndexingConfig::default();
+        let sqlite_index = Arc::new(SqliteFtsSearchIndex::new(pool.clone()));
         super::ingest_text_file(
-            &pool,
             "failed",
             files[2],
+            "/app.log",
             &path,
             lines.len() as u64,
             &config,
+            sqlite_index.clone(),
         )
         .await
         .unwrap();
         let (left, right, cleanup) = tokio::join!(
-            super::ingest_text_file(&pool, "left", files[0], &path, lines.len() as u64, &config),
-            super::ingest_text_file(&pool, "right", files[1], &path, lines.len() as u64, &config),
+            super::ingest_text_file(
+                "left",
+                files[0],
+                "/app.log",
+                &path,
+                lines.len() as u64,
+                &config,
+                sqlite_index.clone()
+            ),
+            super::ingest_text_file(
+                "right",
+                files[1],
+                "/app.log",
+                &path,
+                lines.len() as u64,
+                &config,
+                sqlite_index.clone()
+            ),
             crate::db::cleanup_bundle_content_batched(&pool, "failed", 7),
         );
         left.unwrap();

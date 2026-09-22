@@ -6,8 +6,9 @@ use crate::{
     error::AppError,
     models::logs::{LogSearchHit, LogSearchResponse},
     search::{
-        ContentSearchRequest, ContentSearchScope, FilenameSearchRequest, SearchIndex,
-        publication::artifact_relative_path, search_tantivy_bundle, sqlite::SqliteFtsSearchIndex,
+        ContentSearchRequest, ContentSearchResult, ContentSearchScope, FilenameSearchRequest,
+        SearchIndex, publication::artifact_relative_path, search_tantivy_bundle,
+        sqlite::SqliteFtsSearchIndex,
     },
 };
 
@@ -24,6 +25,17 @@ struct LogQuery {
     from: Option<i64>,
     size: Option<i64>,
 }
+
+type PublicationRow = (String, String, i64, Option<i64>, Option<i64>);
+type IssueBundleSearchRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<i64>,
+    Option<i64>,
+);
 
 // scoped under /api in routes::register
 #[get("/log/v2/{bundle_id}/search")]
@@ -85,18 +97,27 @@ async fn search_logs_inner(
         from,
         size,
     };
-    let publication: Option<(String, String, i64)> = sqlx::query_as(
-        "SELECT backend, state, generation FROM bundle_search_indexes WHERE bundle_id = ?",
+    let publication: Option<PublicationRow> = sqlx::query_as(
+        "SELECT backend, state, generation, schema_version, tokenizer_version FROM bundle_search_indexes WHERE bundle_id = ?",
     )
     .bind(&bundle.id)
     .fetch_optional(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
     let result = match publication {
-        Some((backend, state_name, generation)) if backend == "tantivy" => {
+        Some((backend, state_name, generation, schema_version, tokenizer_version))
+            if backend == "tantivy" =>
+        {
             if state_name != "READY" {
                 return Err(AppError::Conflict(
                     "Bundle search index is not ready".into(),
+                ));
+            }
+            if schema_version != Some(crate::search::publication::TANTIVY_SCHEMA_VERSION)
+                || tokenizer_version != Some(crate::search::publication::TANTIVY_TOKENIZER_VERSION)
+            {
+                return Err(AppError::Conflict(
+                    "Bundle search index version is unsupported; rebuild is required".into(),
                 ));
             }
             let artifact = artifact_relative_path(&bundle.id, generation)?;
@@ -208,8 +229,10 @@ async fn search_issue_logs_inner(
     if search_term.chars().count() < 3 {
         return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
-    let result = SqliteFtsSearchIndex::new(state.db.pool.clone())
-        .search_content(ContentSearchRequest {
+    let result = search_issue_content_mixed(
+        &state.db.pool,
+        &state.storage.data_root,
+        ContentSearchRequest {
             scope: ContentSearchScope::Issue {
                 issue_code: issue_code.clone(),
             },
@@ -217,8 +240,9 @@ async fn search_issue_logs_inner(
             path_like,
             from,
             size,
-        })
-        .await?;
+        },
+    )
+    .await?;
     let total = result.total;
     let truncated = result.truncated;
     let rows = result.rows;
@@ -245,6 +269,97 @@ async fn search_issue_logs_inner(
         hits,
         truncated,
     }))
+}
+
+async fn search_issue_content_mixed(
+    pool: &sqlx::SqlitePool,
+    data_root: &std::path::Path,
+    request: ContentSearchRequest,
+) -> Result<ContentSearchResult, AppError> {
+    let ContentSearchScope::Issue { issue_code } = &request.scope else {
+        return Err(AppError::Config(
+            "mixed Issue search requires an Issue scope".into(),
+        ));
+    };
+    let from = request.from.max(0) as usize;
+    let size = request.size.max(0) as usize;
+    let candidate_limit = from.saturating_add(size).max(1);
+    let sqlite_result = SqliteFtsSearchIndex::new(pool.clone())
+        .search_content(ContentSearchRequest {
+            from: 0,
+            size: candidate_limit as i64,
+            ..request.clone()
+        })
+        .await?;
+    let mut rows = sqlite_result.rows;
+    let mut total = sqlite_result.total;
+    let bundles: Vec<IssueBundleSearchRow> = sqlx::query_as(
+        "SELECT b.id, b.hash, COALESCE(si.backend, 'sqlite_fts'), COALESCE(si.state, 'LEGACY'), COALESCE(si.generation, 0), si.schema_version, si.tokenizer_version FROM bundles b LEFT JOIN bundle_search_indexes si ON si.bundle_id = b.id WHERE b.issue_code = ? AND b.status = 'READY' ORDER BY b.id",
+    )
+    .bind(issue_code)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    for (bundle_id, bundle_hash, backend, state, generation, schema_version, tokenizer_version) in
+        bundles
+    {
+        if backend != "tantivy" {
+            continue;
+        }
+        if state != "READY" {
+            return Err(AppError::Conflict(format!(
+                "Bundle {bundle_id} search index is not ready"
+            )));
+        }
+        if schema_version != Some(crate::search::publication::TANTIVY_SCHEMA_VERSION)
+            || tokenizer_version != Some(crate::search::publication::TANTIVY_TOKENIZER_VERSION)
+        {
+            return Err(AppError::Conflict(
+                "Bundle search index version is unsupported; rebuild is required".into(),
+            ));
+        }
+        let artifact = artifact_relative_path(&bundle_id, generation)?;
+        let result = search_tantivy_bundle(
+            data_root.join(artifact),
+            ContentSearchRequest {
+                scope: ContentSearchScope::Bundle {
+                    bundle_id: bundle_id.clone(),
+                    timeline: None,
+                    file_id: None,
+                },
+                query: request.query.clone(),
+                path_like: request.path_like.clone(),
+                from: 0,
+                size: candidate_limit as i64,
+            },
+        )
+        .await?;
+        total = total.saturating_add(result.total);
+        rows.extend(result.rows.into_iter().map(|mut row| {
+            row.bundle_hash = Some(bundle_hash.clone());
+            row
+        }));
+    }
+    rows.sort_by(|left, right| {
+        (
+            left.offset.unwrap_or(i64::MIN),
+            left.bundle_hash.as_deref().unwrap_or_default(),
+            left.file_id,
+            left.chunk_index.unwrap_or(i64::MIN),
+        )
+            .cmp(&(
+                right.offset.unwrap_or(i64::MIN),
+                right.bundle_hash.as_deref().unwrap_or_default(),
+                right.file_id,
+                right.chunk_index.unwrap_or(i64::MIN),
+            ))
+    });
+    let rows = rows.into_iter().skip(from).take(size).collect();
+    Ok(ContentSearchResult {
+        total,
+        rows,
+        truncated: false,
+    })
 }
 
 async fn search_issue_files(

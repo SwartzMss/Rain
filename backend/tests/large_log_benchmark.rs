@@ -11,6 +11,7 @@ use backend::{
     ingest::{ArchiveBudget, IssueQuota, ProcessFileOptions, process_uploaded_file},
     repositories::{sessions, users},
     routes,
+    search::{IngestIndex, publication::SearchBackendKind},
     upload::{finalizer::finalize_bundle_ready_with_retry, lifecycle::create_processing_bundle},
 };
 use futures_util::{FutureExt, future::join_all};
@@ -145,6 +146,91 @@ fn resources(db: &Path) -> Value {
         "process_read_bytes": proc_number("/proc/self/io", "read_bytes:", 1),
         "process_write_bytes": proc_number("/proc/self/io", "write_bytes:", 1)})
 }
+
+#[cfg(feature = "tantivy-search")]
+type BenchBuild = Option<Arc<backend::search::tantivy::publication::BundleBuildSession>>;
+
+#[cfg(not(feature = "tantivy-search"))]
+type BenchBuild = Option<()>;
+
+#[cfg(feature = "tantivy-search")]
+async fn begin_bench_build(
+    backend: SearchBackendKind,
+    pool: &sqlx::SqlitePool,
+    data_root: &Path,
+    temp_root: &Path,
+    bundle_id: &str,
+    writer_permits: Arc<tokio::sync::Semaphore>,
+    writer_heap_size_bytes: usize,
+) -> Result<BenchBuild, backend::error::AppError> {
+    if backend != SearchBackendKind::Tantivy {
+        return Ok(None);
+    }
+    let generation = backend::search::publication::claim_publication(
+        pool,
+        bundle_id,
+        SearchBackendKind::Tantivy,
+    )
+    .await?;
+    backend::search::tantivy::publication::BundleBuildSession::start(
+        pool,
+        data_root,
+        temp_root,
+        bundle_id,
+        generation,
+        writer_permits,
+        writer_heap_size_bytes,
+    )
+    .await
+    .map(Some)
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+async fn begin_bench_build(
+    _backend: SearchBackendKind,
+    _pool: &sqlx::SqlitePool,
+    _data_root: &Path,
+    _temp_root: &Path,
+    _bundle_id: &str,
+    _writer_permits: Arc<tokio::sync::Semaphore>,
+    _writer_heap_size_bytes: usize,
+) -> Result<BenchBuild, backend::error::AppError> {
+    Ok(None)
+}
+
+fn bench_index(build: &BenchBuild) -> Option<Arc<dyn IngestIndex>> {
+    #[cfg(feature = "tantivy-search")]
+    {
+        build
+            .as_ref()
+            .map(|session| session.clone() as Arc<dyn IngestIndex>)
+    }
+    #[cfg(not(feature = "tantivy-search"))]
+    {
+        let _ = build;
+        None
+    }
+}
+
+fn clone_bench_build(build: &BenchBuild) -> BenchBuild {
+    #[cfg(feature = "tantivy-search")]
+    {
+        build.clone()
+    }
+    #[cfg(not(feature = "tantivy-search"))]
+    {
+        *build
+    }
+}
+
+async fn finish_bench_build(build: &BenchBuild) -> Result<(), backend::error::AppError> {
+    #[cfg(feature = "tantivy-search")]
+    if let Some(session) = build {
+        return session.finish().await;
+    }
+    let _ = build;
+    Ok(())
+}
 struct Sampler {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<Vec<Value>>>,
@@ -246,12 +332,37 @@ async fn large_log_baseline() {
                 create_processing_bundle(&pool, &id, "BENCH", &id, name, uploaded_bytes, Some(&user.id)).await.unwrap();
                 inputs.push((id, path, metadata, uploaded_bytes, uploaded_sha256));
             }
+            let selected_backend = SearchBackendKind::parse(
+                std::env::var("RAIN_SEARCH_BACKEND").ok().as_deref(),
+            )
+            .unwrap();
+            let search_writer_permits = Arc::new(tokio::sync::Semaphore::new(
+                limits.search.tantivy_max_writers,
+            ));
+            let search_temp_root = dir.0.join(".search-tmp");
+            fs::create_dir_all(&search_temp_root).unwrap();
+            let search_builds = join_all(inputs.iter().map(|(id, _, _, _, _)| {
+                begin_bench_build(
+                    selected_backend,
+                    &pool,
+                    &data_root,
+                    &search_temp_root,
+                    id,
+                    search_writer_permits.clone(),
+                    limits.search.tantivy_writer_heap_size as usize,
+                )
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
             metrics.0.lock().unwrap().clear();
             let before = resources(&db_path);
             let sampler = Sampler::new(db_path.clone());
             let started = Instant::now();
-            let times = join_all(inputs.iter().map(|(id, path, _, uploaded_bytes, _)| {
+            let times = join_all(inputs.iter().enumerate().map(|(input_index, (id, path, _, uploaded_bytes, _))| {
                 let pool = &pool; let data_root = &data_root; let limits = &limits; let blob_store = blob_store.clone();
+                let search_build = clone_bench_build(&search_builds[input_index]);
                 async move {
                     let start = Instant::now();
                     process_uploaded_file(ProcessFileOptions {
@@ -259,8 +370,9 @@ async fn large_log_baseline() {
                         storage_name: name, original_name: name, display_name: name,
                         content_type: None, source_path: path, size_bytes: *uploaded_bytes,
                         archive_budget: ArchiveBudget::new(ArchiveConfig::for_content_limit(limits.issue_max_content_size)),
-                        issue_quota: IssueQuota::new(pool.clone(), "BENCH", id, limits.issue_max_content_size), indexing: &limits.indexing,
+                        issue_quota: IssueQuota::new(pool.clone(), "BENCH", id, limits.issue_max_content_size), indexing: &limits.indexing, search_index: bench_index(&search_build),
                     }).await.unwrap();
+                    finish_bench_build(&search_build).await.unwrap();
                     finalize_bundle_ready_with_retry(pool, id).await.unwrap();
                     json!({"bundle": id, "ingest_to_ready_ms": start.elapsed().as_secs_f64() * 1000.0})
                 }

@@ -65,6 +65,7 @@ async fn process(fail: bool) -> Events {
             archive_budget: ArchiveBudget::new(ArchiveConfig::default()),
             issue_quota: IssueQuota::new(pool.clone(), "METRICS", "bundle", 1024 * 1024),
             indexing: &IndexingConfig::default(),
+            search_index: None,
         }).await;
         assert_eq!(result.is_err(), fail);
         pool.close().await;

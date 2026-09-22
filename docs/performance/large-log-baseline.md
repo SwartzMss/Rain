@@ -116,3 +116,23 @@ moving index writes out of SQLite is the first performance priority. The full
 1/2/4 Bundle and 1/5 GiB matrix remains pending. An earlier 1,000-sample run
 exceeded several hours in the query phase and was terminated; it produced no
 report and is not used for conclusions.
+
+## Streaming Tantivy comparison (2026-09-22)
+
+The same release workload was rerun with a real `RAIN_SEARCH_BACKEND=tantivy`
+build after the ingest path was connected to the bounded Bundle build session.
+This is one host and one run per backend, so it demonstrates the shape of the
+change rather than a general performance guarantee.
+
+| Backend | ingest → READY | indexed write wait | raw throughput | sampled peak RSS | SQLite / WAL during ingest |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SQLite FTS | 11.874 s | 10.306 s | 8.42 MiB/s | 24 MiB | 223 MiB / measured separately |
+| Tantivy streaming | 2.026 s | 57.8 ms | 49.36 MiB/s | 55.3 MiB | 4 KiB / 2.75 MiB |
+
+The Tantivy run returned matches for all four fixture terms (common `INFO`,
+rare sentinel, UUID, and Chinese text); observed query latencies were roughly
+4–73 ms. The improvement comes from removing duplicate SQLite FTS body writes
+and overlapping parsing with the bounded writer. The Tantivy writer heap is
+bounded, but total process RSS still includes parser, SQLite, and test-process
+overhead. Repeat the 1/2/4 Bundle and 1/5 GiB matrix before changing the
+default backend.

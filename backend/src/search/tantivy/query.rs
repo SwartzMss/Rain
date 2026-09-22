@@ -42,9 +42,9 @@ impl CandidateSearch {
             return Ok(Vec::new());
         }
         if query.chars().count() < NGRAM_MIN {
-            return Err(AppError::BadRequest(
-                "Tantivy prototype requires at least 2 characters".into(),
-            ));
+            return Err(AppError::BadRequest(format!(
+                "Tantivy search requires at least {NGRAM_MIN} characters"
+            )));
         }
         let needle = query.to_lowercase();
         let terms = unique_ngrams(&query.to_lowercase(), NGRAM_MIN, NGRAM_MAX);

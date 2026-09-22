@@ -114,6 +114,7 @@ pub struct SkillSearchResult {
 pub struct IndexBatch {
     pub bundle_id: String,
     pub file_id: i64,
+    pub path: String,
     pub chunks: Vec<IndexChunk>,
     pub offsets: Vec<(i64, i64)>,
     pub final_line_count: Option<i64>,
@@ -144,6 +145,16 @@ pub trait SearchIndex: Send + Sync {
         request: SkillSearchRequest,
     ) -> Result<SkillSearchResult, AppError>;
     async fn commit_batch(&self, batch: IndexBatch) -> Result<(), AppError>;
+}
+
+/// Ingest-time sink used by a Bundle's selected search backend.
+///
+/// The sink owns the backend-specific write path. SQLite writes the legacy
+/// segment content and FTS shadow rows; Tantivy streams the cleaned content to
+/// its bounded writer and persists only sparse metadata in SQLite.
+#[async_trait]
+pub trait IngestIndex: Send + Sync {
+    async fn commit_ingest_batch(&self, batch: IndexBatch) -> Result<(), AppError>;
 }
 
 pub async fn search_tantivy_bundle(

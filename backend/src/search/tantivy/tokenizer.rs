@@ -1,8 +1,8 @@
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 
-pub const TOKENIZER_NAME: &str = "rain_ngram_v1";
-pub const NGRAM_MIN: usize = 2;
-pub const NGRAM_MAX: usize = 20;
+pub const TOKENIZER_NAME: &str = "rain_ngram_v2";
+pub const NGRAM_MIN: usize = 3;
+pub const NGRAM_MAX: usize = 3;
 
 pub fn analyzer() -> TextAnalyzer {
     TextAnalyzer::builder(
@@ -11,4 +11,14 @@ pub fn analyzer() -> TextAnalyzer {
     )
     .filter(LowerCaser)
     .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NGRAM_MAX, NGRAM_MIN};
+
+    #[test]
+    fn candidate_tokenizer_uses_fixed_trigrams() {
+        assert_eq!((NGRAM_MIN, NGRAM_MAX), (3, 3));
+    }
 }

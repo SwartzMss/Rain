@@ -199,10 +199,28 @@ pub fn spawn_upload_job(job: UploadJob) {
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
     let generation = claim_search_publication(job).await?;
-    let result = process_upload_files_and_publish(job, generation).await;
+    let search_build = match start_search_build(job, generation).await {
+        Ok(build) => build,
+        Err(error) => {
+            if let Some(generation) = generation {
+                crate::search::publication::mark_publication_failed(
+                    &job.pool,
+                    &job.bundle_id,
+                    SearchBackendKind::Tantivy,
+                    generation,
+                    "BUILD_FAILED",
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
+    let result =
+        process_upload_files_and_publish(job, generation, clone_search_build(&search_build)).await;
     if let Err(error) = &result
         && let Some(generation) = generation
     {
+        abort_search_build(&search_build).await;
         crate::search::publication::mark_publication_failed(
             &job.pool,
             &job.bundle_id,
@@ -241,6 +259,7 @@ async fn claim_search_publication(job: &UploadJob) -> Result<Option<i64>, AppErr
 async fn process_upload_files_and_publish(
     job: &UploadJob,
     generation: Option<i64>,
+    search_build: Option<SearchBuild>,
 ) -> Result<(), AppError> {
     let archive_budget = ArchiveBudget::new(job.archive_config.clone())
         .with_temp_budget(job.receive_reservation.temp_budget());
@@ -274,6 +293,7 @@ async fn process_upload_files_and_publish(
             archive_budget: archive_budget.clone(),
             issue_quota: issue_quota.clone(),
             indexing: &job.indexing_config,
+            search_index: search_build_to_index(&search_build),
         })
         .await?;
         debug!(
@@ -287,7 +307,7 @@ async fn process_upload_files_and_publish(
     }
 
     if let Some(generation) = generation {
-        publish_search_publication(job, generation).await?;
+        finish_search_build(&search_build, job, generation).await?;
     }
     finalize_bundle_ready_with_retry(&job.pool, &job.bundle_id).await?;
     info!(
@@ -301,21 +321,81 @@ async fn process_upload_files_and_publish(
 }
 
 #[cfg(feature = "tantivy-search")]
-async fn publish_search_publication(job: &UploadJob, generation: i64) -> Result<(), AppError> {
-    crate::search::tantivy::publication::publish_bundle(
-        &job.pool,
-        &job.data_root,
-        &job.temp_dir,
-        &job.bundle_id,
-        generation,
-        job.search_writer_permits.clone(),
-        job.search_writer_heap_size_bytes,
-    )
-    .await
-}
+type SearchBuild = Arc<crate::search::tantivy::publication::BundleBuildSession>;
 
 #[cfg(not(feature = "tantivy-search"))]
-async fn publish_search_publication(_job: &UploadJob, _generation: i64) -> Result<(), AppError> {
+type SearchBuild = ();
+
+async fn start_search_build(
+    _job: &UploadJob,
+    generation: Option<i64>,
+) -> Result<Option<SearchBuild>, AppError> {
+    #[cfg(feature = "tantivy-search")]
+    if let Some(generation) = generation {
+        return crate::search::tantivy::publication::BundleBuildSession::start(
+            &_job.pool,
+            &_job.data_root,
+            &_job.temp_dir,
+            &_job.bundle_id,
+            generation,
+            _job.search_writer_permits.clone(),
+            _job.search_writer_heap_size_bytes,
+        )
+        .await
+        .map(Some);
+    }
+    #[cfg(not(feature = "tantivy-search"))]
+    let _ = generation;
+    Ok(None)
+}
+
+fn search_build_to_index(
+    search_build: &Option<SearchBuild>,
+) -> Option<std::sync::Arc<dyn crate::search::IngestIndex>> {
+    #[cfg(feature = "tantivy-search")]
+    {
+        search_build
+            .as_ref()
+            .map(|build| build.clone() as std::sync::Arc<dyn crate::search::IngestIndex>)
+    }
+    #[cfg(not(feature = "tantivy-search"))]
+    {
+        let _ = search_build;
+        None
+    }
+}
+
+fn clone_search_build(search_build: &Option<SearchBuild>) -> Option<SearchBuild> {
+    #[cfg(feature = "tantivy-search")]
+    {
+        search_build.clone()
+    }
+    #[cfg(not(feature = "tantivy-search"))]
+    {
+        *search_build
+    }
+}
+
+async fn abort_search_build(_search_build: &Option<SearchBuild>) {
+    #[cfg(feature = "tantivy-search")]
+    if let Some(build) = _search_build {
+        build.abort().await;
+    }
+}
+
+async fn finish_search_build(
+    search_build: &Option<SearchBuild>,
+    _job: &UploadJob,
+    _generation: i64,
+) -> Result<(), AppError> {
+    #[cfg(feature = "tantivy-search")]
+    if let Some(build) = search_build {
+        return build.finish().await;
+    }
+    #[cfg(not(feature = "tantivy-search"))]
+    {
+        let _ = search_build;
+    }
     Err(AppError::Config(
         "Tantivy backend requires the tantivy-search feature".into(),
     ))

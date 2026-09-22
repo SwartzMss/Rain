@@ -243,10 +243,10 @@ PR0/PR1 是当前可先执行的工作包；后续 PR 开始前，以前一阶�
 ### 2026-09-22：PR2 Tantivy 原型与有界写入
 
 - 添加可选 `tantivy-search` feature，锁定 Tantivy 0.26.2；默认构建和生产路由仍使用 SQLite FTS。
-- 新增 per-Bundle schema、2–20 字符 n-gram tokenizer、stored cleaned content 和文件/chunk/行/事件时间字段。
+- 新增 per-Bundle schema、固定三元组 n-gram tokenizer、stored cleaned content 和文件/chunk/行/事件时间字段。
 - 新增有界生产者/消费者管道：默认最多缓存 2 个 batch，writer 在 blocking pool 中运行并限制 64 MiB heap；发送端停止或 writer 失败时不会继续无限生产。
 - 查询只用有限 n-gram 生成候选，再对 stored chunk 做连续不区分大小写复核；覆盖 `abcd` 不匹配 `abc ... bcd`、重复 n-gram 和中文。
-- 新增 `search_backend_parity` feature 集成测试和原型文档；发布、恢复、删除可见性、精确 HTTP total 及生产 ingest 接入留到后续 PR。
+- 新增 `search_backend_parity` feature 集成测试和原型文档；生产 ingest 接入、发布、恢复、删除可见性和混合查询在后续阶段补齐。
 - 已通过 feature 下的原型测试与 `clippy --features tantivy-search --lib -D warnings`；尚未用真实大文件宣称性能收益。
 
 ### 2026-09-22：PR3 发布元数据基础
@@ -261,12 +261,21 @@ PR0/PR1 是当前可先执行的工作包；后续 PR 开始前，以前一阶�
 - 新增 `RAIN_SEARCH_BACKEND` 配置，默认 `sqlite_fts`；只有启用 `tantivy-search` feature 的构建才能选择 `tantivy`。
 - 上传任务在处理开始时 claim 新 generation，从规范化 `log_segments` 以 64 chunk 批次送入有界 Tantivy pipeline；writer 完成后执行目录 rename、重新打开和文档数校验，再把 publication 标为 `READY`。
 - Bundle finalizer 现在只接受 SQLite legacy/ready 或已发布的 Tantivy `READY` 元数据；Tantivy publication 未完成时不会把 Bundle 置为 `READY`。
-- Bundle 内容搜索按 publication backend 路由到 Tantivy；Issue-wide 搜索和已有 Bundle 保持 SQLite，避免在混合后端查询尚未完成前改变语义。
+- Bundle 内容搜索按 publication backend 路由到 Tantivy；Issue-wide 内容搜索已支持 SQLite/Tantivy 混合合并，已有 Bundle 继续走 SQLite。
 - 新增 `search_publication` 集成测试，覆盖 generation claim、artifact publish/reopen、READY 元数据和 Bundle 查询；默认与 feature 构建均通过 check，Tantivy feature 库 clippy 通过。
 
 ### 2026-09-22：PR4 writer admission 第一阶段
 
 - 新增 `RAIN_SEARCH_TANTIVY_MAX_WRITERS` 与 `RAIN_SEARCH_TANTIVY_WRITER_HEAP`，默认只允许一个 64 MiB writer；所有 Tantivy Bundle publication 共用 admission semaphore。
 - Upload worker 在启动 Tantivy pipeline 前获取 writer permit，permit 覆盖 batch 消费、commit、reopen 校验和 publication，避免单任务有界但并发任务把 writer heap 线性叠加。
-- 这一步只完成 writer 资源预算；查询 fan-out、磁盘 I/O admission 和真实大文件 1/2/4 并发对照仍留在 PR4 后续验收。
+- writer 资源预算已覆盖真实上传；查询 fan-out 目前串行且磁盘 I/O admission、1/2/4 并发矩阵仍留在 PR4 后续验收。
 - 新增 migration `0004_tantivy_skip_sqlite_fts`：Tantivy-owned Bundle 的 log segment 不再写 SQLite FTS5 shadow table，保留 legacy/SQLite Bundle 的 trigger 语义，消除双重索引写入的主要重复成本。
+
+### 2026-09-22：PR4 流式接入与首轮性能对照
+
+- 上传解析器通过 `IngestIndex` 把清洗后的 chunk 直接送入 Tantivy `BundleBuildSession`；不再先写完整 SQLite 正文再回读构建索引。
+- SQLite 仅保留空正文兼容行、稀疏 offsets、行范围、事件时间和 line count；元数据按 512 chunk 批量提交，避免每个 chunk 争抢 writer。
+- tokenizer 固定为 `rain_ngram_v2` 三元组，候选结果仍逐 chunk 做连续子串复核；旧的 2–20 配置已废弃并递增 tokenizer 版本。
+- Issue 内容搜索已支持 SQLite/Tantivy 混合合并、稳定排序和全局分页；Bundle 路由校验 publication、schema 和 tokenizer 版本。
+- 增加启动/定时清理 unpublished generation 和已删除 Bundle artifact，并补充真实 streaming publication 与“正文不落 SQLite”的集成测试。
+- 一次 100 MiB release 对照：SQLite ingest→READY 约 11.874 s，Tantivy streaming 约 2.026 s；Tantivy RSS 采样峰值约 55.3 MiB。数字只代表单主机单次运行，默认后端仍不切换。

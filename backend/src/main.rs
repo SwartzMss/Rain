@@ -270,6 +270,9 @@ async fn main() -> std::io::Result<()> {
     background_tasks.push(backend::routes::spawn_file_deletion_cleanup(
         shared_state.clone(),
     ));
+    background_tasks.push(backend::routes::spawn_search_artifact_cleanup(
+        shared_state.clone(),
+    ));
 
     let server = HttpServer::new(move || {
         App::new()

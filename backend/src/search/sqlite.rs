@@ -20,6 +20,25 @@ impl SqliteFtsSearchIndex {
     fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    async fn commit_batch_inner(&self, batch: IndexBatch) -> Result<(), AppError> {
+        crate::db::write::run(self.pool(), "index-batch", &batch, |conn, batch| {
+            Box::pin(async move {
+                flush_log_chunks(conn, &batch.bundle_id, batch.file_id, &batch.chunks).await?;
+                insert_line_offsets(conn, batch.file_id, &batch.offsets).await?;
+                if let Some(line_count) = batch.final_line_count {
+                    sqlx::query("UPDATE files SET line_count = ? WHERE id = ?")
+                        .bind(line_count)
+                        .bind(batch.file_id)
+                        .execute(conn)
+                        .await
+                        .map_err(AppError::Database)?;
+                }
+                Ok(())
+            })
+        })
+        .await
+    }
 }
 
 #[derive(FromRow)]
@@ -332,22 +351,14 @@ impl SearchIndex for SqliteFtsSearchIndex {
     }
 
     async fn commit_batch(&self, batch: IndexBatch) -> Result<(), AppError> {
-        crate::db::write::run(self.pool(), "index-batch", &batch, |conn, batch| {
-            Box::pin(async move {
-                flush_log_chunks(conn, &batch.bundle_id, batch.file_id, &batch.chunks).await?;
-                insert_line_offsets(conn, batch.file_id, &batch.offsets).await?;
-                if let Some(line_count) = batch.final_line_count {
-                    sqlx::query("UPDATE files SET line_count = ? WHERE id = ?")
-                        .bind(line_count)
-                        .bind(batch.file_id)
-                        .execute(conn)
-                        .await
-                        .map_err(AppError::Database)?;
-                }
-                Ok(())
-            })
-        })
-        .await
+        self.commit_batch_inner(batch).await
+    }
+}
+
+#[async_trait]
+impl IngestIndex for SqliteFtsSearchIndex {
+    async fn commit_ingest_batch(&self, batch: IndexBatch) -> Result<(), AppError> {
+        self.commit_batch_inner(batch).await
     }
 }
 
@@ -449,6 +460,7 @@ mod tests {
         IndexBatch {
             bundle_id: "bundle".into(),
             file_id,
+            path: "/app.log".into(),
             chunks: vec![IndexChunk {
                 chunk_index: 0,
                 line_start: Some(0),

@@ -212,7 +212,15 @@ mod tests {
             let config = crate::config::IndexingConfig::default();
             let path = root.join("app.log");
             let mut future = Box::pin(super::super::ingest_text_file(
-                &pool, "bundle", file_id, &path, 13, &config,
+                "bundle",
+                file_id,
+                "/app.log",
+                &path,
+                13,
+                &config,
+                Arc::new(crate::search::sqlite::SqliteFtsSearchIndex::new(
+                    pool.clone(),
+                )),
             ));
             assert!(
                 tokio::time::timeout(Duration::from_millis(50), &mut future)
@@ -270,11 +278,14 @@ mod tests {
         let config = crate::config::IndexingConfig::default();
         let mut metrics = FileIndexMetrics::new("bundle", file_id);
         let indexing = super::super::ingest_text_file_inner(
-            &pool,
             "bundle",
             file_id,
+            "/app.log",
             &path,
             &config,
+            Arc::new(crate::search::sqlite::SqliteFtsSearchIndex::new(
+                pool.clone(),
+            )),
             &mut metrics,
         )
         .with_subscriber(tracing_subscriber::registry().with(RetrySignal(signal.clone())));

@@ -149,7 +149,9 @@ mod tests {
             })
             .unwrap();
         let committed = writer.commit().unwrap();
-        let hits = CandidateSearch::new(committed).search("错误", 10).unwrap();
+        let hits = CandidateSearch::new(committed)
+            .search("错误标", 10)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "/中文.log");
         std::fs::remove_dir_all(path).unwrap();
