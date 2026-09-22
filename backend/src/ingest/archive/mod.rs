@@ -21,17 +21,20 @@ pub(crate) async fn extract_archive(
     dest: &Path,
     archive_budget: ArchiveBudget,
 ) -> Result<(), AppError> {
-    if is_zip_file(name) {
-        zip::extract_zip_archive(src, dest, archive_budget).await
-    } else if is_tar_gz_file(name) {
-        tar_gz::extract_tar_gz_archive(src, dest, archive_budget).await
-    } else if is_gzip_file(name) {
-        gzip::extract_gzip_file(name, src, dest, archive_budget).await
-    } else {
-        Err(AppError::BadRequest(format!(
-            "unsupported archive type: {name}"
-        )))
-    }
+    crate::ingest::metrics::measure("archive_extract", async {
+        if is_zip_file(name) {
+            zip::extract_zip_archive(src, dest, archive_budget).await
+        } else if is_tar_gz_file(name) {
+            tar_gz::extract_tar_gz_archive(src, dest, archive_budget).await
+        } else if is_gzip_file(name) {
+            gzip::extract_gzip_file(name, src, dest, archive_budget).await
+        } else {
+            Err(AppError::BadRequest(format!(
+                "unsupported archive type: {name}"
+            )))
+        }
+    })
+    .await
 }
 
 fn is_zip_file(name: &str) -> bool {

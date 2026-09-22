@@ -128,7 +128,7 @@ pub async fn finalize_bundle_failed(
                 .bind(reason)
                 .bind(retryable)
                 .bind(bundle_id)
-                .execute(conn)
+                .execute(&mut *conn)
                 .await
                 .map(|_| ())
                 .map_err(AppError::Database)
@@ -178,6 +178,24 @@ pub async fn finalize_bundle_failed(
         );
     }
 
+    let unpublished_generation: Option<i64> = sqlx::query_scalar(
+        "SELECT generation FROM bundle_search_indexes WHERE bundle_id = ? AND state IN ('BUILDING', 'FAILED') AND generation > 0",
+    )
+    .bind(bundle_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)
+    .unwrap_or_else(|error| {
+        error!(bundle_id, %error, "failed to load unpublished search generation for cleanup");
+        None
+    });
+    if let Some(generation) = unpublished_generation {
+        let _ = crate::search::publication::cleanup_publication_artifact(
+            data_root, bundle_id, generation,
+        )
+        .await;
+    }
+
     for path in [staging_root.join(bundle_hash), data_root.join(bundle_hash)] {
         match fs::remove_dir_all(&path).await {
             Ok(()) => {}
@@ -197,7 +215,7 @@ pub async fn finalize_bundle_ready_with_retry(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
 ) -> Result<(), AppError> {
-    finalize_bundle_ready(pool, bundle_id).await
+    crate::ingest::metrics::measure("bundle_publish", finalize_bundle_ready(pool, bundle_id)).await
 }
 
 async fn finalize_bundle_ready(pool: &sqlx::SqlitePool, bundle_id: &str) -> Result<(), AppError> {
@@ -209,10 +227,41 @@ async fn finalize_bundle_ready(pool: &sqlx::SqlitePool, bundle_id: &str) -> Resu
         |conn, &(bundle_id,)| {
             Box::pin(async move {
                 sqlx::query(
-                    "UPDATE bundles SET status = 'READY' WHERE id = ? AND status = 'PROCESSING'",
+                    "INSERT OR IGNORE INTO bundle_search_indexes (bundle_id, backend, state) VALUES (?, 'sqlite_fts', 'BUILDING')",
                 )
                 .bind(bundle_id)
-                .execute(conn)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                let publication: Option<(String, String)> = sqlx::query_as(
+                    "SELECT backend, state FROM bundle_search_indexes WHERE bundle_id = ?",
+                )
+                .bind(bundle_id)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                match publication.as_ref() {
+                    Some((backend, state)) if backend == "tantivy" && state == "READY" => {}
+                    Some((backend, state)) if backend == "sqlite_fts" && matches!(state.as_str(), "LEGACY" | "BUILDING" | "READY") => {
+                        sqlx::query(
+                            "UPDATE bundle_search_indexes SET state = 'READY', built_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ? AND backend = 'sqlite_fts' AND state IN ('LEGACY', 'BUILDING', 'READY')",
+                        )
+                        .bind(bundle_id)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
+                    }
+                    _ => {
+                        return Err(AppError::Conflict(
+                            "search index publication is not ready for this bundle".into(),
+                        ));
+                    }
+                }
+                sqlx::query(
+                    "UPDATE bundles SET status = 'READY' WHERE id = ? AND status = 'PROCESSING' AND EXISTS (SELECT 1 FROM bundle_search_indexes WHERE bundle_id = bundles.id AND state = 'READY')",
+                )
+                .bind(bundle_id)
+                .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;
                 Ok(())
@@ -286,6 +335,13 @@ mod tests {
         .unwrap();
         assert_eq!(state, ("READY".into(), "PUBLISHING".into()));
         assert_eq!(unchanged, 100);
+        let publication: (String, String) = sqlx::query_as(
+            "SELECT backend, state FROM bundle_search_indexes WHERE bundle_id = 'bundle'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(publication, ("sqlite_fts".into(), "READY".into()));
     }
 
     #[tokio::test]

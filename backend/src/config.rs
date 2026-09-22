@@ -7,6 +7,7 @@ use crate::ingest::limits::{
     MAX_ARCHIVE_COMPRESSION_RATIO, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_OUTPUT_PATH_CHARS,
     MAX_ARCHIVE_PATH_DEPTH, MAX_ARCHIVE_RECURSION_DEPTH,
 };
+use crate::search::publication::SearchBackendKind;
 use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 
 const KIB: u64 = 1024;
@@ -271,6 +272,21 @@ pub struct IndexingConfig {
     pub max_indexed_line_size: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    pub tantivy_max_writers: usize,
+    pub tantivy_writer_heap_size: u64,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            tantivy_max_writers: 1,
+            tantivy_writer_heap_size: 64 * MIB,
+        }
+    }
+}
+
 impl Default for IndexingConfig {
     fn default() -> Self {
         Self {
@@ -338,6 +354,7 @@ pub struct AppLimits {
     pub issue_max_content_size: u64,
     pub upload: UploadConfig,
     pub indexing: IndexingConfig,
+    pub search: SearchConfig,
     pub api: ApiConfig,
     pub temp_results: TempResultConfig,
 }
@@ -438,6 +455,7 @@ impl Default for AppLimits {
             issue_max_content_size: 8 * GIB,
             upload: UploadConfig::default(),
             indexing: IndexingConfig::default(),
+            search: SearchConfig::default(),
             api: ApiConfig::default(),
             temp_results: TempResultConfig::default(),
         }
@@ -522,6 +540,16 @@ impl AppLimits {
                 max_indexed_line_size: env_size(
                     "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE",
                     defaults.indexing.max_indexed_line_size,
+                )?,
+            },
+            search: SearchConfig {
+                tantivy_max_writers: env_value(
+                    "RAIN_SEARCH_TANTIVY_MAX_WRITERS",
+                    defaults.search.tantivy_max_writers,
+                )?,
+                tantivy_writer_heap_size: env_size(
+                    "RAIN_SEARCH_TANTIVY_WRITER_HEAP",
+                    defaults.search.tantivy_writer_heap_size,
                 )?,
             },
             api: ApiConfig {
@@ -621,6 +649,14 @@ impl AppLimits {
         positive!(
             self.indexing.max_indexed_line_size,
             "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE"
+        );
+        positive!(
+            self.search.tantivy_max_writers,
+            "RAIN_SEARCH_TANTIVY_MAX_WRITERS"
+        );
+        positive!(
+            self.search.tantivy_writer_heap_size,
+            "RAIN_SEARCH_TANTIVY_WRITER_HEAP"
         );
         positive!(self.api.file_preview_size, "RAIN_API_FILE_PREVIEW_SIZE");
         positive!(
@@ -760,6 +796,7 @@ pub struct AppConfig {
     pub ai_provider: AiProviderEnv,
     pub skill_run_limits: SkillRunLimits,
     pub bootstrap_admin: BootstrapAdminConfig,
+    pub search_backend: SearchBackendKind,
 }
 
 impl AppConfig {
@@ -802,6 +839,8 @@ impl AppConfig {
         let limits = AppLimits::from_env()?;
         let auth = AuthConfig::from_env()?;
         let ai_provider = AiProviderEnv::from_env()?;
+        let search_backend =
+            SearchBackendKind::parse(optional_env("RAIN_SEARCH_BACKEND")?.as_deref())?;
         let bootstrap_admin = BootstrapAdminConfig {
             username: env::var("RAIN_BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".into()),
             password: env::var("RAIN_BOOTSTRAP_ADMIN_PASSWORD").unwrap_or_default(),
@@ -827,6 +866,7 @@ impl AppConfig {
             ai_provider,
             skill_run_limits: SkillRunLimits::default(),
             bootstrap_admin,
+            search_backend,
         })
     }
 }

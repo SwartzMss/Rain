@@ -114,6 +114,29 @@ pub fn spawn_file_deletion_cleanup(
     )
 }
 
+pub fn spawn_search_artifact_cleanup(
+    state: web::Data<crate::AppState>,
+) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "search-artifact-cleanup",
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(30),
+        move || {
+            let pool = state.db.pool.clone();
+            let data_root = state.storage.data_root.clone();
+            async move {
+                crate::search::publication::cleanup_unpublished_artifacts(&pool, &data_root)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                crate::search::publication::cleanup_deleted_bundle_artifacts(&pool, &data_root)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        },
+    )
+}
+
 async fn prevent_session_response_caching(
     request: ServiceRequest,
     next: Next<impl MessageBody>,

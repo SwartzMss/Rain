@@ -1,18 +1,20 @@
 use actix_web::{HttpResponse, get, web};
 use serde::Deserialize;
-use sqlx::FromRow;
 
 use crate::{
     AppState,
     error::AppError,
     models::logs::{LogSearchHit, LogSearchResponse},
+    search::{
+        ContentSearchRequest, ContentSearchResult, ContentSearchScope, FilenameSearchRequest,
+        SearchIndex, publication::artifact_relative_path, search_tantivy_bundle,
+        sqlite::SqliteFtsSearchIndex,
+    },
 };
 
 use super::issues::{ensure_issue_active, normalize_issue_code, touch_issue_activity_best_effort};
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
-
-const SHORT_SEARCH_SCAN_LIMIT: i64 = 10_001;
 
 #[derive(Deserialize)]
 struct LogQuery {
@@ -24,9 +26,28 @@ struct LogQuery {
     size: Option<i64>,
 }
 
+type PublicationRow = (String, String, i64, Option<i64>, Option<i64>);
+type IssueBundleSearchRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    Option<i64>,
+    Option<i64>,
+);
+
 // scoped under /api in routes::register
 #[get("/log/v2/{bundle_id}/search")]
 pub async fn search_logs(
+    path: web::Path<String>,
+    query: web::Query<LogQuery>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    crate::ingest::metrics::measure("bundle_search", search_logs_inner(path, query, state)).await
+}
+
+async fn search_logs_inner(
     path: web::Path<String>,
     query: web::Query<LogQuery>,
     state: web::Data<AppState>,
@@ -40,7 +61,6 @@ pub async fn search_logs(
 
     let bundle = load_bundle(&state.db.pool, &bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
-    let fts_query = build_fts_query(search_term);
     let timeline = term.timeline.and_then(|value| {
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
@@ -63,173 +83,55 @@ pub async fn search_logs(
         .size
         .unwrap_or(state.limits.api.default_search_results)
         .clamp(1, state.limits.api.max_search_results);
-    let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
-    let short_pattern = format!("%{}%", escape_like_pattern(search_term));
     if search_term.chars().count() < 3 {
         return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
-
-    let truncated = if search_term.chars().count() < 3 {
-        let candidate_count: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) FROM (
-                SELECT ls.id
-                FROM log_segments ls
-                JOIN visible_files f ON f.id = ls.file_id
-                WHERE ls.bundle_id = ?
-                  AND (? IS NULL OR ls.timeline = ?)
-                  AND (? IS NULL OR f.path LIKE ?)
-                  AND (? IS NULL OR ls.file_id = ?)
-                ORDER BY ls.id
-                LIMIT ?
-            )
-            "#,
-        )
-        .bind(&bundle.id)
-        .bind(&timeline)
-        .bind(&timeline)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(file_id)
-        .bind(file_id)
-        .bind(SHORT_SEARCH_SCAN_LIMIT + 1)
-        .fetch_one(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-        candidate_count > SHORT_SEARCH_SCAN_LIMIT
-    } else {
-        false
+    let request = ContentSearchRequest {
+        scope: ContentSearchScope::Bundle {
+            bundle_id: bundle.id.clone(),
+            timeline,
+            file_id,
+        },
+        query: search_term.to_owned(),
+        path_like,
+        from,
+        size,
     };
-
-    let total: i64 = if search_term.chars().count() < 3 {
-        sqlx::query_scalar(
-            r#"
-        WITH candidates AS MATERIALIZED (
-        SELECT ls.content, ls.file_id, ls.timeline, ls.line_offset AS offset,
-               ls.line_end, ls.chunk_index, f.path
-        FROM log_segments ls
-        JOIN visible_files f ON f.id = ls.file_id
-        WHERE ls.bundle_id = ?
-          AND (? IS NULL OR ls.timeline = ?)
-          AND (? IS NULL OR f.path LIKE ?)
-          AND (? IS NULL OR ls.file_id = ?)
-        ORDER BY ls.id
-        LIMIT ?
-        )
-        SELECT COUNT(*) FROM candidates
-        WHERE content LIKE ? ESCAPE '\' COLLATE NOCASE
-        "#,
-        )
-        .bind(&bundle.id)
-        .bind(&timeline)
-        .bind(&timeline)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(file_id)
-        .bind(file_id)
-        .bind(SHORT_SEARCH_SCAN_LIMIT)
-        .bind(&short_pattern)
-        .fetch_one(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?
-    } else {
-        sqlx::query_scalar(
-            r#"
-        SELECT COUNT(*) FROM log_segments ls
-        JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
-        JOIN visible_files f ON f.id = ls.file_id
-        WHERE log_segments_fts MATCH ?
-          AND ls.bundle_id = ?
-          AND (? IS NULL OR ls.timeline = ?)
-          AND (? IS NULL OR f.path LIKE ?)
-          AND (? IS NULL OR ls.file_id = ?)
-        "#,
-        )
-        .bind(&fts_query)
-        .bind(&bundle.id)
-        .bind(&timeline)
-        .bind(&timeline)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(file_id)
-        .bind(file_id)
-        .fetch_one(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?
+    let publication: Option<PublicationRow> = sqlx::query_as(
+        "SELECT backend, state, generation, schema_version, tokenizer_version FROM bundle_search_indexes WHERE bundle_id = ?",
+    )
+    .bind(&bundle.id)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(AppError::Database)?;
+    let result = match publication {
+        Some((backend, state_name, generation, schema_version, tokenizer_version))
+            if backend == "tantivy" =>
+        {
+            if state_name != "READY" {
+                return Err(AppError::Conflict(
+                    "Bundle search index is not ready".into(),
+                ));
+            }
+            if schema_version != Some(crate::search::publication::TANTIVY_SCHEMA_VERSION)
+                || tokenizer_version != Some(crate::search::publication::TANTIVY_TOKENIZER_VERSION)
+            {
+                return Err(AppError::Conflict(
+                    "Bundle search index version is unsupported; rebuild is required".into(),
+                ));
+            }
+            let artifact = artifact_relative_path(&bundle.id, generation)?;
+            search_tantivy_bundle(state.storage.data_root.join(artifact), request).await?
+        }
+        _ => {
+            SqliteFtsSearchIndex::new(state.db.pool.clone())
+                .search_content(request)
+                .await?
+        }
     };
-
-    let rows = if search_term.chars().count() < 3 {
-        sqlx::query_as::<_, LogRow>(
-            r#"
-        WITH candidates AS MATERIALIZED (
-        SELECT ls.id, ls.file_id, f.path, ls.timeline, ls.line_offset AS offset,
-               ls.line_end, ls.chunk_index, ls.content
-        FROM log_segments ls
-        JOIN visible_files f ON f.id = ls.file_id
-        WHERE ls.bundle_id = ?
-          AND (? IS NULL OR ls.timeline = ?)
-          AND (? IS NULL OR f.path LIKE ?)
-          AND (? IS NULL OR ls.file_id = ?)
-        ORDER BY ls.id
-        LIMIT ?
-        )
-        SELECT file_id, path, timeline, offset, line_end, chunk_index, content
-        FROM candidates
-        WHERE content LIKE ? ESCAPE '\' COLLATE NOCASE
-        ORDER BY offset NULLS FIRST, id
-        LIMIT ? OFFSET ?
-        "#,
-        )
-        .bind(&bundle.id)
-        .bind(&timeline)
-        .bind(&timeline)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(file_id)
-        .bind(file_id)
-        .bind(SHORT_SEARCH_SCAN_LIMIT)
-        .bind(&short_pattern)
-        .bind(size)
-        .bind(from)
-        .fetch_all(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?
-    } else {
-        sqlx::query_as::<_, LogRow>(
-            r#"
-        SELECT ls.file_id,
-               f.path,
-               ls.timeline,
-               ls.line_offset AS offset,
-               ls.line_end,
-               ls.chunk_index,
-               ls.content AS content
-        FROM log_segments ls
-        JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
-        JOIN visible_files f ON f.id = ls.file_id
-        WHERE log_segments_fts MATCH ?
-          AND ls.bundle_id = ?
-          AND (? IS NULL OR ls.timeline = ?)
-          AND (? IS NULL OR f.path LIKE ?)
-          AND (? IS NULL OR ls.file_id = ?)
-        ORDER BY ls.line_offset NULLS FIRST, ls.id
-        LIMIT ? OFFSET ?
-        "#,
-        )
-        .bind(&fts_query)
-        .bind(&bundle.id)
-        .bind(&timeline)
-        .bind(&timeline)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(file_id)
-        .bind(file_id)
-        .bind(size)
-        .bind(from)
-        .fetch_all(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?
-    };
+    let total = result.total;
+    let truncated = result.truncated;
+    let rows = result.rows;
 
     let hits = rows
         .into_iter()
@@ -279,6 +181,15 @@ pub async fn search_issue_logs(
     query: web::Query<IssueLogQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    crate::ingest::metrics::measure("issue_search", search_issue_logs_inner(path, query, state))
+        .await
+}
+
+async fn search_issue_logs_inner(
+    path: web::Path<String>,
+    query: web::Query<IssueLogQuery>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     ensure_issue_active(&state.db.pool, &issue_code).await?;
     let term = query.into_inner();
@@ -302,7 +213,6 @@ pub async fn search_issue_logs(
         return Ok(response);
     }
 
-    let fts_query = build_fts_query(search_term);
     let path_like = term.path_like.and_then(|value| {
         let trimmed = value.trim().to_string();
         if trimmed.is_empty() {
@@ -316,169 +226,33 @@ pub async fn search_issue_logs(
         .size
         .unwrap_or(state.limits.api.default_search_results)
         .clamp(1, state.limits.api.max_search_results);
-    let path_pattern = path_like.as_ref().map(|value| format!("%{}%", value));
-    let short_pattern = format!("%{}%", escape_like_pattern(search_term));
     if search_term.chars().count() < 3 {
         return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
-
-    let truncated = if search_term.chars().count() < 3 {
-        let candidate_count: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) FROM (
-                SELECT ls.id
-                FROM log_segments ls
-                JOIN bundles b ON b.id = ls.bundle_id
-                JOIN issues i ON i.code = b.issue_code
-                JOIN visible_files f ON f.id = ls.file_id
-                WHERE b.issue_code = ?
-                  AND i.status = 'ACTIVE'
-                  AND b.status = 'READY'
-                  AND (? IS NULL OR f.path LIKE ?)
-                ORDER BY ls.id
-                LIMIT ?
-            )
-            "#,
-        )
-        .bind(&issue_code)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(SHORT_SEARCH_SCAN_LIMIT + 1)
-        .fetch_one(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-        candidate_count > SHORT_SEARCH_SCAN_LIMIT
-    } else {
-        false
-    };
-
-    let total: i64 = if search_term.chars().count() < 3 {
-        sqlx::query_scalar(
-            r#"
-        WITH candidates AS MATERIALIZED (
-        SELECT ls.content, f.path
-        FROM log_segments ls
-        JOIN bundles b ON b.id = ls.bundle_id
-        JOIN issues i ON i.code = b.issue_code
-        JOIN visible_files f ON f.id = ls.file_id
-        WHERE b.issue_code = ?
-          AND i.status = 'ACTIVE'
-          AND b.status = 'READY'
-          AND (? IS NULL OR f.path LIKE ?)
-        ORDER BY ls.id
-        LIMIT ?
-        )
-        SELECT COUNT(*) FROM candidates
-        WHERE content LIKE ? ESCAPE '\' COLLATE NOCASE
-        "#,
-        )
-        .bind(&issue_code)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(SHORT_SEARCH_SCAN_LIMIT)
-        .bind(&short_pattern)
-        .fetch_one(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?
-    } else {
-        sqlx::query_scalar(
-            r#"
-        SELECT COUNT(*) FROM log_segments ls
-        JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
-        JOIN bundles b ON b.id = ls.bundle_id
-        JOIN issues i ON i.code = b.issue_code
-        JOIN visible_files f ON f.id = ls.file_id
-        WHERE log_segments_fts MATCH ?
-          AND b.issue_code = ?
-          AND i.status = 'ACTIVE'
-          AND b.status = 'READY'
-          AND (? IS NULL OR f.path LIKE ?)
-        "#,
-        )
-        .bind(&fts_query)
-        .bind(&issue_code)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .fetch_one(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?
-    };
-
-    let rows = if search_term.chars().count() < 3 {
-        sqlx::query_as::<_, IssueLogRow>(
-            r#"
-        WITH candidates AS MATERIALIZED (
-        SELECT ls.id, ls.file_id, f.path, ls.line_offset AS offset, ls.line_end,
-               ls.chunk_index, ls.content, b.hash AS bundle_hash
-        FROM log_segments ls
-        JOIN bundles b ON b.id = ls.bundle_id
-        JOIN issues i ON i.code = b.issue_code
-        JOIN visible_files f ON f.id = ls.file_id
-        WHERE b.issue_code = ?
-          AND i.status = 'ACTIVE'
-          AND b.status = 'READY'
-          AND (? IS NULL OR f.path LIKE ?)
-        ORDER BY ls.id
-        LIMIT ?
-        )
-        SELECT file_id, path, offset, line_end, chunk_index, content, bundle_hash
-        FROM candidates
-        WHERE content LIKE ? ESCAPE '\' COLLATE NOCASE
-        ORDER BY offset NULLS FIRST, id
-        LIMIT ? OFFSET ?
-        "#,
-        )
-        .bind(&issue_code)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(SHORT_SEARCH_SCAN_LIMIT)
-        .bind(&short_pattern)
-        .bind(size)
-        .bind(from)
-        .fetch_all(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?
-    } else {
-        sqlx::query_as::<_, IssueLogRow>(
-            r#"
-        SELECT ls.file_id,
-               f.path,
-               ls.line_offset AS offset,
-               ls.line_end,
-               ls.chunk_index,
-               ls.content AS content,
-               b.hash as bundle_hash
-        FROM log_segments ls
-        JOIN log_segments_fts ON log_segments_fts.rowid = ls.id
-        JOIN bundles b ON b.id = ls.bundle_id
-        JOIN issues i ON i.code = b.issue_code
-        JOIN visible_files f ON f.id = ls.file_id
-        WHERE log_segments_fts MATCH ?
-          AND b.issue_code = ?
-          AND i.status = 'ACTIVE'
-          AND b.status = 'READY'
-          AND (? IS NULL OR f.path LIKE ?)
-        ORDER BY ls.line_offset NULLS FIRST, ls.id
-        LIMIT ? OFFSET ?
-        "#,
-        )
-        .bind(&fts_query)
-        .bind(&issue_code)
-        .bind(&path_pattern)
-        .bind(&path_pattern)
-        .bind(size)
-        .bind(from)
-        .fetch_all(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?
-    };
+    let result = search_issue_content_mixed(
+        &state.db.pool,
+        &state.storage.data_root,
+        ContentSearchRequest {
+            scope: ContentSearchScope::Issue {
+                issue_code: issue_code.clone(),
+            },
+            query: search_term.to_owned(),
+            path_like,
+            from,
+            size,
+        },
+    )
+    .await?;
+    let total = result.total;
+    let truncated = result.truncated;
+    let rows = result.rows;
 
     let hits = rows
         .into_iter()
         .map(|row| LogSearchHit {
             file_id: row.file_id.to_string(),
             path: row.path,
-            bundle_hash: Some(row.bundle_hash),
+            bundle_hash: row.bundle_hash,
             snippet: literal_snippet(&row.content, search_term),
             timeline: None,
             offset: row.offset,
@@ -497,6 +271,97 @@ pub async fn search_issue_logs(
     }))
 }
 
+async fn search_issue_content_mixed(
+    pool: &sqlx::SqlitePool,
+    data_root: &std::path::Path,
+    request: ContentSearchRequest,
+) -> Result<ContentSearchResult, AppError> {
+    let ContentSearchScope::Issue { issue_code } = &request.scope else {
+        return Err(AppError::Config(
+            "mixed Issue search requires an Issue scope".into(),
+        ));
+    };
+    let from = request.from.max(0) as usize;
+    let size = request.size.max(0) as usize;
+    let candidate_limit = from.saturating_add(size).max(1);
+    let sqlite_result = SqliteFtsSearchIndex::new(pool.clone())
+        .search_content(ContentSearchRequest {
+            from: 0,
+            size: candidate_limit as i64,
+            ..request.clone()
+        })
+        .await?;
+    let mut rows = sqlite_result.rows;
+    let mut total = sqlite_result.total;
+    let bundles: Vec<IssueBundleSearchRow> = sqlx::query_as(
+        "SELECT b.id, b.hash, COALESCE(si.backend, 'sqlite_fts'), COALESCE(si.state, 'LEGACY'), COALESCE(si.generation, 0), si.schema_version, si.tokenizer_version FROM bundles b LEFT JOIN bundle_search_indexes si ON si.bundle_id = b.id WHERE b.issue_code = ? AND b.status = 'READY' ORDER BY b.id",
+    )
+    .bind(issue_code)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    for (bundle_id, bundle_hash, backend, state, generation, schema_version, tokenizer_version) in
+        bundles
+    {
+        if backend != "tantivy" {
+            continue;
+        }
+        if state != "READY" {
+            return Err(AppError::Conflict(format!(
+                "Bundle {bundle_id} search index is not ready"
+            )));
+        }
+        if schema_version != Some(crate::search::publication::TANTIVY_SCHEMA_VERSION)
+            || tokenizer_version != Some(crate::search::publication::TANTIVY_TOKENIZER_VERSION)
+        {
+            return Err(AppError::Conflict(
+                "Bundle search index version is unsupported; rebuild is required".into(),
+            ));
+        }
+        let artifact = artifact_relative_path(&bundle_id, generation)?;
+        let result = search_tantivy_bundle(
+            data_root.join(artifact),
+            ContentSearchRequest {
+                scope: ContentSearchScope::Bundle {
+                    bundle_id: bundle_id.clone(),
+                    timeline: None,
+                    file_id: None,
+                },
+                query: request.query.clone(),
+                path_like: request.path_like.clone(),
+                from: 0,
+                size: candidate_limit as i64,
+            },
+        )
+        .await?;
+        total = total.saturating_add(result.total);
+        rows.extend(result.rows.into_iter().map(|mut row| {
+            row.bundle_hash = Some(bundle_hash.clone());
+            row
+        }));
+    }
+    rows.sort_by(|left, right| {
+        (
+            left.offset.unwrap_or(i64::MIN),
+            left.bundle_hash.as_deref().unwrap_or_default(),
+            left.file_id,
+            left.chunk_index.unwrap_or(i64::MIN),
+        )
+            .cmp(&(
+                right.offset.unwrap_or(i64::MIN),
+                right.bundle_hash.as_deref().unwrap_or_default(),
+                right.file_id,
+                right.chunk_index.unwrap_or(i64::MIN),
+            ))
+    });
+    let rows = rows.into_iter().skip(from).take(size).collect();
+    Ok(ContentSearchResult {
+        total,
+        rows,
+        truncated: false,
+    })
+}
+
 async fn search_issue_files(
     pool: &sqlx::SqlitePool,
     api: &crate::config::ApiConfig,
@@ -509,63 +374,16 @@ async fn search_issue_files(
     let size = size
         .unwrap_or(api.default_search_results)
         .clamp(1, api.max_search_results);
-    let pattern = format!("%{}%", escape_like_pattern(search_term));
-
-    let total: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*)
-        FROM visible_files f
-        JOIN bundles b ON b.id = f.bundle_id
-        JOIN issues i ON i.code = b.issue_code
-        WHERE b.issue_code = ?
-          AND i.status = 'ACTIVE'
-          AND b.status = 'READY'
-          AND f.is_dir = 0
-          AND (
-            f.name LIKE ? ESCAPE '\' COLLATE NOCASE
-            OR f.path LIKE ? ESCAPE '\' COLLATE NOCASE
-          )
-        "#,
-    )
-    .bind(issue_code)
-    .bind(&pattern)
-    .bind(&pattern)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let rows = sqlx::query_as::<_, IssueFileSearchRow>(
-        r#"
-        SELECT f.id AS file_id,
-               f.name,
-               CASE WHEN f.parent_id IS NULL THEN f.name ELSE f.path END AS path,
-               b.hash AS bundle_hash
-        FROM visible_files f
-        JOIN bundles b ON b.id = f.bundle_id
-        JOIN issues i ON i.code = b.issue_code
-        WHERE b.issue_code = ?
-          AND i.status = 'ACTIVE'
-          AND b.status = 'READY'
-          AND f.is_dir = 0
-          AND (
-            f.name LIKE ? ESCAPE '\' COLLATE NOCASE
-            OR f.path LIKE ? ESCAPE '\' COLLATE NOCASE
-          )
-        ORDER BY CASE WHEN f.name = ? COLLATE NOCASE THEN 0 ELSE 1 END,
-                 f.name COLLATE NOCASE,
-                 f.path COLLATE NOCASE
-        LIMIT ? OFFSET ?
-        "#,
-    )
-    .bind(issue_code)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(search_term)
-    .bind(size)
-    .bind(from)
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)?;
+    let result = SqliteFtsSearchIndex::new(pool.clone())
+        .search_filenames(FilenameSearchRequest {
+            issue_code: issue_code.to_owned(),
+            query: search_term.to_owned(),
+            from,
+            size,
+        })
+        .await?;
+    let total = result.total;
+    let rows = result.rows;
 
     let hits = rows
         .into_iter()
@@ -587,47 +405,6 @@ async fn search_issue_files(
         hits,
         truncated: false,
     }))
-}
-
-#[derive(FromRow)]
-struct LogRow {
-    file_id: i64,
-    path: String,
-    timeline: Option<String>,
-    offset: Option<i64>,
-    line_end: Option<i64>,
-    chunk_index: Option<i64>,
-    content: String,
-}
-
-#[derive(FromRow)]
-struct IssueLogRow {
-    file_id: i64,
-    path: String,
-    offset: Option<i64>,
-    line_end: Option<i64>,
-    chunk_index: Option<i64>,
-    content: String,
-    bundle_hash: String,
-}
-
-#[derive(FromRow)]
-struct IssueFileSearchRow {
-    file_id: i64,
-    name: String,
-    path: String,
-    bundle_hash: String,
-}
-
-fn escape_like_pattern(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
-fn build_fts_query(search_term: &str) -> String {
-    format!("\"{}\"", search_term.replace('"', "\"\""))
 }
 
 fn literal_snippet(content: &str, search_term: &str) -> String {

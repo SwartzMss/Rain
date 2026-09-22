@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use crate::error::AppError;
+use crate::{error::AppError, ingest::metrics::micros};
 
 static WRITERS: Lazy<StdMutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = Lazy::new(Default::default);
 const MAX_ATTEMPTS: u32 = 3;
@@ -89,21 +89,38 @@ where
     for attempt in 1..=MAX_ATTEMPTS {
         let queued = Instant::now();
         let permit = acquire(pool).await;
-        let queue_ms = queued.elapsed().as_millis() as u64;
+        let queue_elapsed = queued.elapsed();
+        let queue_ms = queue_elapsed.as_millis() as u64;
+        let queue_us = micros(queue_elapsed);
         let started = Instant::now();
-        let result = match pool.begin().await {
-            Ok(mut tx) => match execute(&mut tx, input).await {
-                Ok(value) => tx
-                    .commit()
-                    .await
-                    .map(|()| value)
-                    .map_err(AppError::Database),
-                Err(error) => {
-                    // Do not replay if rollback itself fails.
-                    tx.rollback().await.map_err(AppError::Database)?;
-                    Err(error)
-                }
-            },
+        let begin_result = pool.begin().await;
+        let begin_us = micros(started.elapsed());
+        let mut execute_us = 0;
+        let mut finish_us = 0;
+        let mut rollback_failed = false;
+        let result = match begin_result {
+            Ok(mut tx) => {
+                let execute_started = Instant::now();
+                let executed = execute(&mut tx, input).await;
+                execute_us = micros(execute_started.elapsed());
+                let finish_started = Instant::now();
+                let result = match executed {
+                    Ok(value) => tx
+                        .commit()
+                        .await
+                        .map(|()| value)
+                        .map_err(AppError::Database),
+                    Err(error) => match tx.rollback().await {
+                        Ok(()) => Err(error),
+                        Err(rollback_error) => {
+                            rollback_failed = true;
+                            Err(AppError::Database(rollback_error))
+                        }
+                    },
+                };
+                finish_us = micros(finish_started.elapsed());
+                result
+            }
             Err(error) => Err(AppError::Database(error)),
         };
         drop(permit);
@@ -112,16 +129,26 @@ where
             Ok(value) => {
                 if elapsed_ms >= 1_000 || queue_ms >= 1_000 {
                     tracing::warn!(
+                        metric = "sqlite_write",
                         operation,
                         attempt,
+                        queue_us,
+                        begin_us,
+                        execute_us,
+                        finish_us,
                         queue_ms,
                         elapsed_ms,
                         "slow SQLite write transaction completed"
                     );
                 } else {
                     tracing::debug!(
+                        metric = "sqlite_write",
                         operation,
                         attempt,
+                        queue_us,
+                        begin_us,
+                        execute_us,
+                        finish_us,
                         queue_ms,
                         elapsed_ms,
                         "SQLite write transaction completed"
@@ -130,8 +157,8 @@ where
                 return Ok(value);
             }
             Err(error) => {
-                let retry = attempt < MAX_ATTEMPTS && busy(&error);
-                tracing::warn!(operation, attempt, queue_ms, elapsed_ms, retry, %error, "SQLite write transaction failed");
+                let retry = !rollback_failed && attempt < MAX_ATTEMPTS && busy(&error);
+                tracing::warn!(metric = "sqlite_write", operation, attempt, queue_us, begin_us, execute_us, finish_us, queue_ms, elapsed_ms, retry, %error, "SQLite write transaction failed");
                 if !retry {
                     return Err(error);
                 }

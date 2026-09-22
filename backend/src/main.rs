@@ -125,6 +125,18 @@ async fn main() -> std::io::Result<()> {
     {
         recovery_runtime.mark_stale_processing_bundles_ready();
     }
+    run_optional_recovery_stage(
+        "unpublished-search-artifact-cleanup",
+        STARTUP_RECOVERY_TIMEOUT,
+        backend::search::publication::cleanup_unpublished_artifacts(&pool, &config.data_root),
+    )
+    .await;
+    run_optional_recovery_stage(
+        "deleted-search-artifact-cleanup",
+        STARTUP_RECOVERY_TIMEOUT,
+        backend::search::publication::cleanup_deleted_bundle_artifacts(&pool, &config.data_root),
+    )
+    .await;
     if run_optional_recovery_stage(
         "stale-skill-runs",
         STARTUP_RECOVERY_TIMEOUT,
@@ -172,6 +184,7 @@ async fn main() -> std::io::Result<()> {
         blob_store,
     );
     app_state.issue_cleanup_policy = Arc::new(cleanup_policy.clone());
+    app_state.search_backend = config.search_backend;
     for username in cleanup_policy.usernames() {
         match sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM users WHERE username_normalized = ?)",
@@ -266,6 +279,9 @@ async fn main() -> std::io::Result<()> {
         shared_state.clone(),
     ));
     background_tasks.push(backend::routes::spawn_file_deletion_cleanup(
+        shared_state.clone(),
+    ));
+    background_tasks.push(backend::routes::spawn_search_artifact_cleanup(
         shared_state.clone(),
     ));
 

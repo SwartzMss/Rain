@@ -9,6 +9,7 @@ pub mod log_expression;
 pub mod models;
 pub mod repositories;
 pub mod routes;
+pub mod search;
 pub mod services;
 pub mod skill_schema;
 pub mod upload;
@@ -105,6 +106,21 @@ pub struct UploadRuntime {
     pub receive_permits: Arc<Semaphore>,
     pub tmp_bytes: Arc<AtomicU64>,
     pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
+}
+
+pub struct SearchRuntime {
+    pub tantivy_writer_permits: Arc<Semaphore>,
+    pub tantivy_writer_heap_size_bytes: usize,
+}
+
+impl SearchRuntime {
+    pub fn new(max_writers: usize, writer_heap_size_bytes: u64) -> Self {
+        Self {
+            tantivy_writer_permits: Arc::new(Semaphore::new(max_writers)),
+            tantivy_writer_heap_size_bytes: usize::try_from(writer_heap_size_bytes)
+                .unwrap_or(usize::MAX),
+        }
+    }
 }
 
 impl UploadRuntime {
@@ -369,6 +385,7 @@ pub struct AppState {
     pub db: DatabaseContext,
     pub storage: StorageContext,
     pub upload: UploadRuntime,
+    pub search: SearchRuntime,
     pub temp_results: TempResultRuntime,
     pub line_read_permits: Arc<Semaphore>,
     pub line_read_clients: Arc<Mutex<HashMap<String, usize>>>,
@@ -381,6 +398,7 @@ pub struct AppState {
     pub issue_inactive_days: AtomicUsize,
     pub issue_cleanup_policy: Arc<IssueCleanupPolicy>,
     pub limits: AppLimits,
+    pub search_backend: crate::search::publication::SearchBackendKind,
 }
 
 const MAX_LINE_READ_CLIENTS: usize = 1024;
@@ -478,6 +496,10 @@ impl AppState {
             limits.upload.concurrent_processing_tasks,
             limits.upload.concurrent_receive_tasks,
         );
+        let search = SearchRuntime::new(
+            limits.search.tantivy_max_writers,
+            limits.search.tantivy_writer_heap_size,
+        );
         let temp_results = TempResultRuntime::new(limits.temp_results.concurrent_materializations);
         let line_read_permits = Arc::new(Semaphore::new(limits.api.concurrent_line_reads));
         let line_read_clients = Arc::new(Mutex::new(HashMap::new()));
@@ -489,6 +511,7 @@ impl AppState {
                 blob_store,
             },
             upload,
+            search,
             temp_results,
             line_read_permits,
             line_read_clients,
@@ -501,6 +524,7 @@ impl AppState {
             issue_inactive_days: AtomicUsize::new(0),
             issue_cleanup_policy: Arc::new(IssueCleanupPolicy::default()),
             limits,
+            search_backend: crate::search::publication::SearchBackendKind::SqliteFts,
         }
     }
 
@@ -589,6 +613,21 @@ mod tests {
         let state = AppState::new(pool, PathBuf::from("data"), limits);
 
         assert_eq!(state.upload.processing_permits.available_permits(), 7);
+    }
+
+    #[tokio::test]
+    async fn state_uses_configured_tantivy_writer_admission() {
+        let pool = SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let mut limits = AppLimits::default();
+        limits.search.tantivy_max_writers = 2;
+        limits.search.tantivy_writer_heap_size = 8 * 1024 * 1024;
+
+        let state = AppState::new(pool, PathBuf::from("data"), limits);
+
+        assert_eq!(state.search.tantivy_writer_permits.available_permits(), 2);
+        assert_eq!(state.search.tantivy_writer_heap_size_bytes, 8 * 1024 * 1024);
     }
 
     #[tokio::test]

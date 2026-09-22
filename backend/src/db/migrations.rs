@@ -1541,6 +1541,7 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "DROP TABLE IF EXISTS temp_results",
         "DROP TABLE IF EXISTS rain_ready_probe",
         "DROP TABLE IF EXISTS file_deletion_jobs",
+        "DROP TABLE IF EXISTS bundle_search_indexes",
         "DROP TABLE IF EXISTS log_line_offsets",
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
@@ -1633,6 +1634,13 @@ mod tests {
         .await
         .expect("inspect baseline table");
         assert!(table_exists);
+        let search_table_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='bundle_search_indexes')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect search publication table");
+        assert!(search_table_exists);
     }
 
     #[tokio::test]
