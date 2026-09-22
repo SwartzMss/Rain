@@ -22,8 +22,7 @@ async fn fetch_settings(pool: &sqlx::SqlitePool) -> Result<RegistrationSettings,
     .fetch_one(pool)
     .await
     .map_err(AppError::Database)?;
-    let policy =
-        IssueCleanupPolicy::from_json(&row.6).map_err(|message| AppError::Config(message))?;
+    let policy = IssueCleanupPolicy::from_json(&row.6).map_err(AppError::Config)?;
     Ok(RegistrationSettings {
         allow_registration: row.0,
         updated_at: row.1,

@@ -15,6 +15,7 @@ pub enum UploadStatus {
 pub enum UploadStage {
     Pending,
     Receiving,
+    Validating,
     Extracting,
     Indexing,
     Publishing,
@@ -84,6 +85,8 @@ impl UploadStage {
     pub fn from_db_value(value: &str) -> Self {
         if value.eq_ignore_ascii_case("RECEIVING") {
             Self::Receiving
+        } else if value.eq_ignore_ascii_case("VALIDATING") {
+            Self::Validating
         } else if value.eq_ignore_ascii_case("EXTRACTING") {
             Self::Extracting
         } else if value.eq_ignore_ascii_case("INDEXING") {

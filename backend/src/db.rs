@@ -653,7 +653,7 @@ pub async fn load_or_initialize_cleanup_exempt_users(
             .map_err(AppError::Database)?
     };
     tx.commit().await.map_err(AppError::Database)?;
-    IssueCleanupPolicy::from_json(&json).map_err(|message| AppError::Config(message))
+    IssueCleanupPolicy::from_json(&json).map_err(AppError::Config)
 }
 
 #[cfg(test)]

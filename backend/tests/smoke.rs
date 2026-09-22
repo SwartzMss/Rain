@@ -1467,6 +1467,14 @@ async fn nested_archive_limit_failure_reports_extracting_stage() {
             .await
             .expect("load nested archive failure stage");
     assert_eq!(failure_stage.as_deref(), Some("EXTRACTING"));
+    let (content_size, file_count): (i64, i64) = sqlx::query_as(
+        "SELECT content_size_bytes, (SELECT COUNT(*) FROM files WHERE bundle_id = bundles.id) FROM bundles WHERE issue_code = 'NESTEDLIMIT'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load failed nested archive cleanup state");
+    assert_eq!(content_size, 0);
+    assert_eq!(file_count, 0);
 
     let issue: Value = test::call_and_read_body_json(
         &app,

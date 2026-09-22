@@ -83,7 +83,7 @@ export function UploadPanel({
                   : '拖拽日志文件到这里，或点击选择文件'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              支持 .log、.txt、.zip、.tar.gz、.tgz、.gz。上传前检查容量和 ZIP 解压大小；GZIP 和嵌套压缩内容仍需后台校验。
+              支持 .log、.txt、.zip、.tar.gz、.tgz、.gz。上传前会快速检查，后台还会对压缩内容做权威校验。
             </p>
           </div>
         </div>

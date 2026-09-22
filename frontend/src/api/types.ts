@@ -8,7 +8,7 @@ export interface UploadLimits {
   max_archive_entries: number;
   max_compression_ratio: number;
 }
-export type UploadStage = 'PENDING' | 'RECEIVING' | 'EXTRACTING' | 'INDEXING' | 'PUBLISHING' | 'READY' | 'FAILED';
+export type UploadStage = 'PENDING' | 'RECEIVING' | 'VALIDATING' | 'EXTRACTING' | 'INDEXING' | 'PUBLISHING' | 'READY' | 'FAILED';
 
 export type UserRole = 'USER' | 'ADMIN';
 export type UserStatus = 'ACTIVE' | 'DISABLED';

@@ -42,6 +42,11 @@ import { PENDING_SAVED_SEARCH_KEY, takePendingSavedSearch } from './pendingSaved
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
+    if (bundle.stage === 'RECEIVING') return '正在接收文件';
+    if (bundle.stage === 'VALIDATING') return '正在校验压缩内容';
+    if (bundle.stage === 'EXTRACTING') return '正在解压';
+    if (bundle.stage === 'INDEXING') return '正在建立索引';
+    if (bundle.stage === 'PUBLISHING') return '正在发布';
     return '正在建立索引';
   }
   if (bundle.status.upload_status === 'FAILED') {
