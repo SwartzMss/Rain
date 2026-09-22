@@ -30,7 +30,7 @@ pub fn ensure_bundle_ready(bundle: &BundleRow) -> Result<(), AppError> {
                 || status.eq_ignore_ascii_case("PENDING")
                 || matches!(
                     status,
-                    "RECEIVING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
+                    "RECEIVING" | "VALIDATING" | "EXTRACTING" | "INDEXING" | "PUBLISHING"
                 ) =>
         {
             Err(AppError::Conflict("bundle is still processing".into()))
