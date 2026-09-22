@@ -120,6 +120,12 @@ async fn main() -> std::io::Result<()> {
         backend::search::publication::cleanup_unpublished_artifacts(&pool, &config.data_root),
     )
     .await;
+    run_optional_recovery_stage(
+        "deleted-search-artifact-cleanup",
+        STARTUP_RECOVERY_TIMEOUT,
+        backend::search::publication::cleanup_deleted_bundle_artifacts(&pool, &config.data_root),
+    )
+    .await;
     if run_optional_recovery_stage(
         "stale-skill-runs",
         STARTUP_RECOVERY_TIMEOUT,

@@ -234,9 +234,28 @@ pub async fn cleanup_publication_artifact(
     }
 }
 
+pub async fn cleanup_deleted_bundle_artifacts(
+    pool: &SqlitePool,
+    data_root: &std::path::Path,
+) -> Result<u64, AppError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT i.bundle_id, i.generation FROM bundle_search_indexes i JOIN bundles b ON b.id = i.bundle_id WHERE b.status = 'DELETED' AND i.generation > 0",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut removed = 0_u64;
+    for (bundle_id, generation) in rows {
+        if cleanup_publication_artifact(data_root, &bundle_id, generation).await? {
+            removed = removed.saturating_add(1);
+        }
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SearchBackendKind, artifact_relative_path};
+    use super::{SearchBackendKind, artifact_relative_path, cleanup_deleted_bundle_artifacts};
 
     #[test]
     fn artifact_paths_use_only_internal_ids_and_generations() {
@@ -251,5 +270,36 @@ mod tests {
             SearchBackendKind::parse(Some("sqlite")).unwrap(),
             SearchBackendKind::SqliteFts
         );
+    }
+
+    #[tokio::test]
+    async fn deleted_bundle_artifacts_are_removed_during_recovery() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name) VALUES('CLEAN','Cleanup')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-clean','CLEAN','hash-clean','cleanup','DELETED')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state) VALUES('bundle-clean','tantivy',1,'READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "rain-search-cleanup-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let artifact = root.join(artifact_relative_path("bundle-clean", 1).unwrap());
+        tokio::fs::create_dir_all(&artifact).await.unwrap();
+        let removed = cleanup_deleted_bundle_artifacts(&pool, &root)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!artifact.exists());
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 }
