@@ -148,6 +148,7 @@ pub async fn upload_logs(
         }
     };
 
+    let received_at = std::time::Instant::now();
     let bundle_name = if upload.files.len() == 1 {
         upload.files[0].display_name.clone()
     } else {
@@ -182,6 +183,7 @@ pub async fn upload_logs(
     let file_count = upload.files.len() as u64;
     let staging_root = temp_dir.join("staging");
     spawn_upload_job(UploadJob {
+        received_at,
         pool: state.db.pool.clone(),
         data_root: state.storage.data_root.clone(),
         blob_store: state.storage.blob_store.clone(),

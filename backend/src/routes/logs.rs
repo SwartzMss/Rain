@@ -31,6 +31,14 @@ pub async fn search_logs(
     query: web::Query<LogQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    crate::ingest::metrics::measure("bundle_search", search_logs_inner(path, query, state)).await
+}
+
+async fn search_logs_inner(
+    path: web::Path<String>,
+    query: web::Query<LogQuery>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
     let bundle_hash = path.into_inner();
     let term = query.into_inner();
     let search_term = term.q.trim();
@@ -275,6 +283,15 @@ enum IssueSearchMode {
 
 #[get("/issues/{issue_code}/search")]
 pub async fn search_issue_logs(
+    path: web::Path<String>,
+    query: web::Query<IssueLogQuery>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    crate::ingest::metrics::measure("issue_search", search_issue_logs_inner(path, query, state))
+        .await
+}
+
+async fn search_issue_logs_inner(
     path: web::Path<String>,
     query: web::Query<IssueLogQuery>,
     state: web::Data<AppState>,

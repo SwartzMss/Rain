@@ -468,6 +468,7 @@ impl<'a> SkillToolExecutor<'a> {
         file_id: Option<i64>,
         context_expansion_minutes: Option<i64>,
     ) -> Result<Value, AppError> {
+        crate::ingest::metrics::measure("skill_search", async {
         let context_expansion_minutes = context_expansion_minutes.unwrap_or(0);
         if !(0..=MAX_CONTEXT_EXPANSION_MINUTES).contains(&context_expansion_minutes) {
             return Err(AppError::BadRequest(
@@ -653,6 +654,7 @@ impl<'a> SkillToolExecutor<'a> {
         };
         self.record_output(&value)?;
         Ok(value)
+        }).await
     }
 
     pub async fn read_file_lines(

@@ -197,7 +197,7 @@ pub async fn finalize_bundle_ready_with_retry(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
 ) -> Result<(), AppError> {
-    finalize_bundle_ready(pool, bundle_id).await
+    crate::ingest::metrics::measure("bundle_publish", finalize_bundle_ready(pool, bundle_id)).await
 }
 
 async fn finalize_bundle_ready(pool: &sqlx::SqlitePool, bundle_id: &str) -> Result<(), AppError> {

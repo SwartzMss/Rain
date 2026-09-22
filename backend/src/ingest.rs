@@ -22,6 +22,7 @@ use crate::{
 mod archive;
 mod indexing;
 pub(crate) mod limits;
+pub(crate) mod metrics;
 mod quota;
 
 pub use archive::ArchiveBudget;
@@ -162,7 +163,11 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
 
     let relative_path = format!("/{bundle_hash}/{storage_name}");
     let meta = uploaded_file_meta(original_name, display_name, storage_name, preview_kind);
-    let blob_id = persist_blob(pool, blob_store.as_ref(), &disk_path).await?;
+    let blob_id = metrics::measure(
+        "cas_persist",
+        persist_blob(pool, blob_store.as_ref(), &disk_path),
+    )
+    .await?;
 
     let file_id = insert_file_record(
         pool,
@@ -177,7 +182,11 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         Some(blob_id),
     )
     .await?;
-    mark_blob_ready(pool, blob_store.as_ref(), blob_id).await?;
+    metrics::measure(
+        "cas_verify_publish",
+        mark_blob_ready(pool, blob_store.as_ref(), blob_id),
+    )
+    .await?;
 
     update_process_stage(pool, bundle_id, "EXTRACTING").await?;
     if preview_kind == PreviewKind::Text {
@@ -308,7 +317,13 @@ fn ingest_directory<'a>(
             let blob_id = if is_dir {
                 None
             } else {
-                Some(persist_blob(pool, blob_store.as_ref(), &disk_path).await?)
+                Some(
+                    metrics::measure(
+                        "cas_persist",
+                        persist_blob(pool, blob_store.as_ref(), &disk_path),
+                    )
+                    .await?,
+                )
             };
 
             prepared.push(PreparedDirectoryEntry {
@@ -327,7 +342,11 @@ fn ingest_directory<'a>(
         let record_ids =
             insert_directory_children(pool, bundle_id, Some(parent_id), &prepared).await?;
         for blob_id in prepared.iter().filter_map(|entry| entry.blob_id) {
-            mark_blob_ready(pool, blob_store.as_ref(), blob_id).await?;
+            metrics::measure(
+                "cas_verify_publish",
+                mark_blob_ready(pool, blob_store.as_ref(), blob_id),
+            )
+            .await?;
         }
         for (entry, record_id) in prepared.into_iter().zip(record_ids) {
             let PreparedDirectoryEntry {
@@ -579,6 +598,21 @@ async fn ingest_text_file(
     _size_bytes: u64,
     indexing: &IndexingConfig,
 ) -> Result<(), AppError> {
+    let mut metrics = metrics::FileIndexMetrics::new(bundle_id, file_id);
+    let result =
+        ingest_text_file_inner(pool, bundle_id, file_id, disk_path, indexing, &mut metrics).await;
+    metrics.outcome = if result.is_ok() { "success" } else { "error" };
+    result
+}
+
+async fn ingest_text_file_inner(
+    pool: &sqlx::SqlitePool,
+    bundle_id: &str,
+    file_id: i64,
+    disk_path: &Path,
+    indexing: &IndexingConfig,
+    metrics: &mut metrics::FileIndexMetrics<'_>,
+) -> Result<(), AppError> {
     let file = fs::File::open(disk_path)
         .await
         .map_err(|error| io_error_at("open log file for indexing", disk_path, error))?;
@@ -614,6 +648,8 @@ async fn ingest_text_file(
             offsets.push((line_number, line_offset as i64));
         }
         bytes_scanned = bytes_scanned.saturating_add(read as u64);
+        metrics.source_bytes = bytes_scanned;
+        metrics.source_lines += 1;
 
         let cleaned = clean_log_line(&line, truncated);
         if !cleaned.is_empty() {
@@ -636,7 +672,15 @@ async fn ingest_text_file(
                 chunk_index += 1;
                 chunk = LogChunk::new(chunk_index, INDEX_CHUNK_TARGET_BYTES);
             }
+            metrics.set_writing(true);
             commit_index_batch(pool, bundle_id, file_id, &pending_chunks, &offsets, None).await?;
+            metrics.set_writing(false);
+            metrics.indexed_bytes += pending_chunks
+                .iter()
+                .map(|chunk| chunk.byte_len() as u64)
+                .sum::<u64>();
+            metrics.committed_chunks += pending_chunks.len() as u64;
+            metrics.committed_batches += 1;
             pending_chunks.clear();
             offsets.clear();
             budget.reset();
@@ -647,6 +691,7 @@ async fn ingest_text_file(
         budget.record_chunk(chunk.byte_len());
         pending_chunks.push(chunk);
     }
+    metrics.set_writing(true);
     commit_index_batch(
         pool,
         bundle_id,
@@ -656,6 +701,13 @@ async fn ingest_text_file(
         Some(line_number),
     )
     .await?;
+    metrics.set_writing(false);
+    metrics.indexed_bytes += pending_chunks
+        .iter()
+        .map(|chunk| chunk.byte_len() as u64)
+        .sum::<u64>();
+    metrics.committed_chunks += pending_chunks.len() as u64;
+    metrics.committed_batches += 1;
     Ok(())
 }
 

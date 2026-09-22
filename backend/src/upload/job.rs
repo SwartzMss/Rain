@@ -68,6 +68,8 @@ pub fn spawn_temp_cleanup_worker(queue: TempCleanupQueue) -> tokio::task::JoinHa
 }
 
 pub struct UploadJob {
+    /// Captured immediately after multipart receipt, before DB reservation finalization.
+    pub received_at: Instant,
     pub pool: sqlx::SqlitePool,
     pub data_root: PathBuf,
     pub blob_store: Arc<dyn BlobStore>,
@@ -87,8 +89,9 @@ pub struct UploadJob {
 }
 
 pub fn spawn_upload_job(job: UploadJob) {
+    // Start before scheduling so enqueue-to-READY includes executor delay.
+    let queued_at = Instant::now();
     tokio::spawn(async move {
-        let queued_at = Instant::now();
         let file_count = job.files.len();
         let received_bytes = job
             .files
@@ -236,6 +239,12 @@ async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {
     }
 
     finalize_bundle_ready_with_retry(&job.pool, &job.bundle_id).await?;
+    info!(
+        metric = "upload_to_ready",
+        bundle_id = %job.bundle_id,
+        elapsed_us = crate::ingest::metrics::micros(job.received_at.elapsed()),
+        "received upload became READY"
+    );
     let _ = fs::remove_dir_all(job.staging_root.join(&job.bundle_hash)).await;
     Ok(())
 }
