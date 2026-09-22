@@ -330,6 +330,40 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(body["issue_inactive_days"], 15);
     assert_eq!(body["allow_registration"], true);
     assert_eq!(body["login_ip_limit_per_minute"], 7);
+    assert_eq!(body["cleanup_exempt_usernames"], serde_json::json!([]));
+    let whitelist_update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"cleanup_exempt_usernames": [" Ordinary ", "ORDINARY"]}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(whitelist_update.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(whitelist_update).await;
+    assert_eq!(
+        body["cleanup_exempt_usernames"],
+        serde_json::json!(["ordinary"])
+    );
+    let persisted: String =
+        sqlx::query_scalar("SELECT cleanup_exempt_usernames_json FROM system_settings WHERE id=1")
+            .fetch_one(&pool)
+            .await
+            .expect("cleanup whitelist persistence");
+    assert_eq!(persisted, "[\"ordinary\"]");
+    let whitelist_clear = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({"cleanup_exempt_usernames": []}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(whitelist_clear.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(whitelist_clear).await;
+    assert_eq!(body["cleanup_exempt_usernames"], serde_json::json!([]));
     let owner_detail = test::call_service(
         &app,
         test::TestRequest::get()

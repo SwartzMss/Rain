@@ -13,7 +13,8 @@ use backend::{
     config::AppConfig,
     db::{
         capture_recovery_cutoff, fail_stale_processing_bundles_before, init_pool,
-        load_or_initialize_system_settings, prepare_schema, resume_deleting_bundles,
+        load_or_initialize_cleanup_exempt_users, load_or_initialize_system_settings,
+        prepare_schema, resume_deleting_bundles,
     },
     routes::register,
 };
@@ -90,6 +91,16 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("failed to initialize auth rate limits");
     let registration_allowed = registration_value != 0;
+    let cleanup_policy =
+        load_or_initialize_cleanup_exempt_users(&pool, &config.issue_cleanup_policy)
+            .await
+            .expect("failed to initialize Issue cleanup exemptions");
+    if !config.issue_cleanup_policy.is_empty() {
+        info!(
+            exempt_user_count = config.issue_cleanup_policy.len(),
+            "RAIN_CLEANUP_EXEMPT_USERS is only used for first-start migration; database settings are authoritative"
+        );
+    }
     log_sqlite_file_sizes(&config.database_url).await;
 
     if config.reset_db {
@@ -160,8 +171,8 @@ async fn main() -> std::io::Result<()> {
         config.ai_provider.clone(),
         blob_store,
     );
-    app_state.issue_cleanup_policy = Arc::new(config.issue_cleanup_policy.clone());
-    for username in config.issue_cleanup_policy.usernames() {
+    app_state.issue_cleanup_policy = Arc::new(cleanup_policy.clone());
+    for username in cleanup_policy.usernames() {
         match sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM users WHERE username_normalized = ?)",
         )
@@ -180,7 +191,7 @@ async fn main() -> std::io::Result<()> {
     match sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM issues LEFT JOIN users cleanup_owner ON cleanup_owner.id = issues.owner_user_id WHERE issues.status='DELETING' AND issues.deletion_reason='INACTIVE' AND EXISTS (SELECT 1 FROM json_each(?) exempt WHERE exempt.value = cleanup_owner.username_normalized)",
     )
-    .bind(config.issue_cleanup_policy.exempt_usernames_json())
+    .bind(cleanup_policy.exempt_usernames_json())
     .fetch_one(&app_state.db.pool)
     .await
     {
@@ -192,7 +203,7 @@ async fn main() -> std::io::Result<()> {
         Err(error) => warn!(%error, "could not inspect pending inactive Issue deletions"),
     }
     info!(
-        exempt_user_count = config.issue_cleanup_policy.len(),
+        exempt_user_count = cleanup_policy.len(),
         "configured Issue cleanup exemptions"
     );
     app_state.recovery = recovery_runtime.clone();
