@@ -39,7 +39,7 @@ pub struct RevokedSessions {
     pub revoked_sessions: u64,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize)]
 pub struct RegistrationSettings {
     pub allow_registration: i64,
     pub updated_at: String,
@@ -47,6 +47,7 @@ pub struct RegistrationSettings {
     pub login_ip_limit_per_minute: i64,
     pub login_username_failure_limit_per_5_minutes: i64,
     pub issue_inactive_days: i64,
+    pub cleanup_exempt_usernames: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +56,8 @@ pub struct UpdateRegistrationSettings {
     pub login_ip_limit_per_minute: Option<usize>,
     pub login_username_failure_limit_per_5_minutes: Option<usize>,
     pub issue_inactive_days: Option<serde_json::Value>,
+    /// Outer `None` means omitted; inner `None` means an explicit JSON null.
+    pub cleanup_exempt_usernames: Option<Option<Vec<String>>>,
 }
 
 #[derive(Debug, Serialize)]

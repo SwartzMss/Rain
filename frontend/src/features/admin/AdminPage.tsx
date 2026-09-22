@@ -333,12 +333,14 @@ export function AdminSettingsPage() {
   const [ipLimit, setIpLimit] = useState(20);
   const [usernameLimit, setUsernameLimit] = useState(10);
   const [issueInactiveDays, setIssueInactiveDays] = useState<number | "">(0);
+  const [cleanupExemptUsernames, setCleanupExemptUsernames] = useState<string[]>([]);
+  const [cleanupInput, setCleanupInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [hasLoadedSettings, setHasLoadedSettings] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [feedbackSection, setFeedbackSection] = useState<
-    "registration" | "rate-limits" | "issue-expiry" | null
+    "registration" | "rate-limits" | "issue-expiry" | "cleanup-exempt-users" | null
   >(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -351,6 +353,7 @@ export function AdminSettingsPage() {
       setIpLimit(value.login_ip_limit_per_minute);
       setUsernameLimit(value.login_username_failure_limit_per_5_minutes);
       setIssueInactiveDays(value.issue_inactive_days);
+      setCleanupExemptUsernames(value.cleanup_exempt_usernames ?? []);
       setHasLoadedSettings(true);
     } catch (e) {
       setHasLoadedSettings(false);
@@ -407,6 +410,37 @@ export function AdminSettingsPage() {
       );
       setIssueInactiveDays(result.issue_inactive_days);
       setMessage("Issue 过期配置已保存");
+    } catch (e) {
+      setSaveError(normalizeApiError(e));
+      await load();
+    } finally {
+      setSaving(false);
+    }
+  };
+  const addCleanupUser = () => {
+    const username = cleanupInput.trim().toLowerCase();
+    if (!username || cleanupExemptUsernames.some((item) => item.toLowerCase() === username)) {
+      setCleanupInput("");
+      return;
+    }
+    setCleanupExemptUsernames((current) => [...current, username]);
+    setCleanupInput("");
+  };
+  const saveCleanupUsers = async () => {
+    setFeedbackSection("cleanup-exempt-users");
+    setSaving(true);
+    setMessage(null);
+    setSaveError(null);
+    try {
+      const result = await rainApi.updateAdminSettings(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        cleanupExemptUsernames,
+      );
+      setCleanupExemptUsernames(result.cleanup_exempt_usernames ?? []);
+      setMessage("自动清理白名单已保存");
     } catch (e) {
       setSaveError(normalizeApiError(e));
       await load();
@@ -626,6 +660,58 @@ export function AdminSettingsPage() {
             配置将在下一次后台扫描任务执行时生效，扫描任务通常每隔一段时间自动运行。部署配置中的豁免用户不会参与自动清理。
           </p>
           {sectionFeedback("issue-expiry")}
+        </SettingsSection>
+
+        <SettingsSection
+          icon="users"
+          title="自动清理白名单"
+          description="白名单用户拥有的 Issue 不会被后台非活跃自动清理；修改保存后立即对后续清理批次生效。"
+        >
+          <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-end">
+            <div className="min-w-0 flex-1">
+              <label className="text-sm font-medium text-slate-700" htmlFor="cleanup-exempt-user">
+                添加用户名
+              </label>
+              <input
+                id="cleanup-exempt-user"
+                value={cleanupInput}
+                disabled={controlsDisabled}
+                onChange={(event) => setCleanupInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addCleanupUser();
+                  }
+                }}
+                placeholder="输入用户名后按 Enter"
+                className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:bg-slate-50"
+              />
+            </div>
+            <button type="button" disabled={controlsDisabled || !cleanupInput.trim()} onClick={addCleanupUser} className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-cyan-300 hover:text-cyan-700 disabled:cursor-not-allowed disabled:opacity-50">
+              添加
+            </button>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2" aria-label="自动清理白名单">
+            {cleanupExemptUsernames.length === 0 ? (
+              <p className="text-sm text-slate-500">当前没有白名单用户。</p>
+            ) : cleanupExemptUsernames.map((username) => (
+              <span key={username} className="inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-sm text-cyan-800">
+                {username}
+                <button type="button" disabled={controlsDisabled} onClick={() => setCleanupExemptUsernames((current) => current.filter((item) => item !== username))} className="text-cyan-600 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50" aria-label={`移除 ${username}`}>
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+          <div className="mt-4 flex flex-wrap justify-end gap-2">
+            <button type="button" disabled={controlsDisabled || cleanupExemptUsernames.length === 0} onClick={() => setCleanupExemptUsernames([])} className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-rose-300 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-50">
+              清空
+            </button>
+            <button type="button" disabled={controlsDisabled} onClick={() => void saveCleanupUsers()} className={primaryButtonClass}>
+              保存白名单
+            </button>
+          </div>
+          {sectionFeedback("cleanup-exempt-users")}
         </SettingsSection>
       </div>
     </AdminGuard>

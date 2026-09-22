@@ -15,6 +15,8 @@ impl Default for IssueCleanupPolicy {
 }
 
 impl IssueCleanupPolicy {
+    pub const MAX_EXEMPT_USERNAMES: usize = 200;
+
     pub fn from_csv(value: Option<&str>) -> (Self, Vec<String>) {
         let mut usernames = HashSet::new();
         let mut ignored = Vec::new();
@@ -27,9 +29,42 @@ impl IssueCleanupPolicy {
                 ignored.push(username.to_owned());
                 continue;
             }
-            usernames.insert(normalize_username(username));
+            if usernames.len() < Self::MAX_EXEMPT_USERNAMES {
+                usernames.insert(normalize_username(username));
+            } else {
+                ignored.push(username.to_owned());
+            }
         }
         (Self::from_normalized_usernames(usernames), ignored)
+    }
+
+    pub fn from_usernames<I, S>(usernames: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut normalized = HashSet::new();
+        for raw in usernames {
+            let username = raw.as_ref().trim();
+            if username.is_empty() {
+                continue;
+            }
+            validate_username(username).map_err(|_| username.to_owned())?;
+            normalized.insert(normalize_username(username));
+            if normalized.len() > Self::MAX_EXEMPT_USERNAMES {
+                return Err(format!(
+                    "最多配置 {} 个自动清理白名单用户",
+                    Self::MAX_EXEMPT_USERNAMES
+                ));
+            }
+        }
+        Ok(Self::from_normalized_usernames(normalized))
+    }
+
+    pub fn from_json(value: &str) -> Result<Self, String> {
+        let usernames: Vec<String> =
+            serde_json::from_str(value).map_err(|_| "自动清理白名单数据格式无效".to_owned())?;
+        Self::from_usernames(usernames)
     }
 
     fn from_normalized_usernames(usernames: HashSet<String>) -> Self {
@@ -53,6 +88,12 @@ impl IssueCleanupPolicy {
 
     pub fn usernames(&self) -> impl Iterator<Item = &str> {
         self.exempt_usernames.iter().map(String::as_str)
+    }
+
+    pub fn usernames_sorted(&self) -> Vec<String> {
+        let mut usernames = self.exempt_usernames.iter().cloned().collect::<Vec<_>>();
+        usernames.sort_unstable();
+        usernames
     }
 
     pub fn len(&self) -> usize {
