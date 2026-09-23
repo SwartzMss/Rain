@@ -2,14 +2,12 @@
 
 use std::path::PathBuf;
 
-use std::sync::Arc;
-use tokio::sync::Semaphore;
-
 use backend::{
     db,
     search::{
         ContentSearchRequest, ContentSearchScope, IndexBatch, IndexChunk, IngestIndex,
         publication::{SearchBackendKind, artifact_relative_path, claim_publication},
+        resource::SearchResourceBudget,
         search_tantivy_bundle,
         tantivy::publication::BundleBuildSession,
     },
@@ -50,8 +48,7 @@ async fn publishes_reopens_and_searches_a_bundle_index() {
         &root.join(".tmp"),
         "bundle-pub",
         generation,
-        Arc::new(Semaphore::new(1)),
-        16 * 1024 * 1024,
+        SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap(),
     )
     .await
     .unwrap();
@@ -149,8 +146,7 @@ async fn streaming_build_keeps_chunk_body_out_of_sqlite() {
         &root.join(".tmp"),
         "bundle-stream",
         generation,
-        Arc::new(Semaphore::new(1)),
-        16 * 1024 * 1024,
+        SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap(),
     )
     .await
     .unwrap();
@@ -198,6 +194,61 @@ async fn streaming_build_keeps_chunk_body_out_of_sqlite() {
     .unwrap();
     assert_eq!(result.total, 1);
     assert_eq!(result.rows[0].content, "streamed MARKER body");
+
+    pool.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn aborted_build_releases_resource_budget_for_the_next_bundle() {
+    let root = fixture_root();
+    std::fs::create_dir_all(&root).unwrap();
+    let pool = db::init_pool(&format!("sqlite://{}", root.join("rain.db").display())).unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    sqlx::query("INSERT INTO issues(code,name) VALUES('ABORT','Abort')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-abort-a','ABORT','hash-abort-a','fixture','PROCESSING'),('bundle-abort-b','ABORT','hash-abort-b','fixture','PROCESSING')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
+    let first_generation = claim_publication(&pool, "bundle-abort-a", SearchBackendKind::Tantivy)
+        .await
+        .unwrap();
+    let first = BundleBuildSession::start(
+        &pool,
+        &root,
+        &root.join(".tmp"),
+        "bundle-abort-a",
+        first_generation,
+        budget.clone(),
+    )
+    .await
+    .unwrap();
+    first.abort().await;
+    drop(first);
+
+    let second_generation = claim_publication(&pool, "bundle-abort-b", SearchBackendKind::Tantivy)
+        .await
+        .unwrap();
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        BundleBuildSession::start(
+            &pool,
+            &root,
+            &root.join(".tmp"),
+            "bundle-abort-b",
+            second_generation,
+            budget,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    second.abort().await;
+    drop(second);
 
     pool.close().await;
     std::fs::remove_dir_all(root).unwrap();

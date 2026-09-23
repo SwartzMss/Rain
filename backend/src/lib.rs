@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AiProviderEnv, AppLimits, AuthConfig};
 use crate::error::AppError;
+use crate::search::resource::SearchResourceBudget;
 use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 
 #[derive(Debug, Clone)]
@@ -109,16 +110,14 @@ pub struct UploadRuntime {
 }
 
 pub struct SearchRuntime {
-    pub tantivy_writer_permits: Arc<Semaphore>,
-    pub tantivy_writer_heap_size_bytes: usize,
+    pub tantivy_budget: SearchResourceBudget,
 }
 
 impl SearchRuntime {
     pub fn new(max_writers: usize, writer_heap_size_bytes: u64) -> Self {
         Self {
-            tantivy_writer_permits: Arc::new(Semaphore::new(max_writers)),
-            tantivy_writer_heap_size_bytes: usize::try_from(writer_heap_size_bytes)
-                .unwrap_or(usize::MAX),
+            tantivy_budget: SearchResourceBudget::new(max_writers, writer_heap_size_bytes)
+                .expect("validated Tantivy resource budget"),
         }
     }
 }
@@ -626,8 +625,11 @@ mod tests {
 
         let state = AppState::new(pool, PathBuf::from("data"), limits);
 
-        assert_eq!(state.search.tantivy_writer_permits.available_permits(), 2);
-        assert_eq!(state.search.tantivy_writer_heap_size_bytes, 8 * 1024 * 1024);
+        assert_eq!(state.search.tantivy_budget.available_writers(), 2);
+        assert_eq!(
+            state.search.tantivy_budget.writer_heap_size_bytes(),
+            8 * 1024 * 1024
+        );
     }
 
     #[tokio::test]

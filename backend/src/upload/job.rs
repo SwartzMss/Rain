@@ -91,8 +91,7 @@ pub struct UploadJob {
     pub receive_reservation: ReceiveReservation,
     pub temp_cleanup_queue: TempCleanupQueue,
     pub search_backend: SearchBackendKind,
-    pub search_writer_permits: Arc<Semaphore>,
-    pub search_writer_heap_size_bytes: usize,
+    pub search_resource_budget: crate::search::resource::SearchResourceBudget,
 }
 
 pub fn spawn_upload_job(job: UploadJob) {
@@ -361,8 +360,7 @@ async fn start_search_build(
             &_job.temp_dir,
             &_job.bundle_id,
             generation,
-            _job.search_writer_permits.clone(),
-            _job.search_writer_heap_size_bytes,
+            _job.search_resource_budget.clone(),
         )
         .await
         .map(Some);

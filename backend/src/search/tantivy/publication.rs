@@ -2,21 +2,22 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
-use tokio::{
-    fs,
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
-};
+use tokio::{fs, sync::Mutex};
 
 use crate::{
     error::AppError,
     search::publication::{SearchBackendKind, artifact_relative_path, mark_publication_ready},
-    search::{IndexBatch, IndexChunk, IngestIndex},
+    search::{
+        IndexBatch, IndexChunk, IngestIndex,
+        resource::{SearchResourceBudget, SearchResourcePermit},
+    },
 };
 
 use super::{
@@ -38,7 +39,11 @@ pub struct BundleBuildSession {
     pending_metadata: Mutex<Vec<IndexBatch>>,
     expected_documents: AtomicU64,
     published: std::sync::atomic::AtomicBool,
-    _writer_permit: OwnedSemaphorePermit,
+    metric_emitted: AtomicBool,
+    budget: SearchResourceBudget,
+    admission_wait: Duration,
+    build_started: Instant,
+    _resource_permit: SearchResourcePermit,
 }
 
 impl BundleBuildSession {
@@ -48,8 +53,7 @@ impl BundleBuildSession {
         temp_dir: &Path,
         bundle_id: &str,
         generation: i64,
-        writer_permits: Arc<Semaphore>,
-        writer_heap_size_bytes: usize,
+        budget: SearchResourceBudget,
     ) -> Result<Arc<Self>, AppError> {
         let relative = artifact_relative_path(bundle_id, generation)?;
         let staging = temp_dir
@@ -65,14 +69,12 @@ impl BundleBuildSession {
                 .await
                 .map_err(AppError::Io)?;
         }
-        let writer_permit = writer_permits
-            .acquire_owned()
-            .await
-            .map_err(|_| AppError::Conflict("Tantivy writer admission is shutting down".into()))?;
+        let resource_permit = budget.acquire().await?;
+        let admission_wait = resource_permit.queue_wait();
         let pipeline = BoundedBundlePipeline::start(
             staging.clone(),
             PipelineConfig {
-                writer_heap_size_bytes,
+                writer_heap_size_bytes: budget.writer_heap_size_bytes(),
                 ..PipelineConfig::default()
             },
         )?;
@@ -86,11 +88,21 @@ impl BundleBuildSession {
             pending_metadata: Mutex::new(Vec::new()),
             expected_documents: AtomicU64::new(0),
             published: std::sync::atomic::AtomicBool::new(false),
-            _writer_permit: writer_permit,
+            metric_emitted: AtomicBool::new(false),
+            budget,
+            admission_wait,
+            build_started: Instant::now(),
+            _resource_permit: resource_permit,
         }))
     }
 
     pub async fn finish(&self) -> Result<(), AppError> {
+        let result = self.finish_inner().await;
+        self.emit_metric(if result.is_ok() { "success" } else { "error" });
+        result
+    }
+
+    async fn finish_inner(&self) -> Result<(), AppError> {
         let pipeline =
             self.pipeline.lock().await.take().ok_or_else(|| {
                 AppError::Conflict("Tantivy build session is already closed".into())
@@ -160,6 +172,26 @@ impl BundleBuildSession {
         Ok(())
     }
 
+    fn emit_metric(&self, outcome: &'static str) {
+        if self
+            .metric_emitted
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            tracing::info!(
+                metric = "tantivy_index_build",
+                bundle_id = %self.bundle_id,
+                outcome,
+                admission_wait_ms = self.admission_wait.as_millis() as u64,
+                build_elapsed_ms = self.build_started.elapsed().as_millis() as u64,
+                active_writers = self.budget.active_writers(),
+                queued_writers = self.budget.queued_writers(),
+                writer_heap_size_bytes = self.budget.writer_heap_size_bytes(),
+                "Tantivy Bundle index build completed"
+            );
+        }
+    }
+
     pub async fn abort(&self) {
         if self.published.load(Ordering::Acquire) {
             return;
@@ -174,6 +206,7 @@ impl BundleBuildSession {
                 }
             }
         }
+        self.emit_metric("cancelled");
     }
 }
 

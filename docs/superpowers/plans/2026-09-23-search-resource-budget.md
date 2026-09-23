@@ -16,7 +16,7 @@
 - Create: `backend/src/search/resource.rs`
 - Modify: `backend/src/search/mod.rs`
 
-- [ ] **Step 1: Write tests for permit capacity and release**
+- [x] **Step 1: Write tests for permit capacity and release**
 
 Add a `#[cfg(test)]` module in `resource.rs` with these tests:
 
@@ -57,7 +57,7 @@ async fn cancelled_waiter_does_not_leave_queue_or_active_counts() {
 
 Export the resource module from `backend/src/search/mod.rs` without enabling the Tantivy feature; the type must also be available to `AppState` in the default build.
 
-- [ ] **Step 2: Run the focused tests and confirm the expected RED state**
+- [x] **Step 2: Run the focused tests and confirm the expected RED state**
 
 Run:
 
@@ -76,7 +76,7 @@ Expected: compilation fails because `SearchResourceBudget` and its methods do no
 - Modify: `backend/src/routes/uploads.rs:195-210`
 - Modify: `backend/src/upload/job.rs:80-100, 350-370`
 
-- [ ] **Step 1: Implement the budget and owned permit**
+- [x] **Step 1: Implement the budget and owned permit**
 
 Implement:
 
@@ -98,11 +98,11 @@ pub struct SearchResourcePermit {
 
 `new` must return `Result<Self, AppError>` and reject zero values with `AppError::Config`. `acquire` must increment the queued counter before awaiting, decrement it on both success and cancellation through a drop guard, increment active count after acquisition, and return the measured queue wait. Dropping `SearchResourcePermit` decrements active count and releases the owned semaphore permit. Expose `writer_heap_size_bytes`, `queue_wait`, `active_writers`, `queued_writers`, and `available_writers` for callers and tests.
 
-- [ ] **Step 2: Replace split runtime fields with the budget**
+- [x] **Step 2: Replace split runtime fields with the budget**
 
 Change `SearchRuntime` to hold `tantivy_budget: SearchResourceBudget`. Construct it from the existing `SearchConfig` values in `SearchRuntime::new`. Update `AppState` construction, the runtime admission test, upload route job construction, and `UploadJob` to carry a cloned `SearchResourceBudget`. Preserve the existing environment variable names and default values.
 
-- [ ] **Step 3: Run the focused resource and state tests**
+- [x] **Step 3: Run the focused resource and state tests**
 
 Run:
 
@@ -119,11 +119,11 @@ Expected: all focused tests pass, including the cancellation count assertions.
 - Modify: `backend/src/search/tantivy/publication.rs:1-180`
 - Modify: `backend/src/upload/job.rs:340-370`
 
-- [ ] **Step 1: Update BundleBuildSession to acquire the budget**
+- [x] **Step 1: Update BundleBuildSession to acquire the budget**
 
 Change `BundleBuildSession::start` to accept `SearchResourceBudget`, acquire a `SearchResourcePermit` before starting `BoundedBundlePipeline`, and store the permit on the session. Pass `budget.writer_heap_size_bytes()` to `PipelineConfig`. Keep the permit alive through publication verification and `mark_publication_ready` so no second writer can start while the first is still publishing.
 
-- [ ] **Step 2: Add admission and build tracing**
+- [x] **Step 2: Add admission and build tracing**
 
 Record `queue_wait_ms` from the permit and `build_started = Instant::now()` in the session. Wrap `finish` so success and every error outcome emit one event:
 
@@ -142,11 +142,11 @@ tracing::info!(
 
 Use an inner `finish_inner` helper so errors do not skip the metric. `abort` must keep the current artifact cleanup behavior and allow the session drop to release the permit.
 
-- [ ] **Step 3: Update publication tests and add release coverage**
+- [x] **Step 3: Update publication tests and add release coverage**
 
 Update `backend/tests/search_publication.rs` and any in-module callers to pass a `SearchResourceBudget`. Add a test that starts a build with one permit, drops/aborts it, then starts a second build within one second; this proves an aborted build cannot permanently hold admission.
 
-- [ ] **Step 4: Run Tantivy publication tests**
+- [x] **Step 4: Run Tantivy publication tests**
 
 Run:
 
@@ -164,15 +164,15 @@ Expected: publication, artifact cleanup, pipeline, and search tests pass.
 - Modify: `docs/performance/large-log-baseline.md`
 - Modify: `docs/performance/tantivy-prototype.md`
 
-- [ ] **Step 1: Capture Tantivy build metrics in the benchmark subscriber**
+- [x] **Step 1: Capture Tantivy build metrics in the benchmark subscriber**
 
 Include `tantivy_index_build` in the accepted metrics and aggregate `admission_wait_ms`, `build_elapsed_ms`, `active_writers`, and `writer_heap_size_bytes`. Keep the existing 1/2/4 `RAIN_BENCH_CONCURRENCY` matrix and include the selected writer budget in the emitted JSON `config` object.
 
-- [ ] **Step 2: Document the benchmark commands and interpretation**
+- [x] **Step 2: Document the benchmark commands and interpretation**
 
 Document commands for `RAIN_BENCH_CONCURRENCY=1`, `2`, and `4` with `RAIN_SEARCH_BACKEND=tantivy`, and explain that higher concurrency is useful only when throughput rises without unbounded RSS or p95 query latency. Do not record unmeasured numbers as results.
 
-- [ ] **Step 3: Run the benchmark compile/test path**
+- [x] **Step 3: Run the benchmark compile/test path**
 
 Run:
 
@@ -187,7 +187,7 @@ Expected: the ignored benchmark compiles with the new metrics and budget API.
 **Files:**
 - Modify: `docs/superpowers/plans/2026-09-23-search-resource-budget.md` (check off completed steps)
 
-- [ ] **Step 1: Run formatting, checks, and tests**
+- [x] **Step 1: Run formatting, checks, and tests**
 
 Run:
 
@@ -202,7 +202,7 @@ cargo test --manifest-path backend/Cargo.toml --locked --features tantivy-search
 cargo test --manifest-path backend/Cargo.toml --locked --test smoke
 ```
 
-- [ ] **Step 2: Review the diff and commit**
+- [x] **Step 2: Review the diff and commit**
 
 Run `git diff --check`, verify only the planned files changed, then commit with:
 

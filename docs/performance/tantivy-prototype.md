@@ -49,11 +49,14 @@ backend. Tantivy-owned uploads therefore keep the normalized `log_segments`
 rows but avoid duplicating every chunk into SQLite FTS during ingest; legacy and
 SQLite-owned Bundles retain the original trigger path.
 
-Tantivy writers also pass through a process-wide admission semaphore. The
+Tantivy writers pass through a process-wide `SearchResourceBudget`. The
 defaults allow one writer with a 64 MiB heap; `RAIN_SEARCH_TANTIVY_MAX_WRITERS`
 and `RAIN_SEARCH_TANTIVY_WRITER_HEAP` set the aggregate writer budget for
-larger machines. Startup and the periodic cleanup task remove unpublished
-generations and artifacts for deleted Bundles.
+larger machines. The budget is held from writer creation through publication
+verification, and releases on success, failure, or cancellation. Build metrics
+report admission wait, active/queued writers, heap reservation, and total build
+time. Startup and the periodic cleanup task remove unpublished generations and
+artifacts for deleted Bundles.
 
 The current implementation is still opt-in. Skill search remains on the
 SQLite adapter, and query fan-out/reader caching are deliberately conservative;
