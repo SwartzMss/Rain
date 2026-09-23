@@ -238,7 +238,7 @@ impl Default for UploadConfig {
 
 #[derive(Debug, Clone)]
 pub struct ArchiveConfig {
-    pub max_extracted_size: u64,
+    pub max_working_size: u64,
     pub max_entry_size: u64,
     pub max_entries: usize,
     pub max_path_depth: usize,
@@ -255,8 +255,12 @@ impl Default for ArchiveConfig {
 
 impl ArchiveConfig {
     pub fn for_content_limit(content_limit: u64) -> Self {
+        Self::for_content_limit_with_working_size(content_limit, content_limit.saturating_mul(2))
+    }
+
+    pub fn for_content_limit_with_working_size(content_limit: u64, max_working_size: u64) -> Self {
         Self {
-            max_extracted_size: content_limit,
+            max_working_size,
             max_entry_size: content_limit,
             max_entries: MAX_ARCHIVE_ENTRIES,
             max_path_depth: MAX_ARCHIVE_PATH_DEPTH,
@@ -352,6 +356,7 @@ impl Default for ApiConfig {
 #[derive(Debug, Clone)]
 pub struct AppLimits {
     pub issue_max_content_size: u64,
+    pub archive_max_working_size: u64,
     pub upload: UploadConfig,
     pub indexing: IndexingConfig,
     pub search: SearchConfig,
@@ -453,6 +458,7 @@ impl Default for AppLimits {
     fn default() -> Self {
         Self {
             issue_max_content_size: 8 * GIB,
+            archive_max_working_size: 16 * GIB,
             upload: UploadConfig::default(),
             indexing: IndexingConfig::default(),
             search: SearchConfig::default(),
@@ -517,10 +523,15 @@ fn env_size(name: &str, default: u64) -> Result<u64, AppError> {
 impl AppLimits {
     fn from_env() -> Result<Self, AppError> {
         let defaults = Self::default();
+        let issue_max_content_size = env_size(
+            "RAIN_ISSUE_MAX_CONTENT_SIZE",
+            defaults.issue_max_content_size,
+        )?;
         let limits = Self {
-            issue_max_content_size: env_size(
-                "RAIN_ISSUE_MAX_CONTENT_SIZE",
-                defaults.issue_max_content_size,
+            issue_max_content_size,
+            archive_max_working_size: env_size(
+                "RAIN_ARCHIVE_MAX_WORKING_SIZE",
+                issue_max_content_size.saturating_mul(2),
             )?,
             upload: UploadConfig {
                 concurrent_processing_tasks: env_value(
@@ -637,6 +648,10 @@ impl AppLimits {
             };
         }
         positive!(self.issue_max_content_size, "RAIN_ISSUE_MAX_CONTENT_SIZE");
+        positive!(
+            self.archive_max_working_size,
+            "RAIN_ARCHIVE_MAX_WORKING_SIZE"
+        );
         positive!(
             self.upload.concurrent_processing_tasks,
             "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS"
@@ -1009,6 +1024,7 @@ mod tests {
     fn defaults_expose_only_meaningful_workflow_limits() {
         let limits = AppLimits::default();
         assert_eq!(limits.issue_max_content_size, 8 * 1024_u64.pow(3));
+        assert_eq!(limits.archive_max_working_size, 16 * 1024_u64.pow(3));
         assert_eq!(limits.upload.concurrent_processing_tasks, 4);
         assert_eq!(limits.indexing.max_indexed_line_size, 256 * 1024);
         assert_eq!(limits.api.file_preview_size, 64 * 1024);
@@ -1104,12 +1120,45 @@ mod tests {
     }
 
     #[test]
-    fn archive_working_budget_uses_issue_content_limit() {
+    fn archive_working_budget_is_independent_from_issue_content_limit() {
         let limit = 4 * 1024_u64.pow(3);
         let archive = ArchiveConfig::for_content_limit(limit);
 
-        assert_eq!(archive.max_extracted_size, limit);
+        assert_eq!(archive.max_working_size, limit.saturating_mul(2));
         assert_eq!(archive.max_entry_size, limit);
+    }
+
+    #[test]
+    fn archive_working_size_defaults_from_issue_limit_and_can_be_overridden() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let issue_name = "RAIN_ISSUE_MAX_CONTENT_SIZE";
+        let working_name = "RAIN_ARCHIVE_MAX_WORKING_SIZE";
+        let previous_issue = std::env::var_os(issue_name);
+        let previous_working = std::env::var_os(working_name);
+
+        unsafe {
+            std::env::set_var(issue_name, "1 GiB");
+            std::env::remove_var(working_name);
+        }
+        let derived = AppLimits::from_env().unwrap();
+        assert_eq!(derived.issue_max_content_size, 1024_u64.pow(3));
+        assert_eq!(derived.archive_max_working_size, 2 * 1024_u64.pow(3));
+
+        unsafe {
+            std::env::set_var(working_name, "5 GiB");
+        }
+        let explicit = AppLimits::from_env().unwrap();
+        assert_eq!(explicit.archive_max_working_size, 5 * 1024_u64.pow(3));
+
+        match previous_issue {
+            Some(value) => unsafe { std::env::set_var(issue_name, value) },
+            None => unsafe { std::env::remove_var(issue_name) },
+        }
+        match previous_working {
+            Some(value) => unsafe { std::env::set_var(working_name, value) },
+            None => unsafe { std::env::remove_var(working_name) },
+        }
     }
 
     #[test]
@@ -1122,6 +1171,22 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("RAIN_API_DEFAULT_LINE_PAGE_SIZE")
+        );
+    }
+
+    #[test]
+    fn rejects_zero_archive_working_size() {
+        let limits = AppLimits {
+            archive_max_working_size: 0,
+            ..AppLimits::default()
+        };
+
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_ARCHIVE_MAX_WORKING_SIZE")
         );
     }
 

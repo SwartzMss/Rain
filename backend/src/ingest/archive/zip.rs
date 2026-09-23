@@ -2,7 +2,7 @@ use std::{collections::HashSet, path::Path};
 
 use tokio::task;
 
-use crate::error::AppError;
+use crate::{error::AppError, file_classification::is_supported_archive_name};
 
 use super::{
     ArchiveBudget, io_error_at, join_error,
@@ -55,7 +55,10 @@ pub(crate) async fn extract_zip_archive(
             }
 
             let uncompressed_size = entry.size();
-            if !entry.is_dir() && uncompressed_size > archive_budget.config.max_entry_size {
+            if !entry.is_dir()
+                && !is_supported_archive_name(entry.name())
+                && uncompressed_size > archive_budget.config.max_entry_size
+            {
                 return Err(AppError::BadRequest(format!(
                     "archive entry exceeds configured limit; max entry size {}: {}",
                     format_binary_size(archive_budget.config.max_entry_size),

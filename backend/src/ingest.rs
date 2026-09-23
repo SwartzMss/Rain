@@ -1896,7 +1896,7 @@ mod tests {
         let (source, destination) = gzip_fixture("entry-limit", b"hello");
         let config = ArchiveConfig {
             max_entry_size: 4,
-            max_extracted_size: 8,
+            max_working_size: 8,
             ..ArchiveConfig::default()
         };
 
@@ -1914,11 +1914,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gzip_reports_exhausted_bundle_budget() {
+    async fn gzip_reports_exhausted_archive_working_budget() {
         let (source, destination) = gzip_fixture("bundle-limit", b"hello");
         let config = ArchiveConfig {
             max_entry_size: 6,
-            max_extracted_size: 8,
+            max_working_size: 8,
             ..ArchiveConfig::default()
         };
         let budget = ArchiveBudget::new(config);
@@ -1928,7 +1928,31 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("max bundle size 8 B"));
+        assert!(matches!(
+            error,
+            AppError::PublicApi {
+                code: "ARCHIVE_WORKING_SIZE_EXCEEDED",
+                ..
+            }
+        ));
+        let _ = std::fs::remove_dir_all(source.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn nested_archive_working_bytes_can_exceed_single_entry_limit() {
+        let (source, destination) = gzip_fixture("nested-working-budget", b"012345678901234");
+        let config = ArchiveConfig {
+            max_entry_size: 10,
+            max_working_size: 20,
+            ..ArchiveConfig::default()
+        };
+        let budget = ArchiveBudget::new(config);
+        budget.reserve_bytes(4).unwrap();
+
+        extract_gzip_file("nested.zip.gz", &source, &destination, budget)
+            .await
+            .expect("inner archive output should fit the independent working budget");
+
         let _ = std::fs::remove_dir_all(source.parent().unwrap());
     }
 }

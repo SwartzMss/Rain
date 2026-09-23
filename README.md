@@ -147,6 +147,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | 环境变量 | 默认值 | 用途 |
 | --- | ---: | --- |
 | `RAIN_ISSUE_MAX_CONTENT_SIZE` | `8 GiB` | 每个 Issue 最终可浏览文件总量；压缩包按解压后内容计算 |
+| `RAIN_ARCHIVE_MAX_WORKING_SIZE` | `2 × RAIN_ISSUE_MAX_CONTENT_SIZE` | 单个 Bundle 递归解压过程中累计产生的工作数据上限；用于 archive bomb 防护，不计入 Issue 最终内容配额 |
 | `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` | `4` | 并发后台处理任务 |
 | `RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS` | `4` | 并发 Multipart 接收任务 |
 | `RAIN_UPLOAD_MAX_TMP_BYTES` | `32 GiB` | 所有上传任务 `.tmp` 工作区的全局字节预算，包含原始接收文件和解压后的 staging 文件 |

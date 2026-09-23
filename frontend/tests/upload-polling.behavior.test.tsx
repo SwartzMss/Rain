@@ -74,7 +74,7 @@ describe('upload and bundle polling behavior', () => {
     vi.mocked(rainApi.fetchUploadLimits).mockResolvedValue({
       max_upload_bytes: 16 * 1024 ** 3, max_content_bytes: 8 * 1024 ** 3,
       used_content_bytes: 0, remaining_content_bytes: 8 * 1024 ** 3,
-      max_archive_entries: 100000, max_compression_ratio: 1000
+      max_archive_working_bytes: 16 * 1024 ** 3, max_archive_entries: 100000, max_compression_ratio: 1000
     });
     vi.mocked(rainApi.fetchFileNode).mockResolvedValue({ children: [] });
   });
@@ -123,7 +123,7 @@ describe('upload and bundle polling behavior', () => {
   it('does not send file data when preflight detects insufficient capacity', async () => {
     vi.mocked(rainApi.fetchUploadLimits).mockResolvedValueOnce({
       max_upload_bytes: 100, max_content_bytes: 50, used_content_bytes: 49,
-      remaining_content_bytes: 1, max_archive_entries: 100, max_compression_ratio: 1000
+      remaining_content_bytes: 1, max_archive_working_bytes: 100, max_archive_entries: 100, max_compression_ratio: 1000
     });
     const { result } = renderHook(() => useUploadTask({
       currentIssueCode: 'ISSUE-1', loadBundles: vi.fn(), loadIssues: vi.fn()
@@ -146,7 +146,7 @@ describe('upload and bundle polling behavior', () => {
     act(() => result.current.resetSelection());
     await act(async () => {
       pending.resolve({ max_upload_bytes: 100, max_content_bytes: 50, used_content_bytes: 0,
-        remaining_content_bytes: 50, max_archive_entries: 100, max_compression_ratio: 1000 });
+        remaining_content_bytes: 50, max_archive_working_bytes: 100, max_archive_entries: 100, max_compression_ratio: 1000 });
       await upload;
     });
     expect(rainApi.uploadLogs).not.toHaveBeenCalled();
