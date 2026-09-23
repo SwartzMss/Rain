@@ -9,7 +9,11 @@ use crate::{
     error::AppError,
     search::{ContentSearchRequest, ContentSearchResult, ContentSearchRow, ContentSearchScope},
 };
-use tantivy::{TantivyDocument, collector::TopDocs, query::AllQuery, schema::Value};
+use tantivy::{
+    DocAddress, DocSet, TERMINATED, TantivyDocument,
+    query::{AllQuery, EnableScoring, Query},
+    schema::Value,
+};
 
 pub mod pipeline;
 pub mod publication;
@@ -19,6 +23,7 @@ pub mod tokenizer;
 pub mod writer;
 
 pub use query::{CandidateSearch, SearchHit};
+use query::{SearchOptions, SearchPage};
 pub use schema::{BundleSchema, build_schema};
 pub use writer::{BundleIndexWriter, IndexedChunk};
 
@@ -58,27 +63,24 @@ async fn search_bundle_inner(
     let query = request.query;
     tokio::task::spawn_blocking(move || {
         let committed = writer::open_committed(path)?;
-        let hits = CandidateSearch::new(committed).search(&query, usize::MAX)?;
-        let (hits, visibility_total) = match visible_file_ids.as_ref() {
-            Some(visible) => filter_visible_hits(hits, visible),
-            None => {
-                let total = hits.len() as i64;
-                (hits, total)
-            }
-        };
-        let mut rows: Vec<_> = hits
+        let page = CandidateSearch::new(committed).search_page(
+            &query,
+            SearchOptions {
+                file_id,
+                timeline: timeline.as_deref(),
+                path_like: path_like.as_deref(),
+                visible_file_ids: visible_file_ids.as_ref(),
+                from,
+                size,
+            },
+        )?;
+        let SearchPage {
+            hits,
+            total,
+            metrics,
+        } = page;
+        let rows: Vec<ContentSearchRow> = hits
             .into_iter()
-            .filter(|hit| file_id.is_none_or(|value| value == hit.file_id))
-            .filter(|hit| {
-                timeline
-                    .as_deref()
-                    .is_none_or(|value| hit.timeline.as_deref() == Some(value))
-            })
-            .filter(|hit| {
-                path_like
-                    .as_deref()
-                    .is_none_or(|value| hit.path.contains(value))
-            })
             .map(|hit| ContentSearchRow {
                 file_id: hit.file_id,
                 path: hit.path,
@@ -90,19 +92,15 @@ async fn search_bundle_inner(
                 content: hit.content,
             })
             .collect();
-        rows.sort_by_key(|row| {
-            (
-                row.offset.unwrap_or(i64::MIN),
-                row.file_id,
-                row.chunk_index.unwrap_or(i64::MIN),
-            )
-        });
-        let total = if visible_file_ids.is_some() {
-            rows.len() as i64
-        } else {
-            visibility_total
-        };
-        let rows = rows.into_iter().skip(from).take(size).collect();
+        tracing::debug!(
+            metric = "tantivy_search",
+            candidate_docs = metrics.candidate_docs,
+            stored_doc_reads = metrics.stored_doc_reads,
+            exact_hits = metrics.exact_hits,
+            retained_hits = metrics.max_retained_hits,
+            returned_hits = rows.len(),
+            "completed bounded Tantivy search"
+        );
         Ok(ContentSearchResult {
             total,
             rows,
@@ -111,18 +109,6 @@ async fn search_bundle_inner(
     })
     .await
     .map_err(|error| AppError::Config(format!("Tantivy search task failed: {error}")))?
-}
-
-pub(crate) fn filter_visible_hits(
-    hits: Vec<SearchHit>,
-    visible_file_ids: &HashSet<i64>,
-) -> (Vec<SearchHit>, i64) {
-    let filtered = hits
-        .into_iter()
-        .filter(|hit| visible_file_ids.contains(&hit.file_id))
-        .collect::<Vec<_>>();
-    let total = filtered.len() as i64;
-    (filtered, total)
 }
 
 /// Rebuild an immutable generation by copying only documents belonging to the
@@ -140,60 +126,65 @@ pub fn rebuild_visible_index(
         .reader()
         .map_err(|error| AppError::Config(format!("open Tantivy rebuild reader: {error}")))?;
     let searcher = reader.searcher();
-    let addresses = searcher
-        .search(
-            &AllQuery,
-            &TopDocs::with_limit(searcher.num_docs() as usize).order_by_score(),
-        )
-        .map_err(|error| AppError::Config(format!("scan Tantivy rebuild source: {error}")))?;
+    let weight = AllQuery
+        .weight(EnableScoring::disabled_from_searcher(&searcher))
+        .map_err(|error| AppError::Config(format!("prepare Tantivy rebuild scan: {error}")))?;
     let mut writer = BundleIndexWriter::create(destination, heap_size_bytes)?;
-    for (_, address) in addresses {
-        let document: TantivyDocument = searcher
-            .doc(address)
-            .map_err(|error| AppError::Config(format!("read Tantivy rebuild document: {error}")))?;
-        let file_id = document
-            .get_first(source.fields.file_id)
-            .and_then(|value| value.as_u64())
-            .unwrap_or_default() as i64;
-        if !visible_file_ids.contains(&file_id) {
-            continue;
-        }
-        let Some(content) = document
-            .get_first(source.fields.content)
-            .and_then(|value| value.as_str())
-        else {
-            continue;
-        };
-        let chunk = IndexedChunk {
-            file_id,
-            chunk_index: document
-                .get_first(source.fields.chunk_index)
+    for (segment_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
+        let mut scorer = weight
+            .scorer(segment_reader, 1.0)
+            .map_err(|error| AppError::Config(format!("scan Tantivy rebuild source: {error}")))?;
+        let mut doc_id = scorer.doc();
+        while doc_id != TERMINATED {
+            let address = DocAddress {
+                segment_ord: segment_ord as u32,
+                doc_id,
+            };
+            let document: TantivyDocument = searcher.doc(address).map_err(|error| {
+                AppError::Config(format!("read Tantivy rebuild document: {error}"))
+            })?;
+            let file_id = document
+                .get_first(source.fields.file_id)
                 .and_then(|value| value.as_u64())
-                .unwrap_or_default() as i64,
-            line_start: document
-                .get_first(source.fields.line_start)
-                .and_then(|value| value.as_i64()),
-            line_end: document
-                .get_first(source.fields.line_end)
-                .and_then(|value| value.as_i64()),
-            event_time_start_ms: document
-                .get_first(source.fields.event_time_start)
-                .and_then(|value| value.as_i64()),
-            event_time_end_ms: document
-                .get_first(source.fields.event_time_end)
-                .and_then(|value| value.as_i64()),
-            timeline: document
-                .get_first(source.fields.timeline)
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned),
-            content: content.to_owned(),
-            path: document
-                .get_first(source.fields.path)
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-        };
-        writer.add_chunk(&chunk)?;
+                .unwrap_or_default() as i64;
+            if visible_file_ids.contains(&file_id)
+                && let Some(content) = document
+                    .get_first(source.fields.content)
+                    .and_then(|value| value.as_str())
+            {
+                let chunk = IndexedChunk {
+                    file_id,
+                    chunk_index: document
+                        .get_first(source.fields.chunk_index)
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or_default() as i64,
+                    line_start: document
+                        .get_first(source.fields.line_start)
+                        .and_then(|value| value.as_i64()),
+                    line_end: document
+                        .get_first(source.fields.line_end)
+                        .and_then(|value| value.as_i64()),
+                    event_time_start_ms: document
+                        .get_first(source.fields.event_time_start)
+                        .and_then(|value| value.as_i64()),
+                    event_time_end_ms: document
+                        .get_first(source.fields.event_time_end)
+                        .and_then(|value| value.as_i64()),
+                    timeline: document
+                        .get_first(source.fields.timeline)
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned),
+                    content: content.to_owned(),
+                    path: document
+                        .get_first(source.fields.path)
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                };
+                writer.add_chunk(&chunk)?;
+            }
+            doc_id = scorer.advance();
+        }
     }
     Ok(writer.commit()?.document_count)
 }
@@ -202,7 +193,10 @@ pub fn rebuild_visible_index(
 mod tests {
     use std::collections::HashSet;
 
-    use super::{BundleIndexWriter, CandidateSearch, IndexedChunk, filter_visible_hits};
+    use super::{
+        BundleIndexWriter, CandidateSearch, IndexedChunk, SearchOptions, rebuild_visible_index,
+        writer,
+    };
 
     fn temp_index_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -271,31 +265,172 @@ mod tests {
     }
 
     #[test]
-    fn visibility_filter_fills_page_after_hidden_candidates() {
-        let hits = vec![
-            super::SearchHit {
-                file_id: 10,
-                chunk_index: 0,
-                line_start: Some(0),
-                line_end: Some(0),
-                timeline: None,
-                content: "marker".into(),
-                path: "/deleted.log".into(),
-            },
-            super::SearchHit {
-                file_id: 11,
-                chunk_index: 0,
-                line_start: Some(1),
-                line_end: Some(1),
-                timeline: None,
-                content: "marker".into(),
-                path: "/visible.log".into(),
-            },
-        ];
-        let visible = HashSet::from([11_i64]);
-        let (filtered, total) = filter_visible_hits(hits, &visible);
-        assert_eq!(total, 1);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].file_id, 11);
+    fn bounded_page_applies_visibility_and_preserves_total() {
+        let path = temp_index_path();
+        let mut writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();
+        for (file_id, chunk_index, line_start) in [(10, 0, 0), (11, 1, 1), (12, 2, 2)] {
+            writer
+                .add_chunk(&IndexedChunk {
+                    file_id,
+                    chunk_index,
+                    line_start: Some(line_start),
+                    line_end: Some(line_start),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    timeline: Some("all".into()),
+                    content: "marker".into(),
+                    path: "/visible.log".into(),
+                })
+                .unwrap();
+        }
+        let committed = writer.commit().unwrap();
+        let visible_file_ids = HashSet::from([11_i64, 12]);
+        let page = CandidateSearch::new(committed)
+            .search_page(
+                "marker",
+                SearchOptions {
+                    visible_file_ids: Some(&visible_file_ids),
+                    from: 1,
+                    size: 1,
+                    ..SearchOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].file_id, 12);
+        assert_eq!(page.metrics.max_retained_hits, 2);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_page_pushes_file_id_filter_into_candidate_scan() {
+        let path = temp_index_path();
+        let mut writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();
+        for (file_id, chunk_index) in [(7, 0), (7, 1), (8, 2), (9, 3)] {
+            writer
+                .add_chunk(&IndexedChunk {
+                    file_id,
+                    chunk_index,
+                    line_start: Some(chunk_index),
+                    line_end: Some(chunk_index),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    timeline: Some("all".into()),
+                    content: "marker".into(),
+                    path: "/app.log".into(),
+                })
+                .unwrap();
+        }
+        let committed = writer.commit().unwrap();
+        let page = CandidateSearch::new(committed)
+            .search_page(
+                "marker",
+                SearchOptions {
+                    file_id: Some(7),
+                    from: 0,
+                    size: 10,
+                    ..SearchOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.metrics.candidate_docs, 2);
+        assert_eq!(page.hits.len(), 2);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_page_keeps_deep_pagination_ordered() {
+        let path = temp_index_path();
+        let mut writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();
+        for line_start in 0..20 {
+            writer
+                .add_chunk(&IndexedChunk {
+                    file_id: 1,
+                    chunk_index: line_start,
+                    line_start: Some(line_start),
+                    line_end: Some(line_start),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    timeline: Some("all".into()),
+                    content: "marker".into(),
+                    path: "/app.log".into(),
+                })
+                .unwrap();
+        }
+        let committed = writer.commit().unwrap();
+        let page = CandidateSearch::new(committed)
+            .search_page(
+                "marker",
+                SearchOptions {
+                    from: 10,
+                    size: 3,
+                    ..SearchOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(page.total, 20);
+        assert_eq!(
+            page.hits
+                .iter()
+                .map(|hit| hit.chunk_index)
+                .collect::<Vec<_>>(),
+            vec![10, 11, 12]
+        );
+        assert_eq!(page.metrics.max_retained_hits, 13);
+        let count_only = CandidateSearch::new(writer::open_committed(&path).unwrap())
+            .search_page(
+                "marker",
+                SearchOptions {
+                    from: 10,
+                    size: 0,
+                    ..SearchOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(count_only.total, 20);
+        assert!(count_only.hits.is_empty());
+        assert_eq!(count_only.metrics.max_retained_hits, 0);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn visible_rebuild_copies_documents_without_materializing_addresses() {
+        let source_path = temp_index_path();
+        let destination_path = temp_index_path();
+        let mut writer = BundleIndexWriter::create(&source_path, 16 * 1024 * 1024).unwrap();
+        for file_id in [7, 8] {
+            writer
+                .add_chunk(&IndexedChunk {
+                    file_id,
+                    chunk_index: 0,
+                    line_start: Some(file_id),
+                    line_end: Some(file_id),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    timeline: Some("all".into()),
+                    content: "marker".into(),
+                    path: "/app.log".into(),
+                })
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let copied = rebuild_visible_index(
+            &source_path,
+            &destination_path,
+            &HashSet::from([7_i64]),
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(copied, 1);
+        let committed = writer::open_committed(&destination_path).unwrap();
+        let hits = CandidateSearch::new(committed)
+            .search("marker", 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_id, 7);
+        std::fs::remove_dir_all(source_path).unwrap();
+        std::fs::remove_dir_all(destination_path).unwrap();
     }
 }
