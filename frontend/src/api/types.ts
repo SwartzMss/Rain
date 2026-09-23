@@ -145,6 +145,7 @@ export interface LogSearchResponse {
   total: number;
   hits: LogSearchHit[];
   truncated: boolean;
+  max_search_window: number;
 }
 
 export interface UploadResponse {
@@ -209,6 +210,7 @@ export interface IssueLogSearchResponse {
   total: number;
   hits: IssueLogSearchHit[];
   truncated: boolean;
+  max_search_window: number;
 }
 
 export interface TempResultInfo {

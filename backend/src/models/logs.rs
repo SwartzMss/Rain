@@ -18,4 +18,5 @@ pub struct LogSearchResponse {
     pub total: u64,
     pub hits: Vec<LogSearchHit>,
     pub truncated: bool,
+    pub max_search_window: u64,
 }

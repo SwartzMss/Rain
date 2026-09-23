@@ -157,7 +157,9 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
                 <button
                   type="button"
                   className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 disabled:opacity-50"
-                  disabled={loading || (result.total <= (page + 1) * pageSize)}
+                  disabled={loading
+                    || result.total <= (page + 1) * pageSize
+                    || (page + 1) * pageSize + pageSize > result.max_search_window}
                   onClick={() => {
                     const next = page + 1;
                     setPage(next);
@@ -169,6 +171,11 @@ export function LogsView({ activeBundle, recentBundles, onBundleSelected }: Logs
               </div>
             </div>
           </div>
+          {result.total > result.max_search_window ? (
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              分页最多展示前 {result.max_search_window} 条结果，请缩小范围或增加过滤条件。
+            </p>
+          ) : null}
           {result.truncated ? <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">短关键词搜索已达到扫描上限，结果可能不完整。请使用至少 3 个字符的关键词。</p> : null}
           <ul className="space-y-3">
             {result.hits.map((hit) => (

@@ -1,3 +1,5 @@
+use std::{cmp::Ordering, collections::BinaryHeap};
+
 use actix_web::{HttpResponse, get, web};
 use serde::Deserialize;
 
@@ -7,10 +9,11 @@ use crate::{
     models::logs::{LogSearchHit, LogSearchResponse},
     search::{
         ContentSearchRequest, ContentSearchResult, ContentSearchScope, FilenameSearchRequest,
-        SearchIndex,
+        SearchIndex, SearchWindow,
         publication::{acquire_generation_lease, artifact_relative_path},
         search_tantivy_bundle_visible,
         sqlite::SqliteFtsSearchIndex,
+        validate_search_window,
         visibility::snapshot_file_ids,
     },
 };
@@ -61,6 +64,7 @@ async fn search_logs_inner(
     if search_term.is_empty() {
         return Err(AppError::BadRequest("query parameter q is required".into()));
     }
+    let window = normalize_search_window(&state.limits.api, term.from, term.size)?;
 
     let bundle = load_bundle(&state.db.pool, &bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
@@ -81,11 +85,8 @@ async fn search_logs_inner(
         }
     });
     let file_id = term.file_id;
-    let from = term.from.unwrap_or(0).max(0);
-    let size = term
-        .size
-        .unwrap_or(state.limits.api.default_search_results)
-        .clamp(1, state.limits.api.max_search_results);
+    let from = window.from as i64;
+    let size = window.size as i64;
     if search_term.chars().count() < 3 {
         return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
@@ -166,6 +167,7 @@ async fn search_logs_inner(
         total: total.max(0) as u64,
         hits,
         truncated,
+        max_search_window: state.limits.api.max_search_window as u64,
     }))
 }
 
@@ -203,12 +205,13 @@ async fn search_issue_logs_inner(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
-    ensure_issue_active(&state.db.pool, &issue_code).await?;
     let term = query.into_inner();
     let search_term = term.q.trim();
     if search_term.is_empty() {
         return Err(AppError::BadRequest("query parameter q is required".into()));
     }
+    let window = normalize_search_window(&state.limits.api, term.from, term.size)?;
+    ensure_issue_active(&state.db.pool, &issue_code).await?;
 
     if matches!(term.mode, IssueSearchMode::Filename) {
         let response = search_issue_files(
@@ -233,11 +236,8 @@ async fn search_issue_logs_inner(
             Some(trimmed)
         }
     });
-    let from = term.from.unwrap_or(0).max(0);
-    let size = term
-        .size
-        .unwrap_or(state.limits.api.default_search_results)
-        .clamp(1, state.limits.api.max_search_results);
+    let from = window.from as i64;
+    let size = window.size as i64;
     if search_term.chars().count() < 3 {
         return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
@@ -280,7 +280,66 @@ async fn search_issue_logs_inner(
         total: total.max(0) as u64,
         hits,
         truncated,
+        max_search_window: state.limits.api.max_search_window as u64,
     }))
+}
+
+#[derive(Debug)]
+struct RankedIssueRow {
+    key: (i64, String, i64, i64),
+    row: crate::search::ContentSearchRow,
+}
+
+impl PartialEq for RankedIssueRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for RankedIssueRow {}
+
+impl PartialOrd for RankedIssueRow {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedIssueRow {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+fn issue_row_key(row: &crate::search::ContentSearchRow) -> (i64, String, i64, i64) {
+    (
+        row.offset.unwrap_or(i64::MIN),
+        row.bundle_hash.clone().unwrap_or_default(),
+        row.file_id,
+        row.chunk_index.unwrap_or(i64::MIN),
+    )
+}
+
+fn retain_issue_row(
+    retained: &mut BinaryHeap<RankedIssueRow>,
+    row: crate::search::ContentSearchRow,
+    limit: usize,
+) {
+    if limit == 0 {
+        return;
+    }
+    let ranked = RankedIssueRow {
+        key: issue_row_key(&row),
+        row,
+    };
+    if retained.len() < limit {
+        retained.push(ranked);
+    } else if retained
+        .peek()
+        .is_some_and(|current| ranked.key < current.key)
+    {
+        retained.pop();
+        retained.push(ranked);
+    }
 }
 
 async fn search_issue_content_mixed(
@@ -293,9 +352,12 @@ async fn search_issue_content_mixed(
             "mixed Issue search requires an Issue scope".into(),
         ));
     };
-    let from = request.from.max(0) as usize;
-    let size = request.size.max(0) as usize;
-    let candidate_limit = from.saturating_add(size).max(1);
+    let window = validate_search_window(
+        request.from,
+        request.size,
+        crate::search::HARD_MAX_SEARCH_WINDOW as i64,
+    )?;
+    let candidate_limit = window.limit.max(1);
     let sqlite_result = SqliteFtsSearchIndex::new(pool.clone())
         .search_content(ContentSearchRequest {
             from: 0,
@@ -303,7 +365,10 @@ async fn search_issue_content_mixed(
             ..request.clone()
         })
         .await?;
-    let mut rows = sqlite_result.rows;
+    let mut retained = BinaryHeap::new();
+    for row in sqlite_result.rows {
+        retain_issue_row(&mut retained, row, window.limit);
+    }
     let mut total = sqlite_result.total;
     let bundles: Vec<IssueBundleSearchRow> = sqlx::query_as(
         "SELECT b.id, b.hash, COALESCE(si.backend, 'sqlite_fts'), COALESCE(si.state, 'LEGACY'), COALESCE(si.generation, 0), si.schema_version, si.tokenizer_version FROM bundles b LEFT JOIN bundle_search_indexes si ON si.bundle_id = b.id WHERE b.issue_code = ? AND b.status = 'READY' ORDER BY b.id",
@@ -352,26 +417,18 @@ async fn search_issue_content_mixed(
         lease.release().await?;
         let result = result?;
         total = total.saturating_add(result.total);
-        rows.extend(result.rows.into_iter().map(|mut row| {
+        for mut row in result.rows {
             row.bundle_hash = Some(bundle_hash.clone());
-            row
-        }));
+            retain_issue_row(&mut retained, row, window.limit);
+        }
     }
-    rows.sort_by(|left, right| {
-        (
-            left.offset.unwrap_or(i64::MIN),
-            left.bundle_hash.as_deref().unwrap_or_default(),
-            left.file_id,
-            left.chunk_index.unwrap_or(i64::MIN),
-        )
-            .cmp(&(
-                right.offset.unwrap_or(i64::MIN),
-                right.bundle_hash.as_deref().unwrap_or_default(),
-                right.file_id,
-                right.chunk_index.unwrap_or(i64::MIN),
-            ))
-    });
-    let rows = rows.into_iter().skip(from).take(size).collect();
+    let mut rows: Vec<_> = retained.into_iter().map(|ranked| ranked.row).collect();
+    rows.sort_by_key(issue_row_key);
+    let rows = rows
+        .into_iter()
+        .skip(window.from)
+        .take(window.size)
+        .collect();
     Ok(ContentSearchResult {
         total,
         rows,
@@ -387,10 +444,9 @@ async fn search_issue_files(
     from: Option<i64>,
     size: Option<i64>,
 ) -> Result<HttpResponse, AppError> {
-    let from = from.unwrap_or(0).max(0);
-    let size = size
-        .unwrap_or(api.default_search_results)
-        .clamp(1, api.max_search_results);
+    let window = normalize_search_window(api, from, size)?;
+    let from = window.from as i64;
+    let size = window.size as i64;
     let result = SqliteFtsSearchIndex::new(pool.clone())
         .search_filenames(FilenameSearchRequest {
             issue_code: issue_code.to_owned(),
@@ -421,7 +477,19 @@ async fn search_issue_files(
         total: total.max(0) as u64,
         hits,
         truncated: false,
+        max_search_window: api.max_search_window as u64,
     }))
+}
+
+fn normalize_search_window(
+    api: &crate::config::ApiConfig,
+    from: Option<i64>,
+    size: Option<i64>,
+) -> Result<SearchWindow, AppError> {
+    let size = size
+        .unwrap_or(api.default_search_results)
+        .clamp(1, api.max_search_results);
+    validate_search_window(from.unwrap_or(0), size, api.max_search_window)
 }
 
 fn literal_snippet(content: &str, search_term: &str) -> String {

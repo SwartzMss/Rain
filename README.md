@@ -164,6 +164,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT` | `2` | 每个客户端的并发行读取数 |
 | `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
+| `RAIN_API_MAX_SEARCH_WINDOW` | `10000` | 单次搜索允许的最大 `from + size` 窗口（不能超过 100000） |
 | `RAIN_TEMP_RESULT_MAX_SIZE` | `64 MiB` | 单个临时搜索结果的 `.log/.meta/.idx` 总大小上限 |
 | `RAIN_TEMP_RESULT_MAX_TOTAL_SIZE` | `1 GiB` | 临时结果目录的数据库登记总容量上限 |
 | `RAIN_TEMP_RESULT_MAX_RECORDS` | `1000` | 临时结果最多保留的记录数 |
@@ -387,6 +388,8 @@ Multipart 字段：
 
 - `GET /api/log/v2/{bundleId}/search?q=keyword`
 - `GET /api/issues/{issueCode}/search?q=keyword`
+
+搜索接口支持 `from`、`size` 分页，服务端限制 `from + size <= RAIN_API_MAX_SEARCH_WINDOW`；超出 offset 返回 `SEARCH_OFFSET_TOO_LARGE`，窗口溢出返回 `SEARCH_WINDOW_TOO_LARGE`（HTTP 400）。响应中的 `max_search_window` 是当前生效上限，Issue 内容搜索会在所有 Bundle 间做全局有界排序。
 
 ## 后续方向
 

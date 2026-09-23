@@ -3,6 +3,108 @@ use async_trait::async_trait;
 
 use crate::error::AppError;
 
+/// Absolute safety ceiling for any search page retained by a backend.
+///
+/// API configuration may choose a lower value, but it cannot raise this
+/// bound. Keeping the invariant here protects direct index callers as well as
+/// HTTP routes from allocating an unbounded `from + size` heap.
+pub const HARD_MAX_SEARCH_WINDOW: usize = 100_000;
+pub const DEFAULT_MAX_SEARCH_WINDOW: i64 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchWindow {
+    pub from: usize,
+    pub size: usize,
+    pub limit: usize,
+}
+
+pub fn validate_search_window(
+    from: i64,
+    size: i64,
+    max_window: i64,
+) -> Result<SearchWindow, AppError> {
+    if max_window <= 0 || usize::try_from(max_window).is_err() {
+        return Err(AppError::Config(
+            "search window limit must be a positive platform-sized integer".into(),
+        ));
+    }
+    let max_window = max_window as usize;
+    if max_window > HARD_MAX_SEARCH_WINDOW {
+        return Err(AppError::Config(format!(
+            "search window limit must not exceed {HARD_MAX_SEARCH_WINDOW}"
+        )));
+    }
+
+    let from = from.max(0) as u128;
+    let size = size.max(0) as u128;
+    if from > max_window as u128 {
+        return Err(AppError::public(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "SEARCH_OFFSET_TOO_LARGE",
+            format!("search offset exceeds the server limit of {max_window}"),
+        ));
+    }
+    if from == max_window as u128 && size > 0 {
+        return Err(AppError::public(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "SEARCH_OFFSET_TOO_LARGE",
+            format!("search offset must be smaller than the server limit of {max_window}"),
+        ));
+    }
+    let limit = if size == 0 {
+        0
+    } else {
+        from.checked_add(size).ok_or_else(|| {
+            AppError::public(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "SEARCH_WINDOW_TOO_LARGE",
+                format!("search window exceeds the server limit of {max_window}"),
+            )
+        })?
+    };
+    if limit > max_window as u128 {
+        return Err(AppError::public(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "SEARCH_WINDOW_TOO_LARGE",
+            format!("from + size must not exceed the server limit of {max_window}"),
+        ));
+    }
+    Ok(SearchWindow {
+        from: from as usize,
+        size: size as usize,
+        limit: limit as usize,
+    })
+}
+
+pub fn validate_tantivy_search_window(from: usize, size: usize) -> Result<SearchWindow, AppError> {
+    if from > HARD_MAX_SEARCH_WINDOW {
+        return Err(AppError::public(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "SEARCH_OFFSET_TOO_LARGE",
+            format!("search offset exceeds the server limit of {HARD_MAX_SEARCH_WINDOW}"),
+        ));
+    }
+    let limit = if size == 0 {
+        0
+    } else {
+        from.checked_add(size).ok_or_else(|| {
+            AppError::public(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "SEARCH_WINDOW_TOO_LARGE",
+                format!("search window exceeds the server limit of {HARD_MAX_SEARCH_WINDOW}"),
+            )
+        })?
+    };
+    if limit > HARD_MAX_SEARCH_WINDOW {
+        return Err(AppError::public(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "SEARCH_WINDOW_TOO_LARGE",
+            format!("from + size must not exceed the server limit of {HARD_MAX_SEARCH_WINDOW}"),
+        ));
+    }
+    Ok(SearchWindow { from, size, limit })
+}
+
 pub mod publication;
 #[cfg(feature = "tantivy-search")]
 pub mod rebuild;
@@ -175,6 +277,53 @@ pub async fn search_tantivy_bundle(
         Err(AppError::Config(
             "Tantivy backend requires the tantivy-search feature".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_MAX_SEARCH_WINDOW, validate_search_window};
+    use crate::error::AppError;
+
+    fn error_code(error: AppError) -> &'static str {
+        match error {
+            AppError::PublicApi { code, .. } => code,
+            other => panic!("expected public search-window error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_window_accepts_normal_and_boundary_pages() {
+        assert_eq!(
+            validate_search_window(100, 20, DEFAULT_MAX_SEARCH_WINDOW).unwrap(),
+            super::SearchWindow {
+                from: 100,
+                size: 20,
+                limit: 120,
+            }
+        );
+        assert_eq!(
+            validate_search_window(9_999, 1, DEFAULT_MAX_SEARCH_WINDOW)
+                .unwrap()
+                .limit,
+            10_000
+        );
+    }
+
+    #[test]
+    fn search_window_rejects_offset_and_overflow() {
+        assert_eq!(
+            error_code(validate_search_window(10_000, 1, DEFAULT_MAX_SEARCH_WINDOW).unwrap_err()),
+            "SEARCH_OFFSET_TOO_LARGE"
+        );
+        assert_eq!(
+            error_code(validate_search_window(9_999, 2, DEFAULT_MAX_SEARCH_WINDOW).unwrap_err()),
+            "SEARCH_WINDOW_TOO_LARGE"
+        );
+        assert_eq!(
+            error_code(validate_search_window(i64::MAX, 1, DEFAULT_MAX_SEARCH_WINDOW).unwrap_err()),
+            "SEARCH_OFFSET_TOO_LARGE"
+        );
     }
 }
 
