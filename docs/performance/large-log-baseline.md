@@ -138,7 +138,9 @@ report and is not used for conclusions.
 The same release workload was rerun with a real `RAIN_SEARCH_BACKEND=tantivy`
 build after the ingest path was connected to the bounded Bundle build session.
 This is one host and one run per backend, so it demonstrates the shape of the
-change rather than a general performance guarantee.
+change rather than a general performance guarantee. Tantivy is now the v0.1
+default; the remaining matrix is for release characterization and concurrency
+tuning, not for deciding whether to switch the default.
 
 | Backend | ingest → READY | indexed write wait | raw throughput | sampled peak RSS | SQLite / WAL during ingest |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -150,7 +152,8 @@ rare sentinel, UUID, and Chinese text); observed query latencies were roughly
 4–73 ms. The improvement comes from removing duplicate SQLite FTS body writes
 and overlapping parsing with the bounded writer. The Tantivy writer heap is
 bounded, but total process RSS still includes parser, SQLite, and test-process
-overhead. Repeat the 1/2/4 Bundle and 1/5 GiB matrix before changing the
-default backend. Compare `admission_wait_ms` with `build_elapsed_ms`: a higher
+overhead. Repeat the 1/2/4 Bundle and 1/5 GiB matrix before declaring a
+production performance baseline. Compare `admission_wait_ms` with
+`build_elapsed_ms`: a higher
 concurrency setting is useful only when it raises throughput without making
 admission wait, RSS, or search p95 grow disproportionately.

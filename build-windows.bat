@@ -3,7 +3,7 @@ setlocal
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
-if "%RAIN_RELEASE_VERSION%"=="" set "RAIN_RELEASE_VERSION=v0.0.1"
+if "%RAIN_RELEASE_VERSION%"=="" set "RAIN_RELEASE_VERSION=v0.1.0"
 set "VITE_APP_VERSION=%RAIN_RELEASE_VERSION%"
 
 echo ==^> Building embedded frontend...
