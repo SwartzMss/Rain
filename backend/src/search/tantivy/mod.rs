@@ -1,9 +1,7 @@
-//! Experimental per-Bundle Tantivy backend.
+//! Per-Bundle Tantivy backend used by the v0.1.x default build.
 //!
-//! This module is deliberately opt-in behind `tantivy-search`. It is a
-//! candidate index: every hit is verified against the stored cleaned chunk
-//! before it is returned, so n-gram false positives cannot change search
-//! semantics.
+//! Every hit is verified against the stored cleaned chunk before it is
+//! returned, so n-gram false positives cannot change search semantics.
 
 use std::path::PathBuf;
 

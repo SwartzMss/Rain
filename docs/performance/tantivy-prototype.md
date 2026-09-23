@@ -1,7 +1,9 @@
-# Tantivy bundle-index prototype
+# Tantivy bundle-index v0.1
 
-The `tantivy-search` feature adds an opt-in per-Bundle search backend. The
-default build continues to use SQLite FTS.
+The default v0.1.x build includes and selects Tantivy for Bundle search. SQLite
+remains the control-plane database. This release is intentionally a fresh
+installation: it does not migrate pre-release SQLite search data, and startup
+rejects a data directory containing SQLite-backed Bundles.
 
 The upload worker streams each cleaned log chunk directly into a per-Bundle
 build session. A bounded channel (two batches by default) feeds one blocking
@@ -24,19 +26,18 @@ candidate generator: a query such as `abcd` must not match `abc ... bcd`.
 The HTTP Bundle and Issue routes require at least three characters, matching
 the tokenizer bound.
 
-The feature is built and tested with Tantivy 0.26.2:
+The backend is built and tested with Tantivy 0.26.2:
 
 ```bash
 cargo test --manifest-path backend/Cargo.toml --locked \
-  --features tantivy-search search::tantivy
+  search::tantivy
 cargo test --manifest-path backend/Cargo.toml --locked \
-  --features tantivy-search --test search_backend_parity
+  --test search_backend_parity
 cargo clippy --manifest-path backend/Cargo.toml --locked \
-  --features tantivy-search --lib -- -D warnings
+  --lib -- -D warnings
 ```
 
-Use `RAIN_SEARCH_BACKEND=tantivy` with a `--features tantivy-search` build to
-select the backend for new uploads. The upload worker claims a generation,
+Use the default `RAIN_SEARCH_BACKEND=tantivy` build for uploads. The upload worker claims a generation,
 streams normalized chunks through the bounded pipeline, persists sparse metadata
 in batches, reopens and verifies the artifact, and only then allows the Bundle
 to become READY. The Bundle content search route reads that published
@@ -58,7 +59,7 @@ report admission wait, active/queued writers, heap reservation, and total build
 time. Startup and the periodic cleanup task remove unpublished generations and
 artifacts for deleted Bundles.
 
-The current implementation is still opt-in. Skill search remains on the
-SQLite adapter, and query fan-out/reader caching are deliberately conservative;
-legacy Bundles are not rebuilt automatically. See the large-log baseline for
-the first one-host comparison rather than treating it as a production SLO.
+Skill search remains on the SQLite adapter in this release, and query
+fan-out/reader caching are deliberately conservative. Old data directories are
+not rebuilt automatically; see the large-log baseline for the first one-host
+comparison rather than treating it as a production SLO.
