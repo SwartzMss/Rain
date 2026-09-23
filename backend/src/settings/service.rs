@@ -5,7 +5,7 @@ use sqlx::{Row, SqlitePool};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    config::{AiProviderEnv, AppLimits, AuthConfig},
+    config::{AppLimits, AuthConfig},
     db,
     error::AppError,
 };
@@ -291,7 +291,6 @@ impl SettingsService {
         &self,
         limits: &AppLimits,
         auth: &AuthConfig,
-        _ai: &AiProviderEnv,
         issue_inactive_days: usize,
         cleanup_json: Option<&str>,
     ) -> Result<Arc<SettingsSnapshot>, AppError> {

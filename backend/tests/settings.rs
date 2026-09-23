@@ -1,5 +1,5 @@
 use backend::{
-    config::{AiProviderEnv, AppLimits, AuthConfig},
+    config::{AppLimits, AuthConfig},
     db,
     settings::{ApplyMode, SettingKey, SettingsService, SettingsValues},
 };
@@ -61,7 +61,7 @@ async fn bootstrap_seeds_legacy_environment_once_and_database_wins_afterward() {
     let service = SettingsService::new(pool.clone());
 
     let first = service
-        .initialize(&limits, &auth, &AiProviderEnv::default(), 0, None)
+        .initialize(&limits, &auth, 0, None)
         .await
         .expect("initialization");
     assert_eq!(first.configured.issue_max_content_size, 1234);
@@ -72,7 +72,7 @@ async fn bootstrap_seeds_legacy_environment_once_and_database_wins_afterward() {
     let mut changed_auth = AuthConfig::default();
     changed_auth.allow_registration = true;
     let second = service
-        .initialize(&changed, &changed_auth, &AiProviderEnv::default(), 0, None)
+        .initialize(&changed, &changed_auth, 0, None)
         .await
         .expect("second initialization");
     assert_eq!(second.configured.issue_max_content_size, 1234);
@@ -85,13 +85,7 @@ async fn save_requires_revision_and_applies_hot_values_atomically() {
     db::prepare_schema(&pool, true).await.expect("schema");
     let service = SettingsService::new(pool.clone());
     let initial = service
-        .initialize(
-            &AppLimits::default(),
-            &AuthConfig::default(),
-            &AiProviderEnv::default(),
-            0,
-            None,
-        )
+        .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
         .await
         .expect("initialization");
 
@@ -113,13 +107,7 @@ async fn save_requires_revision_and_applies_hot_values_atomically() {
     );
 
     let reloaded = service
-        .initialize(
-            &AppLimits::default(),
-            &AuthConfig::default(),
-            &AiProviderEnv::default(),
-            0,
-            None,
-        )
+        .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
         .await
         .expect("reload");
     assert_eq!(reloaded.configured.search_tantivy_max_writers, 2);

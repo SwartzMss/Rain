@@ -268,7 +268,6 @@ mod tests {
             serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
         assert_eq!(body["recovery"], false);
 
-        state.recovery.mark_stale_skill_runs_ready();
         state.recovery.mark_stale_processing_bundles_ready();
         let response = readiness_response(state.as_ref()).await;
         assert_eq!(response.status(), StatusCode::OK);

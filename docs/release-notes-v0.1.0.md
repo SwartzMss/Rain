@@ -27,8 +27,10 @@ Tantivy startup check stops with an actionable fresh-data-directory error.
 `RAIN_SEARCH_BACKEND=sqlite_fts` remains available for tests and old-data
 diagnosis. It is not the v0.1.0 default deployment path.
 
-Skill search remains on its existing SQLite adapter in v0.1.0. Tantivy support
-for Skill search and retirement of the SQLite FTS path are follow-up work.
+The AI diagnosis and Skill features are not included in this release. Their
+legacy database tables may remain in an upgraded database for compatibility,
+but Rain no longer exposes their APIs, loads provider credentials, or sends
+model requests.
 
 ## Validation
 

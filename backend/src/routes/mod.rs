@@ -8,7 +8,6 @@ use actix_web::{
 };
 use serde_json::json;
 
-mod ai_provider;
 mod auth;
 mod files;
 mod health;
@@ -19,8 +18,6 @@ pub(crate) use issues::cleanup_inactive_issues;
 pub use issues::resume_manual_issue_deletions;
 mod logs;
 mod saved_searches;
-mod skill_runs;
-mod skills;
 mod temp_results;
 mod uploads;
 
@@ -34,23 +31,6 @@ pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) -> tokio::ta
             async move {
                 temp_results::cleanup_expired(&state)
                     .await
-                    .map_err(|error| error.to_string())
-            }
-        },
-    )
-}
-
-pub fn spawn_skill_run_cleanup(state: web::Data<crate::AppState>) -> tokio::task::JoinHandle<()> {
-    crate::spawn_periodic_job(
-        "skill-run-cleanup",
-        std::time::Duration::from_secs(60),
-        std::time::Duration::from_secs(300),
-        move || {
-            let state = state.clone();
-            async move {
-                crate::repositories::skill_runs::cleanup_expired(&state.db.pool, 24 * 60 * 60)
-                    .await
-                    .map(|_| ())
                     .map_err(|error| error.to_string())
             }
         },
@@ -177,10 +157,8 @@ async fn prevent_session_response_caching(
     request: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
-    let no_store = request.path().starts_with("/api/auth/")
-        || request.path().starts_with("/api/me/")
-        || request.path().starts_with("/api/skill-runs/")
-        || request.path().starts_with("/api/admin/ai-provider");
+    let no_store =
+        request.path().starts_with("/api/auth/") || request.path().starts_with("/api/me/");
     let mut response = next.call(request).await?;
     if no_store {
         response
@@ -219,10 +197,6 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(auth::register_user)
                 .service(auth::registration_status)
                 .service(admin::list_users)
-                .service(ai_provider::get_ai_provider)
-                .service(ai_provider::get_ai_provider_status)
-                .service(ai_provider::update_ai_provider)
-                .service(ai_provider::test_ai_provider)
                 .service(admin::get_settings)
                 .service(admin::update_settings)
                 .service(admin::auth_rate_limits)
@@ -242,18 +216,6 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(saved_searches::update)
                 .service(saved_searches::delete)
                 .service(saved_searches::mark_used)
-                .service(skills::list)
-                .service(skills::get)
-                .service(skills::create)
-                .service(skills::update)
-                .service(skills::delete_skill)
-                .service(skills::review)
-                .service(skill_runs::create)
-                .service(skill_runs::get_active_run)
-                .service(skill_runs::get_run)
-                .service(skill_runs::cancel)
-                .service(skill_runs::result)
-                .service(skill_runs::events)
                 .service(issues::list_issues)
                 .service(issues::create_issue)
                 .service(issues::get_issue_bundles)

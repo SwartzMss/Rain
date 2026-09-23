@@ -173,12 +173,6 @@ pub struct FilenameSearchRow {
     pub bundle_hash: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct FilenameSearchResult {
-    pub total: i64,
-    pub rows: Vec<FilenameSearchRow>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSearchMode {
     Fts,
@@ -217,6 +211,12 @@ pub struct SkillSearchRow {
 pub struct SkillSearchResult {
     pub rows: Vec<SkillSearchRow>,
     pub has_unindexed_matches: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FilenameSearchResult {
+    pub total: i64,
+    pub rows: Vec<FilenameSearchRow>,
 }
 
 #[derive(Debug, Clone)]

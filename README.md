@@ -181,12 +181,6 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_ISSUE_INACTIVE_DAYS` | `0` | Issue 非活跃自动过期天数；0 关闭，启用范围 7–30 |
 | `RAIN_CLEANUP_EXEMPT_USERS` | 空 | 仅用于首次启动迁移到数据库的逗号分隔白名单；之后请在管理员系统设置中维护，数据库配置优先，支持大小写输入 |
 | `RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR` | `10` | 同一 IP 每小时注册尝试上限 |
-| `RAIN_AI_BASE_URL` | — | OpenAI-compatible API 的 `/v1` Base URL；作为数据库配置的兜底 |
-| `RAIN_AI_API_KEY` | — | 环境变量 Provider 的 API Key |
-| `RAIN_AI_MODEL` | — | 环境变量 Provider 使用的模型 |
-| `RAIN_AI_TIMEOUT_SECONDS` | `120` | 单次模型请求超时，范围 1–300 秒 |
-| `RAIN_AI_STRUCTURED_OUTPUT` | `json_object` | Skill final result 和 repair 请求的结构化输出模式；可选 `json_object` 或 `json_schema`。管理员 Provider Test 始终使用 `response_format: null`，只验证连通性，不验证 strict schema 能力 |
-| `RAIN_AI_MASTER_KEY` | — | 32 字节随机主密钥的 Base64，用于加密管理员保存到数据库的 API Key |
 
 默认配置会使用：
 
@@ -205,18 +199,6 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 5. 点击 Issue 的“查看”打开文件浏览页。
 6. 在左侧文件树选择文件，右侧会显示文本预览。
 7. 在搜索框输入关键词，可搜索当前 Issue 下已索引的文本日志。
-
-### 私有 Skills 与 Issue 诊断
-
-登录用户可以在“账户 → 我的 Skills”创建自己的 `SKILL.md`、启停 Skill，并请求一次质量评估。所有 Skill 都必须符合 [`SKILL.md` v1](doc/SKILL_SCHEMA.md)；服务端在保存、详情读取、质量评估和运行时确定性校验 front matter、五个必填章节和 64 KiB 上限，格式合法性不交给 AI 判断。当前内测阶段不保留旧格式兼容层，格式发生不兼容变化时应重建开发数据。Skills 始终按用户隔离，系统不提供内置 Skills；每个用户最多 50 个，列表只返回摘要，完整 Markdown 按所选 Skill 单独读取。质量评估只保留当前 Skill 版本和当前评分规则的一份结果，重新评估会覆盖，正文修改会清除它。评分等级由服务端按总分确定，评估限制为每用户同时 1 个、每小时 5 次、全局同时 2 个模型任务，整体 90 秒超时。
-
-管理员可以在“系统设置 → AI Provider”保存 OpenAI-compatible 服务配置并测试连接。空测试请求只测试当前生效配置；测试未保存配置必须完整提供 Base URL、API Key、模型和超时，修改 Base URL 时也必须重新输入 API Key，避免把已有密钥发送到新地址。完整且可解密的数据库配置优先于环境变量。数据库中的 API Key 使用 `RAIN_AI_MASTER_KEY` 进行 AES-256-GCM 加密；接口、审计日志和错误信息都不会返回明文或密文。未配置主密钥时仍可使用完整的环境变量 Provider，但不能把新的 API Key 保存进数据库。
-
-任何能查看当前 ACTIVE Issue 的登录用户都可选择自己的已启用 Skill 运行诊断，不要求是 Issue 创建者。Runner 只有 `get_issue_manifest`、`list_files`、`search_logs`、`read_file_lines` 四个只读工具，且服务端固定绑定当前 Issue；文件列表提供游标续页和路径前缀过滤。Skill 的 front matter 不会作为诊断指令注入，Skill 内容也不能扩大 Issue scope 或工具权限。固定限制为 8 次迭代、24 次工具调用、每次最多 20 个搜索结果、30 个证据区间、单次工具输出 32 KiB、累计证据 128 KiB、总时长 120 秒，同一用户同时只能运行一个任务。Issue Manifest、日志和文件名始终按不可信检索上下文或证据处理。
-
-诊断运行可选定“不限制时间”、事故时间前后窗口或直接时间范围；时间范围使用日志中的 wall-clock 文本，最多 24 小时，并保存为该 Run 的不可变快照。API 接受空格或 `T` 分隔的本地日期时间，可带小数秒，也接受 `datetime-local` 的分钟精度；不会自动转换为 UTC。`search_logs` 默认只检索与主窗口相交且具有事件时间索引的日志 chunk，模型最多请求 15 分钟的边界上下文扩展。`time_scope` 不传或为 `null` 时保持旧的全量搜索行为；只有 `HH:mm:ss` 而没有日期的日志不会臆测日期，带范围搜索会通过 coverage 信息报告被排除的未索引匹配。
-
-页面刷新后可在同一浏览器会话中续接当前任务。成功、失败或取消后的结果仅按 run ID 临时保留 24 小时，随后连同步骤和 Skill 快照清理；Rain 不提供诊断历史列表。受支持的摘要、每项观察和推断都必须引用经过服务端核验的证据 ID；无证据摘要会被服务端替换为固定的“证据不足”文本。证据携带 Bundle hash、文件和行号，可直接跳回唯一来源。文件发现结果明确标记目录，误读目录会返回非致命工具错误。
 
 ## 用户认证
 
@@ -266,7 +248,6 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 单行默认超过 8 MiB 时索引和分页展示会截断该行，并标记 `[line truncated]`；该限制可配置。
 - Issue 范围和 Bundle 范围采用 Tantivy trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符的关键词直接拒绝。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
 - 登录后的原始文件下载。
-- 用户私有 Skill 管理、当前版本质量评估，以及 Issue 范围的受限 AI 诊断。
 - 删除 Issue、Bundle、单个文件节点。
 - Issue 自动清理按 owner 的非活跃状态执行；管理员可在“系统设置 → 自动清理白名单”中实时维护豁免用户。`RAIN_CLEANUP_EXEMPT_USERS` 仅在数据库尚未初始化白名单时作为一次性迁移来源，后续不会覆盖管理员配置。旧的 `RAIN_RETENTION_DAYS` 已废弃并会被忽略。
 
@@ -287,8 +268,6 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 真实文件使用 SHA-256 内容寻址 Blob 存储，保存到数据根目录下的 `blobs/<hash前两位>/<完整hash>`；多个 Bundle 中的相同内容只保存一份。
 - 文件字节访问统一经过 `BlobStore` 接口；当前使用 `LocalCasBlobStore`，上层业务不依赖本地物理路径。
 - Bundle 使用逻辑删除；无引用 Blob 由后台 GC 基于数据库实际引用扫描，并在 24 小时宽限期后回收。
-- `timeline` 目前仍固定为 `all`，仅作为旧的展示标签；日志 chunk 另外保存从普通日期时间、`[日期时间]` 或 `[E][日期时间][...]` 行首格式提取的 wall-clock 起止比较键，供带 `time_scope` 的 Skill Run 搜索过滤。数据库仍使用兼容性的 `*_ms` 列名，但这些整数值不是 Unix epoch、UTC 或绝对时间，只能与同一 wall-clock 编码比较。
-- 当前 AI 分析只支持 OpenAI-compatible Chat Completions，不提供通用聊天、Shell、网络工具、用户脚本、MCP 或 Issue 写操作。
 
 自动测试：
 
@@ -398,9 +377,7 @@ Multipart 字段：
 1. 在目标机器完成 1/2/4 并发和 1/5 GiB 大文件基线，确认吞吐、RSS 和查询 p95。
 2. 解析任务细粒度进度、取消和失败重试。
 3. 结构化事件查询 API，例如按 level、component、时间范围过滤。
-4. Tantivy 覆盖 Skill 日志检索，并在确认兼容后再考虑退役 SQLite FTS。
-5. 更完整的日志 parser 规则和多行异常合并。
-6. 带日志引用的 AI 分析。
+4. 更完整的日志 parser 规则和多行异常合并。
 
 数据库细节见 [doc/DB.md](doc/DB.md)。
 # 管理员初始化与权限
