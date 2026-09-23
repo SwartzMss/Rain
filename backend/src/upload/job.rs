@@ -148,6 +148,7 @@ pub fn spawn_upload_job(job: UploadJob) {
             file_count,
             received_bytes,
             queue_elapsed_ms = queued_at.elapsed().as_millis() as u64,
+            processing_queue_ms = queued_at.elapsed().as_millis() as u64,
             "upload processing started"
         );
         let process_result = process_upload_job(&job).await;
@@ -273,6 +274,7 @@ async fn process_upload_files_and_publish(
     );
 
     crate::upload::lifecycle::set_bundle_stage(&job.pool, &job.bundle_id, "VALIDATING").await?;
+    let preflight_started = Instant::now();
     for uploaded in &job.files {
         preflight_uploaded_file(PreflightFileOptions {
             pool: &job.pool,
@@ -289,6 +291,20 @@ async fn process_upload_files_and_publish(
         })
         .await?;
     }
+    info!(
+        metric = "upload_preflight",
+        request_id = job.request_id.as_deref().unwrap_or("unavailable"),
+        bundle_id = %job.bundle_id,
+        file_count = job.files.len(),
+        received_bytes = job
+            .files
+            .iter()
+            .fold(0_u64, |total, file| total.saturating_add(file.size_bytes)),
+        preflight_elapsed_ms = preflight_started.elapsed().as_millis() as u64,
+        active_writers = job.search_resource_budget.active_writers(),
+        queued_writers = job.search_resource_budget.queued_writers(),
+        "uploaded bundle preflight completed"
+    );
 
     for (file_index, uploaded) in job.files.iter().enumerate() {
         let file_started = Instant::now();

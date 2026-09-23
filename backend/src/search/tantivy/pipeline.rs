@@ -4,12 +4,19 @@
 //! Tantivy work runs on Tokio's blocking pool so a large file cannot occupy an
 //! async executor worker while segments are flushed.
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::error::AppError;
 
+use super::super::resource::SearchResourcePermit;
 use super::writer::{BundleIndexWriter, CommittedBundleIndex, IndexedChunk};
 
 #[derive(Debug, Clone, Copy)]
@@ -28,35 +35,68 @@ impl Default for PipelineConfig {
 }
 
 pub struct BoundedBundlePipeline {
-    sender: Option<mpsc::Sender<Vec<IndexedChunk>>>,
-    task: Option<JoinHandle<Result<CommittedBundleIndex, AppError>>>,
+    sender: Mutex<Option<mpsc::Sender<Vec<IndexedChunk>>>>,
+    task: tokio::sync::Mutex<Option<JoinHandle<Result<CommittedBundleIndex, AppError>>>>,
+    aborted: Arc<AtomicBool>,
 }
 
 impl BoundedBundlePipeline {
+    /// Start a bounded pipeline without tying it to the global search budget.
+    /// Publication builds should use [`Self::start_with_permit`] so the permit
+    /// lifetime covers the blocking writer task itself.
     pub fn start(path: PathBuf, config: PipelineConfig) -> Result<Self, AppError> {
+        Self::start_inner(path, config, None)
+    }
+
+    pub fn start_with_permit(
+        path: PathBuf,
+        config: PipelineConfig,
+        resource_permit: SearchResourcePermit,
+    ) -> Result<Self, AppError> {
+        Self::start_inner(path, config, Some(resource_permit))
+    }
+
+    fn start_inner(
+        path: PathBuf,
+        config: PipelineConfig,
+        resource_permit: Option<SearchResourcePermit>,
+    ) -> Result<Self, AppError> {
         if config.queue_capacity == 0 || config.writer_heap_size_bytes == 0 {
             return Err(AppError::Config(
                 "Tantivy pipeline limits must be positive".into(),
             ));
         }
         let (sender, mut receiver) = mpsc::channel(config.queue_capacity);
+        let aborted = Arc::new(AtomicBool::new(false));
+        let worker_aborted = aborted.clone();
         let task = tokio::task::spawn_blocking(move || {
+            let _resource_permit = resource_permit;
             let mut writer = BundleIndexWriter::create(path, config.writer_heap_size_bytes)?;
             while let Some(batch) = receiver.blocking_recv() {
                 for chunk in &batch {
                     writer.add_chunk(chunk)?;
                 }
             }
+            if worker_aborted.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("Tantivy pipeline was aborted".into()));
+            }
             writer.commit()
         });
         Ok(Self {
-            sender: Some(sender),
-            task: Some(task),
+            sender: Mutex::new(Some(sender)),
+            task: tokio::sync::Mutex::new(Some(task)),
+            aborted,
         })
     }
 
     pub async fn submit(&self, batch: Vec<IndexedChunk>) -> Result<(), AppError> {
-        let Some(sender) = &self.sender else {
+        let sender = self
+            .sender
+            .lock()
+            .map_err(|_| AppError::Config("Tantivy pipeline sender lock poisoned".into()))?
+            .as_ref()
+            .cloned();
+        let Some(sender) = sender else {
             return Err(AppError::Conflict(
                 "Tantivy pipeline is already closed".into(),
             ));
@@ -66,21 +106,39 @@ impl BoundedBundlePipeline {
         })
     }
 
-    pub async fn finish(mut self) -> Result<CommittedBundleIndex, AppError> {
-        self.sender.take();
+    pub async fn finish(&self) -> Result<CommittedBundleIndex, AppError> {
+        self.sender
+            .lock()
+            .map_err(|_| AppError::Config("Tantivy pipeline sender lock poisoned".into()))?
+            .take();
         self.task
+            .lock()
+            .await
             .take()
-            .expect("Tantivy pipeline task must exist before finish")
+            .ok_or_else(|| AppError::Conflict("Tantivy pipeline is already closed".into()))?
             .await
             .map_err(|error| AppError::Config(format!("Tantivy writer task failed: {error}")))?
+    }
+
+    pub async fn abort(&self) -> Result<(), AppError> {
+        self.aborted.store(true, Ordering::Release);
+        self.sender
+            .lock()
+            .map_err(|_| AppError::Config("Tantivy pipeline sender lock poisoned".into()))?
+            .take();
+        let Some(task) = self.task.lock().await.take() else {
+            return Ok(());
+        };
+        let _ = task.await;
+        Ok(())
     }
 }
 
 impl Drop for BoundedBundlePipeline {
     fn drop(&mut self) {
-        self.sender.take();
-        if let Some(task) = self.task.take() {
-            task.abort();
+        self.aborted.store(true, Ordering::Release);
+        if let Ok(mut sender) = self.sender.lock() {
+            sender.take();
         }
     }
 }
@@ -88,7 +146,7 @@ impl Drop for BoundedBundlePipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::tantivy::CandidateSearch;
+    use crate::search::{resource::SearchResourceBudget, tantivy::CandidateSearch};
 
     fn path() -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -101,12 +159,17 @@ mod tests {
     #[tokio::test]
     async fn bounded_pipeline_commits_batches_in_order() {
         let path = path();
-        let pipeline = BoundedBundlePipeline::start(
+        let pipeline = BoundedBundlePipeline::start_with_permit(
             path.clone(),
             PipelineConfig {
                 queue_capacity: 2,
                 writer_heap_size_bytes: 16 * 1024 * 1024,
             },
+            SearchResourceBudget::new(1, 16 * 1024 * 1024)
+                .unwrap()
+                .acquire()
+                .await
+                .unwrap(),
         )
         .unwrap();
         for index in 0..5 {
@@ -137,12 +200,17 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_limits_are_rejected_before_starting_a_writer() {
-        let result = BoundedBundlePipeline::start(
+        let result = BoundedBundlePipeline::start_with_permit(
             path(),
             PipelineConfig {
                 queue_capacity: 0,
                 writer_heap_size_bytes: 1,
             },
+            SearchResourceBudget::new(1, 1)
+                .unwrap()
+                .acquire()
+                .await
+                .unwrap(),
         );
         assert!(matches!(result, Err(AppError::Config(_))));
     }

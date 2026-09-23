@@ -1,7 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -9,7 +9,10 @@ use std::{
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
-use tokio::{fs, sync::Mutex};
+use tokio::{
+    fs,
+    sync::{Mutex, OnceCell},
+};
 
 use crate::{
     error::AppError,
@@ -17,10 +20,7 @@ use crate::{
         SearchBackendKind, artifact_relative_path, mark_publication_ready,
         refresh_publication_heartbeat,
     },
-    search::{
-        IndexBatch, IndexChunk, IngestIndex,
-        resource::{SearchResourceBudget, SearchResourcePermit},
-    },
+    search::{IndexBatch, IndexChunk, IngestIndex, resource::SearchResourceBudget},
 };
 
 use super::{
@@ -29,6 +29,7 @@ use super::{
 };
 
 const SPARSE_METADATA_COMMIT_CHUNKS: usize = 512;
+const SPARSE_METADATA_COMMIT_BATCHES: usize = 512;
 
 struct HeartbeatGuard(Option<tokio::task::JoinHandle<()>>);
 
@@ -86,15 +87,18 @@ pub struct BundleBuildSession {
     generation: i64,
     staging: PathBuf,
     final_path: PathBuf,
-    pipeline: Mutex<Option<BoundedBundlePipeline>>,
+    pipeline: OnceCell<Arc<BoundedBundlePipeline>>,
+    operation_lock: Mutex<()>,
+    closing: AtomicBool,
     pending_metadata: Mutex<Vec<IndexBatch>>,
     expected_documents: AtomicU64,
     published: std::sync::atomic::AtomicBool,
     metric_emitted: AtomicBool,
     budget: SearchResourceBudget,
-    admission_wait: Duration,
+    admission_wait_micros: AtomicU64,
+    writer_started: StdMutex<Option<Instant>>,
+    writer_active_at_admission: AtomicU64,
     build_started: Instant,
-    _resource_permit: SearchResourcePermit,
     heartbeat_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -123,30 +127,24 @@ impl BundleBuildSession {
                 .await
                 .map_err(AppError::Io)?;
         }
-        let resource_permit = budget.acquire().await?;
-        let admission_wait = resource_permit.queue_wait();
-        let pipeline = BoundedBundlePipeline::start(
-            staging.clone(),
-            PipelineConfig {
-                writer_heap_size_bytes: budget.writer_heap_size_bytes(),
-                ..PipelineConfig::default()
-            },
-        )?;
         let session = Arc::new(Self {
             pool: pool.clone(),
             bundle_id: bundle_id.to_owned(),
             generation,
             staging,
             final_path,
-            pipeline: Mutex::new(Some(pipeline)),
+            pipeline: OnceCell::new(),
+            operation_lock: Mutex::new(()),
+            closing: AtomicBool::new(false),
             pending_metadata: Mutex::new(Vec::new()),
             expected_documents: AtomicU64::new(0),
             published: std::sync::atomic::AtomicBool::new(false),
             metric_emitted: AtomicBool::new(false),
             budget,
-            admission_wait,
+            admission_wait_micros: AtomicU64::new(0),
+            writer_started: StdMutex::new(None),
+            writer_active_at_admission: AtomicU64::new(0),
             build_started: Instant::now(),
-            _resource_permit: resource_permit,
             heartbeat_task: Mutex::new(None),
         });
         *session.heartbeat_task.lock().await = Some(heartbeat.take());
@@ -169,10 +167,14 @@ impl BundleBuildSession {
     }
 
     async fn finish_inner(&self) -> Result<(), AppError> {
-        let pipeline =
-            self.pipeline.lock().await.take().ok_or_else(|| {
-                AppError::Conflict("Tantivy build session is already closed".into())
-            })?;
+        let _operation = self.operation_lock.lock().await;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(AppError::Conflict(
+                "Tantivy build session is already closed".into(),
+            ));
+        }
+        let pipeline = self.ensure_pipeline().await?;
+        self.closing.store(true, Ordering::Release);
         let committed = pipeline.finish().await?;
         let pending = self
             .pending_metadata
@@ -238,19 +240,77 @@ impl BundleBuildSession {
         Ok(())
     }
 
+    async fn ensure_pipeline(&self) -> Result<Arc<BoundedBundlePipeline>, AppError> {
+        if self.closing.load(Ordering::Acquire) && self.pipeline.get().is_none() {
+            return Err(AppError::Conflict(
+                "Tantivy build session is already closed".into(),
+            ));
+        }
+        let budget = self.budget.clone();
+        let staging = self.staging.clone();
+        let closing = &self.closing;
+        let admission_wait = &self.admission_wait_micros;
+        let writer_started = &self.writer_started;
+        let writer_active_at_admission = &self.writer_active_at_admission;
+        let pipeline = self
+            .pipeline
+            .get_or_try_init(|| async move {
+                let permit = budget.acquire().await?;
+                if closing.load(Ordering::Acquire) {
+                    drop(permit);
+                    return Err(AppError::Conflict(
+                        "Tantivy build session is already closed".into(),
+                    ));
+                }
+                let waited = permit.queue_wait();
+                let pipeline = BoundedBundlePipeline::start_with_permit(
+                    staging,
+                    PipelineConfig {
+                        writer_heap_size_bytes: budget.writer_heap_size_bytes(),
+                        ..PipelineConfig::default()
+                    },
+                    permit,
+                )?;
+                if let Ok(mut started) = writer_started.lock() {
+                    *started = Some(Instant::now());
+                }
+                admission_wait.store(
+                    waited.as_micros().min(u128::from(u64::MAX)) as u64,
+                    Ordering::Release,
+                );
+                // The current count is captured at admission because the
+                // completion metric is emitted after the permit is released.
+                writer_active_at_admission.store(budget.active_writers() as u64, Ordering::Release);
+                Ok(Arc::new(pipeline))
+            })
+            .await?;
+        Ok(pipeline.clone())
+    }
+
     fn emit_metric(&self, outcome: &'static str) {
         if self
             .metric_emitted
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            let writer_active_ms = self
+                .writer_started
+                .lock()
+                .ok()
+                .and_then(|started| started.map(|started| started.elapsed().as_millis() as u64))
+                .unwrap_or(0);
             tracing::info!(
                 metric = "tantivy_index_build",
                 bundle_id = %self.bundle_id,
                 outcome,
-                admission_wait_ms = self.admission_wait.as_millis() as u64,
+                admission_wait_ms = self.admission_wait_micros.load(Ordering::Acquire) / 1_000,
+                writer_active_ms,
+                indexing_elapsed_ms = writer_active_ms,
                 build_elapsed_ms = self.build_started.elapsed().as_millis() as u64,
                 active_writers = self.budget.active_writers(),
+                writer_active_writers = self
+                    .writer_active_at_admission
+                    .load(Ordering::Acquire),
                 queued_writers = self.budget.queued_writers(),
                 writer_heap_size_bytes = self.budget.writer_heap_size_bytes(),
                 "Tantivy Bundle index build completed"
@@ -259,11 +319,15 @@ impl BundleBuildSession {
     }
 
     pub async fn abort(&self) {
+        self.closing.store(true, Ordering::Release);
         self.stop_heartbeat().await;
+        let _operation = self.operation_lock.lock().await;
         if self.published.load(Ordering::Acquire) {
             return;
         }
-        self.pipeline.lock().await.take();
+        if let Some(pipeline) = self.pipeline.get() {
+            let _ = pipeline.abort().await;
+        }
         for path in [&self.staging, &self.final_path] {
             match fs::remove_dir_all(path).await {
                 Ok(()) => {}
@@ -295,6 +359,12 @@ impl IngestIndex for BundleBuildSession {
                 "Tantivy batch belongs to a different Bundle".into(),
             ));
         }
+        let _operation = self.operation_lock.lock().await;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(AppError::Conflict(
+                "Tantivy build session is already closed".into(),
+            ));
+        }
         let indexed = batch
             .chunks
             .iter()
@@ -311,13 +381,8 @@ impl IngestIndex for BundleBuildSession {
             })
             .collect::<Vec<_>>();
         let count = indexed.len() as u64;
-        {
-            let pipeline = self.pipeline.lock().await;
-            let Some(pipeline) = pipeline.as_ref() else {
-                return Err(AppError::Conflict(
-                    "Tantivy build session is already closed".into(),
-                ));
-            };
+        if !indexed.is_empty() {
+            let pipeline = self.ensure_pipeline().await?;
             pipeline.submit(indexed).await?;
         }
         let metadata = IndexBatch {
@@ -346,7 +411,8 @@ impl IngestIndex for BundleBuildSession {
                 .iter()
                 .map(|batch| batch.chunks.len())
                 .sum::<usize>();
-            (chunk_count >= SPARSE_METADATA_COMMIT_CHUNKS)
+            (chunk_count >= SPARSE_METADATA_COMMIT_CHUNKS
+                || pending.len() >= SPARSE_METADATA_COMMIT_BATCHES)
                 .then(|| pending.drain(..).collect::<Vec<_>>())
         };
         if let Some(flush) = flush {
@@ -364,5 +430,269 @@ async fn remove_published_artifact(path: &Path) {
         Err(error) => {
             tracing::warn!(path = %path.display(), %error, "failed to remove unpublished Tantivy artifact")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        db,
+        search::publication::{SearchBackendKind, claim_publication},
+    };
+
+    fn fixture_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "rain-tantivy-publication-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    async fn fixture(name: &str) -> (SqlitePool, PathBuf, i64) {
+        let root = fixture_root(name);
+        std::fs::create_dir_all(&root).unwrap();
+        let pool = db::init_pool(&format!("sqlite://{}", root.join("rain.db").display())).unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name) VALUES('PUBTEST','Publication test')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-pubtest','PUBTEST','hash','fixture','PROCESSING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let generation = claim_publication(&pool, "bundle-pubtest", SearchBackendKind::Tantivy)
+            .await
+            .unwrap();
+        (pool, root, generation)
+    }
+
+    #[tokio::test]
+    async fn writer_admission_starts_at_first_searchable_batch() {
+        let (pool, root, generation) = fixture("lazy").await;
+        let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
+        let session = BundleBuildSession::start(
+            &pool,
+            &root,
+            &root.join(".tmp"),
+            "bundle-pubtest",
+            generation,
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(budget.active_writers(), 0);
+        session
+            .commit_ingest_batch(IndexBatch {
+                bundle_id: "bundle-pubtest".into(),
+                file_id: 1,
+                path: "/app.log".into(),
+                chunks: vec![IndexChunk {
+                    chunk_index: 0,
+                    line_start: Some(0),
+                    line_end: Some(0),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    content: "searchable".into(),
+                }],
+                offsets: vec![(0, 0)],
+                final_line_count: Some(1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(budget.active_writers(), 1);
+        session.abort().await;
+        drop(session);
+        assert_eq!(budget.active_writers(), 0);
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_bundle_finishes_with_a_valid_empty_index_without_writer_admission() {
+        let (pool, root, generation) = fixture("empty").await;
+        let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
+        let session = BundleBuildSession::start(
+            &pool,
+            &root,
+            &root.join(".tmp"),
+            "bundle-pubtest",
+            generation,
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(budget.active_writers(), 0);
+        session.finish().await.unwrap();
+        assert_eq!(budget.active_writers(), 0);
+        let index = open_committed(
+            root.join(artifact_relative_path("bundle-pubtest", generation).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(index.document_count, 0);
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_ingest_batch_does_not_admit_a_writer() {
+        let (pool, root, generation) = fixture("empty-batch").await;
+        let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
+        let session = BundleBuildSession::start(
+            &pool,
+            &root,
+            &root.join(".tmp"),
+            "bundle-pubtest",
+            generation,
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        session
+            .commit_ingest_batch(IndexBatch {
+                bundle_id: "bundle-pubtest".into(),
+                file_id: 1,
+                path: "/empty.log".into(),
+                chunks: Vec::new(),
+                offsets: Vec::new(),
+                final_line_count: Some(0),
+            })
+            .await
+            .unwrap();
+        assert_eq!(budget.active_writers(), 0);
+        session.abort().await;
+        assert_eq!(budget.queued_writers(), 0);
+        assert_eq!(budget.active_writers(), 0);
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn multiple_lazy_sessions_can_preflight_before_writer_admission() {
+        let (pool, root, generation) = fixture("parallel-preflight").await;
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-pubtest-2','PUBTEST','hash-2','fixture-2','PROCESSING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second_generation =
+            claim_publication(&pool, "bundle-pubtest-2", SearchBackendKind::Tantivy)
+                .await
+                .unwrap();
+        let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
+        let first = BundleBuildSession::start(
+            &pool,
+            &root,
+            &root.join(".tmp"),
+            "bundle-pubtest",
+            generation,
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        let second = BundleBuildSession::start(
+            &pool,
+            &root,
+            &root.join(".tmp"),
+            "bundle-pubtest-2",
+            second_generation,
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(budget.active_writers(), 0);
+        assert_eq!(budget.queued_writers(), 0);
+        first.abort().await;
+        second.abort().await;
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_queued_writer_does_not_leave_admission_state() {
+        let (pool, root, generation) = fixture("queued-cancel").await;
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-pubtest-2','PUBTEST','hash-2','fixture-2','PROCESSING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second_generation =
+            claim_publication(&pool, "bundle-pubtest-2", SearchBackendKind::Tantivy)
+                .await
+                .unwrap();
+        let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
+        let first = BundleBuildSession::start(
+            &pool,
+            &root,
+            &root.join(".tmp"),
+            "bundle-pubtest",
+            generation,
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        first
+            .commit_ingest_batch(IndexBatch {
+                bundle_id: "bundle-pubtest".into(),
+                file_id: 1,
+                path: "/first.log".into(),
+                chunks: vec![IndexChunk {
+                    chunk_index: 0,
+                    line_start: Some(0),
+                    line_end: Some(0),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    content: "first".into(),
+                }],
+                offsets: vec![(0, 0)],
+                final_line_count: Some(1),
+            })
+            .await
+            .unwrap();
+
+        let second = BundleBuildSession::start(
+            &pool,
+            &root,
+            &root.join(".tmp"),
+            "bundle-pubtest-2",
+            second_generation,
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+        let second_for_task = second.clone();
+        let commit = tokio::spawn(async move {
+            second_for_task
+                .commit_ingest_batch(IndexBatch {
+                    bundle_id: "bundle-pubtest-2".into(),
+                    file_id: 2,
+                    path: "/second.log".into(),
+                    chunks: vec![IndexChunk {
+                        chunk_index: 0,
+                        line_start: Some(0),
+                        line_end: Some(0),
+                        event_time_start_ms: None,
+                        event_time_end_ms: None,
+                        content: "second".into(),
+                    }],
+                    offsets: vec![(0, 0)],
+                    final_line_count: Some(1),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while budget.queued_writers() == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        commit.abort();
+        let _ = commit.await;
+        assert_eq!(budget.queued_writers(), 0);
+        second.abort().await;
+        first.abort().await;
+        assert_eq!(budget.active_writers(), 0);
+        pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

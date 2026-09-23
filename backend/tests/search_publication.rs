@@ -44,16 +44,18 @@ async fn publishes_reopens_and_searches_a_bundle_index() {
     let generation = claim_publication(&pool, "bundle-pub", SearchBackendKind::Tantivy)
         .await
         .unwrap();
+    let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
     let builder = BundleBuildSession::start(
         &pool,
         &root,
         &root.join(".tmp"),
         "bundle-pub",
         generation,
-        SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap(),
+        budget.clone(),
     )
     .await
     .unwrap();
+    assert_eq!(budget.active_writers(), 0);
     builder
         .commit_ingest_batch(IndexBatch {
             bundle_id: "bundle-pub".into(),
@@ -82,7 +84,9 @@ async fn publishes_reopens_and_searches_a_bundle_index() {
         })
         .await
         .unwrap();
+    assert_eq!(budget.active_writers(), 1);
     builder.finish().await.unwrap();
+    assert_eq!(budget.active_writers(), 0);
 
     let state: (String, String) = sqlx::query_as(
         "SELECT backend,state FROM bundle_search_indexes WHERE bundle_id='bundle-pub'",
