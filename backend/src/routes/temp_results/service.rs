@@ -49,6 +49,7 @@ async fn materialize_result(
     source_label: &str,
     mode: MaterializeMode,
 ) -> Result<MaterializeOutcome, AppError> {
+    let settings = state.settings.snapshot().await;
     materialize_result_with_timeout(
         state,
         expression_text,
@@ -56,7 +57,7 @@ async fn materialize_result(
         sources,
         source_label,
         mode,
-        std::time::Duration::from_secs(state.limits.temp_results.max_scan_duration_seconds),
+        std::time::Duration::from_secs(settings.effective.temp_results_max_scan_duration_seconds),
     )
     .await
 }
@@ -70,6 +71,7 @@ async fn materialize_result_with_timeout(
     mode: MaterializeMode,
     timeout: std::time::Duration,
 ) -> Result<MaterializeOutcome, AppError> {
+    let settings = state.settings.snapshot().await;
     let id = Uuid::new_v4().simple().to_string();
     let directory = data_root(state).join("temp-results");
     tokio::fs::create_dir_all(&directory)
@@ -109,8 +111,8 @@ async fn materialize_result_with_timeout(
                 &mut output,
                 &mut metadata,
                 &mut index,
-                state.limits.temp_results.max_result_size,
-                state.limits.temp_results.max_scan_bytes,
+                settings.effective.temp_results_max_result_size,
+                settings.effective.temp_results_max_scan_bytes,
             )
             .await
         })
@@ -182,6 +184,7 @@ pub(crate) async fn resolve_sources(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
 ) -> Result<ResolvedSources, AppError> {
+    let settings = state.settings.snapshot().await;
     if let Some(source_id) = payload.source_temp_id.as_deref() {
         let (source, source_lease) = acquire_active_result(state, source_id).await?;
         let path = checked_temp_path(state, &source.storage_path)?;
@@ -211,11 +214,12 @@ pub(crate) async fn resolve_sources(
     }
     if let Some(issue_code) = payload.issue_code.as_deref() {
         let issue_code = normalize_issue_code(issue_code)?;
-        let max_sources = i64::try_from(state.limits.temp_results.max_sources).map_err(|_| {
-            AppError::Config(
-                "RAIN_TEMP_RESULT_MAX_SOURCES cannot be represented on this platform".into(),
-            )
-        })?;
+        let max_sources =
+            i64::try_from(settings.effective.temp_results_max_sources).map_err(|_| {
+                AppError::Config(
+                    "RAIN_TEMP_RESULT_MAX_SOURCES cannot be represented on this platform".into(),
+                )
+            })?;
         let query_limit = max_sources
             .checked_add(1)
             .ok_or_else(|| AppError::Config("RAIN_TEMP_RESULT_MAX_SOURCES is too large".into()))?;
@@ -240,7 +244,7 @@ pub(crate) async fn resolve_sources(
         .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
-        if rows.len() > state.limits.temp_results.max_sources {
+        if rows.len() > settings.effective.temp_results_max_sources {
             return Err(AppError::public(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "TEMP_RESULT_SOURCE_LIMIT",
@@ -324,6 +328,7 @@ async fn read_result_page(
     start: i64,
     limit: i64,
 ) -> Result<(Vec<TempLine>, Option<i64>), AppError> {
+    let settings = state.settings.snapshot().await;
     let result_path = checked_temp_path(state, &result.storage_path)?;
     let meta_path = result_path.with_extension("meta");
     let index_path = result_path.with_extension("idx");
@@ -345,7 +350,7 @@ async fn read_result_page(
         start,
         limit,
         result.line_count,
-        state.limits.api.max_line_page_bytes,
+        settings.effective.api_max_line_page_bytes,
     )
     .await?;
     let next_start = if start
@@ -379,6 +384,7 @@ pub(crate) async fn create_preview_result(
     payload: web::Json<PreviewTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    let settings = state.settings.snapshot().await;
     check_temp_result_rate_limit(&state, &request)?;
     let _client_lease = acquire_materialization_lease(&state, &request)?;
     let _permit = state
@@ -399,8 +405,8 @@ pub(crate) async fn create_preview_result(
     let start = payload.from.unwrap_or(0).max(0);
     let limit = preview_page_size(
         payload.size,
-        state.limits.api.default_line_page_size,
-        state.limits.api.max_line_page_size,
+        settings.effective.api_default_line_page_size,
+        settings.effective.api_max_line_page_size,
     );
     checked_page_end(start, limit)?;
     let request = CreateTempResultRequest {
@@ -506,13 +512,14 @@ pub(crate) async fn get_result_lines(
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    let settings = state.settings.snapshot().await;
     let _line_read = state.acquire_line_read(&request_client_key(&request))?;
     let (result, _read_lease) = acquire_active_result(&state, &id).await?;
     let start = query.start.unwrap_or(0).max(0);
     let limit = query
         .limit
-        .unwrap_or(state.limits.api.default_line_page_size)
-        .clamp(1, state.limits.api.max_line_page_size);
+        .unwrap_or(settings.effective.api_default_line_page_size)
+        .clamp(1, settings.effective.api_max_line_page_size);
     let (lines, next_start) = read_result_page(&state, &result, start, limit).await?;
     Ok(HttpResponse::Ok().json(TempResultLines {
         start,

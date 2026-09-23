@@ -300,6 +300,44 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(settings.status(), StatusCode::OK);
     let body: serde_json::Value = test::read_body_json(settings).await;
     assert_eq!(body["allow_registration"], false);
+    let revision = body["revision"].as_str().expect("settings revision");
+    let missing_revision = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({
+                "changes": {"api_default_search_results": 25}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(missing_revision.status(), StatusCode::PRECONDITION_REQUIRED);
+    let versioned_update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({
+                "expected_revision": revision,
+                "changes": {
+                    "api_default_search_results": 25,
+                    "search_tantivy_max_writers": 2
+                }
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(versioned_update.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(versioned_update).await;
+    assert_eq!(body["configured"]["api_default_search_results"], 25);
+    assert!(
+        body["pending_restart_fields"]
+            .as_array()
+            .is_some_and(|fields| fields
+                .iter()
+                .any(|field| field == "search_tantivy_max_writers"))
+    );
     let update = test::call_service(
         &app,
         test::TestRequest::patch()

@@ -56,11 +56,15 @@ pub struct ReceiveReservation {
 pub struct TempBudget {
     used: Arc<AtomicU64>,
     reserved: Arc<AtomicU64>,
-    max: u64,
+    max: Arc<AtomicU64>,
 }
 
 impl ReceiveReservation {
     pub fn new(used: Arc<AtomicU64>, max: u64) -> Self {
+        Self::new_with_dynamic_max(used, Arc::new(AtomicU64::new(max)))
+    }
+
+    pub fn new_with_dynamic_max(used: Arc<AtomicU64>, max: Arc<AtomicU64>) -> Self {
         Self {
             budget: TempBudget {
                 used,
@@ -84,7 +88,7 @@ impl TempBudget {
         loop {
             let current = self.used.load(Ordering::Acquire);
             let next = current.checked_add(bytes).ok_or_else(tmp_budget_error)?;
-            if next > self.max {
+            if next > self.max.load(Ordering::Acquire) {
                 return Err(tmp_budget_error());
             }
             if self
@@ -92,6 +96,10 @@ impl TempBudget {
                 .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                if next > self.max.load(Ordering::Acquire) {
+                    self.used.fetch_sub(bytes, Ordering::AcqRel);
+                    return Err(tmp_budget_error());
+                }
                 self.reserved.fetch_add(bytes, Ordering::AcqRel);
                 return Ok(());
             }

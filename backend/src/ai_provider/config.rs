@@ -85,6 +85,7 @@ struct StoredProvider {
     encrypted_api_key: String,
     model: String,
     request_timeout_seconds: i64,
+    structured_output: Option<String>,
 }
 
 pub async fn resolve_effective_config(
@@ -92,7 +93,7 @@ pub async fn resolve_effective_config(
     env: &AiProviderEnv,
 ) -> Result<Option<ResolvedAiProvider>, AppError> {
     let stored = sqlx::query_as::<_, StoredProvider>(
-        "SELECT base_url,encrypted_api_key,model,request_timeout_seconds FROM ai_provider_settings WHERE id=1",
+        "SELECT base_url,encrypted_api_key,model,request_timeout_seconds,structured_output FROM ai_provider_settings WHERE id=1",
     )
     .fetch_optional(pool)
     .await
@@ -105,13 +106,19 @@ pub async fn resolve_effective_config(
         && !api_key.trim().is_empty()
         && (1..=300).contains(&stored.request_timeout_seconds)
     {
+        let structured_output = stored
+            .structured_output
+            .as_deref()
+            .map(|value| StructuredOutputMode::parse(Some(value)))
+            .transpose()?
+            .unwrap_or(env.structured_output);
         return Ok(Some(ResolvedAiProvider {
             source: ProviderSource::Database,
             base_url: stored.base_url,
             api_key,
             model: stored.model,
             timeout_seconds: stored.request_timeout_seconds as u64,
-            structured_output: env.structured_output,
+            structured_output,
         }));
     }
 

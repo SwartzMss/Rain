@@ -34,6 +34,7 @@ pub async fn get_upload_limits(
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     require_issue_owner(&state.db.pool, &issue_code, &user.0.id).await?;
+    let settings = state.settings.snapshot().await;
     // Match IssueQuota, including content reserved by processing uploads.
     let used: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(content_size_bytes), 0) FROM bundles WHERE issue_code = ? AND status IN ('READY','PROCESSING')",
@@ -42,10 +43,10 @@ pub async fn get_upload_limits(
     .fetch_one(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
-    let limit = state.limits.issue_max_content_size;
+    let limit = settings.effective.issue_max_content_size;
     let archive = crate::config::ArchiveConfig::for_content_limit_with_working_size(
         limit,
-        state.limits.archive_max_working_size,
+        settings.effective.archive_max_working_size,
     );
     Ok(HttpResponse::Ok()
         .insert_header(("Cache-Control", "no-store, private"))
@@ -76,7 +77,9 @@ pub async fn upload_logs(
         .map(|value| value.0.clone());
     let issue_code = normalize_issue_code(&path.into_inner())?;
     require_issue_owner(&state.db.pool, &issue_code, &user.0.id).await?;
-    let request_limit = raw_payload_limit(state.limits.issue_max_content_size.saturating_mul(2));
+    let settings = state.settings.snapshot().await;
+    let request_limit =
+        raw_payload_limit(settings.effective.issue_max_content_size.saturating_mul(2));
     if let Some(length) = req.headers().get(CONTENT_LENGTH) {
         let length = length
             .to_str()
@@ -120,14 +123,14 @@ pub async fn upload_logs(
         return Err(AppError::Io(error));
     }
 
-    let reservation = ReceiveReservation::new(
+    let reservation = ReceiveReservation::new_with_dynamic_max(
         state.upload.tmp_bytes.clone(),
-        state.limits.upload.max_tmp_bytes,
+        state.upload.tmp_max_bytes.clone(),
     );
     let upload = match collect_multipart_upload(
         limited_multipart(&req, payload, request_limit),
         &temp_dir,
-        state.limits.issue_max_content_size.saturating_mul(2),
+        settings.effective.issue_max_content_size.saturating_mul(2),
         reservation,
     )
     .await
@@ -195,13 +198,16 @@ pub async fn upload_logs(
         staging_root,
         processing_permits: state.upload.processing_permits.clone(),
         archive_config: crate::config::ArchiveConfig::for_content_limit_with_working_size(
-            state.limits.issue_max_content_size,
-            state.limits.archive_max_working_size,
+            settings.effective.issue_max_content_size,
+            settings.effective.archive_max_working_size,
         ),
-        indexing_config: state.limits.indexing.clone(),
+        indexing_config: crate::config::IndexingConfig {
+            max_indexed_line_size: settings.effective.indexing_max_indexed_line_size,
+        },
         request_id: request_id.clone(),
         issue_code: issue_code.clone(),
-        issue_max_content_size: state.limits.issue_max_content_size,
+        issue_max_content_size: settings.effective.issue_max_content_size,
+        settings: state.settings.clone(),
         bundle_id: bundle_id.clone(),
         bundle_hash: bundle_hash.clone(),
         files: upload.files,

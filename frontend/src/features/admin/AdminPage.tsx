@@ -7,6 +7,7 @@ import type {
   AuditLog,
   UserStatus,
   AuthRateLimitEntry,
+  RegistrationSettings,
 } from "../../api/types";
 import { useAuth } from "../../auth/AuthContext";
 import { isAdmin } from "../../auth/permissions";
@@ -329,6 +330,13 @@ export function AdminPage() {
 }
 
 export function AdminSettingsPage() {
+  const legacySettingKeys = new Set([
+    "allow_registration",
+    "login_ip_limit_per_minute",
+    "login_username_failure_limit_per_5_minutes",
+    "issue_inactive_days",
+    "cleanup_exempt_usernames",
+  ]);
   const [allowed, setAllowed] = useState(true);
   const [ipLimit, setIpLimit] = useState(20);
   const [usernameLimit, setUsernameLimit] = useState(10);
@@ -344,6 +352,10 @@ export function AdminSettingsPage() {
   >(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [pendingRestartFields, setPendingRestartFields] = useState<string[]>([]);
+  const [revision, setRevision] = useState<string | null>(null);
+  const [advancedFields, setAdvancedFields] = useState<NonNullable<RegistrationSettings["fields"]>>([]);
+  const [advancedDraft, setAdvancedDraft] = useState<Record<string, unknown>>({});
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
@@ -354,6 +366,16 @@ export function AdminSettingsPage() {
       setUsernameLimit(value.login_username_failure_limit_per_5_minutes);
       setIssueInactiveDays(value.issue_inactive_days);
       setCleanupExemptUsernames(value.cleanup_exempt_usernames ?? []);
+      setPendingRestartFields(value.pending_restart_fields ?? []);
+      setRevision(value.revision ?? null);
+      const fields = (value.fields ?? []).filter((field) => !legacySettingKeys.has(field.key));
+      setAdvancedFields(fields);
+      setAdvancedDraft(
+        fields.reduce<Record<string, unknown>>((draft, field) => {
+          draft[field.key] = value.configured?.[field.key] ?? field.default_value ?? "";
+          return draft;
+        }, {}),
+      );
       setHasLoadedSettings(true);
     } catch (e) {
       setHasLoadedSettings(false);
@@ -378,6 +400,8 @@ export function AdminSettingsPage() {
       setIpLimit(result.login_ip_limit_per_minute);
       setUsernameLimit(result.login_username_failure_limit_per_5_minutes);
       setIssueInactiveDays(result.issue_inactive_days);
+      setPendingRestartFields(result.pending_restart_fields ?? []);
+      setRevision(result.revision ?? null);
       setMessage("设置已保存");
     } catch (e) {
       setSaveError(normalizeApiError(e));
@@ -409,6 +433,8 @@ export function AdminSettingsPage() {
         issueInactiveDays,
       );
       setIssueInactiveDays(result.issue_inactive_days);
+      setPendingRestartFields(result.pending_restart_fields ?? []);
+      setRevision(result.revision ?? null);
       setMessage("Issue 过期配置已保存");
     } catch (e) {
       setSaveError(normalizeApiError(e));
@@ -440,10 +466,36 @@ export function AdminSettingsPage() {
         cleanupExemptUsernames,
       );
       setCleanupExemptUsernames(result.cleanup_exempt_usernames ?? []);
+      setPendingRestartFields(result.pending_restart_fields ?? []);
+      setRevision(result.revision ?? null);
       setMessage("自动清理白名单已保存");
     } catch (e) {
       setSaveError(normalizeApiError(e));
       await load();
+    } finally {
+      setSaving(false);
+    }
+  };
+  const saveAdvancedSettings = async () => {
+    setFeedbackSection(null);
+    setSaving(true);
+    setMessage(null);
+    setSaveError(null);
+    try {
+      const changes = Object.fromEntries(
+        advancedFields.map((field) => {
+          const value = advancedDraft[field.key];
+          if (field.value_type === "integer") return [field.key, Number(value)];
+          return [field.key, value];
+        }),
+      );
+      const result = await rainApi.updateAdminSettingsV2(revision ?? "0", changes);
+      setRevision(result.revision ?? null);
+      setAdvancedDraft(result.configured ?? advancedDraft);
+      setPendingRestartFields(result.pending_restart_fields ?? []);
+      setMessage("运行参数已保存");
+    } catch (e) {
+      setSaveError(normalizeApiError(e));
     } finally {
       setSaving(false);
     }
@@ -491,6 +543,12 @@ export function AdminSettingsPage() {
           description="配置系统的注册、认证与过期策略，保障系统安全与稳定运行。"
         />
 
+        {pendingRestartFields.length > 0 ? (
+          <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="status">
+            已保存但需要手动重启后生效：{pendingRestartFields.join("、")}
+          </p>
+        ) : null}
+
         {loadError ? (
           <p
             className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
@@ -498,6 +556,56 @@ export function AdminSettingsPage() {
           >
             {loadError}
           </p>
+        ) : null}
+
+        {advancedFields.length > 0 ? (
+          <section className="rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur sm:p-6">
+            <h2 className="text-lg font-semibold text-slate-950">运行参数</h2>
+            <p className="mt-1 text-sm leading-6 text-slate-500">
+              配置值会从后端元数据读取；标记“重启生效”的项目保存后不会在线替换正在运行的并发资源。
+            </p>
+            <div className="mt-4 grid gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
+              {advancedFields.map((field) => {
+                const value = advancedDraft[field.key];
+                const label = `${field.description ?? field.key}${field.unit ? `（${field.unit}）` : ""}`;
+                return (
+                  <label key={field.key} className="space-y-1 text-sm text-slate-600">
+                    <span className="flex items-center justify-between gap-2">
+                      <span>{label}</span>
+                      <span className="text-xs text-slate-400">
+                        {field.apply_mode === "restart_required" ? "重启生效" : "即时生效"}
+                      </span>
+                    </span>
+                    {field.value_type === "boolean" ? (
+                      <input
+                        aria-label={field.key}
+                        type="checkbox"
+                        checked={Boolean(value)}
+                        disabled={controlsDisabled || saving}
+                        onChange={(event) => setAdvancedDraft((current) => ({ ...current, [field.key]: event.target.checked }))}
+                      />
+                    ) : (
+                      <input
+                        aria-label={field.key}
+                        type={field.value_type === "integer" ? "number" : "text"}
+                        min={field.min ?? undefined}
+                        max={field.max ?? undefined}
+                        value={Array.isArray(value) ? value.join(",") : String(value ?? "")}
+                        disabled={controlsDisabled || saving}
+                        onChange={(event) => setAdvancedDraft((current) => ({ ...current, [field.key]: event.target.value }))}
+                        className="w-full rounded-lg border border-slate-300 px-3 py-2"
+                      />
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+            <button type="button" className={`${primaryButtonClass} mt-5`} disabled={controlsDisabled || saving} onClick={() => void saveAdvancedSettings()}>
+              {saving ? "保存中…" : "保存运行参数"}
+            </button>
+            {saveError && !feedbackSection ? <p className="mt-3 text-sm text-rose-700" role="alert">保存失败：{saveError}</p> : null}
+            {message && !feedbackSection ? <p className="mt-3 text-sm text-emerald-700" role="status">{message}</p> : null}
+          </section>
         ) : null}
 
         <SettingsSection

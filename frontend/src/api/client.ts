@@ -37,6 +37,7 @@ import type {
 
 const API_BASE_URL = '';
 const ISSUE_CODE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+let adminSettingsRevision: string | undefined;
 
 export class ApiError extends Error {
   constructor(
@@ -151,7 +152,7 @@ export const rainApi = {
   deleteSkill(id: string) { return request<void>(`/api/me/skills/${encodePathSegment(id)}`, { method: 'DELETE' }); },
   reviewSkill(id: string) { return request<SkillReview>(`/api/me/skills/${encodePathSegment(id)}/review`, { method: 'POST' }); },
   fetchAiProvider() { return request<AiProviderSettings>('/api/admin/ai-provider'); },
-  updateAiProvider(payload: { base_url: string; api_key?: string; model: string; request_timeout_seconds: number }) { return request<AiProviderSettings>('/api/admin/ai-provider', { method: 'PUT', body: JSON.stringify(payload) }); },
+  updateAiProvider(payload: { expected_revision?: string; base_url: string; api_key?: string; model: string; request_timeout_seconds: number; structured_output?: 'json_object' | 'json_schema' }) { return request<AiProviderSettings>('/api/admin/ai-provider', { method: 'PUT', body: JSON.stringify(payload) }); },
   testAiProvider(payload?: { base_url: string; api_key: string; model: string; request_timeout_seconds: number }) { return request<{ ok: boolean; model: string }>('/api/admin/ai-provider/test', { method: 'POST', body: payload ? JSON.stringify(payload) : undefined }); },
   fetchAiProviderStatus() { return request<{ configured: boolean }>('/api/me/ai-provider-status'); },
   createSkillRun(issueCode: string, skillId: string, timeScope: SkillRunTimeScopeRequest | null = null) { return request<SkillRun>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/skill-runs`, { method: 'POST', body: JSON.stringify({ skill_id: skillId, time_scope: timeScope }) }); },
@@ -165,8 +166,17 @@ export const rainApi = {
     return request<AdminUserPage>(`/api/admin/users?${query}`);
   },
   fetchAuditLogs(cursor?: string) { return request<AuditLogPage>(`/api/admin/audit-logs${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`); },
-  fetchAdminSettings() { return request<RegistrationSettings>('/api/admin/settings'); },
-  updateAdminSettings(allow_registration?: boolean, login_ip_limit_per_minute?: number, login_username_failure_limit_per_5_minutes?: number, issue_inactive_days?: number, cleanup_exempt_usernames?: string[]) { return request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days, cleanup_exempt_usernames }) }); },
+  async fetchAdminSettings() {
+    const value = await request<RegistrationSettings>('/api/admin/settings');
+    adminSettingsRevision = value.revision;
+    return value;
+  },
+  async updateAdminSettings(allow_registration?: boolean, login_ip_limit_per_minute?: number, login_username_failure_limit_per_5_minutes?: number, issue_inactive_days?: number, cleanup_exempt_usernames?: string[]) {
+    const value = await request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ expected_revision: adminSettingsRevision, allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days, cleanup_exempt_usernames }) });
+    adminSettingsRevision = value.revision;
+    return value;
+  },
+  updateAdminSettingsV2(expected_revision: string, changes: Record<string, unknown>) { return request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ expected_revision, changes }) }); },
   fetchAuthRateLimits() { return request<AuthRateLimitsResponse>('/api/admin/auth-rate-limits'); },
   clearAuthRateLimit(type: 'usernames' | 'ips', key: string) { return request<void>(`/api/admin/auth-rate-limits/${type}/${encodePathSegment(key)}`, { method: 'DELETE' }); },
   clearAllAuthRateLimits(type: 'usernames' | 'ips') { return request<void>(`/api/admin/auth-rate-limits/${type}`, { method: 'DELETE' }); },

@@ -25,7 +25,34 @@ export interface AdminUserPage { items: AdminUser[]; next_cursor: string | null;
 export interface AuditLog { id: string; actor_type: 'USER' | 'SYSTEM'; actor_user_id: string | null; target_user_id: string | null; target_username: string | null; action: string; old_value: string | null; new_value: string | null; client_ip: string | null; user_agent?: string | null; created_at: string; }
 export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }
 export interface RegistrationStatus { allow_registration: boolean; }
-export interface RegistrationSettings extends RegistrationStatus { updated_at: string; updated_by_username: string | null; login_ip_limit_per_minute: number; login_username_failure_limit_per_5_minutes: number; issue_inactive_days: number; cleanup_exempt_usernames: string[]; }
+export interface RegistrationSettings extends RegistrationStatus {
+  schema_version?: number;
+  revision?: string;
+  updated_at: string;
+  updated_by_username: string | null;
+  login_ip_limit_per_minute: number;
+  login_username_failure_limit_per_5_minutes: number;
+  issue_inactive_days: number;
+  cleanup_exempt_usernames: string[];
+  configured?: Record<string, unknown>;
+  effective?: Record<string, unknown>;
+  restart_required?: boolean;
+  pending_restart_fields?: string[];
+  fields?: Array<{
+    key: string;
+    db_column: string;
+    env_name: string;
+    value_type?: string;
+    unit?: string | null;
+    default_value?: unknown;
+    default_rule?: string | null;
+    min?: number | null;
+    max?: number | null;
+    description?: string;
+    apply_mode: 'hot' | 'restart_required';
+    sensitive?: boolean;
+  }>;
+}
 export interface AuthRateLimitEntry { key: string; username: string | null; ip: string | null; current_count: number; limit: number; window_seconds: number; last_event_at: string | null; retry_after_seconds: number; limited: boolean; }
 export interface AuthRateLimitsResponse { username_failures: AuthRateLimitEntry[]; login_ips: AuthRateLimitEntry[]; }
 
@@ -281,10 +308,12 @@ export interface SkillPayload {
 
 export interface AiProviderSettings {
   configured: boolean;
+  revision?: string;
   source?: 'DATABASE' | 'ENVIRONMENT' | null;
   base_url?: string | null;
   model?: string | null;
   request_timeout_seconds: number;
+  structured_output?: 'json_object' | 'json_schema';
   api_key_mask?: string | null;
 }
 

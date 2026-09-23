@@ -92,6 +92,12 @@ pub async fn get_file_content(
     params: web::Path<FilePath>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    let settings = state.settings.snapshot().await;
+    let mut runtime_limits = state.limits.clone();
+    let mut runtime_auth = state.auth_runtime.config.clone();
+    settings
+        .effective
+        .apply_to_config(&mut runtime_limits, &mut runtime_auth);
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
     ensure_bundle_ready(&bundle)?;
@@ -102,7 +108,7 @@ pub async fn get_file_content(
     let preview = read_file_preview(
         &record,
         state.storage.blob_store.as_ref(),
-        &state.limits.api,
+        &runtime_limits.api,
     )
     .await?;
     touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "file content read").await;
@@ -116,6 +122,12 @@ pub async fn get_file_lines(
     query: web::Query<LinesQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
+    let settings = state.settings.snapshot().await;
+    let mut runtime_limits = state.limits.clone();
+    let mut runtime_auth = state.auth_runtime.config.clone();
+    settings
+        .effective
+        .apply_to_config(&mut runtime_limits, &mut runtime_auth);
     let _line_read = state.acquire_line_read(&request_client_key(&request))?;
     let FilePath { bundle_id, file_id } = params.into_inner();
     let bundle = load_bundle(&state.db.pool, &bundle_id).await?;
@@ -127,13 +139,13 @@ pub async fn get_file_lines(
     let start = query.start.unwrap_or(0).max(0);
     let limit = query
         .limit
-        .unwrap_or(state.limits.api.default_line_page_size)
-        .clamp(1, state.limits.api.max_line_page_size);
+        .unwrap_or(runtime_limits.api.default_line_page_size)
+        .clamp(1, runtime_limits.api.max_line_page_size);
     let lines = read_file_lines(
         &state.db.pool,
         &record,
         state.storage.blob_store.as_ref(),
-        &state.limits.api,
+        &runtime_limits.api,
         start,
         limit,
     )

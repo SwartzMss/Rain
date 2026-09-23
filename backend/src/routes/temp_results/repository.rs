@@ -77,6 +77,19 @@ pub(crate) async fn insert_staging_temp_result_with_retention(
     output_path: &Path,
     retention: Duration,
 ) -> Result<(), AppError> {
+    let _capacity_guard = state.temp_results.capacity_lock.lock().await;
+    let settings = state.settings.snapshot().await;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
+        .fetch_one(&state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+    if count >= settings.effective.temp_results_max_records {
+        return Err(AppError::api(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TEMP_RESULT_LIMIT",
+            "临时结果记录数已达到配置上限，请稍后重试",
+        ));
+    }
     let created_at = Utc::now();
     let expires_at = created_at + retention;
     let name = format!("filtered-{}.log", &id[..8]);
@@ -317,13 +330,15 @@ pub(crate) async fn delete_deleting_record(
 }
 
 pub(crate) async fn ensure_temp_result_budget(state: &web::Data<AppState>) -> Result<(), AppError> {
+    let settings = state.settings.snapshot().await;
     let (count, total): (i64, i64) =
         sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results")
             .fetch_one(&state.db.pool)
             .await
             .map_err(AppError::Database)?;
-    if count >= state.limits.temp_results.max_records
-        || total >= i64::try_from(state.limits.temp_results.max_total_size).unwrap_or(i64::MAX)
+    if count >= settings.effective.temp_results_max_records
+        || total
+            >= i64::try_from(settings.effective.temp_results_max_total_size).unwrap_or(i64::MAX)
     {
         return Err(AppError::api(
             StatusCode::TOO_MANY_REQUESTS,
@@ -339,6 +354,7 @@ pub(crate) async fn ensure_temp_result_capacity(
     size_bytes: i64,
     current_id: Option<&str>,
 ) -> Result<(), AppError> {
+    let settings = state.settings.snapshot().await;
     let (count, total): (i64, i64) = if let Some(current_id) = current_id {
         sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM temp_results WHERE id != ?",
@@ -360,8 +376,9 @@ pub(crate) async fn ensure_temp_result_capacity(
             "临时结果存储配额已用尽，请稍后重试",
         )
     })?;
-    if count >= state.limits.temp_results.max_records
-        || next_total > i64::try_from(state.limits.temp_results.max_total_size).unwrap_or(i64::MAX)
+    if count >= settings.effective.temp_results_max_records
+        || next_total
+            > i64::try_from(settings.effective.temp_results_max_total_size).unwrap_or(i64::MAX)
     {
         return Err(AppError::api(
             StatusCode::TOO_MANY_REQUESTS,
