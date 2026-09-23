@@ -130,7 +130,7 @@ pub async fn claim_publication(
                     .to_string_lossy()
                     .into_owned();
                 let result = sqlx::query(
-                    "UPDATE bundle_search_indexes SET backend = ?, schema_version = ?, tokenizer_version = ?, generation = ?, artifact_key = ?, state = 'BUILDING', built_at = NULL, last_error_code = NULL, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ? AND EXISTS (SELECT 1 FROM bundles WHERE id = bundle_search_indexes.bundle_id AND status = 'PROCESSING') AND (state IN ('LEGACY', 'READY', 'FAILED', 'NEEDS_REBUILD') OR (state = 'BUILDING' AND backend = 'sqlite_fts'))",
+                    "UPDATE bundle_search_indexes SET backend = ?, schema_version = ?, tokenizer_version = ?, generation = ?, artifact_key = ?, state = 'BUILDING', built_at = NULL, last_error_code = NULL, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ? AND pending_state='IDLE' AND pending_generation IS NULL AND EXISTS (SELECT 1 FROM bundles WHERE id = bundle_search_indexes.bundle_id AND status = 'PROCESSING') AND (state IN ('LEGACY', 'READY', 'FAILED', 'NEEDS_REBUILD') OR (state = 'BUILDING' AND backend = 'sqlite_fts'))",
                 )
                 .bind(backend)
                 .bind(TANTIVY_SCHEMA_VERSION)
@@ -899,6 +899,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("no longer available"));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn publication_retry_cannot_claim_cleanup_owned_row() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues(code,name,status) VALUES('RETRYCLAIM','Retry claim','ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-retryclaim','RETRYCLAIM','hash','retry claim','PROCESSING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state,pending_state) VALUES('bundle-retryclaim','tantivy',1,'FAILED','CLEANING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error =
+            super::claim_publication(&pool, "bundle-retryclaim", SearchBackendKind::Tantivy)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("already being built"));
         pool.close().await;
     }
 }
