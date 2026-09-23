@@ -1,31 +1,35 @@
-# Large log baseline (PR0)
+# Large log benchmark
 
-This opt-in tool measures the existing SQLite/CAS ingest pipeline and authenticated
-search handlers. It does not change the search implementation or schema. No GiB
-performance results are claimed here; collect release reports on the target host.
+This opt-in tool measures the selected search backend, CAS ingest pipeline, and
+authenticated search handlers. Set `RAIN_SEARCH_BACKEND` explicitly when
+comparing SQLite and Tantivy. No GiB performance results are claimed here;
+collect release reports on the target host.
 
 From `backend/`:
 
 ```sh
 # Small functional check (debug builds are fine for this check only).
+RAIN_SEARCH_BACKEND=sqlite_fts \
 RAIN_BENCH_BYTES=16384 RAIN_BENCH_CONCURRENCY=2 RAIN_BENCH_QUERIES=2 \
   cargo test --test large_log_benchmark large_log_baseline -- --ignored --exact
 
-# Tantivy resource-budget matrix. Use a build with the opt-in feature and
+# Tantivy resource-budget matrix. v0.1 builds include Tantivy by default;
 # compare one, two, and four concurrent Bundles on the same host.
 for concurrency in 1 2 4; do
   RAIN_SEARCH_BACKEND=tantivy \
   RAIN_BENCH_CONCURRENCY=$concurrency \
   RAIN_BENCH_REPORT=/tmp/rain-tantivy-c${concurrency}.jsonl \
-    cargo test --release --features tantivy-search --test large_log_benchmark \
+    cargo test --release --test large_log_benchmark \
       large_log_baseline -- --ignored --exact --nocapture
 done
 
 # Baseline: 100 MiB per bundle, one bundle, 20 samples per query/scope.
+RAIN_SEARCH_BACKEND=sqlite_fts \
 RAIN_BENCH_REPORT=/tmp/rain-baseline.jsonl \
   cargo test --release --test large_log_benchmark large_log_baseline -- --ignored --exact --nocapture
 
 # Example isolated GiB workload; repeat with concurrency 1, 2, and 4.
+RAIN_SEARCH_BACKEND=tantivy \
 RAIN_BENCH_BYTES=1073741824 RAIN_BENCH_CONCURRENCY=4 \
   RAIN_BENCH_QUERIES=100 RAIN_BENCH_ITERATIONS=3 \
   RAIN_BENCH_REPORT=/tmp/rain-1gib-c4.jsonl \

@@ -67,6 +67,11 @@ async fn main() -> std::io::Result<()> {
     prepare_schema(&pool, config.reset_db)
         .await
         .expect("failed to prepare database schema");
+    if config.search_backend == backend::search::publication::SearchBackendKind::Tantivy {
+        backend::search::publication::ensure_fresh_tantivy_data(&pool)
+            .await
+            .expect("v0.1 Tantivy requires a fresh data directory");
+    }
     backend::repositories::bootstrap_admin::bootstrap_admin(
         &pool,
         &config.bootstrap_admin.username,

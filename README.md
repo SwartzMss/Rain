@@ -2,7 +2,7 @@
 
 Rain 是一个本地日志包浏览与检索工具。当前版本用于把文本日志或 `.zip`、`.tar.gz`、`.tgz`、`.gz` 压缩包上传到一个 Issue 下，浏览递归解压后的文件树，分页查看文本内容，并按关键词搜索日志。
 
-默认使用 SQLite，本地启动不需要安装 PostgreSQL 或其他数据库服务。
+默认使用 Tantivy 作为日志搜索后端，SQLite 继续承担本地控制面；本地启动不需要安装 PostgreSQL 或其他数据库服务。v0.1.x 是全新初始版本，不兼容旧的 SQLite 搜索数据目录。
 
 ## 快速启动
 
@@ -149,7 +149,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS` | `4` | 并发 Multipart 接收任务 |
 | `RAIN_UPLOAD_MAX_TMP_BYTES` | `32 GiB` | 所有上传任务 `.tmp` 工作区的全局字节预算，包含原始接收文件和解压后的 staging 文件 |
 | `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
-| `RAIN_SEARCH_BACKEND` | `sqlite_fts` | Bundle 内容搜索后端；feature 构建可选 `tantivy` |
+| `RAIN_SEARCH_BACKEND` | `tantivy` | Bundle 内容搜索后端；v0.1.x 默认使用 Tantivy，`sqlite_fts` 仅用于兼容测试 |
 | `RAIN_SEARCH_TANTIVY_MAX_WRITERS` | `1` | Tantivy Bundle writer 并发上限 |
 | `RAIN_SEARCH_TANTIVY_WRITER_HEAP` | `64 MiB` | 单个 Tantivy writer heap 上限 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
@@ -260,7 +260,7 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 文件树浏览。
 - 文本文件分页读取，后端按行偏移索引快速跳转。
 - 单行默认超过 8 MiB 时索引和分页展示会截断该行，并标记 `[line truncated]`；该限制可配置。
-- Issue 范围和 bundle 范围采用 SQLite FTS5 trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符的关键词直接拒绝。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
+- Issue 范围和 Bundle 范围采用 Tantivy trigram 子字符串搜索，支持标识符、错误码和连续中文的部分匹配；少于 3 个字符的关键词直接拒绝。结果返回最多 400 字符的命中附近摘要，默认 50 条、最多 100 条。
 - 登录后的原始文件下载。
 - 用户私有 Skill 管理、当前版本质量评估，以及 Issue 范围的受限 AI 诊断。
 - 删除 Issue、Bundle、单个文件节点。
@@ -275,10 +275,10 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 - 临时搜索结果受单结果大小、全局总容量、记录数、并发物化数和按 IP 的请求频率共同限制；Preview 结果固定保留 30 分钟，完整结果固定保留 7 天，读取不会滑动续期；达到上限时不会继续创建结果文件。
 - 文件和临时结果行分页同时受近似字节预算、全局并发读取数和单客户端并发读取数限制，避免少数超大分页请求占满内存或 I/O；当单行的 JSON 编码结果仍超过分页预算时，服务端会返回带 `[response truncated]` 标记的有界前缀，并继续推进分页游标。
 - 搜索关键词少于 3 个字符会被拒绝，以避免公开接口执行无界的全文扫描。
-- SQLite 使用 WAL 和 30 秒 busy timeout；上传写库、Blob 维护、索引和清理通过进程内共享写入队列按事务排队。索引先解析再写入，每 5000 行或约 1 MiB 正文提交一次，并增量保存行偏移；遇到 `SQLITE_BUSY` 会回滚并重试完整批次，最多 3 次尝试。后台解压/索引任务默认最多 4 个并发，可通过 `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` 调整。
+- SQLite 使用 WAL 和 30 秒 busy timeout；上传写库、Blob 维护和清理通过进程内共享写入队列按事务排队。Tantivy 索引在独立 Bundle writer 中构建，不占用 SQLite writer admission；后台解压/索引任务默认最多 4 个并发，可通过 `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` 调整。
 - Bundle 清理默认每批 100 行，每批提交后重新排队，避免一次清理长期占用写入队列。此队列不能协调其他进程；同一数据库应由一个 Rain 实例使用，并放在本地文件系统上。
 - `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。
-- 搜索使用 SQLite FTS5 trigram external-content 索引；日志 chunk 正文仅存于 `log_segments.content`，FTS 不保存正文副本。
+- 搜索使用 Tantivy trigram 索引；日志 chunk 正文由 Bundle Tantivy artifact 持有，SQLite 只保存行定位和生命周期元数据。
 - 服务状态分为进程存活检查 `/healthz` 和依赖就绪检查 `/readyz`；页面顶部显示的是后者，检查 SQLite 和数据目录是否可用。`/readyz` 保留数据库写入后回滚的探测，结果缓存 5 秒，并发请求共享一次探测。
 - 真实文件使用 SHA-256 内容寻址 Blob 存储，保存到数据根目录下的 `blobs/<hash前两位>/<完整hash>`；多个 Bundle 中的相同内容只保存一份。
 - 文件字节访问统一经过 `BlobStore` 接口；当前使用 `LocalCasBlobStore`，上层业务不依赖本地物理路径。
@@ -299,8 +299,8 @@ Windows 手动验证时，可在启用 Defender 或目录索引的环境上传�
 
 默认数据都在仓库根目录下的 `data/`，该目录已被 `.gitignore` 忽略：
 
-- SQLite 数据库：`data/rain.db`
-- 上传和解压文件：`data/uploads/`
+- SQLite 控制数据库：`data/rain.db`
+- 上传、解压文件和 Tantivy 索引：`data/uploads/`
 - 后端运行日志：`log/YYYY-MM-DD.backend.log`（按天轮转）
 
 如果想清空本地数据，可以停止服务后删除 `data/`，或临时设置：
@@ -308,6 +308,8 @@ Windows 手动验证时，可在启用 Defender 或目录索引的环境上传�
 ```dotenv
 RESET_DB=true
 ```
+
+v0.1.x 不会迁移旧版本的 SQLite 搜索数据。若启动时提示需要新的数据目录，请备份后使用全新的 `DATABASE_URL` 和 `RAIN_DATA_ROOT`；旧日志需要重新上传。
 
 注意：`RESET_DB=true` 会删除当前应用 schema 和 migration metadata，再通过同一 migration chain 重建表，并清空配置的数据目录，仅适合本地调试或测试；不要在生产环境用它代替数据库升级。
 

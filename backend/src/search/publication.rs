@@ -20,8 +20,13 @@ pub enum SearchBackendKind {
 
 impl SearchBackendKind {
     pub fn parse(value: Option<&str>) -> Result<Self, AppError> {
+        let default_backend = if cfg!(feature = "tantivy-search") {
+            "tantivy"
+        } else {
+            "sqlite_fts"
+        };
         match value
-            .unwrap_or("sqlite_fts")
+            .unwrap_or(default_backend)
             .trim()
             .to_ascii_lowercase()
             .as_str()
@@ -51,6 +56,24 @@ impl SearchBackendKind {
             Self::Tantivy => "tantivy",
         }
     }
+}
+
+/// v0.1.x is a Tantivy-first release and does not migrate pre-release SQLite
+/// search data. Refuse to start against a database that still has a
+/// SQLite-backed Bundle so an upgrade cannot silently hide existing results.
+pub async fn ensure_fresh_tantivy_data(pool: &SqlitePool) -> Result<(), AppError> {
+    let legacy_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM bundle_search_indexes WHERE backend = 'sqlite_fts'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if legacy_count > 0 {
+        return Err(AppError::Config(
+            "v0.1 Tantivy requires a fresh data directory; existing SQLite search data must be removed before startup".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Build an artifact key from the immutable internal Bundle id and generation.
@@ -255,7 +278,77 @@ pub async fn cleanup_deleted_bundle_artifacts(
 
 #[cfg(test)]
 mod tests {
-    use super::{SearchBackendKind, artifact_relative_path, cleanup_deleted_bundle_artifacts};
+    use super::{
+        SearchBackendKind, artifact_relative_path, cleanup_deleted_bundle_artifacts,
+        ensure_fresh_tantivy_data,
+    };
+
+    #[cfg(feature = "tantivy-search")]
+    #[test]
+    fn v01_defaults_to_tantivy() {
+        assert_eq!(
+            SearchBackendKind::parse(None).unwrap(),
+            SearchBackendKind::Tantivy
+        );
+    }
+
+    #[cfg(not(feature = "tantivy-search"))]
+    #[test]
+    fn no_feature_build_keeps_sqlite_default_for_tooling() {
+        assert_eq!(
+            SearchBackendKind::parse(None).unwrap(),
+            SearchBackendKind::SqliteFts
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_database_is_valid_for_tantivy_first_startup() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        ensure_fresh_tantivy_data(&pool).await.unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_bundle_is_rejected_for_v01_tantivy_startup() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name) VALUES('LEGACY','Legacy')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-legacy','LEGACY','hash','legacy','READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,state) VALUES('bundle-legacy','sqlite_fts','LEGACY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = ensure_fresh_tantivy_data(&pool).await.unwrap_err();
+        assert!(error.to_string().contains("fresh data directory"));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn tantivy_only_database_is_valid_for_restart() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name) VALUES('V01','v0.1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-v01','V01','hash','v0.1','READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE bundle_search_indexes SET backend='tantivy', state='READY', generation=1 WHERE bundle_id='bundle-v01'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        ensure_fresh_tantivy_data(&pool).await.unwrap();
+        pool.close().await;
+    }
 
     #[test]
     fn artifact_paths_use_only_internal_ids_and_generations() {
