@@ -10,6 +10,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::AppError;
 
+/// Maximum number of Tantivy query tasks allowed to execute in one process.
+/// Issue searches add a smaller per-request limit on top of this budget.
+pub const MAX_CONCURRENT_TANTIVY_QUERIES: usize = 4;
+
 #[derive(Clone)]
 pub struct SearchResourceBudget {
     writer_permits: Arc<Semaphore>,
