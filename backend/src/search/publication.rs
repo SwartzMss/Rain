@@ -331,7 +331,7 @@ pub async fn cleanup_unpublished_artifacts(
     data_root: &std::path::Path,
 ) -> Result<u64, AppError> {
     let rows: Vec<(String, String, i64, Option<i64>, String)> = sqlx::query_as(
-        "SELECT bundle_id, state, generation, pending_generation, pending_state FROM bundle_search_indexes WHERE (pending_state='FAILED' AND pending_generation IS NOT NULL) OR (state IN ('BUILDING','FAILED') AND pending_state='IDLE' AND generation>0) OR (pending_state='CLEANING' AND datetime(updated_at) <= datetime('now','-5 minutes'))",
+        "SELECT bundle_id, state, generation, pending_generation, pending_state FROM bundle_search_indexes WHERE (pending_state='FAILED' AND pending_generation IS NOT NULL) OR (state='FAILED' AND pending_state='IDLE' AND generation>0) OR (state='BUILDING' AND pending_state='IDLE' AND generation>0 AND datetime(updated_at) <= datetime('now','-5 minutes')) OR (pending_state='CLEANING' AND datetime(updated_at) <= datetime('now','-5 minutes'))",
     )
     .fetch_all(pool)
     .await
@@ -768,6 +768,10 @@ mod tests {
         ));
         let artifact = root.join(artifact_relative_path("bundle-building", generation).unwrap());
         tokio::fs::create_dir_all(&artifact).await.unwrap();
+        sqlx::query("UPDATE bundle_search_indexes SET updated_at=datetime('now','-10 minutes') WHERE bundle_id='bundle-building'")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let removed = cleanup_unpublished_artifacts(&pool, &root).await.unwrap();
         assert_eq!(removed, 1);
@@ -789,6 +793,45 @@ mod tests {
                 .await
                 .is_ok()
         );
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn active_initial_building_publication_is_not_cleaned() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name) VALUES('ACTIVEBUILD','Active build')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-activebuild','ACTIVEBUILD','hash','active build','PROCESSING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let generation =
+            super::claim_publication(&pool, "bundle-activebuild", SearchBackendKind::Tantivy)
+                .await
+                .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "rain-search-active-building-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let artifact = root.join(artifact_relative_path("bundle-activebuild", generation).unwrap());
+        tokio::fs::create_dir_all(&artifact).await.unwrap();
+
+        assert_eq!(
+            cleanup_unpublished_artifacts(&pool, &root).await.unwrap(),
+            0
+        );
+        assert!(artifact.exists());
+        let state: (String, i64, String) = sqlx::query_as(
+            "SELECT state,generation,pending_state FROM bundle_search_indexes WHERE bundle_id='bundle-activebuild'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, ("BUILDING".into(), generation, "IDLE".into()));
         pool.close().await;
         let _ = tokio::fs::remove_dir_all(root).await;
     }
