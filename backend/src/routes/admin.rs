@@ -12,28 +12,6 @@ use crate::{
     services::issue_cleanup_policy::IssueCleanupPolicy,
 };
 
-type SettingsRow = (i64, String, Option<String>, i64, i64, i64, String);
-type ExistingSettingsRow = (i64, i64, i64, i64, String);
-
-async fn fetch_settings(pool: &sqlx::SqlitePool) -> Result<RegistrationSettings, AppError> {
-    let row: SettingsRow = sqlx::query_as(
-        "SELECT s.allow_registration, s.updated_at, u.username AS updated_by_username, s.login_ip_limit_per_minute, s.login_username_failure_limit_per_5_minutes, s.issue_inactive_days, s.cleanup_exempt_usernames_json FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-    let policy = IssueCleanupPolicy::from_json(&row.6).map_err(AppError::Config)?;
-    Ok(RegistrationSettings {
-        allow_registration: row.0,
-        updated_at: row.1,
-        updated_by_username: row.2,
-        login_ip_limit_per_minute: row.3,
-        login_username_failure_limit_per_5_minutes: row.4,
-        issue_inactive_days: row.5,
-        cleanup_exempt_usernames: policy.usernames_sorted(),
-    })
-}
-
 fn limit(value: Option<i64>) -> Result<i64, AppError> {
     let value = value.unwrap_or(50);
     if !(1..=100).contains(&value) {
@@ -289,21 +267,10 @@ pub async fn get_settings(
     _admin: RequireAdmin,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    crate::db::load_or_initialize_registration_setting(
-        &state.db.pool,
-        state.auth_runtime.registration_allowed(),
-    )
-    .await?;
-    let settings = fetch_settings(&state.db.pool).await?;
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "allow_registration": settings.allow_registration != 0,
-        "updated_at": settings.updated_at,
-        "updated_by_username": settings.updated_by_username,
-        "login_ip_limit_per_minute": settings.login_ip_limit_per_minute,
-        "login_username_failure_limit_per_5_minutes": settings.login_username_failure_limit_per_5_minutes,
-        "issue_inactive_days": settings.issue_inactive_days,
-        "cleanup_exempt_usernames": settings.cleanup_exempt_usernames,
-    })))
+    let snapshot = state.settings.load().await?;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store, private"))
+        .json(settings_response_with_metadata(&state, &snapshot).await?))
 }
 
 #[patch("/admin/settings")]
@@ -313,159 +280,232 @@ pub async fn update_settings(
     state: web::Data<AppState>,
     body: web::Json<UpdateRegistrationSettings>,
 ) -> Result<HttpResponse, AppError> {
-    let _settings_guard = state.auth_runtime.registration_settings_lock.lock().await;
-    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, ?)")
-        .bind(state.auth_runtime.registration_allowed() as i64)
-        .execute(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-    let old: ExistingSettingsRow = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days, cleanup_exempt_usernames_json FROM system_settings WHERE id=1")
-        .fetch_one(&state.db.pool).await.map_err(AppError::Database)?;
-    let ip_limit = body.login_ip_limit_per_minute.unwrap_or_else(|| {
-        state
-            .auth_runtime
-            .login_ip_limit_per_minute
-            .load(std::sync::atomic::Ordering::Acquire)
-    });
-    let username_limit = body
-        .login_username_failure_limit_per_5_minutes
-        .unwrap_or_else(|| {
-            state
-                .auth_runtime
-                .login_username_failure_limit_per_5_minutes
-                .load(std::sync::atomic::Ordering::Acquire)
-        });
-    if !(1..=1000).contains(&ip_limit) || !(1..=100).contains(&username_limit) {
+    let current = state.settings.load().await?;
+    if let Some(value) = body.issue_inactive_days.as_ref()
+        && !value
+            .as_i64()
+            .is_some_and(|days| days == 0 || (7..=30).contains(&days))
+    {
+        return Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "INVALID_ISSUE_INACTIVE_DAYS",
+            "Issue 非活跃天数必须为 0，或 7 到 30 的整数",
+        ));
+    }
+    if body
+        .login_ip_limit_per_minute
+        .is_some_and(|value| !(1..=1000).contains(&value))
+        || body
+            .login_username_failure_limit_per_5_minutes
+            .is_some_and(|value| !(1..=100).contains(&value))
+    {
         return Err(AppError::api(
             StatusCode::BAD_REQUEST,
             "INVALID_RATE_LIMIT",
             "IP 限流阈值必须为 1 到 1000，用户名限流阈值必须为 1 到 100",
         ));
     }
-    let issue_inactive_days = match body.issue_inactive_days.as_ref() {
-        None => old.3 as usize,
-        Some(value) => value
-            .as_i64()
-            .filter(|days| *days == 0 || (7..=30).contains(days))
-            .map(|days| days as usize)
-            .ok_or_else(|| {
-                AppError::api(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_ISSUE_INACTIVE_DAYS",
-                    "Issue 非活跃天数必须为 0，或 7 到 30 的整数",
-                )
-            })?,
-    };
-    let cleanup_policy = match body.cleanup_exempt_usernames.as_ref() {
-        None => None,
-        Some(None) => {
-            return Err(AppError::api(
-                StatusCode::BAD_REQUEST,
-                "INVALID_CLEANUP_EXEMPT_USERS",
-                "自动清理白名单必须为用户名数组",
-            ));
-        }
-        Some(Some(usernames)) => Some(IssueCleanupPolicy::from_usernames(usernames).map_err(
-            |username| {
-                AppError::public(
-                    StatusCode::BAD_REQUEST,
-                    "INVALID_CLEANUP_EXEMPT_USERS",
-                    format!("自动清理白名单中的用户名无效：{username}"),
-                )
-            },
-        )?),
-    };
-    let cleanup_json = cleanup_policy
-        .as_ref()
-        .map(|policy| policy.exempt_usernames_json().to_owned())
-        .unwrap_or_else(|| old.4.clone());
-    let mut settings_tx = state.db.pool.begin().await.map_err(AppError::Database)?;
-    let allow_registration = body.allow_registration.unwrap_or(old.0 != 0);
-    sqlx::query("UPDATE system_settings SET allow_registration=?, login_ip_limit_per_minute=?, login_username_failure_limit_per_5_minutes=?, issue_inactive_days=?, cleanup_exempt_usernames_json=?, cleanup_exempt_users_initialized=1, updated_by_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=1")
-        .bind(allow_registration as i64).bind(ip_limit as i64).bind(username_limit as i64).bind(issue_inactive_days as i64).bind(&cleanup_json).bind(&admin.0.id).execute(&mut *settings_tx).await.map_err(AppError::Database)?;
-    let mut auth_changes = Vec::new();
-    if old.0 != allow_registration as i64 {
-        auth_changes.push(format!(
-            "registration:{}->{}",
-            old.0 != 0,
-            allow_registration
+    let mut changes = body.changes.clone().unwrap_or_default();
+    if body.changes.is_some()
+        && (body.allow_registration.is_some()
+            || body.login_ip_limit_per_minute.is_some()
+            || body.login_username_failure_limit_per_5_minutes.is_some()
+            || body.issue_inactive_days.is_some()
+            || body.cleanup_exempt_usernames.is_some())
+    {
+        return Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "SETTINGS_INVALID_REQUEST",
+            "changes 与旧版扁平字段不能同时使用",
         ));
     }
-    if old.1 != ip_limit as i64 {
-        auth_changes.push(format!("ip_limit:{}->{ip_limit}", old.1));
+    if body.changes.is_none() {
+        if let Some(value) = body.allow_registration {
+            changes.insert("allow_registration".into(), serde_json::json!(value));
+        }
+        if let Some(value) = body.login_ip_limit_per_minute {
+            changes.insert("login_ip_limit_per_minute".into(), serde_json::json!(value));
+        }
+        if let Some(value) = body.login_username_failure_limit_per_5_minutes {
+            changes.insert(
+                "login_username_failure_limit_per_5_minutes".into(),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(value) = &body.issue_inactive_days {
+            changes.insert("issue_inactive_days".into(), value.clone());
+        }
+        if let Some(value) = &body.cleanup_exempt_usernames {
+            let value = value.clone().ok_or_else(|| {
+                AppError::api(
+                    StatusCode::BAD_REQUEST,
+                    "SETTINGS_INVALID_REQUEST",
+                    "白名单必须为用户名数组",
+                )
+            })?;
+            let policy = IssueCleanupPolicy::from_usernames(&value).map_err(|username| {
+                AppError::public(
+                    StatusCode::BAD_REQUEST,
+                    "SETTINGS_INVALID_REQUEST",
+                    format!("自动清理白名单中的用户名无效：{username}"),
+                )
+            })?;
+            changes.insert(
+                "cleanup_exempt_usernames".into(),
+                serde_json::from_str(policy.exempt_usernames_json())
+                    .map_err(|error| AppError::Config(error.to_string()))?,
+            );
+        }
     }
-    if old.2 != username_limit as i64 {
-        auth_changes.push(format!("username_limit:{}->{username_limit}", old.2));
-    }
-    let issue_changed = old.3 != issue_inactive_days as i64;
-    let cleanup_changed = old.4 != cleanup_json;
+    let expected_revision = match body.expected_revision.as_ref() {
+        Some(value) => parse_revision(value)?,
+        None if body.changes.is_some() => {
+            return Err(AppError::api(
+                StatusCode::PRECONDITION_REQUIRED,
+                "SETTINGS_REVISION_REQUIRED",
+                "保存配置必须携带 revision，请刷新后重试",
+            ));
+        }
+        // Keep the pre-v2 flat request usable for existing operators. New
+        // clients use `changes` and must provide an explicit revision.
+        None => current.revision,
+    };
     let client_ip = req.peer_addr().map(|address| address.ip().to_string());
     let user_agent = req
         .headers()
         .get("user-agent")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    if !auth_changes.is_empty() {
-        sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?,'AUTH_SETTINGS_UPDATED',?,?,?,?)")
-            .bind(Uuid::new_v4().to_string())
-            .bind(&admin.0.id)
-            .bind(format!("registration={};ip_limit={};username_limit={}", old.0 != 0, old.1, old.2))
-            .bind(auth_changes.join(";"))
-            .bind(client_ip.as_deref())
-            .bind(user_agent.as_deref())
-            .execute(&mut *settings_tx)
-            .await
-            .map_err(AppError::Database)?;
-    }
-    if issue_changed {
-        sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?,'ISSUE_INACTIVE_SETTINGS_UPDATED',?,?,?,?)")
-            .bind(Uuid::new_v4().to_string())
-            .bind(&admin.0.id)
-            .bind(format!("issue_inactive_days={}", old.3))
-            .bind(format!("issue_inactive_days={issue_inactive_days}"))
-            .bind(client_ip.as_deref())
-            .bind(user_agent.as_deref())
-            .execute(&mut *settings_tx)
-            .await
-            .map_err(AppError::Database)?;
-    }
-    if cleanup_changed {
-        sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?,'ISSUE_CLEANUP_EXEMPT_USERS_UPDATED',?,?,?,?)")
-            .bind(Uuid::new_v4().to_string())
-            .bind(&admin.0.id)
-            .bind(&old.4)
-            .bind(&cleanup_json)
-            .bind(client_ip.as_deref())
-            .bind(user_agent.as_deref())
-            .execute(&mut *settings_tx)
-            .await
-            .map_err(AppError::Database)?;
-    }
-    settings_tx.commit().await.map_err(AppError::Database)?;
+        .and_then(|value| value.to_str().ok());
+    let result = state
+        .settings
+        .save_with_context(
+            expected_revision,
+            &changes,
+            Some(&admin.0.id),
+            client_ip.as_deref(),
+            user_agent,
+        )
+        .await?;
     state
         .auth_runtime
-        .set_registration_allowed(allow_registration);
-    state
-        .auth_runtime
-        .login_ip_limit_per_minute
-        .store(ip_limit, std::sync::atomic::Ordering::Release);
+        .set_registration_allowed(result.snapshot.effective.allow_registration);
+    state.auth_runtime.login_ip_limit_per_minute.store(
+        result.snapshot.effective.login_ip_limit_per_minute,
+        std::sync::atomic::Ordering::Release,
+    );
     state
         .auth_runtime
         .login_username_failure_limit_per_5_minutes
-        .store(username_limit, std::sync::atomic::Ordering::Release);
-    state
-        .issue_inactive_days
-        .store(issue_inactive_days, std::sync::atomic::Ordering::Release);
-    let settings = fetch_settings(&state.db.pool).await?;
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "allow_registration": settings.allow_registration != 0,
-        "updated_at": settings.updated_at,
-        "updated_by_username": settings.updated_by_username,
-        "login_ip_limit_per_minute": settings.login_ip_limit_per_minute,
-        "login_username_failure_limit_per_5_minutes": settings.login_username_failure_limit_per_5_minutes,
-        "issue_inactive_days": settings.issue_inactive_days,
-        "cleanup_exempt_usernames": settings.cleanup_exempt_usernames,
-    })))
+        .store(
+            result
+                .snapshot
+                .effective
+                .login_username_failure_limit_per_5_minutes,
+            std::sync::atomic::Ordering::Release,
+        );
+    state.auth_runtime.session_ttl_seconds.store(
+        result.snapshot.effective.session_ttl_seconds,
+        std::sync::atomic::Ordering::Release,
+    );
+    state.auth_runtime.register_ip_limit_per_hour.store(
+        result.snapshot.effective.register_ip_limit_per_hour,
+        std::sync::atomic::Ordering::Release,
+    );
+    state.line_read_per_client.store(
+        result
+            .snapshot
+            .effective
+            .api_concurrent_line_reads_per_client,
+        std::sync::atomic::Ordering::Release,
+    );
+    state.upload.tmp_max_bytes.store(
+        result.snapshot.effective.upload_max_tmp_bytes,
+        std::sync::atomic::Ordering::Release,
+    );
+    state.issue_inactive_days.store(
+        result.snapshot.effective.issue_inactive_days,
+        std::sync::atomic::Ordering::Release,
+    );
+    let cleanup_policy =
+        IssueCleanupPolicy::from_usernames(&result.snapshot.effective.cleanup_exempt_usernames)
+            .map_err(|username| {
+                AppError::Config(format!("saved cleanup whitelist is invalid: {username}"))
+            })?;
+    state.set_cleanup_policy(cleanup_policy);
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store, private"))
+        .json(
+            settings_response_with_metadata(&state, &std::sync::Arc::new(result.snapshot)).await?,
+        ))
+}
+
+fn parse_revision(value: &serde_json::Value) -> Result<i64, AppError> {
+    let parsed = match value {
+        serde_json::Value::String(value) => value.parse::<i64>().ok(),
+        serde_json::Value::Number(value) => value.as_i64(),
+        _ => None,
+    };
+    parsed.filter(|revision| *revision >= 0).ok_or_else(|| {
+        AppError::api(
+            StatusCode::BAD_REQUEST,
+            "SETTINGS_INVALID_REQUEST",
+            "expected_revision 必须是非负十进制整数",
+        )
+    })
+}
+
+async fn settings_response_with_metadata(
+    state: &web::Data<AppState>,
+    snapshot: &std::sync::Arc<crate::settings::SettingsSnapshot>,
+) -> Result<serde_json::Value, AppError> {
+    let (updated_at, updated_by_username): (String, Option<String>) = sqlx::query_as(
+        "SELECT s.updated_at,u.username FROM system_settings s LEFT JOIN users u ON u.id=s.updated_by_user_id WHERE s.id=1",
+    )
+    .fetch_one(&state.db.pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut response = settings_response(snapshot);
+    response["updated_at"] = serde_json::Value::String(updated_at);
+    response["updated_by_username"] = updated_by_username
+        .map(serde_json::Value::String)
+        .unwrap_or(serde_json::Value::Null);
+    Ok(response)
+}
+
+fn settings_response(
+    snapshot: &std::sync::Arc<crate::settings::SettingsSnapshot>,
+) -> serde_json::Value {
+    let configured =
+        serde_json::to_value(&snapshot.configured).unwrap_or_else(|_| serde_json::json!({}));
+    let effective =
+        serde_json::to_value(&snapshot.effective).unwrap_or_else(|_| serde_json::json!({}));
+    let restart_fields = [
+        "argon2_concurrency",
+        "upload_concurrent_processing_tasks",
+        "upload_concurrent_receive_tasks",
+        "indexing_max_indexed_line_size",
+        "search_tantivy_max_writers",
+        "search_tantivy_writer_heap_size",
+        "api_concurrent_line_reads",
+        "temp_results_concurrent_materializations",
+    ];
+    let pending_restart_fields: Vec<&str> = restart_fields
+        .into_iter()
+        .filter(|field| configured.get(*field) != effective.get(*field))
+        .collect();
+    serde_json::json!({
+        "schema_version": 2,
+        "revision": snapshot.revision.to_string(),
+        "allow_registration": snapshot.configured.allow_registration,
+        "login_ip_limit_per_minute": snapshot.configured.login_ip_limit_per_minute,
+        "login_username_failure_limit_per_5_minutes": snapshot.configured.login_username_failure_limit_per_5_minutes,
+        "issue_inactive_days": snapshot.configured.issue_inactive_days,
+        "cleanup_exempt_usernames": snapshot.configured.cleanup_exempt_usernames,
+        "configured": configured,
+        "effective": effective,
+        "restart_required": !pending_restart_fields.is_empty(),
+        "pending_restart_fields": pending_restart_fields,
+        "fields": crate::settings::metadata::all(),
+    })
 }
 
 #[get("/admin/users")]

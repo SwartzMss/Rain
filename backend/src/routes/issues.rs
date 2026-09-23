@@ -342,11 +342,9 @@ async fn cleanup_inactive_issues_with_lease(
     let days = state
         .issue_inactive_days
         .load(std::sync::atomic::Ordering::Acquire);
-    let cleanup_policy = crate::db::load_or_initialize_cleanup_exempt_users(
-        &state.db.pool,
-        &state.issue_cleanup_policy,
-    )
-    .await?;
+    let runtime_policy = state.current_cleanup_policy();
+    let cleanup_policy =
+        crate::db::load_or_initialize_cleanup_exempt_users(&state.db.pool, &runtime_policy).await?;
     let exempt_users = cleanup_policy.exempt_usernames_json().to_owned();
     let deleting: Vec<(String, Option<String>, String, i64)> = sqlx::query_as(
         "SELECT issues.code, issues.owner_user_id, issues.last_activity_at, issues.inactive_claim_days FROM issues LEFT JOIN users cleanup_owner ON cleanup_owner.id = issues.owner_user_id WHERE issues.status='DELETING' AND issues.deletion_reason='INACTIVE' AND issues.inactive_claim_days IS NOT NULL AND (issues.deletion_retry_at IS NULL OR datetime(issues.deletion_retry_at) <= datetime('now')) AND (issues.deletion_lease_until IS NULL OR datetime(issues.deletion_lease_until) <= datetime('now')) AND NOT EXISTS (SELECT 1 FROM json_each(?) exempt WHERE exempt.value = cleanup_owner.username_normalized) ORDER BY COALESCE(issues.deletion_retry_at, ''), issues.code LIMIT 20",
@@ -363,7 +361,7 @@ async fn cleanup_inactive_issues_with_lease(
             &code,
             &lease_token,
             lease_seconds,
-            &state.issue_cleanup_policy,
+            &runtime_policy,
         )
         .await?
         {
@@ -377,7 +375,7 @@ async fn cleanup_inactive_issues_with_lease(
             claimed_days as usize,
             &lease_token,
             lease_seconds,
-            &state.issue_cleanup_policy,
+            &runtime_policy,
         )
         .await
         {
@@ -410,7 +408,7 @@ async fn cleanup_inactive_issues_with_lease(
             days,
             &lease_token,
             lease_seconds,
-            &state.issue_cleanup_policy,
+            &runtime_policy,
         )
         .await?
         {
@@ -424,7 +422,7 @@ async fn cleanup_inactive_issues_with_lease(
             days,
             &lease_token,
             lease_seconds,
-            &state.issue_cleanup_policy,
+            &runtime_policy,
         )
         .await
         {
@@ -772,6 +770,7 @@ pub async fn delete_issue(
             .bind(issue_code).execute(conn).await.map_err(AppError::Database)?.rows_affected())
     })).await?;
     let newly_claimed = claimed == 1;
+    let runtime_policy = state.current_cleanup_policy();
     if claimed == 0 {
         let issue_state: Option<(String, Option<String>)> =
             sqlx::query_as("SELECT status, deletion_reason FROM issues WHERE code = ?")
@@ -789,7 +788,7 @@ pub async fn delete_issue(
                     &state.db.pool,
                     &issue_code,
                     &user.0.id,
-                    &state.issue_cleanup_policy,
+                    &runtime_policy,
                 )
                 .await?
                 {

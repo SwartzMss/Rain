@@ -536,7 +536,11 @@ impl<'a> SkillToolExecutor<'a> {
             end_line: i64,
             snippet: String,
         }
-        let max_hits = self.state.limits.api.max_search_results.clamp(1, 20);
+        let settings = self.state.settings.snapshot().await;
+        let max_hits = settings
+            .effective
+            .api_max_search_results
+            .clamp(1, 20);
         let result = SqliteFtsSearchIndex::new(self.state.db.pool.clone())
             .search_skill(SkillSearchRequest {
                 issue_code: self.context.issue_code.clone(), query: query.to_owned(),
@@ -631,7 +635,12 @@ impl<'a> SkillToolExecutor<'a> {
             self.record_output(&value)?;
             return Ok(value);
         }
+        let settings = self.state.settings.snapshot().await;
         let mut api = self.state.limits.api.clone();
+        api.default_line_page_size = settings.effective.api_default_line_page_size;
+        api.max_line_page_size = settings.effective.api_max_line_page_size;
+        api.max_line_page_bytes = settings.effective.api_max_line_page_bytes;
+        api.max_preview_line_size = settings.effective.api_max_preview_line_size;
         api.max_preview_line_size = api.max_preview_line_size.min(MAX_SKILL_LINE_BYTES);
         let mut lines = Vec::new();
         for (unseen_start, unseen_end) in unseen {

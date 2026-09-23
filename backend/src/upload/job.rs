@@ -85,6 +85,7 @@ pub struct UploadJob {
     pub request_id: Option<String>,
     pub issue_code: String,
     pub issue_max_content_size: u64,
+    pub settings: crate::settings::SettingsService,
     pub bundle_id: String,
     pub bundle_hash: String,
     pub files: Vec<UploadedFile>,
@@ -265,11 +266,17 @@ async fn process_upload_files_and_publish(
 ) -> Result<(), AppError> {
     let archive_budget = ArchiveBudget::new(job.archive_config.clone())
         .with_temp_budget(job.receive_reservation.temp_budget());
+    let current_issue_limit = job
+        .settings
+        .snapshot()
+        .await
+        .effective
+        .issue_max_content_size;
     let issue_quota = IssueQuota::new(
         job.pool.clone(),
         &job.issue_code,
         &job.bundle_id,
-        job.issue_max_content_size,
+        current_issue_limit,
     );
 
     crate::upload::lifecycle::set_bundle_stage(&job.pool, &job.bundle_id, "VALIDATING").await?;

@@ -1,0 +1,36 @@
+ALTER TABLE system_settings ADD COLUMN session_ttl_seconds INTEGER;
+ALTER TABLE system_settings ADD COLUMN register_ip_limit_per_hour INTEGER;
+ALTER TABLE system_settings ADD COLUMN argon2_concurrency INTEGER;
+ALTER TABLE system_settings ADD COLUMN issue_max_content_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN archive_max_working_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN upload_concurrent_processing_tasks INTEGER;
+ALTER TABLE system_settings ADD COLUMN upload_concurrent_receive_tasks INTEGER;
+ALTER TABLE system_settings ADD COLUMN upload_max_tmp_bytes INTEGER;
+ALTER TABLE system_settings ADD COLUMN indexing_max_indexed_line_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN search_tantivy_max_writers INTEGER;
+ALTER TABLE system_settings ADD COLUMN search_tantivy_writer_heap_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_file_preview_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_max_preview_line_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_default_line_page_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_max_line_page_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_max_line_page_bytes INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_concurrent_line_reads INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_concurrent_line_reads_per_client INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_default_search_results INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_max_search_results INTEGER;
+ALTER TABLE system_settings ADD COLUMN api_max_search_window INTEGER;
+ALTER TABLE system_settings ADD COLUMN temp_results_max_result_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN temp_results_max_total_size INTEGER;
+ALTER TABLE system_settings ADD COLUMN temp_results_max_records INTEGER;
+ALTER TABLE system_settings ADD COLUMN temp_results_concurrent_materializations INTEGER;
+ALTER TABLE system_settings ADD COLUMN temp_results_max_sources INTEGER;
+ALTER TABLE system_settings ADD COLUMN temp_results_max_scan_bytes INTEGER;
+ALTER TABLE system_settings ADD COLUMN temp_results_max_scan_duration_seconds INTEGER;
+ALTER TABLE system_settings ADD COLUMN revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0);
+
+ALTER TABLE admin_audit_logs ADD COLUMN operation_id TEXT;
+ALTER TABLE admin_audit_logs ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_operation_id ON admin_audit_logs(operation_id);
+
+ALTER TABLE ai_provider_settings ADD COLUMN structured_output TEXT;
+ALTER TABLE ai_provider_settings ADD COLUMN provider_revision INTEGER NOT NULL DEFAULT 0 CHECK(provider_revision >= 0);

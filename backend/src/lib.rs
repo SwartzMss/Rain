@@ -11,6 +11,7 @@ pub mod repositories;
 pub mod routes;
 pub mod search;
 pub mod services;
+pub mod settings;
 pub mod skill_schema;
 pub mod upload;
 
@@ -36,6 +37,7 @@ use crate::config::{AiProviderEnv, AppLimits, AuthConfig};
 use crate::error::AppError;
 use crate::search::resource::SearchResourceBudget;
 use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
+use crate::settings::SettingsService;
 
 #[derive(Debug, Clone)]
 pub struct RequestLogId(pub String);
@@ -106,6 +108,7 @@ pub struct UploadRuntime {
     pub processing_permits: Arc<Semaphore>,
     pub receive_permits: Arc<Semaphore>,
     pub tmp_bytes: Arc<AtomicU64>,
+    pub tmp_max_bytes: Arc<AtomicU64>,
     pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
 }
 
@@ -130,6 +133,7 @@ impl UploadRuntime {
             processing_permits: Arc::new(Semaphore::new(processing)),
             receive_permits: Arc::new(Semaphore::new(receiving)),
             tmp_bytes: Arc::new(AtomicU64::new(0)),
+            tmp_max_bytes: Arc::new(AtomicU64::new(u64::MAX)),
             temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
         }
     }
@@ -159,6 +163,8 @@ impl TempResultRuntime {
 
 pub struct AuthRuntime {
     pub config: AuthConfig,
+    pub session_ttl_seconds: AtomicU64,
+    pub register_ip_limit_per_hour: AtomicUsize,
     pub allow_registration: AtomicBool,
     pub login_ip_limit_per_minute: AtomicUsize,
     pub login_username_failure_limit_per_5_minutes: AtomicUsize,
@@ -354,6 +360,8 @@ impl AuthRuntime {
         let username_limit = config.login_username_failure_limit_per_5_minutes;
         Self {
             hash_permits: Arc::new(Semaphore::new(config.argon2_concurrency)),
+            session_ttl_seconds: AtomicU64::new(config.session_ttl_seconds),
+            register_ip_limit_per_hour: AtomicUsize::new(config.register_ip_limit_per_hour),
             config,
             allow_registration: AtomicBool::new(allow_registration),
             login_ip_limit_per_minute: AtomicUsize::new(ip_limit),
@@ -389,6 +397,7 @@ pub struct AppState {
     pub search: SearchRuntime,
     pub temp_results: TempResultRuntime,
     pub line_read_permits: Arc<Semaphore>,
+    pub line_read_per_client: AtomicUsize,
     pub line_read_clients: Arc<Mutex<HashMap<String, usize>>>,
     pub auth_runtime: AuthRuntime,
     pub ai_provider: AiProviderEnv,
@@ -398,6 +407,8 @@ pub struct AppState {
     pub(crate) readiness_cache: ReadinessCache,
     pub issue_inactive_days: AtomicUsize,
     pub issue_cleanup_policy: Arc<IssueCleanupPolicy>,
+    issue_cleanup_policy_override: Arc<Mutex<Option<IssueCleanupPolicy>>>,
+    pub settings: SettingsService,
     pub limits: AppLimits,
     pub search_backend: crate::search::publication::SearchBackendKind,
 }
@@ -497,6 +508,9 @@ impl AppState {
             limits.upload.concurrent_processing_tasks,
             limits.upload.concurrent_receive_tasks,
         );
+        upload
+            .tmp_max_bytes
+            .store(limits.upload.max_tmp_bytes, Ordering::Release);
         let search = SearchRuntime::new(
             limits.search.tantivy_max_writers,
             limits.search.tantivy_writer_heap_size,
@@ -504,6 +518,7 @@ impl AppState {
         let temp_results = TempResultRuntime::new(limits.temp_results.concurrent_materializations);
         let line_read_permits = Arc::new(Semaphore::new(limits.api.concurrent_line_reads));
         let line_read_clients = Arc::new(Mutex::new(HashMap::new()));
+        let settings = SettingsService::new_with_config(pool.clone(), &limits, &auth);
         let auth_runtime = AuthRuntime::new(auth);
         Self {
             db: DatabaseContext { pool },
@@ -515,6 +530,7 @@ impl AppState {
             search,
             temp_results,
             line_read_permits,
+            line_read_per_client: AtomicUsize::new(limits.api.concurrent_line_reads_per_client),
             line_read_clients,
             auth_runtime,
             ai_provider,
@@ -524,6 +540,8 @@ impl AppState {
             readiness_cache: ReadinessCache::default(),
             issue_inactive_days: AtomicUsize::new(0),
             issue_cleanup_policy: Arc::new(IssueCleanupPolicy::default()),
+            issue_cleanup_policy_override: Arc::new(Mutex::new(None)),
+            settings,
             limits,
             search_backend: crate::search::publication::SearchBackendKind::SqliteFts,
         }
@@ -557,7 +575,7 @@ impl AppState {
             ));
         }
         let count = clients.entry(client_key.to_owned()).or_insert(0);
-        if *count >= self.limits.api.concurrent_line_reads_per_client {
+        if *count >= self.line_read_per_client.load(Ordering::Acquire) {
             drop(permit);
             return Err(AppError::api(
                 actix_web::http::StatusCode::TOO_MANY_REQUESTS,
@@ -571,6 +589,20 @@ impl AppState {
             clients: self.line_read_clients.clone(),
             _permit: permit,
         })
+    }
+
+    pub fn current_cleanup_policy(&self) -> IssueCleanupPolicy {
+        self.issue_cleanup_policy_override
+            .lock()
+            .ok()
+            .and_then(|policy| policy.clone())
+            .unwrap_or_else(|| (*self.issue_cleanup_policy).clone())
+    }
+
+    pub fn set_cleanup_policy(&self, policy: IssueCleanupPolicy) {
+        if let Ok(mut current) = self.issue_cleanup_policy_override.lock() {
+            *current = Some(policy);
+        }
     }
 }
 

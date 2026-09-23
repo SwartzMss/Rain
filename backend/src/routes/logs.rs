@@ -61,11 +61,17 @@ async fn search_logs_inner(
 ) -> Result<HttpResponse, AppError> {
     let bundle_hash = path.into_inner();
     let term = query.into_inner();
+    let settings = state.settings.snapshot().await;
+    let mut runtime_limits = state.limits.clone();
+    let mut runtime_auth = state.auth_runtime.config.clone();
+    settings
+        .effective
+        .apply_to_config(&mut runtime_limits, &mut runtime_auth);
     let search_term = term.q.trim();
     if search_term.is_empty() {
         return Err(AppError::BadRequest("query parameter q is required".into()));
     }
-    let window = normalize_search_window(&state.limits.api, term.from, term.size)?;
+    let window = normalize_search_window(&runtime_limits.api, term.from, term.size)?;
 
     let bundle = load_bundle(&state.db.pool, &bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
@@ -174,7 +180,7 @@ async fn search_logs_inner(
         total: total.max(0) as u64,
         hits,
         truncated,
-        max_search_window: state.limits.api.max_search_window as u64,
+        max_search_window: runtime_limits.api.max_search_window as u64,
     }))
 }
 
@@ -213,17 +219,23 @@ async fn search_issue_logs_inner(
 ) -> Result<HttpResponse, AppError> {
     let issue_code = normalize_issue_code(&path.into_inner())?;
     let term = query.into_inner();
+    let settings = state.settings.snapshot().await;
+    let mut runtime_limits = state.limits.clone();
+    let mut runtime_auth = state.auth_runtime.config.clone();
+    settings
+        .effective
+        .apply_to_config(&mut runtime_limits, &mut runtime_auth);
     let search_term = term.q.trim();
     if search_term.is_empty() {
         return Err(AppError::BadRequest("query parameter q is required".into()));
     }
-    let window = normalize_search_window(&state.limits.api, term.from, term.size)?;
+    let window = normalize_search_window(&runtime_limits.api, term.from, term.size)?;
     ensure_issue_active(&state.db.pool, &issue_code).await?;
 
     if matches!(term.mode, IssueSearchMode::Filename) {
         let response = search_issue_files(
             &state.db.pool,
-            &state.limits.api,
+            &runtime_limits.api,
             &issue_code,
             search_term,
             term.from,
@@ -288,7 +300,7 @@ async fn search_issue_logs_inner(
         total: total.max(0) as u64,
         hits,
         truncated,
-        max_search_window: state.limits.api.max_search_window as u64,
+        max_search_window: runtime_limits.api.max_search_window as u64,
     }))
 }
 

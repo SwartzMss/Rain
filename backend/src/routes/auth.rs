@@ -277,7 +277,10 @@ pub async fn register_user(
         &state,
         AuthRateLimitPolicy::RegisterIp,
         &client_rate_limit_key(&request, "register"),
-        state.auth_runtime.config.register_ip_limit_per_hour,
+        state
+            .auth_runtime
+            .register_ip_limit_per_hour
+            .load(std::sync::atomic::Ordering::Acquire),
         REGISTER_IP_WINDOW,
         true,
     )?;
@@ -429,7 +432,10 @@ pub async fn login(
 
     let token = generate_session_token();
     let token_hash = hash_session_token(&token);
-    let ttl = state.auth_runtime.config.session_ttl_seconds;
+    let ttl = state
+        .auth_runtime
+        .session_ttl_seconds
+        .load(std::sync::atomic::Ordering::Acquire);
     let ttl_i64 = i64::try_from(ttl).unwrap_or(i64::MAX);
     let user_agent = request
         .headers()
@@ -525,7 +531,10 @@ pub async fn change_password(
     let new_hash = run_argon2(&state, move || hash_password(&new_password)).await?;
     let token = generate_session_token();
     let token_hash = hash_session_token(&token);
-    let ttl = state.auth_runtime.config.session_ttl_seconds;
+    let ttl = state
+        .auth_runtime
+        .session_ttl_seconds
+        .load(std::sync::atomic::Ordering::Acquire);
     let expires_at = Utc::now()
         .checked_add_signed(Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX)))
         .ok_or_else(internal_auth_error)?;

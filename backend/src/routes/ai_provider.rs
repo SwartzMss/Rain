@@ -14,15 +14,18 @@ use crate::{
         retry::complete_with_retry_until,
     },
     auth::extractor::{RequireAdmin, RequireBusinessUser},
+    config::StructuredOutputMode,
     error::AppError,
 };
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateAiProvider {
+    expected_revision: Option<serde_json::Value>,
     base_url: String,
     api_key: Option<String>,
     model: String,
     request_timeout_seconds: u64,
+    structured_output: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,21 +39,30 @@ pub struct TestAiProvider {
 
 async fn provider_snapshot(state: &AppState) -> Result<serde_json::Value, AppError> {
     let resolved = resolve_effective_config(&state.db.pool, &state.ai_provider).await?;
+    let revision: Option<i64> =
+        sqlx::query_scalar("SELECT provider_revision FROM ai_provider_settings WHERE id=1")
+            .fetch_optional(&state.db.pool)
+            .await
+            .map_err(AppError::Database)?;
     Ok(match resolved {
         Some(provider) => serde_json::json!({
             "configured": true,
+            "revision": revision.map(|value| value.to_string()),
             "source": provider.source,
             "base_url": provider.base_url,
             "model": provider.model,
             "request_timeout_seconds": provider.timeout_seconds,
+            "structured_output": provider.structured_output.as_str(),
             "api_key_mask": "••••••••",
         }),
         None => serde_json::json!({
             "configured": false,
+            "revision": revision.map(|value| value.to_string()),
             "source": null,
             "base_url": null,
             "model": null,
             "request_timeout_seconds": state.ai_provider.timeout_seconds,
+            "structured_output": state.ai_provider.structured_output.as_str(),
             "api_key_mask": null,
         }),
     })
@@ -109,12 +121,32 @@ pub async fn update_ai_provider(
         ));
     }
 
-    let existing: Option<(String, String, String, i64)> = sqlx::query_as(
-        "SELECT base_url,encrypted_api_key,model,request_timeout_seconds FROM ai_provider_settings WHERE id=1",
+    let existing: Option<(String, String, String, i64, Option<String>, i64)> = sqlx::query_as(
+        "SELECT base_url,encrypted_api_key,model,request_timeout_seconds,structured_output,provider_revision FROM ai_provider_settings WHERE id=1",
     )
     .fetch_optional(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
+    let expected_revision = body
+        .expected_revision
+        .as_ref()
+        .map(parse_provider_revision)
+        .transpose()?;
+    let current_revision = existing.as_ref().map(|row| row.5).unwrap_or(0);
+    if expected_revision.is_some_and(|revision| revision != current_revision) {
+        return Err(AppError::public(
+            StatusCode::CONFLICT,
+            "AI_PROVIDER_REVISION_CONFLICT",
+            format!("模型服务配置已更新，请刷新后重试（当前版本 {current_revision}）"),
+        ));
+    }
+    let structured_output = body
+        .structured_output
+        .as_deref()
+        .or_else(|| existing.as_ref().and_then(|row| row.4.as_deref()))
+        .map(|value| StructuredOutputMode::parse(Some(value)))
+        .transpose()?
+        .unwrap_or(state.ai_provider.structured_output);
     let replacement_key = body
         .api_key
         .as_deref()
@@ -169,21 +201,39 @@ pub async fn update_ai_provider(
 
     let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
     sqlx::query(
-        "INSERT INTO ai_provider_settings(id,base_url,encrypted_api_key,model,request_timeout_seconds,updated_by_user_id,updated_at) VALUES(1,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET base_url=excluded.base_url,encrypted_api_key=excluded.encrypted_api_key,model=excluded.model,request_timeout_seconds=excluded.request_timeout_seconds,updated_by_user_id=excluded.updated_by_user_id,updated_at=CURRENT_TIMESTAMP",
+        "INSERT INTO ai_provider_settings(id,base_url,encrypted_api_key,model,request_timeout_seconds,structured_output,updated_by_user_id,updated_at) VALUES(1,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET base_url=excluded.base_url,encrypted_api_key=excluded.encrypted_api_key,model=excluded.model,request_timeout_seconds=excluded.request_timeout_seconds,structured_output=excluded.structured_output,updated_by_user_id=excluded.updated_by_user_id,updated_at=CURRENT_TIMESTAMP,provider_revision=provider_revision+1 WHERE provider_revision=?",
     )
     .bind(&base_url)
     .bind(&encrypted_api_key)
     .bind(model)
     .bind(body.request_timeout_seconds as i64)
+    .bind(structured_output.as_str())
     .bind(&admin.0.id)
+    .bind(current_revision)
     .execute(&mut *tx)
     .await
     .map_err(AppError::Database)?;
+    if existing.is_some()
+        && sqlx::query_scalar::<_, i64>(
+            "SELECT provider_revision FROM ai_provider_settings WHERE id=1",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::Database)?
+            == current_revision
+    {
+        return Err(AppError::public(
+            StatusCode::CONFLICT,
+            "AI_PROVIDER_REVISION_CONFLICT",
+            "模型服务配置已被其他管理员更新，请刷新后重试",
+        ));
+    }
     let old_value = existing.as_ref().map(|row| {
         serde_json::json!({
             "base_url": row.0,
             "model": row.2,
             "request_timeout_seconds": row.3,
+            "structured_output": row.4,
             "api_key_configured": true
         })
         .to_string()
@@ -192,6 +242,7 @@ pub async fn update_ai_provider(
         "base_url": base_url,
         "model": model,
         "request_timeout_seconds": body.request_timeout_seconds,
+        "structured_output": structured_output.as_str(),
         "api_key_configured": true,
         "api_key_replaced": replacement_key.is_some()
     })
@@ -217,6 +268,21 @@ fn invalid_base_url() -> AppError {
         "INVALID_AI_BASE_URL",
         "Base URL 必须是有效的 HTTP 或 HTTPS 地址",
     )
+}
+
+fn parse_provider_revision(value: &serde_json::Value) -> Result<i64, AppError> {
+    let revision = match value {
+        serde_json::Value::String(value) => value.parse::<i64>().ok(),
+        serde_json::Value::Number(value) => value.as_i64(),
+        _ => None,
+    };
+    revision.filter(|revision| *revision >= 0).ok_or_else(|| {
+        AppError::api(
+            StatusCode::BAD_REQUEST,
+            "AI_PROVIDER_INVALID_REQUEST",
+            "expected_revision 必须是非负十进制整数",
+        )
+    })
 }
 
 #[post("/admin/ai-provider/test")]

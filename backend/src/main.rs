@@ -32,7 +32,7 @@ struct SqliteSidecarPaths {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let config = AppConfig::from_env().expect("failed to load config");
+    let mut config = AppConfig::from_env().expect("failed to load config");
 
     fs::create_dir_all(&config.log_dir).expect("failed to create log directory");
     let file_appender = rolling::daily(&config.log_dir, "backend.log");
@@ -106,6 +106,20 @@ async fn main() -> std::io::Result<()> {
             "RAIN_CLEANUP_EXEMPT_USERS is only used for first-start migration; database settings are authoritative"
         );
     }
+    let bootstrap_settings = backend::settings::SettingsService::new(pool.clone());
+    let bootstrap_snapshot = bootstrap_settings
+        .initialize(
+            &config.limits,
+            &config.auth,
+            &config.ai_provider,
+            config.issue_inactive_days,
+            Some(cleanup_policy.exempt_usernames_json()),
+        )
+        .await
+        .expect("failed to initialize converged system settings");
+    bootstrap_snapshot
+        .configured
+        .apply_to_config(&mut config.limits, &mut config.auth);
     log_sqlite_file_sizes(&config.database_url).await;
 
     if config.reset_db {
@@ -198,6 +212,17 @@ async fn main() -> std::io::Result<()> {
         config.ai_provider.clone(),
         blob_store,
     );
+    app_state
+        .settings
+        .initialize(
+            &config.limits,
+            &config.auth,
+            &config.ai_provider,
+            config.issue_inactive_days,
+            Some(cleanup_policy.exempt_usernames_json()),
+        )
+        .await
+        .expect("failed to load converged system settings into runtime");
     app_state.issue_cleanup_policy = Arc::new(cleanup_policy.clone());
     app_state.search_backend = config.search_backend;
     for username in cleanup_policy.usernames() {
@@ -251,9 +276,21 @@ async fn main() -> std::io::Result<()> {
         .auth_runtime
         .login_username_failure_limit_per_5_minutes
         .store(username_limit, std::sync::atomic::Ordering::Release);
+    app_state.auth_runtime.session_ttl_seconds.store(
+        config.auth.session_ttl_seconds,
+        std::sync::atomic::Ordering::Release,
+    );
+    app_state.auth_runtime.register_ip_limit_per_hour.store(
+        config.auth.register_ip_limit_per_hour,
+        std::sync::atomic::Ordering::Release,
+    );
     app_state
         .issue_inactive_days
         .store(issue_inactive_days, std::sync::atomic::Ordering::Release);
+    app_state.line_read_per_client.store(
+        config.limits.api.concurrent_line_reads_per_client,
+        std::sync::atomic::Ordering::Release,
+    );
     let shared_state = web::Data::new(app_state);
     let mut background_tasks = vec![
         spawn_blob_gc(

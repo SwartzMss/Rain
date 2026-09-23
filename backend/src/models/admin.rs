@@ -52,6 +52,10 @@ pub struct RegistrationSettings {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateRegistrationSettings {
+    /// Decimal string in the v2 API. Numbers are accepted for backwards
+    /// compatibility with early clients, but responses always use strings.
+    pub expected_revision: Option<serde_json::Value>,
+    pub changes: Option<serde_json::Map<String, serde_json::Value>>,
     pub allow_registration: Option<bool>,
     pub login_ip_limit_per_minute: Option<usize>,
     pub login_username_failure_limit_per_5_minutes: Option<usize>,
