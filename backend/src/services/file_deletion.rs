@@ -137,6 +137,20 @@ pub async fn enqueue_file_deletion(
                     .execute(&mut *conn)
                     .await
                     .map_err(AppError::Database)?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO bundle_search_indexes (bundle_id, backend, state) VALUES (?, 'sqlite_fts', 'LEGACY')",
+                )
+                .bind(bundle_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                sqlx::query(
+                    "UPDATE bundle_search_indexes SET visibility_revision = visibility_revision + 1, state = CASE WHEN backend = 'tantivy' AND generation > 0 THEN 'NEEDS_REBUILD' ELSE state END, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ?",
+                )
+                .bind(bundle_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
                 let job = sqlx::query_as::<_, FileDeletionJob>(
                     "SELECT id,bundle_id,root_file_id,state,phase,cursor_file_id,attempts,next_retry_at,last_error_code,reconcile_after_id,reconcile_bytes,deleted_files,deleted_offsets,deleted_segments,created_at,updated_at,finished_at FROM file_deletion_jobs WHERE id=?",
                 )
@@ -578,6 +592,10 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert bundle");
+        sqlx::query("INSERT INTO bundle_search_indexes (bundle_id, backend, generation, state) VALUES ('async-bundle', 'tantivy', 1, 'READY')")
+            .execute(&pool)
+            .await
+            .expect("insert search publication");
         let root_id: i64 = sqlx::query_scalar(
             "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('async-bundle', 'root', '/root', 1) RETURNING id",
         )
@@ -617,6 +635,13 @@ mod tests {
             .await
             .expect("repeat enqueue is idempotent");
         assert_eq!(repeated.id, job.id);
+        let rebuild: (String, i64, i64) = sqlx::query_as(
+            "SELECT state, visibility_revision, compacted_revision FROM bundle_search_indexes WHERE bundle_id='async-bundle'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("search visibility revision");
+        assert_eq!(rebuild, ("NEEDS_REBUILD".into(), 1, 0));
         assert!(
             enqueue_file_deletion(&pool, "async-bundle", child_id, "owner")
                 .await

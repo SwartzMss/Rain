@@ -4,10 +4,13 @@ use async_trait::async_trait;
 use crate::error::AppError;
 
 pub mod publication;
+#[cfg(feature = "tantivy-search")]
+pub mod rebuild;
 pub mod resource;
 pub mod sqlite;
 #[cfg(feature = "tantivy-search")]
 pub mod tantivy;
+pub mod visibility;
 
 #[derive(Debug, Clone)]
 pub enum ContentSearchScope {
@@ -173,4 +176,25 @@ pub async fn search_tantivy_bundle(
             "Tantivy backend requires the tantivy-search feature".into(),
         ))
     }
+}
+
+#[cfg(feature = "tantivy-search")]
+pub async fn search_tantivy_bundle_visible(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: std::collections::HashSet<i64>,
+) -> Result<ContentSearchResult, AppError> {
+    tantivy::search_bundle_visible(path, request, visible_file_ids).await
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+pub async fn search_tantivy_bundle_visible(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: std::collections::HashSet<i64>,
+) -> Result<ContentSearchResult, AppError> {
+    let _ = (path, request, visible_file_ids);
+    Err(AppError::Config(
+        "Tantivy backend requires the tantivy-search feature".into(),
+    ))
 }

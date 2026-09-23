@@ -131,7 +131,35 @@ pub fn spawn_search_artifact_cleanup(
                 crate::search::publication::cleanup_deleted_bundle_artifacts(&pool, &data_root)
                     .await
                     .map(|_| ())
+                    .map_err(|error| error.to_string())?;
+                crate::search::publication::cleanup_retired_artifacts(&pool, &data_root)
+                    .await
+                    .map(|_| ())
                     .map_err(|error| error.to_string())
+            }
+        },
+    )
+}
+
+pub fn spawn_search_rebuild(state: web::Data<crate::AppState>) -> tokio::task::JoinHandle<()> {
+    crate::spawn_periodic_job(
+        "search-rebuild",
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(15),
+        move || {
+            let pool = state.db.pool.clone();
+            let data_root = state.storage.data_root.clone();
+            let budget = state.search.tantivy_budget.clone();
+            async move {
+                #[cfg(feature = "tantivy-search")]
+                {
+                    crate::search::rebuild::run_once(&pool, &data_root, budget)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                #[cfg(not(feature = "tantivy-search"))]
+                let _ = (pool, data_root, budget);
+                Ok(())
             }
         },
     )

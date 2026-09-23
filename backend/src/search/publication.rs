@@ -179,6 +179,14 @@ pub async fn mark_publication_ready(
                         "search index publication generation changed while building".into(),
                     ));
                 }
+                sqlx::query(
+                    "INSERT OR IGNORE INTO bundle_search_artifacts(bundle_id,generation,state,active_readers,retired_at) VALUES(?,?, 'ACTIVE', 0, NULL)",
+                )
+                .bind(bundle_id)
+                .bind(generation)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
                 Ok(())
             })
         },
@@ -219,6 +227,102 @@ pub async fn mark_publication_failed(
     }
 }
 
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn mark_rebuild_failed(
+    pool: &SqlitePool,
+    claim: &crate::search::rebuild::RebuildClaim,
+    error_code: &str,
+) {
+    let _ = crate::db::write::run(
+        pool,
+        "fail Tantivy deletion rebuild",
+        &(claim.bundle_id.as_str(), claim.target_generation, error_code),
+        |conn, (bundle_id, target_generation, error_code)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE bundle_search_indexes SET pending_state='FAILED', last_error_code=?, updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND pending_generation=? AND pending_state='BUILDING'",
+                )
+                .bind(error_code)
+                .bind(bundle_id)
+                .bind(target_generation)
+                .execute(&mut *conn)
+                .await
+                .map(|_| ())
+                .map_err(AppError::Database)
+            })
+        },
+    )
+    .await;
+}
+
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn publish_rebuild(
+    pool: &SqlitePool,
+    claim: &crate::search::rebuild::RebuildClaim,
+) -> Result<(), AppError> {
+    let artifact_key = artifact_relative_path(&claim.bundle_id, claim.target_generation)?
+        .to_string_lossy()
+        .into_owned();
+    crate::db::write::run(
+        pool,
+        "publish Tantivy deletion rebuild",
+        &(
+            claim.bundle_id.as_str(),
+            claim.active_generation,
+            claim.target_generation,
+            claim.target_revision,
+            artifact_key.as_str(),
+        ),
+        |conn, (bundle_id, active_generation, target_generation, target_revision, artifact_key)| {
+            Box::pin(async move {
+                let changed = sqlx::query(
+                    "UPDATE bundle_search_indexes SET generation=pending_generation, artifact_key=?, compacted_revision=pending_revision, state=CASE WHEN visibility_revision=pending_revision THEN 'READY' ELSE 'NEEDS_REBUILD' END, pending_generation=NULL, pending_revision=NULL, pending_state='IDLE', built_at=CURRENT_TIMESTAMP, last_error_code=NULL, updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND generation=? AND pending_generation=? AND pending_revision=? AND pending_state='BUILDING' AND EXISTS (SELECT 1 FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE b.id=bundle_search_indexes.bundle_id AND b.status='READY' AND i.status='ACTIVE')",
+                )
+                .bind(artifact_key)
+                .bind(bundle_id)
+                .bind(active_generation)
+                .bind(target_generation)
+                .bind(target_revision)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?
+                .rows_affected();
+                if changed != 1 {
+                    return Err(AppError::Conflict(
+                        "Tantivy rebuild publication generation changed".into(),
+                    ));
+                }
+                sqlx::query(
+                    "INSERT OR IGNORE INTO bundle_search_artifacts(bundle_id,generation,state,retired_at) VALUES(?,?,'ACTIVE',NULL)",
+                )
+                .bind(bundle_id)
+                .bind(active_generation)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                sqlx::query(
+                    "UPDATE bundle_search_artifacts SET state='RETIRED', retired_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state='ACTIVE'",
+                )
+                .bind(bundle_id)
+                .bind(active_generation)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                sqlx::query(
+                    "INSERT OR REPLACE INTO bundle_search_artifacts(bundle_id,generation,state,retired_at) VALUES(?,?,'ACTIVE',NULL)",
+                )
+                .bind(bundle_id)
+                .bind(target_generation)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                Ok(())
+            })
+        },
+    )
+    .await
+}
+
 /// Remove only unpublished generations. READY artifacts are intentionally left
 /// untouched so a failed rebuild cannot make an existing Bundle disappear
 /// from search.
@@ -226,17 +330,26 @@ pub async fn cleanup_unpublished_artifacts(
     pool: &SqlitePool,
     data_root: &std::path::Path,
 ) -> Result<u64, AppError> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT bundle_id, generation FROM bundle_search_indexes WHERE state IN ('BUILDING', 'FAILED') AND generation > 0",
+    let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT bundle_id, pending_generation FROM bundle_search_indexes WHERE pending_state = 'FAILED' AND pending_generation IS NOT NULL",
     )
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
     let mut removed = 0_u64;
     for (bundle_id, generation) in rows {
+        let Some(generation) = generation else {
+            continue;
+        };
         if cleanup_publication_artifact(data_root, &bundle_id, generation).await? {
             removed = removed.saturating_add(1);
         }
+        sqlx::query("UPDATE bundle_search_indexes SET pending_state='IDLE', pending_generation=NULL, pending_revision=NULL WHERE bundle_id=? AND pending_generation=?")
+            .bind(bundle_id)
+            .bind(generation)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
     }
     Ok(removed)
 }
@@ -262,7 +375,7 @@ pub async fn cleanup_deleted_bundle_artifacts(
     data_root: &std::path::Path,
 ) -> Result<u64, AppError> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT i.bundle_id, i.generation FROM bundle_search_indexes i JOIN bundles b ON b.id = i.bundle_id WHERE b.status = 'DELETED' AND i.generation > 0",
+        "SELECT bundle_id, generation FROM (SELECT a.bundle_id, a.generation FROM bundle_search_artifacts a JOIN bundles b ON b.id=a.bundle_id WHERE b.status='DELETED' UNION SELECT i.bundle_id, i.generation FROM bundle_search_indexes i JOIN bundles b ON b.id=i.bundle_id WHERE b.status='DELETED' AND i.generation>0)",
     )
     .fetch_all(pool)
     .await
@@ -272,8 +385,79 @@ pub async fn cleanup_deleted_bundle_artifacts(
         if cleanup_publication_artifact(data_root, &bundle_id, generation).await? {
             removed = removed.saturating_add(1);
         }
+        sqlx::query("DELETE FROM bundle_search_artifacts WHERE bundle_id=? AND generation=?")
+            .bind(bundle_id)
+            .bind(generation)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
     }
     Ok(removed)
+}
+
+/// Retired generations are kept briefly after publication so in-flight
+/// readers that selected the previous generation can finish safely.
+pub async fn cleanup_retired_artifacts(
+    pool: &SqlitePool,
+    data_root: &std::path::Path,
+) -> Result<u64, AppError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT a.bundle_id, a.generation FROM bundle_search_artifacts a JOIN bundles b ON b.id=a.bundle_id WHERE a.state='RETIRED' AND a.active_readers=0 AND datetime(a.retired_at) <= datetime('now','-10 minutes') AND b.status <> 'DELETED'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut removed = 0_u64;
+    for (bundle_id, generation) in rows {
+        if cleanup_publication_artifact(data_root, &bundle_id, generation).await? {
+            removed = removed.saturating_add(1);
+        }
+        sqlx::query("DELETE FROM bundle_search_artifacts WHERE bundle_id=? AND generation=? AND state='RETIRED'")
+            .bind(bundle_id)
+            .bind(generation)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+    }
+    Ok(removed)
+}
+
+pub async fn acquire_generation_lease(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    generation: i64,
+) -> Result<(), AppError> {
+    let changed = sqlx::query(
+        "UPDATE bundle_search_artifacts SET active_readers=active_readers+1 WHERE bundle_id=? AND generation=?",
+    )
+    .bind(bundle_id)
+    .bind(generation)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?
+    .rows_affected();
+    if changed != 1 {
+        return Err(AppError::Conflict(
+            "search generation is no longer available".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn release_generation_lease(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    generation: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE bundle_search_artifacts SET active_readers=active_readers-1 WHERE bundle_id=? AND generation=? AND active_readers>0",
+    )
+    .bind(bundle_id)
+    .bind(generation)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?;
+    Ok(())
 }
 
 #[cfg(test)]
