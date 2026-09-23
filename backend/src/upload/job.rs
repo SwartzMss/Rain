@@ -148,7 +148,6 @@ pub fn spawn_upload_job(job: UploadJob) {
             file_count,
             received_bytes,
             queue_elapsed_ms = queued_at.elapsed().as_millis() as u64,
-            processing_queue_ms = queued_at.elapsed().as_millis() as u64,
             "upload processing started"
         );
         let process_result = process_upload_job(&job).await;

@@ -5,7 +5,7 @@
 //! async executor worker while segments are flushed.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -71,13 +71,26 @@ impl BoundedBundlePipeline {
         let worker_aborted = aborted.clone();
         let task = tokio::task::spawn_blocking(move || {
             let _resource_permit = resource_permit;
+            let staging_path = path.clone();
             let mut writer = BundleIndexWriter::create(path, config.writer_heap_size_bytes)?;
             while let Some(batch) = receiver.blocking_recv() {
+                if worker_aborted.load(Ordering::Acquire) {
+                    drop(writer);
+                    remove_aborted_staging(&staging_path);
+                    return Err(AppError::Conflict("Tantivy pipeline was aborted".into()));
+                }
                 for chunk in &batch {
+                    if worker_aborted.load(Ordering::Acquire) {
+                        drop(writer);
+                        remove_aborted_staging(&staging_path);
+                        return Err(AppError::Conflict("Tantivy pipeline was aborted".into()));
+                    }
                     writer.add_chunk(chunk)?;
                 }
             }
             if worker_aborted.load(Ordering::Acquire) {
+                drop(writer);
+                remove_aborted_staging(&staging_path);
                 return Err(AppError::Conflict("Tantivy pipeline was aborted".into()));
             }
             writer.commit()
@@ -131,6 +144,16 @@ impl BoundedBundlePipeline {
         };
         let _ = task.await;
         Ok(())
+    }
+}
+
+fn remove_aborted_staging(path: &Path) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::debug!(path = %path.display(), %error, "failed to remove aborted Tantivy staging")
+        }
     }
 }
 
@@ -213,5 +236,27 @@ mod tests {
                 .unwrap(),
         );
         assert!(matches!(result, Err(AppError::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn dropping_pipeline_stops_worker_and_releases_permit() {
+        let path = path();
+        let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
+        let pipeline = BoundedBundlePipeline::start_with_permit(
+            path.clone(),
+            PipelineConfig::default(),
+            budget.clone().acquire().await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(budget.active_writers(), 1);
+        drop(pipeline);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while budget.active_writers() != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!path.exists());
     }
 }

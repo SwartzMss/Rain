@@ -97,6 +97,7 @@ pub struct BundleBuildSession {
     budget: SearchResourceBudget,
     admission_wait_micros: AtomicU64,
     writer_started: StdMutex<Option<Instant>>,
+    writer_elapsed_micros: AtomicU64,
     writer_active_at_admission: AtomicU64,
     build_started: Instant,
     heartbeat_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -143,6 +144,7 @@ impl BundleBuildSession {
             budget,
             admission_wait_micros: AtomicU64::new(0),
             writer_started: StdMutex::new(None),
+            writer_elapsed_micros: AtomicU64::new(0),
             writer_active_at_admission: AtomicU64::new(0),
             build_started: Instant::now(),
             heartbeat_task: Mutex::new(None),
@@ -173,9 +175,13 @@ impl BundleBuildSession {
                 "Tantivy build session is already closed".into(),
             ));
         }
+        // A bundle with no searchable chunks still needs a reopenable empty
+        // index; its one short writer admission happens only at finalization.
         let pipeline = self.ensure_pipeline().await?;
         self.closing.store(true, Ordering::Release);
-        let committed = pipeline.finish().await?;
+        let committed = pipeline.finish().await;
+        self.record_writer_elapsed();
+        let committed = committed?;
         let pending = self
             .pending_metadata
             .lock()
@@ -293,12 +299,7 @@ impl BundleBuildSession {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let writer_active_ms = self
-                .writer_started
-                .lock()
-                .ok()
-                .and_then(|started| started.map(|started| started.elapsed().as_millis() as u64))
-                .unwrap_or(0);
+            let writer_active_ms = self.writer_elapsed_micros.load(Ordering::Acquire) / 1_000;
             tracing::info!(
                 metric = "tantivy_index_build",
                 bundle_id = %self.bundle_id,
@@ -327,6 +328,7 @@ impl BundleBuildSession {
         }
         if let Some(pipeline) = self.pipeline.get() {
             let _ = pipeline.abort().await;
+            self.record_writer_elapsed();
         }
         for path in [&self.staging, &self.final_path] {
             match fs::remove_dir_all(path).await {
@@ -338,6 +340,16 @@ impl BundleBuildSession {
             }
         }
         self.emit_metric("cancelled");
+    }
+
+    fn record_writer_elapsed(&self) {
+        let Some(started) = self.writer_started.lock().ok().and_then(|guard| *guard) else {
+            return;
+        };
+        self.writer_elapsed_micros.store(
+            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            Ordering::Release,
+        );
     }
 }
 
@@ -510,7 +522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_bundle_finishes_with_a_valid_empty_index_without_writer_admission() {
+    async fn empty_bundle_finishes_with_a_valid_empty_index() {
         let (pool, root, generation) = fixture("empty").await;
         let budget = SearchResourceBudget::new(1, 16 * 1024 * 1024).unwrap();
         let session = BundleBuildSession::start(
