@@ -309,6 +309,13 @@ async fn process_job_step(
                     .execute(&mut *conn)
                     .await
                     .map_err(AppError::Database)?;
+                sqlx::query(
+                    "UPDATE bundle_search_indexes SET visibility_revision=visibility_revision+1, state=CASE WHEN backend='tantivy' AND generation>0 THEN 'NEEDS_REBUILD' ELSE state END, updated_at=CURRENT_TIMESTAMP WHERE bundle_id=(SELECT bundle_id FROM file_deletion_jobs WHERE id=?)",
+                )
+                .bind(job_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
                 return Ok(StepResult::Superseded);
             }
             let row: (String, Option<i64>, i64, i64, i64) = sqlx::query_as(
@@ -679,5 +686,61 @@ mod tests {
                 .await
                 .expect("content size");
         assert_eq!(content_size, 0);
+    }
+
+    #[tokio::test]
+    async fn superseded_deletion_bumps_visibility_revision() {
+        let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");
+        crate::db::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query(
+            "INSERT INTO issues (code, name, status) VALUES ('SUPERSEDE', 'SUPERSEDE', 'ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert issue");
+        sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('supersede-owner','owner','owner','hash')")
+            .execute(&pool)
+            .await
+            .expect("insert owner");
+        sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('supersede-bundle', 'SUPERSEDE', 'supersede-hash', 'supersede', 'READY')")
+            .execute(&pool)
+            .await
+            .expect("insert bundle");
+        sqlx::query("INSERT INTO bundle_search_indexes (bundle_id, backend, generation, state) VALUES ('supersede-bundle', 'tantivy', 1, 'READY')")
+            .execute(&pool)
+            .await
+            .expect("insert publication");
+        let root_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('supersede-bundle', 'root', '/root', 1) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert root");
+        sqlx::query("UPDATE issues SET owner_user_id='supersede-owner' WHERE code='SUPERSEDE'")
+            .execute(&pool)
+            .await
+            .expect("assign owner");
+        enqueue_file_deletion(&pool, "supersede-bundle", root_id, "supersede-owner")
+            .await
+            .expect("enqueue deletion");
+        sqlx::query("UPDATE bundles SET status='DELETING' WHERE id='supersede-bundle'")
+            .execute(&pool)
+            .await
+            .expect("supersede bundle");
+
+        process_file_deletion_jobs(&pool)
+            .await
+            .expect("process superseded deletion");
+
+        let result: (String, i64, i64) = sqlx::query_as(
+            "SELECT state, visibility_revision, compacted_revision FROM bundle_search_indexes WHERE bundle_id='supersede-bundle'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read visibility revision");
+        assert_eq!(result, ("NEEDS_REBUILD".into(), 2, 0));
+        pool.close().await;
     }
 }

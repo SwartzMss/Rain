@@ -8,7 +8,7 @@ use crate::{
     search::{
         ContentSearchRequest, ContentSearchResult, ContentSearchScope, FilenameSearchRequest,
         SearchIndex,
-        publication::{acquire_generation_lease, artifact_relative_path, release_generation_lease},
+        publication::{acquire_generation_lease, artifact_relative_path},
         search_tantivy_bundle_visible,
         sqlite::SqliteFtsSearchIndex,
         visibility::snapshot_file_ids,
@@ -125,14 +125,14 @@ async fn search_logs_inner(
             }
             let artifact = artifact_relative_path(&bundle.id, generation)?;
             let visible_file_ids = snapshot_file_ids(&state.db.pool, &bundle.id).await?;
-            acquire_generation_lease(&state.db.pool, &bundle.id, generation).await?;
+            let lease = acquire_generation_lease(&state.db.pool, &bundle.id, generation).await?;
             let result = search_tantivy_bundle_visible(
                 state.storage.data_root.join(artifact),
                 request,
                 visible_file_ids,
             )
             .await;
-            release_generation_lease(&state.db.pool, &bundle.id, generation).await?;
+            lease.release().await?;
             result?
         }
         _ => {
@@ -332,7 +332,7 @@ async fn search_issue_content_mixed(
         }
         let artifact = artifact_relative_path(&bundle_id, generation)?;
         let visible_file_ids = snapshot_file_ids(pool, &bundle_id).await?;
-        acquire_generation_lease(pool, &bundle_id, generation).await?;
+        let lease = acquire_generation_lease(pool, &bundle_id, generation).await?;
         let result = search_tantivy_bundle_visible(
             data_root.join(artifact),
             ContentSearchRequest {
@@ -349,7 +349,7 @@ async fn search_issue_content_mixed(
             visible_file_ids,
         )
         .await;
-        release_generation_lease(pool, &bundle_id, generation).await?;
+        lease.release().await?;
         let result = result?;
         total = total.saturating_add(result.total);
         rows.extend(result.rows.into_iter().map(|mut row| {

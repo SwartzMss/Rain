@@ -131,6 +131,16 @@ async fn main() -> std::io::Result<()> {
         recovery_runtime.mark_stale_processing_bundles_ready();
     }
     run_optional_recovery_stage(
+        "search-generation-lease-recovery",
+        STARTUP_RECOVERY_TIMEOUT,
+        async {
+            backend::search::publication::reset_generation_leases(&pool)
+                .await
+                .map(|_| 0)
+        },
+    )
+    .await;
+    run_optional_recovery_stage(
         "unpublished-search-artifact-cleanup",
         STARTUP_RECOVERY_TIMEOUT,
         backend::search::publication::cleanup_unpublished_artifacts(&pool, &config.data_root),
