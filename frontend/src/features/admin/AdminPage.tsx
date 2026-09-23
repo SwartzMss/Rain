@@ -559,12 +559,19 @@ export function AdminSettingsPage() {
         ) : null}
 
         {advancedFields.length > 0 ? (
-          <section className="rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur sm:p-6">
-            <h2 className="text-lg font-semibold text-slate-950">运行参数</h2>
-            <p className="mt-1 text-sm leading-6 text-slate-500">
-              配置值会从后端元数据读取；标记“重启生效”的项目保存后不会在线替换正在运行的并发资源。
-            </p>
-            <div className="mt-4 grid gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
+          <details className="rounded-2xl border border-slate-200/90 bg-white/95 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur">
+            <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 px-5 py-4 sm:px-6 [&::-webkit-details-marker]:hidden">
+              <span>
+                <span className="block text-lg font-semibold text-slate-950">高级运行参数</span>
+                <span className="mt-1 block text-sm text-slate-500">资源与请求保护限制，通常无需调整（{advancedFields.length} 项）</span>
+              </span>
+              <span className="text-sm font-medium text-cyan-700">点击展开或收起</span>
+            </summary>
+            <div className="border-t border-slate-100 p-5 sm:p-6">
+              <p className="mb-4 text-sm leading-6 text-slate-500">
+                保存后，标记“重启生效”的项目需要重启服务；其他项目即时生效。
+              </p>
+              <div className="grid gap-4 sm:grid-cols-2">
               {advancedFields.map((field) => {
                 const value = advancedDraft[field.key];
                 const label = `${field.description ?? field.key}${field.unit ? `（${field.unit}）` : ""}`;
@@ -605,7 +612,8 @@ export function AdminSettingsPage() {
             </button>
             {saveError && !feedbackSection ? <p className="mt-3 text-sm text-rose-700" role="alert">保存失败：{saveError}</p> : null}
             {message && !feedbackSection ? <p className="mt-3 text-sm text-emerald-700" role="status">{message}</p> : null}
-          </section>
+            </div>
+          </details>
         ) : null}
 
         <SettingsSection
@@ -1414,7 +1422,9 @@ export function AuditLogsPage() {
                     </td>
                     <td className="px-4 py-3.5">
                       <div className="font-semibold text-slate-900">
-                        {log.target_username || "用户已删除"}
+                        {log.target_user_id
+                          ? log.target_username || "用户已删除"
+                          : "—"}
                       </div>
                       {log.target_user_id ? (
                         <div className="mt-0.5 font-mono text-[11px] text-slate-400">

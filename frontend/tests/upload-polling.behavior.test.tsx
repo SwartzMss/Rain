@@ -15,7 +15,6 @@ vi.mock('../src/api/client', () => ({
   rainApi: {
     fetchFileNode: vi.fn(),
     fetchIssueBundles: vi.fn(),
-    fetchUploadLimits: vi.fn(),
     uploadLogs: vi.fn()
   }
 }));
@@ -71,11 +70,6 @@ async function settle() {
 describe('upload and bundle polling behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.mocked(rainApi.fetchUploadLimits).mockResolvedValue({
-      max_upload_bytes: 16 * 1024 ** 3, max_content_bytes: 8 * 1024 ** 3,
-      used_content_bytes: 0, remaining_content_bytes: 8 * 1024 ** 3,
-      max_archive_working_bytes: 16 * 1024 ** 3, max_archive_entries: 100000, max_compression_ratio: 1000
-    });
     vi.mocked(rainApi.fetchFileNode).mockResolvedValue({ children: [] });
   });
 
@@ -118,39 +112,6 @@ describe('upload and bundle polling behavior', () => {
     finishRefreshA();
     await settle();
     unmount();
-  });
-
-  it('does not send file data when preflight detects insufficient capacity', async () => {
-    vi.mocked(rainApi.fetchUploadLimits).mockResolvedValueOnce({
-      max_upload_bytes: 100, max_content_bytes: 50, used_content_bytes: 49,
-      remaining_content_bytes: 1, max_archive_working_bytes: 100, max_archive_entries: 100, max_compression_ratio: 1000
-    });
-    const { result } = renderHook(() => useUploadTask({
-      currentIssueCode: 'ISSUE-1', loadBundles: vi.fn(), loadIssues: vi.fn()
-    }));
-    await act(async () => { await result.current.performUpload([new File(['too big'], 'a.log')]); });
-    expect(rainApi.uploadLogs).not.toHaveBeenCalled();
-    expect(result.current.uploadError).toContain('未开始上传');
-    expect(result.current.uploadDisabled).toBe(false);
-  });
-
-  it('cancels before sending data if the Issue changes during preflight', async () => {
-    const pending = deferred<Awaited<ReturnType<typeof rainApi.fetchUploadLimits>>>();
-    vi.mocked(rainApi.fetchUploadLimits).mockReturnValueOnce(pending.promise);
-    const { result } = renderHook(() => useUploadTask({
-      currentIssueCode: 'ISSUE-1', loadBundles: vi.fn(), loadIssues: vi.fn()
-    }));
-    let upload!: Promise<void>;
-    act(() => { upload = result.current.performUpload([new File(['a'], 'a.log')]); });
-    expect(result.current.checking).toBe(true);
-    act(() => result.current.resetSelection());
-    await act(async () => {
-      pending.resolve({ max_upload_bytes: 100, max_content_bytes: 50, used_content_bytes: 0,
-        remaining_content_bytes: 50, max_archive_working_bytes: 100, max_archive_entries: 100, max_compression_ratio: 1000 });
-      await upload;
-    });
-    expect(rainApi.uploadLogs).not.toHaveBeenCalled();
-    expect(result.current.uploadDisabled).toBe(false);
   });
 
   it('keeps an in-flight upload disabled when switching Issues resets the selection', async () => {

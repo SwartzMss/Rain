@@ -226,8 +226,6 @@ export function HomeView() {
               onFilesSelected={(files) => upload.performUpload(files).catch(() => undefined)}
               uploadDisabled={upload.uploadDisabled}
               uploadError={upload.uploadError}
-              checking={upload.checking}
-              uploadNotice={upload.uploadNotice}
               uploading={upload.uploading}
               uploadingRef={upload.uploadingRef}
             />

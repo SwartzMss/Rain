@@ -1,7 +1,6 @@
-import { useCallback, useReducer, useRef, useState } from 'react';
+import { useCallback, useReducer, useRef } from 'react';
 import { normalizeApiError, rainApi } from '../../../api/client';
 import type { UploadSelectionItem } from '../uploadRows';
-import { preflightUpload } from '../uploadPreflight';
 
 type UploadState =
   | { status: 'idle'; selection: UploadSelectionItem[]; message: string | null; progress: number }
@@ -54,8 +53,6 @@ export function useUploadTask(options: {
 }) {
   const { currentIssueCode, loadBundles, loadIssues } = options;
   const [state, dispatch] = useReducer(uploadReducer, initialUploadState);
-  const [checking, setChecking] = useState(false);
-  const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const uploadingRef = useRef(false);
   const uploadGenerationRef = useRef(0);
 
@@ -66,7 +63,6 @@ export function useUploadTask(options: {
   const resetSelection = useCallback(() => {
     uploadGenerationRef.current += 1;
     dispatch({ type: 'reset-selection' });
-    setUploadNotice(null);
   }, []);
 
   const performUpload = useCallback(
@@ -83,30 +79,16 @@ export function useUploadTask(options: {
 
       const uploadGeneration = ++uploadGenerationRef.current;
       uploadingRef.current = true;
-      setChecking(true);
-      setUploadNotice(null);
       dispatch({
         type: 'upload-started',
         selection: files.map((file) => ({ name: file.name, sizeBytes: file.size }))
       });
 
       try {
-        const limits = await rainApi.fetchUploadLimits(currentIssueCode);
-        const notice = await preflightUpload(files, limits);
-        // Changing Issue while checking cancels this selection before any file is sent.
-        if (uploadGenerationRef.current !== uploadGeneration) {
-          uploadingRef.current = false;
-          setChecking(false);
-          dispatch({ type: 'upload-finished' });
-          return;
-        }
-        setChecking(false);
-        setUploadNotice(notice);
         await rainApi.uploadLogs(currentIssueCode, files, (progress) => {
           dispatch({ type: 'upload-progress', progress });
         });
       } catch (error) {
-        setChecking(false);
         uploadingRef.current = false;
         dispatch(
           uploadGenerationRef.current === uploadGeneration
@@ -124,8 +106,6 @@ export function useUploadTask(options: {
   );
 
   return {
-    checking,
-    uploadNotice,
     performUpload,
     resetSelection,
     uploadDisabled,

@@ -1,14 +1,5 @@
 export type UploadStatus = 'READY' | 'PROCESSING' | 'FAILED' | 'PENDING';
 
-export interface UploadLimits {
-  max_upload_bytes: number;
-  max_content_bytes: number;
-  used_content_bytes: number;
-  remaining_content_bytes: number;
-  max_archive_working_bytes: number;
-  max_archive_entries: number;
-  max_compression_ratio: number;
-}
 export type UploadStage = 'PENDING' | 'RECEIVING' | 'VALIDATING' | 'EXTRACTING' | 'INDEXING' | 'PUBLISHING' | 'READY' | 'FAILED';
 
 export type UserRole = 'USER' | 'ADMIN';

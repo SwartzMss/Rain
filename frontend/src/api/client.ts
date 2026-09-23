@@ -1,5 +1,4 @@
 import type {
-  UploadLimits,
   FileContentResponse,
   FileLinesResponse,
   FileNodeResponse,
@@ -242,9 +241,6 @@ export const rainApi = {
   },
   fetchIssueBundles(issueId: string) {
     return request<IssueBundlesResponse>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueId))}`);
-  },
-  fetchUploadLimits(issueCode: string) {
-    return request<UploadLimits>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/upload-limits`);
   },
   fetchFileNode(bundleId: string, fileId: string) {
     return request<FileNodeResponse>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}`);

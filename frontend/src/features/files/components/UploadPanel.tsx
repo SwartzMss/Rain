@@ -7,8 +7,6 @@ type UploadPanelProps = {
   onFilesSelected: (files: File[]) => void;
   uploadDisabled: boolean;
   uploadError: string | null;
-  checking?: boolean;
-  uploadNotice?: string | null;
   uploading: boolean;
   uploadingRef: RefObject<boolean>;
 };
@@ -20,8 +18,6 @@ export function UploadPanel({
   onFilesSelected,
   uploadDisabled,
   uploadError,
-  checking,
-  uploadNotice,
   uploading,
   uploadingRef
 }: UploadPanelProps) {
@@ -79,11 +75,11 @@ export function UploadPanel({
               {!currentIssueCode
                 ? '先选择或新建 Issue'
                 : uploading
-                  ? checking ? '正在检查文件大小和剩余容量…' : '上传中'
+                  ? '上传中'
                   : '拖拽日志文件到这里，或点击选择文件'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              支持 .log、.txt、.zip、.tar.gz、.tgz、.gz。上传前会快速检查，后台还会对压缩内容做权威校验。
+              支持 .log、.txt、.zip、.tar.gz、.tgz、.gz。后台会校验文件及解压内容，超出限制的任务将失败。
             </p>
           </div>
         </div>
@@ -96,11 +92,10 @@ export function UploadPanel({
             if (canWrite && !uploadDisabled) fileInputRef.current?.click();
           }}
         >
-          {checking ? '检查中' : uploading ? '上传中' : '选择文件'}
+          {uploading ? '上传中' : '选择文件'}
         </button>
       </div>
       {uploadError ? <p className="text-sm text-rose-600">{uploadError}</p> : null}
-      {uploadNotice ? <p role="status" className="text-sm text-amber-700">{uploadNotice}</p> : null}
     </form>
   );
 }
