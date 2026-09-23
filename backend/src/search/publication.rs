@@ -153,6 +153,40 @@ pub async fn claim_publication(
     .await
 }
 
+/// Keep a long-running initial publication distinguishable from a crashed one.
+/// Cleanup only reclaims BUILDING generations whose heartbeat has gone stale.
+pub async fn refresh_publication_heartbeat(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    generation: i64,
+) -> Result<(), AppError> {
+    let changed = crate::db::write::run(
+        pool,
+        "heartbeat search publication",
+        &(bundle_id, generation),
+        |conn, (bundle_id, generation)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE bundle_search_indexes SET updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND generation=? AND state='BUILDING' AND pending_state='IDLE' AND pending_generation IS NULL",
+                )
+                .bind(bundle_id)
+                .bind(generation)
+                .execute(&mut *conn)
+                .await
+                .map(|result| result.rows_affected())
+                .map_err(AppError::Database)
+            })
+        },
+    )
+    .await?;
+    if changed != 1 {
+        return Err(AppError::Conflict(
+            "search publication generation changed while building".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn mark_publication_ready(
     pool: &SqlitePool,
     bundle_id: &str,
@@ -969,6 +1003,38 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(error.to_string().contains("already being built"));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn publication_heartbeat_refreshes_a_building_generation() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues(code,name,status) VALUES('HEARTBEAT','Heartbeat','ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-heartbeat','HEARTBEAT','hash','heartbeat','PROCESSING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state,updated_at) VALUES('bundle-heartbeat','tantivy',1,'BUILDING',datetime('now','-10 minutes'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        super::refresh_publication_heartbeat(&pool, "bundle-heartbeat", 1)
+            .await
+            .unwrap();
+        let stale: i64 = sqlx::query_scalar(
+            "SELECT datetime(updated_at) <= datetime('now','-5 minutes') FROM bundle_search_indexes WHERE bundle_id='bundle-heartbeat'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stale, 0);
         pool.close().await;
     }
 }

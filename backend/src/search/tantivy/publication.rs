@@ -13,7 +13,10 @@ use tokio::{fs, sync::Mutex};
 
 use crate::{
     error::AppError,
-    search::publication::{SearchBackendKind, artifact_relative_path, mark_publication_ready},
+    search::publication::{
+        SearchBackendKind, artifact_relative_path, mark_publication_ready,
+        refresh_publication_heartbeat,
+    },
     search::{
         IndexBatch, IndexChunk, IngestIndex,
         resource::{SearchResourceBudget, SearchResourcePermit},
@@ -44,6 +47,7 @@ pub struct BundleBuildSession {
     admission_wait: Duration,
     build_started: Instant,
     _resource_permit: SearchResourcePermit,
+    heartbeat_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl BundleBuildSession {
@@ -78,7 +82,7 @@ impl BundleBuildSession {
                 ..PipelineConfig::default()
             },
         )?;
-        Ok(Arc::new(Self {
+        let session = Arc::new(Self {
             pool: pool.clone(),
             bundle_id: bundle_id.to_owned(),
             generation,
@@ -93,13 +97,50 @@ impl BundleBuildSession {
             admission_wait,
             build_started: Instant::now(),
             _resource_permit: resource_permit,
-        }))
+            heartbeat_task: Mutex::new(None),
+        });
+        let heartbeat_pool = pool.clone();
+        let heartbeat_bundle_id = bundle_id.to_owned();
+        let heartbeat_task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                match refresh_publication_heartbeat(
+                    &heartbeat_pool,
+                    &heartbeat_bundle_id,
+                    generation,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(AppError::Conflict(_)) => break,
+                    Err(error) => {
+                        tracing::warn!(
+                            bundle_id = %heartbeat_bundle_id,
+                            generation,
+                            %error,
+                            "failed to refresh Tantivy publication heartbeat"
+                        );
+                    }
+                }
+            }
+        });
+        *session.heartbeat_task.lock().await = Some(heartbeat_task);
+        Ok(session)
     }
 
     pub async fn finish(&self) -> Result<(), AppError> {
         let result = self.finish_inner().await;
+        self.stop_heartbeat().await;
         self.emit_metric(if result.is_ok() { "success" } else { "error" });
         result
+    }
+
+    async fn stop_heartbeat(&self) {
+        let heartbeat = self.heartbeat_task.lock().await.take();
+        if let Some(heartbeat) = heartbeat {
+            heartbeat.abort();
+            let _ = heartbeat.await;
+        }
     }
 
     async fn finish_inner(&self) -> Result<(), AppError> {
@@ -193,6 +234,7 @@ impl BundleBuildSession {
     }
 
     pub async fn abort(&self) {
+        self.stop_heartbeat().await;
         if self.published.load(Ordering::Acquire) {
             return;
         }
@@ -207,6 +249,16 @@ impl BundleBuildSession {
             }
         }
         self.emit_metric("cancelled");
+    }
+}
+
+impl Drop for BundleBuildSession {
+    fn drop(&mut self) {
+        if let Ok(mut heartbeat) = self.heartbeat_task.try_lock()
+            && let Some(heartbeat) = heartbeat.take()
+        {
+            heartbeat.abort();
+        }
     }
 }
 
