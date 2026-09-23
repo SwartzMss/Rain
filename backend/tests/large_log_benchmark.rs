@@ -60,6 +60,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Metrics {
             "log_index_file",
             "operation_phase",
             "tantivy_index_build",
+            "upload_preflight",
         ]
         .contains(&metric)
         {
@@ -95,6 +96,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Metrics {
                 || key.ends_with("_bytes")
                 || [
                     "active_writers",
+                    "writer_active_writers",
                     "committed_batches",
                     "committed_chunks",
                     "queued_writers",
