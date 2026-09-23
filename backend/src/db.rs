@@ -640,32 +640,44 @@ pub async fn load_or_initialize_cleanup_exempt_users(
     pool: &SqlitePool,
     legacy_policy: &IssueCleanupPolicy,
 ) -> Result<IssueCleanupPolicy, AppError> {
-    sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, 1)")
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
-    let mut tx = pool.begin().await.map_err(AppError::Database)?;
-    let initialized: i64 = sqlx::query_scalar(
-        "SELECT cleanup_exempt_users_initialized FROM system_settings WHERE id=1",
+    let legacy_json = legacy_policy.exempt_usernames_json().to_owned();
+    let json = write::run(
+        pool,
+        "initialize cleanup exempt users",
+        &legacy_json,
+        |conn, legacy_json| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, 1)",
+                )
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                let initialized: i64 = sqlx::query_scalar(
+                    "SELECT cleanup_exempt_users_initialized FROM system_settings WHERE id=1",
+                )
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                if initialized == 0 {
+                    sqlx::query("UPDATE system_settings SET cleanup_exempt_usernames_json=?, cleanup_exempt_users_initialized=1, updated_at=CURRENT_TIMESTAMP WHERE id=1")
+                        .bind(legacy_json)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
+                    Ok(legacy_json.clone())
+                } else {
+                    sqlx::query_scalar(
+                        "SELECT cleanup_exempt_usernames_json FROM system_settings WHERE id=1",
+                    )
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)
+                }
+            })
+        },
     )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(AppError::Database)?;
-    let json: String = if initialized == 0 {
-        let json = legacy_policy.exempt_usernames_json().to_owned();
-        sqlx::query("UPDATE system_settings SET cleanup_exempt_usernames_json=?, cleanup_exempt_users_initialized=1, updated_at=CURRENT_TIMESTAMP WHERE id=1")
-            .bind(&json)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::Database)?;
-        json
-    } else {
-        sqlx::query_scalar("SELECT cleanup_exempt_usernames_json FROM system_settings WHERE id=1")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(AppError::Database)?
-    };
-    tx.commit().await.map_err(AppError::Database)?;
+    .await?;
     IssueCleanupPolicy::from_json(&json).map_err(AppError::Config)
 }
 
@@ -805,6 +817,28 @@ mod tests {
             .expect("persisted whitelist");
         assert!(loaded.is_exempt("BOB"));
         assert!(!loaded.is_exempt("alice"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_exempt_user_initialization_waits_for_writer_admission() {
+        let pool = super::init_pool("sqlite::memory:").expect("init pool");
+        super::prepare_schema(&pool, true).await.expect("schema");
+        let (legacy, _) = IssueCleanupPolicy::from_csv(Some("Alice"));
+
+        let permit = super::write::acquire(&pool).await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                load_or_initialize_cleanup_exempt_users(&pool, &legacy),
+            )
+            .await
+            .is_err(),
+            "cleanup whitelist initialization must wait for the shared writer"
+        );
+        drop(permit);
+        load_or_initialize_cleanup_exempt_users(&pool, &legacy)
+            .await
+            .expect("cleanup whitelist initialization after writer release");
     }
 
     #[tokio::test]

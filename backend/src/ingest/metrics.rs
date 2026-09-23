@@ -263,9 +263,14 @@ mod tests {
     #[tokio::test]
     async fn retried_index_transaction_counts_committed_content_once() {
         let (root, pool, file_id) = file_fixture().await;
+        let external_options = pool
+            .connect_options()
+            .as_ref()
+            .clone()
+            .busy_timeout(Duration::from_secs(1));
         let external = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
-            .connect_with(pool.connect_options().as_ref().clone())
+            .connect_with(external_options)
             .await
             .unwrap();
         let mut lock = external.begin().await.unwrap();

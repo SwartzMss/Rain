@@ -2067,7 +2067,10 @@ async fn repeated_passive_cleanup_checkpoints_converge_and_reuse_wal() {
         "reader should leave a WAL backlog: {blocked_checkpoint:?}"
     );
 
-    drop(reader);
+    reader
+        .rollback()
+        .await
+        .expect("reader rollback should release its snapshot");
     let drained = db::checkpoint_wal(&pool)
         .await
         .expect("checkpoint after reader release");
