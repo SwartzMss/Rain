@@ -38,9 +38,7 @@ impl Serialize for FieldMetadata {
     }
 }
 
-fn details(
-    key: SettingKey,
-) -> (
+type FieldDetails = (
     &'static str,
     Option<&'static str>,
     serde_json::Value,
@@ -48,7 +46,9 @@ fn details(
     Option<u64>,
     Option<u64>,
     &'static str,
-) {
+);
+
+fn details(key: SettingKey) -> FieldDetails {
     use SettingKey::*;
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;
