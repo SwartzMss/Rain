@@ -114,6 +114,7 @@ pub struct UploadRuntime {
 
 pub struct SearchRuntime {
     pub tantivy_budget: SearchResourceBudget,
+    pub query_permits: Arc<Semaphore>,
     pub(crate) generation_leases: crate::search::generation_lease::GenerationLeaseRegistry,
 }
 
@@ -122,6 +123,9 @@ impl SearchRuntime {
         Self {
             tantivy_budget: SearchResourceBudget::new(max_writers, writer_heap_size_bytes)
                 .expect("validated Tantivy resource budget"),
+            query_permits: Arc::new(Semaphore::new(
+                crate::search::resource::MAX_CONCURRENT_TANTIVY_QUERIES,
+            )),
             generation_leases: crate::search::generation_lease::GenerationLeaseRegistry::shared(),
         }
     }
@@ -627,6 +631,8 @@ impl Drop for LineReadLease {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use std::path::PathBuf;
 
     use sqlx::sqlite::SqlitePoolOptions;
@@ -663,6 +669,27 @@ mod tests {
         assert_eq!(
             state.search.tantivy_budget.writer_heap_size_bytes(),
             8 * 1024 * 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn state_limits_concurrent_tantivy_queries() {
+        let limits = AppLimits::default();
+        let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        let state = AppState::new(pool, std::env::temp_dir(), limits);
+        let permits = state.search.query_permits.clone();
+        let mut held = Vec::new();
+        for _ in 0..crate::search::resource::MAX_CONCURRENT_TANTIVY_QUERIES {
+            held.push(permits.clone().acquire_owned().await.unwrap());
+        }
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(25), permits.clone().acquire_owned()).await;
+        assert!(blocked.is_err(), "query admission must be globally bounded");
+        drop(held);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), permits.acquire_owned())
+                .await
+                .is_ok()
         );
     }
 

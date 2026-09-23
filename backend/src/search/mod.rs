@@ -1,5 +1,6 @@
 //! Search-plane contracts. Callers depend on these owned values, not SQL or FTS5.
 use async_trait::async_trait;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::error::AppError;
 
@@ -106,6 +107,7 @@ pub fn validate_tantivy_search_window(from: usize, size: usize) -> Result<Search
 }
 
 pub(crate) mod generation_lease;
+pub(crate) mod parallel;
 pub mod publication;
 #[cfg(feature = "tantivy-search")]
 pub mod rebuild;
@@ -338,13 +340,21 @@ pub async fn search_tantivy_bundle_visible(
 }
 
 #[cfg(feature = "tantivy-search")]
-pub(crate) async fn search_tantivy_bundle_visible_with_lease(
+pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
     path: std::path::PathBuf,
     request: ContentSearchRequest,
     visible_file_ids: std::collections::HashSet<i64>,
     lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
 ) -> Result<ContentSearchResult, AppError> {
-    tantivy::search_bundle_visible_with_lease(path, request, visible_file_ids, lease).await
+    tantivy::search_bundle_visible_with_lease_and_permit(
+        path,
+        request,
+        visible_file_ids,
+        lease,
+        permit,
+    )
+    .await
 }
 
 #[cfg(not(feature = "tantivy-search"))]
@@ -360,13 +370,14 @@ pub async fn search_tantivy_bundle_visible(
 }
 
 #[cfg(not(feature = "tantivy-search"))]
-pub(crate) async fn search_tantivy_bundle_visible_with_lease(
+pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
     path: std::path::PathBuf,
     request: ContentSearchRequest,
     visible_file_ids: std::collections::HashSet<i64>,
     lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
 ) -> Result<ContentSearchResult, AppError> {
-    let _ = (path, request, visible_file_ids, lease);
+    let _ = (path, request, visible_file_ids, lease, permit);
     Err(AppError::Config(
         "Tantivy backend requires the tantivy-search feature".into(),
     ))

@@ -5,6 +5,8 @@
 
 use std::{collections::HashSet, path::PathBuf};
 
+use tokio::sync::OwnedSemaphorePermit;
+
 use crate::{
     error::AppError,
     search::{
@@ -45,13 +47,21 @@ pub async fn search_bundle_visible(
     search_bundle_inner(path, request, Some(visible_file_ids), None).await
 }
 
-pub(crate) async fn search_bundle_visible_with_lease(
+pub(crate) async fn search_bundle_visible_with_lease_and_permit(
     path: PathBuf,
     request: ContentSearchRequest,
     visible_file_ids: HashSet<i64>,
     lease: GenerationLease,
+    permit: OwnedSemaphorePermit,
 ) -> Result<ContentSearchResult, AppError> {
-    search_bundle_inner(path, request, Some(visible_file_ids), Some(lease)).await
+    search_bundle_inner_with_permit(
+        path,
+        request,
+        Some(visible_file_ids),
+        Some(lease),
+        Some(permit),
+    )
+    .await
 }
 
 async fn search_bundle_inner(
@@ -59,6 +69,16 @@ async fn search_bundle_inner(
     request: ContentSearchRequest,
     visible_file_ids: Option<HashSet<i64>>,
     lease: Option<GenerationLease>,
+) -> Result<ContentSearchResult, AppError> {
+    search_bundle_inner_with_permit(path, request, visible_file_ids, lease, None).await
+}
+
+async fn search_bundle_inner_with_permit(
+    path: PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: Option<HashSet<i64>>,
+    lease: Option<GenerationLease>,
+    permit: Option<OwnedSemaphorePermit>,
 ) -> Result<ContentSearchResult, AppError> {
     let ContentSearchScope::Bundle {
         timeline, file_id, ..
@@ -76,6 +96,7 @@ async fn search_bundle_inner(
     let query = request.query;
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
+        let _permit = permit;
         let committed = writer::open_committed(path)?;
         let page = CandidateSearch::new(committed).search_page(
             &query,

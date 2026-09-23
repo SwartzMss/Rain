@@ -16,6 +16,8 @@ Rain 将配置分成三类：
 
 上传/处理并发、全局行读取并发、Tantivy writer、Argon2 和临时结果物化并发属于重启生效字段。保存后页面会显示待重启字段；Rain 不会自动重启进程，运维按部署方式手动重启即可。重启时数据库中的 configured 值成为新的 effective 值。
 
+Issue 内容搜索会在每个请求内最多并行查询 2 个 Tantivy bundle，进程内最多同时执行 4 个 Tantivy 查询；单 bundle 搜索也计入进程级额度。结果仍按统一排序键合并并分页，搜索取消或索引删除时会保留查询任务和 generation lease 的生命周期保护。
+
 ## 管理接口并发
 
 新 PATCH 形态为：
