@@ -124,18 +124,23 @@ pub fn spawn_search_artifact_cleanup(
         move || {
             let pool = state.db.pool.clone();
             let data_root = state.storage.data_root.clone();
+            let registry = state.search.generation_leases.clone();
             async move {
                 crate::search::publication::cleanup_unpublished_artifacts(&pool, &data_root)
                     .await
                     .map_err(|error| error.to_string())?;
-                crate::search::publication::cleanup_deleted_bundle_artifacts(&pool, &data_root)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())?;
-                crate::search::publication::cleanup_retired_artifacts(&pool, &data_root)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                crate::search::publication::cleanup_deleted_bundle_artifacts_with_registry(
+                    &pool, &data_root, &registry,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())?;
+                crate::search::publication::cleanup_retired_artifacts_with_registry(
+                    &pool, &data_root, &registry,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
             }
         },
     )
@@ -149,16 +154,19 @@ pub fn spawn_search_rebuild(state: web::Data<crate::AppState>) -> tokio::task::J
         move || {
             let pool = state.db.pool.clone();
             let data_root = state.storage.data_root.clone();
+            let registry = state.search.generation_leases.clone();
             let budget = state.search.tantivy_budget.clone();
             async move {
                 #[cfg(feature = "tantivy-search")]
                 {
-                    crate::search::rebuild::run_once(&pool, &data_root, budget)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                    crate::search::rebuild::run_once_with_registry(
+                        &pool, &data_root, &registry, budget,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
                 }
                 #[cfg(not(feature = "tantivy-search"))]
-                let _ = (pool, data_root, budget);
+                let _ = (pool, data_root, registry, budget);
                 Ok(())
             }
         },

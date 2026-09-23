@@ -59,6 +59,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Metrics {
             "sqlite_write",
             "log_index_file",
             "operation_phase",
+            "tantivy_search",
             "tantivy_index_build",
             "upload_preflight",
         ]

@@ -105,6 +105,7 @@ pub fn validate_tantivy_search_window(from: usize, size: usize) -> Result<Search
     Ok(SearchWindow { from, size, limit })
 }
 
+pub(crate) mod generation_lease;
 pub mod publication;
 #[cfg(feature = "tantivy-search")]
 pub mod rebuild;
@@ -336,6 +337,16 @@ pub async fn search_tantivy_bundle_visible(
     tantivy::search_bundle_visible(path, request, visible_file_ids).await
 }
 
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn search_tantivy_bundle_visible_with_lease(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: std::collections::HashSet<i64>,
+    lease: generation_lease::GenerationLease,
+) -> Result<ContentSearchResult, AppError> {
+    tantivy::search_bundle_visible_with_lease(path, request, visible_file_ids, lease).await
+}
+
 #[cfg(not(feature = "tantivy-search"))]
 pub async fn search_tantivy_bundle_visible(
     path: std::path::PathBuf,
@@ -343,6 +354,19 @@ pub async fn search_tantivy_bundle_visible(
     visible_file_ids: std::collections::HashSet<i64>,
 ) -> Result<ContentSearchResult, AppError> {
     let _ = (path, request, visible_file_ids);
+    Err(AppError::Config(
+        "Tantivy backend requires the tantivy-search feature".into(),
+    ))
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+pub(crate) async fn search_tantivy_bundle_visible_with_lease(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: std::collections::HashSet<i64>,
+    lease: generation_lease::GenerationLease,
+) -> Result<ContentSearchResult, AppError> {
+    let _ = (path, request, visible_file_ids, lease);
     Err(AppError::Config(
         "Tantivy backend requires the tantivy-search feature".into(),
     ))
