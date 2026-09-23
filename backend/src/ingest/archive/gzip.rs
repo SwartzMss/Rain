@@ -7,7 +7,7 @@ use std::{
 use flate2::read::GzDecoder;
 use tokio::task;
 
-use crate::error::AppError;
+use crate::{error::AppError, file_classification::is_supported_archive_name};
 
 use super::{
     ArchiveBudget, io_error, io_error_at, join_error,
@@ -29,7 +29,11 @@ pub(crate) async fn extract_gzip_file(
     task::spawn_blocking(move || -> Result<(), AppError> {
         archive_budget.reserve_entry()?;
         let remaining = archive_budget.remaining_bytes()?;
-        let entry_limit = archive_budget.config.max_entry_size;
+        let entry_limit = if is_supported_archive_name(&output_name) {
+            archive_budget.config.max_working_size
+        } else {
+            archive_budget.config.max_entry_size
+        };
         let copy_limit = entry_limit.min(remaining);
         let compressed_size = std::fs::metadata(&src_path).map_err(io_error)?.len().max(1);
         let file = StdFile::open(&src_path)
@@ -56,10 +60,7 @@ pub(crate) async fn extract_gzip_file(
             .map_err(|error| {
                 if matches!(error, AppError::BadRequest(_)) {
                     if remaining <= entry_limit {
-                        AppError::BadRequest(format!(
-                            "archive bundle exceeds configured extracted size; max bundle size {}",
-                            format_binary_size(archive_budget.config.max_extracted_size)
-                        ))
+                        archive_budget.working_size_exceeded()
                     } else {
                         AppError::BadRequest(format!(
                             "archive entry exceeds configured limit; max entry size {}",
@@ -100,7 +101,7 @@ fn copy_with_limit<R: Read, W: Write>(
         }
         total = total
             .checked_add(read as u64)
-            .ok_or_else(|| AppError::BadRequest("gzip extracted size overflow".into()))?;
+            .ok_or_else(|| AppError::BadRequest("gzip working size overflow".into()))?;
         if total > limit {
             return Err(AppError::BadRequest(format!(
                 "gzip exceeds limit of {limit} bytes"

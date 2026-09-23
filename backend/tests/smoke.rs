@@ -1413,6 +1413,7 @@ async fn nested_archive_limit_failure_reports_extracting_stage() {
     insert_issues(&pool, &["NESTEDLIMIT"]).await;
     let limits = AppLimits {
         issue_max_content_size: 4 * 1024,
+        archive_max_working_size: 4 * 1024,
         ..AppLimits::default()
     };
     let app = test::init_service(
@@ -1467,6 +1468,15 @@ async fn nested_archive_limit_failure_reports_extracting_stage() {
             .await
             .expect("load nested archive failure stage");
     assert_eq!(failure_stage.as_deref(), Some("EXTRACTING"));
+    let failure_code: Option<String> =
+        sqlx::query_scalar("SELECT failure_code FROM bundles WHERE issue_code = 'NESTEDLIMIT'")
+            .fetch_one(&pool)
+            .await
+            .expect("load nested archive failure code");
+    assert_eq!(
+        failure_code.as_deref(),
+        Some("ARCHIVE_WORKING_SIZE_EXCEEDED")
+    );
     let (content_size, file_count): (i64, i64) = sqlx::query_as(
         "SELECT content_size_bytes, (SELECT COUNT(*) FROM files WHERE bundle_id = bundles.id) FROM bundles WHERE issue_code = 'NESTEDLIMIT'",
     )
@@ -1488,6 +1498,78 @@ async fn nested_archive_limit_failure_reports_extracting_stage() {
 }
 
 #[actix_web::test]
+async fn nested_archive_container_uses_working_budget_not_issue_file_limit() {
+    let test_dir = TestDir::new("rain-nested-archive-working-budget");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let data_root = test_dir.path.join("uploads");
+    fs::create_dir_all(&data_root).expect("create data root");
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    insert_issues(&pool, &["NESTEDWORKING"]).await;
+    let limits = AppLimits {
+        issue_max_content_size: 512,
+        archive_max_working_size: 2 * 1024,
+        ..AppLimits::default()
+    };
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                data_root,
+                limits,
+            )))
+            .configure(routes::register),
+    )
+    .await;
+    let auth_cookie = test_auth_cookie(&pool).await;
+
+    let payload = (0..480)
+        .map(|index| ((index * 17) % 251) as u8)
+        .collect::<Vec<_>>();
+    let first_gzip = gzip_bytes_raw(&payload[..240]);
+    let second_gzip = gzip_bytes_raw(&payload[240..]);
+    let inner_zip = zip_bytes(&[
+        ("first.log.gz", first_gzip.as_slice()),
+        ("second.log.gz", second_gzip.as_slice()),
+    ]);
+    assert!(inner_zip.len() > 512);
+    let outer_zip = zip_bytes(&[("inner.zip", inner_zip.as_slice())]);
+    assert!(outer_zip.len() < 1024);
+    let boundary = format!("rain-{}", Uuid::new_v4().simple());
+    let response: Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/issues/NESTEDWORKING/uploads")
+            .insert_header((
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            ))
+            .set_payload(multipart_body_bytes(
+                &boundary,
+                "NESTEDWORKING",
+                "outer.zip",
+                "application/zip",
+                &outer_zip,
+            ))
+            .cookie(auth_cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response["issue_code"], "NESTEDWORKING");
+    wait_for_issue_ready(&pool, "NESTEDWORKING").await;
+
+    let content_size: i64 = sqlx::query_scalar(
+        "SELECT content_size_bytes FROM bundles WHERE issue_code = 'NESTEDWORKING' AND status = 'READY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load nested archive content size");
+    assert_eq!(content_size, 480);
+}
+
+#[actix_web::test]
 async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     let test_dir = TestDir::new("rain-quota-overflow");
     let db_url = sqlite_url(&test_dir.path.join("rain.db"));
@@ -1500,6 +1582,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     insert_issues(&pool, &["QUOTAFAIL"]).await;
     let limits = AppLimits {
         issue_max_content_size: 16,
+        archive_max_working_size: 32,
         ..AppLimits::default()
     };
     let app = test::init_service(
@@ -1538,6 +1621,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
     let upload_limits: Value = test::read_body_json(limits_response).await;
     assert_eq!(upload_limits["max_content_bytes"], 16);
     assert_eq!(upload_limits["max_upload_bytes"], 32);
+    assert_eq!(upload_limits["max_archive_working_bytes"], 32);
     assert_eq!(upload_limits["remaining_content_bytes"], 16);
 
     let boundary = format!("rain-{}", Uuid::new_v4().simple());
@@ -2602,8 +2686,12 @@ Content-Type: {content_type}\r\n\r\n"
 }
 
 fn gzip_bytes(content: &str) -> Vec<u8> {
+    gzip_bytes_raw(content.as_bytes())
+}
+
+fn gzip_bytes_raw(content: &[u8]) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(content.as_bytes()).expect("write gzip");
+    encoder.write_all(content).expect("write gzip");
     encoder.finish().expect("finish gzip")
 }
 

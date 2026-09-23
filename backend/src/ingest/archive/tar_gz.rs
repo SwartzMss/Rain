@@ -3,7 +3,7 @@ use std::{collections::HashSet, fs::File as StdFile, path::Path};
 use flate2::read::GzDecoder;
 use tokio::task;
 
-use crate::error::AppError;
+use crate::{error::AppError, file_classification::is_supported_archive_name};
 
 use super::{
     ArchiveBudget, io_error, io_error_at, join_error,
@@ -59,7 +59,9 @@ pub(crate) async fn extract_tar_gz_archive(
             }
 
             let entry_size = entry.header().size().map_err(io_error)?;
-            if entry_size > archive_budget.config.max_entry_size {
+            if !is_supported_archive_name(raw_path.to_string_lossy().as_ref())
+                && entry_size > archive_budget.config.max_entry_size
+            {
                 return Err(AppError::BadRequest(format!(
                     "archive entry exceeds configured limit; max entry size {}: {}",
                     format_binary_size(archive_budget.config.max_entry_size),
@@ -69,7 +71,7 @@ pub(crate) async fn extract_tar_gz_archive(
 
             total_uncompressed = total_uncompressed
                 .checked_add(entry_size)
-                .ok_or_else(|| AppError::BadRequest("tar.gz extracted size overflow".into()))?;
+                .ok_or_else(|| AppError::BadRequest("tar.gz working size overflow".into()))?;
             archive_budget.reserve_entry()?;
             archive_budget.reserve_bytes(entry_size)?;
             archive_budget.reserve_temp_bytes(entry_size)?;

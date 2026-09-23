@@ -7,6 +7,7 @@ import { preflightUpload } from '../src/features/files/uploadPreflight';
 const limits: UploadLimits = {
   max_upload_bytes: 16 * 1024 ** 3, max_content_bytes: 8 * 1024 ** 3,
   used_content_bytes: 0, remaining_content_bytes: 8 * 1024 ** 3,
+  max_archive_working_bytes: 16 * 1024 ** 3,
   max_archive_entries: 10000, max_compression_ratio: 1000
 };
 
@@ -65,7 +66,7 @@ describe('upload preflight', () => {
 
   it('reads ZIP metadata and rejects combined extracted size', async () => {
     const file = zip([{ name: 'a.log', size: 80 }, { name: 'b.log', size: 80 }]);
-    await expect(preflightUpload([file], { ...limits, max_content_bytes: 100 })).rejects.toThrow('超过解压上限');
+    await expect(preflightUpload([file], { ...limits, max_archive_working_bytes: 100 })).rejects.toThrow('超过解压工作上限');
   });
 
   it('checks ZIP content against capacity already used by an Issue', async () => {
@@ -81,7 +82,7 @@ describe('upload preflight', () => {
 
   it('sums extraction budgets across ZIPs', async () => {
     const file = zip([{ name: 'a.log', size: 60 }]);
-    await expect(preflightUpload([file, file], { ...limits, max_content_bytes: 100 })).rejects.toThrow('超过解压上限');
+    await expect(preflightUpload([file, file], { ...limits, max_archive_working_bytes: 100 })).rejects.toThrow('超过解压工作上限');
   });
 
   it('checks compression ratio and cumulative entry limits', async () => {
@@ -93,6 +94,16 @@ describe('upload preflight', () => {
   it('does not count nested archive containers as final Issue content', async () => {
     const file = zip([{ name: 'nested.zip', size: 100 }, { name: 'a.log', size: 1 }]);
     await expect(preflightUpload([file], { ...limits, remaining_content_bytes: 1 })).resolves.toContain('无法提前计算');
+  });
+
+  it('does not apply the final-file limit to a nested archive container', async () => {
+    const file = zip([{ name: 'nested.zip', size: 200 }]);
+    await expect(preflightUpload([file], {
+      ...limits,
+      max_content_bytes: 100,
+      max_archive_working_bytes: 300,
+      remaining_content_bytes: 100,
+    })).resolves.toContain('无法提前计算');
   });
 
   it('warns for GZIP and unreadable ZIP metadata instead of treating the compressed size as content', async () => {

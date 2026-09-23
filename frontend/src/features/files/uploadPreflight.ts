@@ -96,7 +96,7 @@ async function inspectZip(file: File, limits: UploadLimits) {
       if (!found) return unknown();
     }
     const name = new TextDecoder().decode(new Uint8Array(directory.buffer, position + 46, nameLength));
-    if (uncompressed > limits.max_content_bytes) {
+    if (!archiveName.test(name) && uncompressed > limits.max_content_bytes) {
       throw new Error(`${file.name} 中的 ${name} 解压后为 ${bytes(uncompressed)}，超过单文件上限 ${bytes(limits.max_content_bytes)}，未开始上传`);
     }
     if (uncompressed && (!compressed || Math.floor(uncompressed / compressed) > limits.max_compression_ratio)) {
@@ -138,8 +138,8 @@ export async function preflightUpload(files: File[], limits: UploadLimits): Prom
     } else {
       content += file.size;
     }
-    if (extracted > limits.max_content_bytes) {
-      throw new Error(`本次压缩包解压大小至少 ${bytes(extracted)}，超过解压上限 ${bytes(limits.max_content_bytes)}，未开始上传`);
+    if (extracted > limits.max_archive_working_bytes) {
+      throw new Error(`本次压缩包解压工作量至少 ${bytes(extracted)}，超过解压工作上限 ${bytes(limits.max_archive_working_bytes)}，未开始上传`);
     }
     if (entries > limits.max_archive_entries) {
       throw new Error(`本次压缩包条目总数超过 ${limits.max_archive_entries}，未开始上传`);

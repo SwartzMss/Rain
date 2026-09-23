@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use actix_web::http::StatusCode;
+
 use crate::upload::multipart::TempBudget;
 use crate::{config::ArchiveConfig, error::AppError};
 
@@ -21,7 +23,7 @@ impl Default for ArchiveBudget {
 #[derive(Default)]
 struct ArchiveCounters {
     entries: usize,
-    extracted_bytes: u64,
+    working_bytes: u64,
 }
 
 impl ArchiveBudget {
@@ -68,17 +70,25 @@ impl ArchiveBudget {
             .counters
             .lock()
             .map_err(|_| AppError::BadRequest("archive budget lock poisoned".into()))?;
-        counters.extracted_bytes = counters
-            .extracted_bytes
+        counters.working_bytes = counters
+            .working_bytes
             .checked_add(size_bytes)
-            .ok_or_else(|| AppError::BadRequest("archive extracted size overflow".into()))?;
-        if counters.extracted_bytes > self.config.max_extracted_size {
-            return Err(AppError::BadRequest(format!(
-                "archive bundle exceeds configured extracted size; max bundle size {}",
-                format_binary_size(self.config.max_extracted_size)
-            )));
+            .ok_or_else(|| AppError::BadRequest("archive working size overflow".into()))?;
+        if counters.working_bytes > self.config.max_working_size {
+            return Err(self.working_size_exceeded());
         }
         Ok(())
+    }
+
+    pub(crate) fn working_size_exceeded(&self) -> AppError {
+        AppError::public(
+            StatusCode::BAD_REQUEST,
+            "ARCHIVE_WORKING_SIZE_EXCEEDED",
+            format!(
+                "archive working data exceeds configured limit; max working size {}",
+                format_binary_size(self.config.max_working_size)
+            ),
+        )
     }
 
     pub(crate) fn remaining_bytes(&self) -> Result<u64, AppError> {
@@ -88,7 +98,7 @@ impl ArchiveBudget {
             .map_err(|_| AppError::BadRequest("archive budget lock poisoned".into()))?;
         Ok(self
             .config
-            .max_extracted_size
-            .saturating_sub(counters.extracted_bytes))
+            .max_working_size
+            .saturating_sub(counters.working_bytes))
     }
 }

@@ -43,7 +43,10 @@ pub async fn get_upload_limits(
     .await
     .map_err(AppError::Database)?;
     let limit = state.limits.issue_max_content_size;
-    let archive = crate::config::ArchiveConfig::for_content_limit(limit);
+    let archive = crate::config::ArchiveConfig::for_content_limit_with_working_size(
+        limit,
+        state.limits.archive_max_working_size,
+    );
     Ok(HttpResponse::Ok()
         .insert_header(("Cache-Control", "no-store, private"))
         .json(serde_json::json!({
@@ -51,6 +54,7 @@ pub async fn get_upload_limits(
             "max_content_bytes": limit,
             "used_content_bytes": used.max(0),
             "remaining_content_bytes": limit.saturating_sub(used.max(0) as u64),
+            "max_archive_working_bytes": archive.max_working_size,
             "max_archive_entries": archive.max_entries,
             "max_compression_ratio": archive.max_compression_ratio,
         })))
@@ -190,8 +194,9 @@ pub async fn upload_logs(
         temp_dir,
         staging_root,
         processing_permits: state.upload.processing_permits.clone(),
-        archive_config: crate::config::ArchiveConfig::for_content_limit(
+        archive_config: crate::config::ArchiveConfig::for_content_limit_with_working_size(
             state.limits.issue_max_content_size,
+            state.limits.archive_max_working_size,
         ),
         indexing_config: state.limits.indexing.clone(),
         request_id: request_id.clone(),
