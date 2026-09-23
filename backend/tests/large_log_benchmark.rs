@@ -11,7 +11,7 @@ use backend::{
     ingest::{ArchiveBudget, IssueQuota, ProcessFileOptions, process_uploaded_file},
     repositories::{sessions, users},
     routes,
-    search::{IngestIndex, publication::SearchBackendKind},
+    search::{IngestIndex, publication::SearchBackendKind, resource::SearchResourceBudget},
     upload::{finalizer::finalize_bundle_ready_with_retry, lifecycle::create_processing_bundle},
 };
 use futures_util::{FutureExt, future::join_all};
@@ -55,7 +55,14 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Metrics {
         let Some(metric) = fields.0.get("metric").and_then(Value::as_str) else {
             return;
         };
-        if !["sqlite_write", "log_index_file", "operation_phase"].contains(&metric) {
+        if ![
+            "sqlite_write",
+            "log_index_file",
+            "operation_phase",
+            "tantivy_index_build",
+        ]
+        .contains(&metric)
+        {
             return;
         }
         let key = format!(
@@ -84,9 +91,16 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Metrics {
         for (key, value) in fields.0 {
             // Ignore identifiers; aggregate measured numeric fields only.
             if (key.ends_with("_us")
+                || key.ends_with("_ms")
                 || key.ends_with("_bytes")
-                || ["source_lines", "committed_chunks", "committed_batches"]
-                    .contains(&key.as_str()))
+                || [
+                    "active_writers",
+                    "committed_batches",
+                    "committed_chunks",
+                    "queued_writers",
+                    "source_lines",
+                ]
+                .contains(&key.as_str()))
                 && let Some(number) = value.as_u64()
             {
                 aggregate["sum"][&key] = json!(
@@ -160,8 +174,7 @@ async fn begin_bench_build(
     data_root: &Path,
     temp_root: &Path,
     bundle_id: &str,
-    writer_permits: Arc<tokio::sync::Semaphore>,
-    writer_heap_size_bytes: usize,
+    resource_budget: SearchResourceBudget,
 ) -> Result<BenchBuild, backend::error::AppError> {
     if backend != SearchBackendKind::Tantivy {
         return Ok(None);
@@ -178,8 +191,7 @@ async fn begin_bench_build(
         temp_root,
         bundle_id,
         generation,
-        writer_permits,
-        writer_heap_size_bytes,
+        resource_budget,
     )
     .await
     .map(Some)
@@ -192,8 +204,7 @@ async fn begin_bench_build(
     _data_root: &Path,
     _temp_root: &Path,
     _bundle_id: &str,
-    _writer_permits: Arc<tokio::sync::Semaphore>,
-    _writer_heap_size_bytes: usize,
+    _resource_budget: SearchResourceBudget,
 ) -> Result<BenchBuild, backend::error::AppError> {
     Ok(None)
 }
@@ -336,9 +347,11 @@ async fn large_log_baseline() {
                 std::env::var("RAIN_SEARCH_BACKEND").ok().as_deref(),
             )
             .unwrap();
-            let search_writer_permits = Arc::new(tokio::sync::Semaphore::new(
+            let search_resource_budget = SearchResourceBudget::new(
                 limits.search.tantivy_max_writers,
-            ));
+                limits.search.tantivy_writer_heap_size,
+            )
+            .unwrap();
             let search_temp_root = dir.0.join(".search-tmp");
             fs::create_dir_all(&search_temp_root).unwrap();
             let search_builds = join_all(inputs.iter().map(|(id, _, _, _, _)| {
@@ -348,8 +361,7 @@ async fn large_log_baseline() {
                     &data_root,
                     &search_temp_root,
                     id,
-                    search_writer_permits.clone(),
-                    limits.search.tantivy_writer_heap_size as usize,
+                    search_resource_budget.clone(),
                 )
             }))
             .await
@@ -409,7 +421,7 @@ async fn large_log_baseline() {
             json!({"schema_version": 1, "iteration": iteration, "timestamp": chrono::Utc::now().to_rfc3339(),
                 "machine": {"host_notes": std::env::var("RAIN_BENCH_HOST_NOTES").ok(), "filesystem": if cfg!(target_os = "linux") { command("df", &["-T", dir.0.to_str().unwrap()]) } else { None }, "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "clock_ticks_per_second": if cfg!(target_os = "linux") { command("getconf", &["CLK_TCK"]).and_then(|s| s.parse::<u64>().ok()) } else { None }, "logical_cpus": std::thread::available_parallelism().ok().map(|v| v.get()), "uname": command("uname", &["-a"]), "cpu": fs::read_to_string("/proc/cpuinfo").ok().and_then(|s| s.lines().find(|l| l.starts_with("model name")).map(str::to_owned)), "memory": fs::read_to_string("/proc/meminfo").ok().and_then(|s| s.lines().next().map(str::to_owned))},
                 "build": {"git_commit": command("git", &["rev-parse", "HEAD"]), "git_status": command("git", &["status", "--porcelain"]), "rustc": command("rustc", &["-Vv"]), "debug_assertions": cfg!(debug_assertions), "package_version": env!("CARGO_PKG_VERSION")},
-                "config": {"bytes_per_bundle_minimum": bytes, "concurrency": concurrency, "query_samples": queries, "query_warmup": warmup, "limits": format!("{limits:?}"), "archive_limits": format!("{:?}", ArchiveConfig::for_content_limit(limits.issue_max_content_size)), "fixture_version": 1, "variant": variant, "sampler_interval_ms": 100},
+                "config": {"bytes_per_bundle_minimum": bytes, "concurrency": concurrency, "query_samples": queries, "query_warmup": warmup, "tantivy_max_writers": limits.search.tantivy_max_writers, "tantivy_writer_heap_size_bytes": limits.search.tantivy_writer_heap_size, "limits": format!("{limits:?}"), "archive_limits": format!("{:?}", ArchiveConfig::for_content_limit(limits.issue_max_content_size)), "fixture_version": 1, "variant": variant, "sampler_interval_ms": 100},
                 "boundaries": {"receive_included": false, "fixture_generation_included": false, "cache_state": "fresh database; generated and hashed inputs may be cached; OS caches not flushed", "queries": "authenticated in-process HTTP handlers, including body decoding; serial, configured warmup excluded, no cache flush", "resource_scope": "entire test process; samples cover ingest only; Linux IO counters cumulative since process start"},
                 "inputs": inputs.iter().map(|(id, _, metadata, uploaded_bytes, uploaded_sha256)| json!({"bundle": id, "fixture": metadata, "uploaded_bytes": uploaded_bytes, "uploaded_sha256": uploaded_sha256})).collect::<Vec<_>>(),
                 "throughput": {"raw_mib_per_second": inputs.iter().map(|i| i.2.bytes).sum::<u64>() as f64 / 1048576.0 / (ingest_ms / 1000.0), "lines_per_second": inputs.iter().map(|i| i.2.lines).sum::<u64>() as f64 / (ingest_ms / 1000.0)},

@@ -11,6 +11,16 @@ From `backend/`:
 RAIN_BENCH_BYTES=16384 RAIN_BENCH_CONCURRENCY=2 RAIN_BENCH_QUERIES=2 \
   cargo test --test large_log_benchmark large_log_baseline -- --ignored --exact
 
+# Tantivy resource-budget matrix. Use a build with the opt-in feature and
+# compare one, two, and four concurrent Bundles on the same host.
+for concurrency in 1 2 4; do
+  RAIN_SEARCH_BACKEND=tantivy \
+  RAIN_BENCH_CONCURRENCY=$concurrency \
+  RAIN_BENCH_REPORT=/tmp/rain-tantivy-c${concurrency}.jsonl \
+    cargo test --release --features tantivy-search --test large_log_benchmark \
+      large_log_baseline -- --ignored --exact --nocapture
+done
+
 # Baseline: 100 MiB per bundle, one bundle, 20 samples per query/scope.
 RAIN_BENCH_REPORT=/tmp/rain-baseline.jsonl \
   cargo test --release --test large_log_benchmark large_log_baseline -- --ignored --exact --nocapture
@@ -85,9 +95,11 @@ rustc, git commit/working-tree status, build profile indicator, and effective
 configuration accompany each report.
 
 A scoped tracing subscriber aggregates production `log_index_file`,
-`sqlite_write`, and `operation_phase` numeric counters/timings by metric, phase,
-outcome, and SQLite operation. Only ingest-stage events are included; setup
-and query events are excluded. These sums describe overlapping work across bundles, so they must
+`sqlite_write`, `operation_phase`, and `tantivy_index_build` numeric
+counters/timings by metric, phase, outcome, and SQLite operation. Tantivy build
+events include `admission_wait_ms`, `build_elapsed_ms`, `active_writers`,
+`queued_writers`, and `writer_heap_size_bytes`. Only ingest-stage events are
+included; setup and query events are excluded. These sums describe overlapping work across bundles, so they must
 not be added together to infer wall time. Missing metrics mean instrumentation
 was not emitted/captured, not a measured zero. Reports are diagnostic artifacts,
 not automatic regression thresholds; compare the same host, build, fixture
@@ -135,4 +147,6 @@ rare sentinel, UUID, and Chinese text); observed query latencies were roughly
 and overlapping parsing with the bounded writer. The Tantivy writer heap is
 bounded, but total process RSS still includes parser, SQLite, and test-process
 overhead. Repeat the 1/2/4 Bundle and 1/5 GiB matrix before changing the
-default backend.
+default backend. Compare `admission_wait_ms` with `build_elapsed_ms`: a higher
+concurrency setting is useful only when it raises throughput without making
+admission wait, RSS, or search p95 grow disproportionately.
