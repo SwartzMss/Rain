@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     error::AppError,
     search::{
+        generation_lease::GenerationLeaseRegistry,
         publication::{self, artifact_relative_path},
         tantivy,
         visibility::snapshot_file_ids,
@@ -16,6 +17,14 @@ use crate::{
 };
 
 use super::resource::SearchResourceBudget;
+
+struct RebuildPlan {
+    source: std::path::PathBuf,
+    staging: std::path::PathBuf,
+    final_path: std::path::PathBuf,
+    visible: HashSet<i64>,
+    lease: crate::search::generation_lease::GenerationLease,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RebuildClaim {
@@ -33,6 +42,15 @@ pub async fn run_once(
     data_root: &Path,
     budget: SearchResourceBudget,
 ) -> Result<(), AppError> {
+    run_once_with_registry(pool, data_root, &GenerationLeaseRegistry::shared(), budget).await
+}
+
+pub(crate) async fn run_once_with_registry(
+    pool: &SqlitePool,
+    data_root: &Path,
+    registry: &GenerationLeaseRegistry,
+    budget: SearchResourceBudget,
+) -> Result<(), AppError> {
     let Some(claim) = claim_next(pool).await? else {
         return Ok(());
     };
@@ -40,7 +58,8 @@ pub async fn run_once(
     if !publication::rebuild_claim_is_current(pool, &claim).await? {
         return Ok(());
     }
-    let lease = match publication::acquire_generation_lease(
+    let lease = match publication::acquire_generation_lease_with_registry(
+        registry,
         pool,
         &claim.bundle_id,
         claim.active_generation,
@@ -72,7 +91,7 @@ pub async fn run_once(
             heartbeat.abort();
             let _ = publication::cleanup_rebuild_artifacts_if_owned(pool, data_root, &claim).await;
             publication::mark_rebuild_failed(pool, &claim, error_code(&error)).await;
-            let _ = lease.release().await;
+            drop(lease);
             return Err(error);
         }
     };
@@ -89,8 +108,19 @@ pub async fn run_once(
         .join(&claim.bundle_id)
         .join(claim.target_generation.to_string())
         .join(&claim.claim_token);
-    let result =
-        build_and_publish(pool, &claim, source, staging, final_path, visible, budget).await;
+    let result = build_and_publish(
+        pool,
+        &claim,
+        RebuildPlan {
+            source,
+            staging,
+            final_path,
+            visible,
+            lease,
+        },
+        budget,
+    )
+    .await;
     heartbeat.abort();
     if let Err(error) = &result {
         if let Err(cleanup_error) =
@@ -105,23 +135,22 @@ pub async fn run_once(
         }
         publication::mark_rebuild_failed(pool, &claim, error_code(error)).await;
     }
-    let release_result = lease.release().await;
-    match (result, release_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-    }
+    result
 }
 
 async fn build_and_publish(
     pool: &SqlitePool,
     claim: &RebuildClaim,
-    source: std::path::PathBuf,
-    staging: std::path::PathBuf,
-    final_path: std::path::PathBuf,
-    visible: HashSet<i64>,
+    plan: RebuildPlan,
     budget: SearchResourceBudget,
 ) -> Result<(), AppError> {
+    let RebuildPlan {
+        source,
+        staging,
+        final_path,
+        visible,
+        lease,
+    } = plan;
     if !fs::try_exists(&source).await.map_err(AppError::Io)? {
         return Err(AppError::NotFound(format!(
             "active Tantivy generation {} for Bundle {}",
@@ -140,6 +169,7 @@ async fn build_and_publish(
     let staging_for_blocking = staging.clone();
     let source_for_blocking = source.clone();
     tokio::task::spawn_blocking(move || {
+        let _lease = lease;
         tantivy::rebuild_visible_index(source_for_blocking, staging_for_blocking, &visible, heap)
     })
     .await

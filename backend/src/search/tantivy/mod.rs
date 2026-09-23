@@ -7,7 +7,10 @@ use std::{collections::HashSet, path::PathBuf};
 
 use crate::{
     error::AppError,
-    search::{ContentSearchRequest, ContentSearchResult, ContentSearchRow, ContentSearchScope},
+    search::{
+        ContentSearchRequest, ContentSearchResult, ContentSearchRow, ContentSearchScope,
+        generation_lease::GenerationLease,
+    },
 };
 use tantivy::{
     DocAddress, DocSet, TERMINATED, TantivyDocument,
@@ -31,7 +34,7 @@ pub async fn search_bundle(
     path: PathBuf,
     request: ContentSearchRequest,
 ) -> Result<ContentSearchResult, AppError> {
-    search_bundle_inner(path, request, None).await
+    search_bundle_inner(path, request, None, None).await
 }
 
 pub async fn search_bundle_visible(
@@ -39,13 +42,23 @@ pub async fn search_bundle_visible(
     request: ContentSearchRequest,
     visible_file_ids: HashSet<i64>,
 ) -> Result<ContentSearchResult, AppError> {
-    search_bundle_inner(path, request, Some(visible_file_ids)).await
+    search_bundle_inner(path, request, Some(visible_file_ids), None).await
+}
+
+pub(crate) async fn search_bundle_visible_with_lease(
+    path: PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: HashSet<i64>,
+    lease: GenerationLease,
+) -> Result<ContentSearchResult, AppError> {
+    search_bundle_inner(path, request, Some(visible_file_ids), Some(lease)).await
 }
 
 async fn search_bundle_inner(
     path: PathBuf,
     request: ContentSearchRequest,
     visible_file_ids: Option<HashSet<i64>>,
+    lease: Option<GenerationLease>,
 ) -> Result<ContentSearchResult, AppError> {
     let ContentSearchScope::Bundle {
         timeline, file_id, ..
@@ -62,6 +75,7 @@ async fn search_bundle_inner(
     let size = request.size.max(0) as usize;
     let query = request.query;
     tokio::task::spawn_blocking(move || {
+        let _lease = lease;
         let committed = writer::open_committed(path)?;
         let page = CandidateSearch::new(committed).search_page(
             &query,

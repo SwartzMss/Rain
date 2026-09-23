@@ -111,6 +111,7 @@ pub struct UploadRuntime {
 
 pub struct SearchRuntime {
     pub tantivy_budget: SearchResourceBudget,
+    pub(crate) generation_leases: crate::search::generation_lease::GenerationLeaseRegistry,
 }
 
 impl SearchRuntime {
@@ -118,6 +119,7 @@ impl SearchRuntime {
         Self {
             tantivy_budget: SearchResourceBudget::new(max_writers, writer_heap_size_bytes)
                 .expect("validated Tantivy resource budget"),
+            generation_leases: crate::search::generation_lease::GenerationLeaseRegistry::shared(),
         }
     }
 }

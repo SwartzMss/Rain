@@ -7,11 +7,12 @@ use crate::{
     AppState,
     error::AppError,
     models::logs::{LogSearchHit, LogSearchResponse},
+    search::generation_lease::GenerationLeaseRegistry,
     search::{
         ContentSearchRequest, ContentSearchResult, ContentSearchScope, FilenameSearchRequest,
         SearchIndex, SearchWindow,
-        publication::{acquire_generation_lease, artifact_relative_path},
-        search_tantivy_bundle_visible,
+        publication::{acquire_generation_lease_with_registry, artifact_relative_path},
+        search_tantivy_bundle_visible_with_lease,
         sqlite::SqliteFtsSearchIndex,
         validate_search_window,
         visibility::snapshot_file_ids,
@@ -126,14 +127,20 @@ async fn search_logs_inner(
             }
             let artifact = artifact_relative_path(&bundle.id, generation)?;
             let visible_file_ids = snapshot_file_ids(&state.db.pool, &bundle.id).await?;
-            let lease = acquire_generation_lease(&state.db.pool, &bundle.id, generation).await?;
-            let result = search_tantivy_bundle_visible(
+            let lease = acquire_generation_lease_with_registry(
+                &state.search.generation_leases,
+                &state.db.pool,
+                &bundle.id,
+                generation,
+            )
+            .await?;
+            let result = search_tantivy_bundle_visible_with_lease(
                 state.storage.data_root.join(artifact),
                 request,
                 visible_file_ids,
+                lease,
             )
             .await;
-            lease.release().await?;
             result?
         }
         _ => {
@@ -244,6 +251,7 @@ async fn search_issue_logs_inner(
     let result = search_issue_content_mixed(
         &state.db.pool,
         &state.storage.data_root,
+        &state.search.generation_leases,
         ContentSearchRequest {
             scope: ContentSearchScope::Issue {
                 issue_code: issue_code.clone(),
@@ -345,6 +353,7 @@ fn retain_issue_row(
 async fn search_issue_content_mixed(
     pool: &sqlx::SqlitePool,
     data_root: &std::path::Path,
+    registry: &GenerationLeaseRegistry,
     request: ContentSearchRequest,
 ) -> Result<ContentSearchResult, AppError> {
     let ContentSearchScope::Issue { issue_code } = &request.scope else {
@@ -397,8 +406,9 @@ async fn search_issue_content_mixed(
         }
         let artifact = artifact_relative_path(&bundle_id, generation)?;
         let visible_file_ids = snapshot_file_ids(pool, &bundle_id).await?;
-        let lease = acquire_generation_lease(pool, &bundle_id, generation).await?;
-        let result = search_tantivy_bundle_visible(
+        let lease =
+            acquire_generation_lease_with_registry(registry, pool, &bundle_id, generation).await?;
+        let result = search_tantivy_bundle_visible_with_lease(
             data_root.join(artifact),
             ContentSearchRequest {
                 scope: ContentSearchScope::Bundle {
@@ -412,9 +422,9 @@ async fn search_issue_content_mixed(
                 size: candidate_limit as i64,
             },
             visible_file_ids,
+            lease,
         )
         .await;
-        lease.release().await?;
         let result = result?;
         total = total.saturating_add(result.total);
         for mut row in result.rows {

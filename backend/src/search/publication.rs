@@ -13,6 +13,10 @@ use tokio::sync::Mutex;
 
 use crate::error::AppError;
 
+use super::generation_lease::{
+    GenerationLease as InMemoryGenerationLease, GenerationLeaseRegistry,
+};
+
 pub const SQLITE_FTS_SCHEMA_VERSION: i64 = 1;
 pub const TANTIVY_SCHEMA_VERSION: i64 = 1;
 pub const TANTIVY_TOKENIZER_VERSION: i64 = 2;
@@ -767,6 +771,15 @@ pub async fn cleanup_deleted_bundle_artifacts(
     pool: &SqlitePool,
     data_root: &Path,
 ) -> Result<u64, AppError> {
+    let registry = GenerationLeaseRegistry::shared();
+    cleanup_deleted_bundle_artifacts_with_registry(pool, data_root, &registry).await
+}
+
+pub(crate) async fn cleanup_deleted_bundle_artifacts_with_registry(
+    pool: &SqlitePool,
+    data_root: &Path,
+    registry: &GenerationLeaseRegistry,
+) -> Result<u64, AppError> {
     let bundle_ids: Vec<String> =
         sqlx::query_scalar("SELECT id FROM bundles WHERE status='DELETED'")
             .fetch_all(pool)
@@ -782,8 +795,8 @@ pub async fn cleanup_deleted_bundle_artifacts(
         .fetch_optional(pool)
         .await
         .map_err(AppError::Database)?;
-        let artifact_rows: Vec<(i64, i64, i64)> = sqlx::query_as(
-            "SELECT generation,active_readers,CASE WHEN cleanup_claimed_at IS NOT NULL AND datetime(cleanup_claimed_at) > datetime('now','-5 minutes') THEN 1 ELSE 0 END FROM bundle_search_artifacts WHERE bundle_id=?",
+        let artifact_rows: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT generation,CASE WHEN cleanup_claimed_at IS NOT NULL AND datetime(cleanup_claimed_at) > datetime('now','-5 minutes') THEN 1 ELSE 0 END FROM bundle_search_artifacts WHERE bundle_id=?",
         )
         .bind(&bundle_id)
         .fetch_all(pool)
@@ -824,10 +837,10 @@ pub async fn cleanup_deleted_bundle_artifacts(
         {
             generations.insert(generation);
         }
-        for (generation, active_readers, cleanup_claimed) in artifact_rows {
+        for (generation, cleanup_claimed) in artifact_rows {
             generations.insert(generation);
             unremoved_artifacts.insert(generation);
-            if active_readers > 0 || cleanup_claimed != 0 {
+            if cleanup_claimed != 0 {
                 protected_generations.insert(generation);
             }
         }
@@ -840,8 +853,12 @@ pub async fn cleanup_deleted_bundle_artifacts(
             if protected_generations.contains(&generation) {
                 continue;
             }
+            let Some(_cleanup_lease) = registry.try_claim_cleanup(&bundle_id, generation) else {
+                protected_generations.insert(generation);
+                continue;
+            };
             let claimed = sqlx::query(
-                "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state IN ('ACTIVE','RETIRED') AND active_readers=0 AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
+                "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state IN ('ACTIVE','RETIRED') AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
             )
             .bind(&bundle_id)
             .bind(generation)
@@ -919,16 +936,28 @@ pub async fn cleanup_retired_artifacts(
     pool: &SqlitePool,
     data_root: &std::path::Path,
 ) -> Result<u64, AppError> {
+    let registry = GenerationLeaseRegistry::shared();
+    cleanup_retired_artifacts_with_registry(pool, data_root, &registry).await
+}
+
+pub(crate) async fn cleanup_retired_artifacts_with_registry(
+    pool: &SqlitePool,
+    data_root: &std::path::Path,
+    registry: &GenerationLeaseRegistry,
+) -> Result<u64, AppError> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT a.bundle_id, a.generation FROM bundle_search_artifacts a JOIN bundles b ON b.id=a.bundle_id WHERE a.state='RETIRED' AND a.active_readers=0 AND (a.cleanup_claimed_at IS NULL OR datetime(a.cleanup_claimed_at) <= datetime('now','-5 minutes')) AND datetime(a.retired_at) <= datetime('now','-10 minutes') AND b.status <> 'DELETED'",
+        "SELECT a.bundle_id, a.generation FROM bundle_search_artifacts a JOIN bundles b ON b.id=a.bundle_id WHERE a.state='RETIRED' AND (a.cleanup_claimed_at IS NULL OR datetime(a.cleanup_claimed_at) <= datetime('now','-5 minutes')) AND datetime(a.retired_at) <= datetime('now','-10 minutes') AND b.status <> 'DELETED'",
     )
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
     let mut removed = 0_u64;
     for (bundle_id, generation) in rows {
+        let Some(cleanup_lease) = registry.try_claim_cleanup(&bundle_id, generation) else {
+            continue;
+        };
         let claimed = sqlx::query(
-            "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state='RETIRED' AND active_readers=0 AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND datetime(retired_at) <= datetime('now','-10 minutes')",
+            "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state='RETIRED' AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND datetime(retired_at) <= datetime('now','-10 minutes')",
         )
         .bind(&bundle_id)
         .bind(generation)
@@ -937,6 +966,7 @@ pub async fn cleanup_retired_artifacts(
         .map_err(AppError::Database)?
         .rows_affected();
         if claimed != 1 {
+            drop(cleanup_lease);
             continue;
         }
         let cleanup_removed = match cleanup_publication_artifact(data_root, &bundle_id, generation)
@@ -971,78 +1001,64 @@ pub async fn acquire_generation_lease(
     bundle_id: &str,
     generation: i64,
 ) -> Result<GenerationLease, AppError> {
-    let changed = sqlx::query(
-        "UPDATE bundle_search_artifacts SET active_readers=active_readers+1 WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NULL AND EXISTS (SELECT 1 FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE b.id=bundle_search_artifacts.bundle_id AND b.status='READY' AND i.status='ACTIVE')",
-    )
-    .bind(bundle_id)
-    .bind(generation)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?
-    .rows_affected();
-    if changed != 1 {
-        return Err(AppError::Conflict(
-            "search generation is no longer available".into(),
-        ));
-    }
-    Ok(GenerationLease {
-        pool: pool.clone(),
-        bundle_id: bundle_id.to_owned(),
-        generation,
-        released: false,
-    })
+    let registry = GenerationLeaseRegistry::shared();
+    let lease =
+        acquire_generation_lease_with_registry(&registry, pool, bundle_id, generation).await?;
+    Ok(GenerationLease { inner: lease })
+}
+
+/// Compatibility no-op for callers that used to release a SQLite counter.
+/// The RAII guard returned by `acquire_generation_lease` now owns release.
+pub async fn release_generation_lease(
+    _pool: &SqlitePool,
+    _bundle_id: &str,
+    _generation: i64,
+) -> Result<(), AppError> {
+    Ok(())
 }
 
 #[derive(Debug)]
 pub struct GenerationLease {
-    pool: SqlitePool,
-    bundle_id: String,
-    generation: i64,
-    released: bool,
+    inner: InMemoryGenerationLease,
 }
 
 impl GenerationLease {
-    pub async fn release(mut self) -> Result<(), AppError> {
-        let result = release_generation_lease(&self.pool, &self.bundle_id, self.generation).await;
-        if result.is_ok() {
-            self.released = true;
-        }
-        result
+    pub async fn release(self) -> Result<(), AppError> {
+        drop(self);
+        Ok(())
     }
 }
 
 impl Drop for GenerationLease {
     fn drop(&mut self) {
-        if self.released {
-            return;
-        }
-        let pool = self.pool.clone();
-        let bundle_id = self.bundle_id.clone();
-        let generation = self.generation;
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                if let Err(error) = release_generation_lease(&pool, &bundle_id, generation).await {
-                    tracing::warn!(%error, bundle_id, generation, "failed to release cancelled search generation lease");
-                }
-            });
-        }
+        let _ = &self.inner;
     }
 }
 
-pub async fn release_generation_lease(
+pub(crate) async fn acquire_generation_lease_with_registry(
+    registry: &GenerationLeaseRegistry,
     pool: &SqlitePool,
     bundle_id: &str,
     generation: i64,
-) -> Result<(), AppError> {
-    sqlx::query(
-        "UPDATE bundle_search_artifacts SET active_readers=active_readers-1 WHERE bundle_id=? AND generation=? AND active_readers>0",
+) -> Result<InMemoryGenerationLease, AppError> {
+    let lease = registry
+        .try_acquire(bundle_id, generation)
+        .ok_or_else(|| AppError::Conflict("search generation is no longer available".into()))?;
+    let available: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM bundle_search_artifacts a JOIN bundles b ON b.id=a.bundle_id JOIN issues i ON i.code=b.issue_code WHERE a.bundle_id=? AND a.generation=? AND a.state IN ('ACTIVE','RETIRED') AND a.cleanup_claimed_at IS NULL AND b.status='READY' AND i.status='ACTIVE')",
     )
     .bind(bundle_id)
     .bind(generation)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(AppError::Database)?;
-    Ok(())
+    if !available {
+        drop(lease);
+        return Err(AppError::Conflict(
+            "search generation is no longer available".into(),
+        ));
+    }
+    Ok(lease)
 }
 
 pub async fn reset_generation_leases(pool: &SqlitePool) -> Result<(), AppError> {
@@ -1059,8 +1075,10 @@ pub async fn reset_generation_leases(pool: &SqlitePool) -> Result<(), AppError> 
 mod tests {
     use super::{
         SearchBackendKind, artifact_relative_path, cleanup_deleted_bundle_artifacts,
-        cleanup_retired_artifacts, cleanup_unpublished_artifacts, ensure_fresh_tantivy_data,
+        cleanup_retired_artifacts_with_registry, cleanup_unpublished_artifacts,
+        ensure_fresh_tantivy_data,
     };
+    use crate::search::generation_lease::GenerationLeaseRegistry;
 
     #[cfg(feature = "tantivy-search")]
     #[test]
@@ -1273,9 +1291,13 @@ mod tests {
         for path in [&active, &pending, &staging] {
             tokio::fs::create_dir_all(path).await.unwrap();
         }
+        let registry = GenerationLeaseRegistry::new();
+        let reader = registry
+            .try_acquire("bundle-lease-delete", 3)
+            .expect("reader lease");
 
         assert_eq!(
-            cleanup_deleted_bundle_artifacts(&pool, &root)
+            super::cleanup_deleted_bundle_artifacts_with_registry(&pool, &root, &registry)
                 .await
                 .unwrap(),
             1
@@ -1291,12 +1313,9 @@ mod tests {
         .unwrap();
         assert_eq!(pending_state, (None, None, "IDLE".into()));
 
-        sqlx::query("UPDATE bundle_search_artifacts SET active_readers=0 WHERE bundle_id='bundle-lease-delete' AND generation=3")
-            .execute(&pool)
-            .await
-            .unwrap();
+        drop(reader);
         assert_eq!(
-            cleanup_deleted_bundle_artifacts(&pool, &root)
+            super::cleanup_deleted_bundle_artifacts_with_registry(&pool, &root, &registry)
                 .await
                 .unwrap(),
             1
@@ -1599,6 +1618,11 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        let registry = GenerationLeaseRegistry::new();
+        let reader =
+            super::acquire_generation_lease_with_registry(&registry, &pool, "bundle-lease", 1)
+                .await
+                .unwrap();
         let root = std::env::temp_dir().join(format!(
             "rain-search-lease-{}",
             uuid::Uuid::new_v4().simple()
@@ -1606,14 +1630,27 @@ mod tests {
         let artifact = root.join(artifact_relative_path("bundle-lease", 1).unwrap());
         tokio::fs::create_dir_all(&artifact).await.unwrap();
 
-        assert_eq!(cleanup_retired_artifacts(&pool, &root).await.unwrap(), 0);
+        assert_eq!(
+            cleanup_retired_artifacts_with_registry(&pool, &root, &registry)
+                .await
+                .unwrap(),
+            0
+        );
         assert!(artifact.exists());
+        drop(reader);
+        assert_eq!(
+            cleanup_retired_artifacts_with_registry(&pool, &root, &registry)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!artifact.exists());
         pool.close().await;
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]
-    async fn dropped_generation_lease_is_released_after_cancellation() {
+    async fn dropped_generation_lease_does_not_write_sqlite_counter() {
         let pool = crate::db::init_pool("sqlite::memory:").unwrap();
         crate::db::prepare_schema(&pool, true).await.unwrap();
         sqlx::query(
@@ -1634,19 +1671,28 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-
-        let lease = super::acquire_generation_lease(&pool, "bundle-droplease", 1)
+        sqlx::query("UPDATE bundle_search_artifacts SET active_readers=7 WHERE bundle_id='bundle-droplease' AND generation=1")
+            .execute(&pool)
             .await
             .unwrap();
+
+        let registry = GenerationLeaseRegistry::new();
+        let lease =
+            super::acquire_generation_lease_with_registry(&registry, &pool, "bundle-droplease", 1)
+                .await
+                .unwrap();
         drop(lease);
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         let readers: i64 = sqlx::query_scalar(
             "SELECT active_readers FROM bundle_search_artifacts WHERE bundle_id='bundle-droplease' AND generation=1",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(readers, 0);
+        assert_eq!(readers, 7);
+        let cleanup = registry
+            .try_claim_cleanup("bundle-droplease", 1)
+            .expect("dropped lease releases the in-memory reader");
+        drop(cleanup);
         pool.close().await;
     }
 
@@ -1677,9 +1723,11 @@ mod tests {
             .await
             .unwrap();
 
-        let error = super::acquire_generation_lease(&pool, "bundle-claimlease", 1)
-            .await
-            .unwrap_err();
+        let registry = GenerationLeaseRegistry::new();
+        let error =
+            super::acquire_generation_lease_with_registry(&registry, &pool, "bundle-claimlease", 1)
+                .await
+                .unwrap_err();
         assert!(error.to_string().contains("no longer available"));
         pool.close().await;
     }
