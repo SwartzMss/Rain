@@ -32,4 +32,4 @@
 ### Task 4: Verify and prepare PR
 
 - [x] Run format, default/feature checks, Clippy, library/integration tests, and the benchmark compile path.
-- [ ] Review `git diff --check`, remove temporary build symlinks, update this plan, commit, push, create a PR, and monitor CI.
+- [x] Review `git diff --check`, remove temporary build symlinks, update this plan, commit, push, create a PR, and monitor CI.
