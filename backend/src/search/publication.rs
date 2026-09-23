@@ -330,17 +330,14 @@ pub async fn cleanup_unpublished_artifacts(
     pool: &SqlitePool,
     data_root: &std::path::Path,
 ) -> Result<u64, AppError> {
-    let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
-        "SELECT bundle_id, pending_generation FROM bundle_search_indexes WHERE pending_state = 'FAILED' AND pending_generation IS NOT NULL",
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT bundle_id, pending_generation FROM bundle_search_indexes WHERE pending_state='FAILED' AND pending_generation IS NOT NULL UNION SELECT bundle_id, generation FROM bundle_search_indexes WHERE state='FAILED' AND pending_state='IDLE' AND generation>0",
     )
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
     let mut removed = 0_u64;
     for (bundle_id, generation) in rows {
-        let Some(generation) = generation else {
-            continue;
-        };
         if cleanup_publication_artifact(data_root, &bundle_id, generation).await? {
             removed = removed.saturating_add(1);
         }
