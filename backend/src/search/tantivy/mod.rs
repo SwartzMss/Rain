@@ -207,6 +207,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unbounded_window_even_for_an_empty_index() {
+        let path = temp_index_path();
+        let writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();
+        let search = CandidateSearch::new(writer.commit().unwrap());
+        for (from, size) in [(usize::MAX, 20), (99_999, 2), (0, 100_001)] {
+            let result = search.search_page(
+                "marker",
+                SearchOptions {
+                    from,
+                    size,
+                    ..SearchOptions::default()
+                },
+            );
+            assert!(result.is_err(), "unbounded window {from} + {size} accepted");
+        }
+        drop(search);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn ngram_candidates_are_verified_before_returning_hits() {
         let path = temp_index_path();
         let mut writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();

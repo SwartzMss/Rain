@@ -310,6 +310,7 @@ pub struct ApiConfig {
     pub concurrent_line_reads_per_client: usize,
     pub default_search_results: i64,
     pub max_search_results: i64,
+    pub max_search_window: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +350,7 @@ impl Default for ApiConfig {
             concurrent_line_reads_per_client: 2,
             default_search_results: 50,
             max_search_results: 100,
+            max_search_window: crate::search::DEFAULT_MAX_SEARCH_WINDOW,
         }
     }
 }
@@ -600,6 +602,10 @@ impl AppLimits {
                     "RAIN_API_MAX_SEARCH_RESULTS",
                     defaults.api.max_search_results,
                 )?,
+                max_search_window: env_value(
+                    "RAIN_API_MAX_SEARCH_WINDOW",
+                    defaults.api.max_search_window,
+                )?,
             },
             temp_results: TempResultConfig {
                 max_result_size: env_size(
@@ -697,6 +703,7 @@ impl AppLimits {
             "RAIN_API_DEFAULT_SEARCH_RESULTS"
         );
         positive!(self.api.max_search_results, "RAIN_API_MAX_SEARCH_RESULTS");
+        positive!(self.api.max_search_window, "RAIN_API_MAX_SEARCH_WINDOW");
         positive!(
             self.temp_results.max_result_size,
             "RAIN_TEMP_RESULT_MAX_SIZE"
@@ -746,6 +753,17 @@ impl AppLimits {
                 "RAIN_API_DEFAULT_SEARCH_RESULTS must not exceed RAIN_API_MAX_SEARCH_RESULTS"
                     .into(),
             ));
+        }
+        if self.api.max_search_results > self.api.max_search_window {
+            return Err(AppError::Config(
+                "RAIN_API_MAX_SEARCH_RESULTS must not exceed RAIN_API_MAX_SEARCH_WINDOW".into(),
+            ));
+        }
+        if self.api.max_search_window > crate::search::HARD_MAX_SEARCH_WINDOW as i64 {
+            return Err(AppError::Config(format!(
+                "RAIN_API_MAX_SEARCH_WINDOW must not exceed {}",
+                crate::search::HARD_MAX_SEARCH_WINDOW
+            )));
         }
         usize::try_from(self.indexing.max_indexed_line_size).map_err(|_| {
             AppError::Config(
@@ -1034,6 +1052,10 @@ mod tests {
         assert_eq!(limits.api.max_line_page_bytes, 16 * 1024_u64.pow(2));
         assert_eq!(limits.api.concurrent_line_reads, 8);
         assert_eq!(limits.api.concurrent_line_reads_per_client, 2);
+        assert_eq!(
+            limits.api.max_search_window,
+            crate::search::DEFAULT_MAX_SEARCH_WINDOW
+        );
     }
 
     #[test]
@@ -1171,6 +1193,29 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("RAIN_API_DEFAULT_LINE_PAGE_SIZE")
+        );
+    }
+
+    #[test]
+    fn rejects_search_window_above_hard_limit_or_below_page_limit() {
+        let mut limits = AppLimits::default();
+        limits.api.max_search_window = crate::search::HARD_MAX_SEARCH_WINDOW as i64 + 1;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_API_MAX_SEARCH_WINDOW")
+        );
+
+        let mut limits = AppLimits::default();
+        limits.api.max_search_window = limits.api.max_search_results - 1;
+        assert!(
+            limits
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("RAIN_API_MAX_SEARCH_RESULTS")
         );
     }
 

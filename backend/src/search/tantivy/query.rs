@@ -15,6 +15,7 @@ use super::{
     tokenizer::{NGRAM_MAX, NGRAM_MIN},
     writer::CommittedBundleIndex,
 };
+use crate::search::validate_tantivy_search_window;
 
 const MAX_CANDIDATE_GRAMS: usize = 64;
 
@@ -109,6 +110,7 @@ impl CandidateSearch {
         query: &str,
         options: SearchOptions<'_>,
     ) -> Result<SearchPage, AppError> {
+        let window = validate_tantivy_search_window(options.from, options.size)?;
         let query = query.trim();
         if query.chars().count() < NGRAM_MIN {
             return Err(AppError::BadRequest(format!(
@@ -157,11 +159,7 @@ impl CandidateSearch {
         let weight = candidate_query
             .weight(EnableScoring::disabled_from_searcher(&searcher))
             .map_err(|error| AppError::Config(format!("prepare Tantivy query: {error}")))?;
-        let window_limit = if options.size == 0 {
-            0
-        } else {
-            options.from.saturating_add(options.size)
-        };
+        let window_limit = window.limit;
         let mut retained = BinaryHeap::new();
         let mut metrics = SearchMetrics::default();
         let mut total = 0_u64;
@@ -264,8 +262,8 @@ impl CandidateSearch {
         ordered_hits.sort_by_key(sort_key);
         let hits: Vec<SearchHit> = ordered_hits
             .into_iter()
-            .skip(options.from)
-            .take(options.size)
+            .skip(window.from)
+            .take(window.size)
             .collect();
         Ok(SearchPage {
             hits,
