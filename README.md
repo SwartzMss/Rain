@@ -2,7 +2,7 @@
 
 Rain 是一个本地日志包浏览与检索工具。当前版本用于把文本日志或 `.zip`、`.tar.gz`、`.tgz`、`.gz` 压缩包上传到一个 Issue 下，浏览递归解压后的文件树，分页查看文本内容，并按关键词搜索日志。
 
-默认使用 Tantivy 作为日志搜索后端，SQLite 继续承担本地控制面；本地启动不需要安装 PostgreSQL 或其他数据库服务。v0.1.x 是全新初始版本，不兼容旧的 SQLite 搜索数据目录。
+当前版本为 `v0.1.0`。默认使用 Tantivy 作为日志搜索后端，SQLite 继续承担本地控制面；本地启动不需要安装 PostgreSQL 或其他数据库服务。v0.1.x 是全新初始版本，不兼容旧的 SQLite 搜索数据目录。
 
 ## 快速启动
 
@@ -49,7 +49,7 @@ cd backend
 cargo run
 ```
 
-启动时会先执行 SQLx 数据库 migration，再进行恢复阶段和启动 HTTP 服务。空数据库会创建当前 baseline；已有无 migration metadata 的旧数据库会先验证完整 schema，缺失或被人工改坏的表、索引、约束或 FTS 定义会直接阻止启动。详细规则见 [`doc/DB.md`](doc/DB.md)。
+启动时会先执行 SQLx 数据库 migration，再进行恢复阶段和启动 HTTP 服务。空数据库会创建当前 baseline；已有无 migration metadata 的旧数据库会先验证完整 schema，缺失或被人工改坏的表、索引、约束或 FTS 定义会直接阻止启动。默认 Tantivy 模式还会拒绝包含旧 SQLite 搜索 Bundle 的数据目录，并提示使用新的数据库和数据目录。详细规则见 [`doc/DB.md`](doc/DB.md)。
 
 打开 `http://localhost:8080` 即可使用应用。
 
@@ -93,6 +93,7 @@ build-windows.bat
 ```text
 release\Rain.exe
 release\.env
+release\VERSION
 ```
 
 Linux/macOS:
@@ -107,9 +108,10 @@ chmod +x ./build-linux.sh
 ```text
 release/rain
 release/.env
+release/VERSION
 ```
 
-手动构建时仍然需要先构建前端，再编译后端：
+手动构建时仍然需要先构建前端，再编译后端。后端默认 feature 已包含 Tantivy，不需要额外的 `--features` 参数：
 
 ```bash
 cd frontend
@@ -134,7 +136,7 @@ Linux/macOS:
 ./backend/target/release/backend
 ```
 
-发布包包含可执行程序和外置 `.env` 配置文件：Windows 为 ZIP，Linux 为 tar.gz。解压后应保持两个文件位于同一目录；修改 `.env` 后重启 Rain 即可改变端口、数据库和数据目录等设置，不需要重新编译。程序会优先读取可执行文件同目录的 `.env`，因此从其他工作目录启动也能找到配置；已设置的系统环境变量优先级高于 `.env`。
+发布包包含可执行程序、外置 `.env` 配置文件和记录版本的 `VERSION` 文件：Windows 为 ZIP，Linux 为 tar.gz。解压后应保持三个文件位于同一目录；修改 `.env` 后重启 Rain 即可改变端口、数据库和数据目录等设置，不需要重新编译。程序会优先读取可执行文件同目录的 `.env`，因此从其他工作目录启动也能找到配置；已设置的系统环境变量优先级高于 `.env`。
 
 ### 可配置限制
 
@@ -149,7 +151,7 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS` | `4` | 并发 Multipart 接收任务 |
 | `RAIN_UPLOAD_MAX_TMP_BYTES` | `32 GiB` | 所有上传任务 `.tmp` 工作区的全局字节预算，包含原始接收文件和解压后的 staging 文件 |
 | `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
-| `RAIN_SEARCH_BACKEND` | `tantivy` | Bundle 内容搜索后端；v0.1.x 默认使用 Tantivy，`sqlite_fts` 仅用于兼容测试 |
+| `RAIN_SEARCH_BACKEND` | `tantivy` | Bundle 内容搜索后端；v0.1.x 默认使用 Tantivy，`sqlite_fts` 仅用于测试和诊断旧数据 |
 | `RAIN_SEARCH_TANTIVY_MAX_WRITERS` | `1` | Tantivy Bundle writer 并发上限 |
 | `RAIN_SEARCH_TANTIVY_WRITER_HEAP` | `64 MiB` | 单个 Tantivy writer heap 上限 |
 | `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
@@ -309,7 +311,7 @@ Windows 手动验证时，可在启用 Defender 或目录索引的环境上传�
 RESET_DB=true
 ```
 
-v0.1.x 不会迁移旧版本的 SQLite 搜索数据。若启动时提示需要新的数据目录，请备份后使用全新的 `DATABASE_URL` 和 `RAIN_DATA_ROOT`；旧日志需要重新上传。
+v0.1.0 不会迁移旧版本的 SQLite 搜索数据。全新安装应使用新的 `DATABASE_URL` 和 `RAIN_DATA_ROOT`；如果启动时提示需要新的数据目录，请先备份旧数据，再创建新的目录并重新上传日志。显式设置 `RAIN_SEARCH_BACKEND=sqlite_fts` 只用于测试和旧数据诊断，不是 v0.1.0 的默认发布路径。
 
 注意：`RESET_DB=true` 会删除当前应用 schema 和 migration metadata，再通过同一 migration chain 重建表，并清空配置的数据目录，仅适合本地调试或测试；不要在生产环境用它代替数据库升级。
 
@@ -389,11 +391,12 @@ Multipart 字段：
 
 短期优先级：
 
-1. 解析任务细粒度进度、取消和失败重试。
-2. 结构化事件查询 API，例如按 level、component、时间范围过滤。
-3. 搜索任务取消、后台搜索和并发限制。
-4. 更完整的日志 parser 规则和多行异常合并。
-5. 带日志引用的 AI 分析。
+1. 在目标机器完成 1/2/4 并发和 1/5 GiB 大文件基线，确认吞吐、RSS 和查询 p95。
+2. 解析任务细粒度进度、取消和失败重试。
+3. 结构化事件查询 API，例如按 level、component、时间范围过滤。
+4. Tantivy 覆盖 Skill 日志检索，并在确认兼容后再考虑退役 SQLite FTS。
+5. 更完整的日志 parser 规则和多行异常合并。
+6. 带日志引用的 AI 分析。
 
 数据库细节见 [doc/DB.md](doc/DB.md)。
 # 管理员初始化与权限
