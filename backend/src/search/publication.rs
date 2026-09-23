@@ -2,15 +2,44 @@
 //! This module does not mark Bundles READY; callers must validate an artifact
 //! before updating `bundle_search_indexes` in the same controlled transaction.
 
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
+};
 
 use sqlx::SqlitePool;
+use tokio::sync::Mutex;
 
 use crate::error::AppError;
 
 pub const SQLITE_FTS_SCHEMA_VERSION: i64 = 1;
 pub const TANTIVY_SCHEMA_VERSION: i64 = 1;
 pub const TANTIVY_TOKENIZER_VERSION: i64 = 2;
+
+type BundleLifecycleLock = Mutex<()>;
+
+static BUNDLE_LIFECYCLE_LOCKS: OnceLock<StdMutex<HashMap<String, Weak<BundleLifecycleLock>>>> =
+    OnceLock::new();
+
+/// Serialize rebuild publication and filesystem cleanup for one Bundle inside
+/// a process. Persisted `CLEANING` state remains the cross-restart recovery
+/// boundary when no worker survives to hold this lock.
+pub(crate) async fn lock_bundle_lifecycle(bundle_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let locks = BUNDLE_LIFECYCLE_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+        let mut locks = locks.lock().expect("bundle lifecycle lock map poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(bundle_id).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(BundleLifecycleLock::new(()));
+            locks.insert(bundle_id.to_owned(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    lock.lock_owned().await
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchBackendKind {
@@ -90,6 +119,169 @@ pub fn artifact_relative_path(bundle_id: &str, generation: i64) -> Result<PathBu
     Ok(PathBuf::from("search")
         .join(bundle_id)
         .join(generation.to_string()))
+}
+
+async fn remove_directory_if_present(path: &Path) -> Result<bool, AppError> {
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AppError::Io(error)),
+    }
+}
+
+async fn remove_path_if_present(path: &Path) -> Result<bool, AppError> {
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(AppError::Io(error)),
+            }
+        }
+        Err(error) => Err(AppError::Io(error)),
+    }
+}
+
+/// Remove every on-disk location owned by one unpublished generation.
+/// Missing locations are expected after a crash and therefore are harmless.
+pub(crate) async fn cleanup_generation_artifacts(
+    data_root: &Path,
+    bundle_id: &str,
+    generation: i64,
+) -> Result<bool, AppError> {
+    let artifact = data_root.join(artifact_relative_path(bundle_id, generation)?);
+    let staging = data_root
+        .join(".search-rebuild")
+        .join(bundle_id)
+        .join(generation.to_string());
+    let mut removed = remove_directory_if_present(&artifact).await?;
+    removed |= remove_directory_if_present(&staging).await?;
+
+    if let Some(parent) = staging.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    if let Some(parent) = artifact.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    Ok(removed)
+}
+
+async fn cleanup_staging_bundle(data_root: &Path, bundle_id: &str) -> Result<bool, AppError> {
+    let path = data_root.join(".search-rebuild").join(bundle_id);
+    let removed = remove_directory_if_present(&path).await?;
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    Ok(removed)
+}
+
+/// Remove a pending generation together with every owner-specific staging
+/// directory left under that generation after a crash.
+async fn cleanup_pending_generation_artifacts(
+    data_root: &Path,
+    bundle_id: &str,
+    generation: i64,
+) -> Result<bool, AppError> {
+    let artifact = data_root.join(artifact_relative_path(bundle_id, generation)?);
+    let staging = data_root
+        .join(".search-rebuild")
+        .join(bundle_id)
+        .join(generation.to_string());
+    let mut removed = remove_directory_if_present(&artifact).await?;
+    removed |= remove_directory_if_present(&staging).await?;
+    if let Some(parent) = staging.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    if let Some(parent) = artifact.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    Ok(removed)
+}
+
+async fn cleanup_orphan_staging_generations(
+    data_root: &Path,
+    bundle_id: &str,
+    protected: Option<(i64, Option<String>)>,
+) -> Result<u64, AppError> {
+    let bundle_root = data_root.join(".search-rebuild").join(bundle_id);
+    let mut generations = match tokio::fs::read_dir(&bundle_root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    let mut removed = 0_u64;
+    while let Some(generation_entry) = generations.next_entry().await.map_err(AppError::Io)? {
+        let generation_name = generation_entry.file_name();
+        let Ok(generation) = generation_name.to_string_lossy().parse::<i64>() else {
+            continue;
+        };
+        if let Some((protected_generation, protected_owner)) = &protected
+            && generation == *protected_generation
+        {
+            let Some(protected_owner) = protected_owner else {
+                continue;
+            };
+            let mut owners = match tokio::fs::read_dir(generation_entry.path()).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(AppError::Io(error)),
+            };
+            while let Some(owner_entry) = owners.next_entry().await.map_err(AppError::Io)? {
+                if owner_entry.file_name().to_string_lossy() == protected_owner.as_str() {
+                    continue;
+                }
+                if remove_path_if_present(&owner_entry.path()).await? {
+                    removed = removed.saturating_add(1);
+                }
+            }
+            let _ = tokio::fs::remove_dir(generation_entry.path()).await;
+        } else if remove_directory_if_present(&generation_entry.path()).await? {
+            removed = removed.saturating_add(1);
+        }
+    }
+    if tokio::fs::read_dir(&bundle_root).await.is_ok() {
+        let _ = tokio::fs::remove_dir(&bundle_root).await;
+    }
+    if let Some(parent) = bundle_root.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    Ok(removed)
+}
+
+async fn cleanup_orphan_final_generations(
+    data_root: &Path,
+    bundle_id: &str,
+    protected_generations: &HashSet<i64>,
+) -> Result<u64, AppError> {
+    let bundle_root = data_root.join("search").join(bundle_id);
+    let mut entries = match tokio::fs::read_dir(&bundle_root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    let mut removed = 0_u64;
+    while let Some(entry) = entries.next_entry().await.map_err(AppError::Io)? {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(generation) = name.parse::<i64>() else {
+            continue;
+        };
+        if generation <= 0 || protected_generations.contains(&generation) {
+            continue;
+        }
+        if remove_directory_if_present(&entry.path()).await? {
+            removed = removed.saturating_add(1);
+        }
+    }
+    let _ = tokio::fs::remove_dir(&bundle_root).await;
+    if let Some(parent) = bundle_root.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    Ok(removed)
 }
 
 /// Claim the next generation for a non-SQLite publisher. The row remains in
@@ -270,15 +462,21 @@ pub(crate) async fn mark_rebuild_failed(
     let _ = crate::db::write::run(
         pool,
         "fail Tantivy deletion rebuild",
-        &(claim.bundle_id.as_str(), claim.target_generation, error_code),
-        |conn, (bundle_id, target_generation, error_code)| {
+        &(
+            claim.bundle_id.as_str(),
+            claim.target_generation,
+            claim.claim_token.as_str(),
+            error_code,
+        ),
+        |conn, (bundle_id, target_generation, claim_token, error_code)| {
             Box::pin(async move {
                 sqlx::query(
-                    "UPDATE bundle_search_indexes SET pending_state='FAILED', last_error_code=?, updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND pending_generation=? AND pending_state='BUILDING'",
+                    "UPDATE bundle_search_indexes SET pending_state='FAILED', pending_phase='BUILDING', last_error_code=?, updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND pending_generation=? AND pending_owner=? AND pending_state IN ('BUILDING','CLEANING')",
                 )
                 .bind(error_code)
                 .bind(bundle_id)
                 .bind(target_generation)
+                .bind(claim_token)
                 .execute(&mut *conn)
                 .await
                 .map(|_| ())
@@ -287,6 +485,101 @@ pub(crate) async fn mark_rebuild_failed(
         },
     )
     .await;
+}
+
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn rebuild_claim_is_current(
+    pool: &SqlitePool,
+    claim: &crate::search::rebuild::RebuildClaim,
+) -> Result<bool, AppError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM bundle_search_indexes i JOIN bundles b ON b.id=i.bundle_id JOIN issues issue ON issue.code=b.issue_code WHERE i.bundle_id=? AND i.backend='tantivy' AND b.status='READY' AND issue.status='ACTIVE' AND i.state='NEEDS_REBUILD' AND i.generation=? AND i.visibility_revision>i.compacted_revision AND i.pending_generation=? AND i.pending_revision=? AND i.pending_owner=? AND i.pending_state='BUILDING' AND i.pending_phase IN ('BUILDING','PUBLISHING'))",
+    )
+    .bind(&claim.bundle_id)
+    .bind(claim.active_generation)
+    .bind(claim.target_generation)
+    .bind(claim.target_revision)
+    .bind(&claim.claim_token)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)
+}
+
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn cleanup_rebuild_artifacts_if_owned(
+    pool: &SqlitePool,
+    data_root: &Path,
+    claim: &crate::search::rebuild::RebuildClaim,
+) -> Result<bool, AppError> {
+    // The owner-specific staging path is never shared with another claim, so
+    // it is safe for an obsolete worker to remove its own abandoned staging
+    // directory even after a newer worker has taken ownership. The final
+    // generation is deliberately left to the durable CLEANING recovery path;
+    // removing that shared path here could race a newer publisher.
+    let current = rebuild_claim_is_current(pool, claim).await?;
+    let staging = data_root
+        .join(".search-rebuild")
+        .join(&claim.bundle_id)
+        .join(claim.target_generation.to_string())
+        .join(&claim.claim_token);
+    let removed = remove_directory_if_present(&staging).await?;
+    Ok(current && removed)
+}
+
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn refresh_rebuild_heartbeat(
+    pool: &SqlitePool,
+    claim: &crate::search::rebuild::RebuildClaim,
+) -> Result<bool, AppError> {
+    let changed = sqlx::query(
+        "UPDATE bundle_search_indexes SET updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND pending_generation=? AND pending_revision=? AND pending_owner=? AND pending_state='BUILDING' AND pending_phase IN ('BUILDING','PUBLISHING')",
+    )
+    .bind(&claim.bundle_id)
+    .bind(claim.target_generation)
+    .bind(claim.target_revision)
+    .bind(&claim.claim_token)
+    .execute(pool)
+    .await
+    .map_err(AppError::Database)?
+    .rows_affected();
+    Ok(changed == 1)
+}
+
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn begin_rebuild_publication(
+    pool: &SqlitePool,
+    claim: &crate::search::rebuild::RebuildClaim,
+) -> Result<bool, AppError> {
+    let changed = crate::db::write::run(
+        pool,
+        "begin Tantivy deletion rebuild publication",
+        &(
+            claim.bundle_id.as_str(),
+            claim.active_generation,
+            claim.target_generation,
+            claim.target_revision,
+            claim.claim_token.as_str(),
+        ),
+        |conn, (bundle_id, active_generation, target_generation, target_revision, claim_token)| {
+            Box::pin(async move {
+                let changed = sqlx::query(
+                    "UPDATE bundle_search_indexes SET pending_phase='PUBLISHING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND generation=? AND pending_generation=? AND pending_revision=? AND pending_owner=? AND pending_state='BUILDING' AND pending_phase='BUILDING' AND EXISTS (SELECT 1 FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE b.id=bundle_search_indexes.bundle_id AND b.status='READY' AND i.status='ACTIVE')",
+                )
+                .bind(bundle_id)
+                .bind(active_generation)
+                .bind(target_generation)
+                .bind(target_revision)
+                .bind(claim_token)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?
+                .rows_affected();
+                Ok(changed == 1)
+            })
+        },
+    )
+    .await?;
+    Ok(changed)
 }
 
 #[cfg(feature = "tantivy-search")]
@@ -305,18 +598,27 @@ pub(crate) async fn publish_rebuild(
             claim.active_generation,
             claim.target_generation,
             claim.target_revision,
+            claim.claim_token.as_str(),
             artifact_key.as_str(),
         ),
-        |conn, (bundle_id, active_generation, target_generation, target_revision, artifact_key)| {
+        |conn, (
+            bundle_id,
+            active_generation,
+            target_generation,
+            target_revision,
+            claim_token,
+            artifact_key,
+        )| {
             Box::pin(async move {
                 let changed = sqlx::query(
-                    "UPDATE bundle_search_indexes SET generation=pending_generation, artifact_key=?, compacted_revision=pending_revision, state=CASE WHEN visibility_revision=pending_revision THEN 'READY' ELSE 'NEEDS_REBUILD' END, pending_generation=NULL, pending_revision=NULL, pending_state='IDLE', built_at=CURRENT_TIMESTAMP, last_error_code=NULL, updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND generation=? AND pending_generation=? AND pending_revision=? AND pending_state='BUILDING' AND EXISTS (SELECT 1 FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE b.id=bundle_search_indexes.bundle_id AND b.status='READY' AND i.status='ACTIVE')",
+                    "UPDATE bundle_search_indexes SET generation=pending_generation, artifact_key=?, compacted_revision=pending_revision, state=CASE WHEN visibility_revision=pending_revision THEN 'READY' ELSE 'NEEDS_REBUILD' END, pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE', built_at=CURRENT_TIMESTAMP, last_error_code=NULL, updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND generation=? AND pending_generation=? AND pending_revision=? AND pending_owner=? AND pending_phase='PUBLISHING' AND pending_state='BUILDING' AND EXISTS (SELECT 1 FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE b.id=bundle_search_indexes.bundle_id AND b.status='READY' AND i.status='ACTIVE')",
                 )
                 .bind(artifact_key)
                 .bind(bundle_id)
                 .bind(active_generation)
                 .bind(target_generation)
                 .bind(target_revision)
+                .bind(claim_token)
                 .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?
@@ -362,19 +664,20 @@ pub(crate) async fn publish_rebuild(
 /// from search.
 pub async fn cleanup_unpublished_artifacts(
     pool: &SqlitePool,
-    data_root: &std::path::Path,
+    data_root: &Path,
 ) -> Result<u64, AppError> {
     let rows: Vec<(String, String, i64, Option<i64>, String)> = sqlx::query_as(
-        "SELECT bundle_id, state, generation, pending_generation, pending_state FROM bundle_search_indexes WHERE (pending_state='FAILED' AND pending_generation IS NOT NULL) OR (state='FAILED' AND pending_state='IDLE' AND generation>0) OR (state='BUILDING' AND pending_state='IDLE' AND generation>0 AND datetime(updated_at) <= datetime('now','-5 minutes')) OR (pending_state='CLEANING' AND datetime(updated_at) <= datetime('now','-5 minutes'))",
+        "SELECT i.bundle_id, i.state, i.generation, i.pending_generation, i.pending_state FROM bundle_search_indexes i JOIN bundles b ON b.id=i.bundle_id WHERE b.status NOT IN ('DELETING','DELETED') AND ((i.pending_state='FAILED' AND i.pending_generation IS NOT NULL) OR (i.pending_state='BUILDING' AND i.pending_phase='PUBLISHING' AND i.pending_generation IS NOT NULL AND datetime(i.updated_at) <= datetime('now','-5 minutes')) OR (i.state='FAILED' AND i.pending_state='IDLE' AND i.generation>0) OR (i.state='BUILDING' AND i.pending_state='IDLE' AND i.generation>0 AND datetime(i.updated_at) <= datetime('now','-5 minutes')) OR (i.pending_state='CLEANING' AND datetime(i.updated_at) <= datetime('now','-5 minutes')))",
     )
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
     let mut removed = 0_u64;
     for (bundle_id, state, generation, pending_generation, pending_state) in rows {
+        let _lifecycle = lock_bundle_lifecycle(&bundle_id).await;
         let generation_to_remove = pending_generation.unwrap_or(generation);
         let claimed = sqlx::query(
-            "UPDATE bundle_search_indexes SET pending_state='CLEANING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND state=? AND generation=? AND pending_state=? AND ((pending_generation IS NULL AND ? IS NULL) OR pending_generation=?) AND (pending_state <> 'CLEANING' OR datetime(updated_at) <= datetime('now','-5 minutes'))",
+            "UPDATE bundle_search_indexes SET pending_state='CLEANING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND state=? AND generation=? AND pending_state=? AND ((pending_generation IS NULL AND ? IS NULL) OR pending_generation=?) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status <> 'DELETED') AND (pending_state <> 'CLEANING' OR datetime(updated_at) <= datetime('now','-5 minutes'))",
         )
         .bind(&bundle_id)
         .bind(&state)
@@ -382,6 +685,7 @@ pub async fn cleanup_unpublished_artifacts(
         .bind(&pending_state)
         .bind(pending_generation)
         .bind(generation_to_remove)
+        .bind(&bundle_id)
         .execute(pool)
         .await
         .map_err(AppError::Database)?
@@ -389,47 +693,26 @@ pub async fn cleanup_unpublished_artifacts(
         if claimed != 1 {
             continue;
         }
-        let cleanup_removed = match cleanup_publication_artifact(
-            data_root,
-            &bundle_id,
-            generation_to_remove,
-        )
-        .await
-        {
+        let cleanup_removed = match if pending_generation.is_some() {
+            cleanup_pending_generation_artifacts(data_root, &bundle_id, generation_to_remove).await
+        } else {
+            cleanup_generation_artifacts(data_root, &bundle_id, generation_to_remove).await
+        } {
             Ok(removed) => removed,
-            Err(error) => {
-                sqlx::query(
-                    "UPDATE bundle_search_indexes SET pending_state=?, updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND pending_state='CLEANING' AND generation=?",
-                )
-                .bind(if pending_state == "CLEANING" {
-                    if pending_generation.is_some() {
-                        "FAILED"
-                    } else {
-                        "IDLE"
-                    }
-                } else {
-                    pending_state.as_str()
-                })
-                .bind(&bundle_id)
-                .bind(generation)
-                .execute(pool)
-                .await
-                .map_err(AppError::Database)?;
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         if cleanup_removed {
             removed = removed.saturating_add(1);
         }
         if pending_generation.is_some() {
-            sqlx::query("UPDATE bundle_search_indexes SET pending_state='IDLE', pending_generation=NULL, pending_revision=NULL WHERE bundle_id=? AND pending_state='CLEANING' AND pending_generation=?")
+            sqlx::query("UPDATE bundle_search_indexes SET pending_state='IDLE', pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING' WHERE bundle_id=? AND pending_state='CLEANING' AND pending_generation=?")
                 .bind(&bundle_id)
                 .bind(generation_to_remove)
                 .execute(pool)
                 .await
                 .map_err(AppError::Database)?;
         } else {
-            sqlx::query("UPDATE bundle_search_indexes SET state='FAILED', generation=0, artifact_key=NULL, last_error_code='RECOVERED_BUILDING', pending_state='IDLE' WHERE bundle_id=? AND state IN ('BUILDING','FAILED') AND pending_state='CLEANING' AND generation=?")
+            sqlx::query("UPDATE bundle_search_indexes SET state='FAILED', generation=0, artifact_key=NULL, last_error_code='RECOVERED_BUILDING', pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE' WHERE bundle_id=? AND state IN ('BUILDING','FAILED') AND pending_state='CLEANING' AND generation=?")
                 .bind(&bundle_id)
                 .bind(generation)
                 .execute(pool)
@@ -437,45 +720,136 @@ pub async fn cleanup_unpublished_artifacts(
                 .map_err(AppError::Database)?;
         }
     }
+
+    let bundle_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM bundles WHERE status NOT IN ('DELETING','DELETED')")
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Database)?;
+    for bundle_id in bundle_ids {
+        let _lifecycle = lock_bundle_lifecycle(&bundle_id).await;
+        let pending: Option<(i64, Option<i64>, Option<String>, String)> = sqlx::query_as(
+            "SELECT generation,pending_generation,pending_owner,pending_state FROM bundle_search_indexes WHERE bundle_id=? AND backend='tantivy'",
+        )
+        .bind(&bundle_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(AppError::Database)?;
+        let protected = pending.map(|(generation, pending_generation, owner, state)| {
+            if let Some(pending_generation) = pending_generation
+                && (state == "BUILDING" || state == "PUBLISHING")
+            {
+                (pending_generation, owner)
+            } else {
+                // A new claim always targets active_generation + 1. Protect
+                // that predicted directory while the DB snapshot and the
+                // filesystem scan are not one atomic operation.
+                (generation.saturating_add(1), None)
+            }
+        });
+        removed = removed.saturating_add(
+            cleanup_orphan_staging_generations(data_root, &bundle_id, protected).await?,
+        );
+    }
     Ok(removed)
 }
 
 pub async fn cleanup_publication_artifact(
-    data_root: &std::path::Path,
+    data_root: &Path,
     bundle_id: &str,
     generation: i64,
 ) -> Result<bool, AppError> {
-    let path = data_root.join(artifact_relative_path(bundle_id, generation)?);
-    match tokio::fs::remove_dir_all(&path).await {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(AppError::Io(error)),
-    }
+    remove_directory_if_present(&data_root.join(artifact_relative_path(bundle_id, generation)?))
+        .await
 }
 
 pub async fn cleanup_deleted_bundle_artifacts(
     pool: &SqlitePool,
-    data_root: &std::path::Path,
+    data_root: &Path,
 ) -> Result<u64, AppError> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT bundle_id, generation FROM (SELECT a.bundle_id, a.generation FROM bundle_search_artifacts a JOIN bundles b ON b.id=a.bundle_id WHERE b.status='DELETED' UNION SELECT i.bundle_id, i.generation FROM bundle_search_indexes i JOIN bundles b ON b.id=i.bundle_id WHERE b.status='DELETED' AND i.generation>0)",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)?;
+    let bundle_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM bundles WHERE status='DELETED'")
+            .fetch_all(pool)
+            .await
+            .map_err(AppError::Database)?;
     let mut removed = 0_u64;
-    for (bundle_id, generation) in rows {
-        let claimed = sqlx::query(
-            "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state IN ('ACTIVE','RETIRED') AND active_readers=0 AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
+    for bundle_id in bundle_ids {
+        let _lifecycle = lock_bundle_lifecycle(&bundle_id).await;
+        let index: Option<(i64, Option<i64>, String, Option<String>)> = sqlx::query_as(
+            "SELECT generation,pending_generation,pending_state,pending_owner FROM bundle_search_indexes WHERE bundle_id=? AND backend='tantivy'",
         )
         .bind(&bundle_id)
-        .bind(generation)
-        .bind(&bundle_id)
-        .execute(pool)
+        .fetch_optional(pool)
         .await
-        .map_err(AppError::Database)?
-        .rows_affected();
-        if claimed == 0 {
+        .map_err(AppError::Database)?;
+        let artifact_rows: Vec<(i64, i64, i64)> = sqlx::query_as(
+            "SELECT generation,active_readers,CASE WHEN cleanup_claimed_at IS NOT NULL AND datetime(cleanup_claimed_at) > datetime('now','-5 minutes') THEN 1 ELSE 0 END FROM bundle_search_artifacts WHERE bundle_id=?",
+        )
+        .bind(&bundle_id)
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let pending_generation = index.as_ref().and_then(|(_, pending, _, _)| *pending);
+        if let Some(pending_generation) = pending_generation {
+            sqlx::query(
+                "UPDATE bundle_search_indexes SET pending_state='CLEANING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND pending_generation=? AND pending_state IN ('BUILDING','FAILED','CLEANING') AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
+            )
+            .bind(&bundle_id)
+            .bind(pending_generation)
+            .bind(&bundle_id)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+            if cleanup_pending_generation_artifacts(data_root, &bundle_id, pending_generation)
+                .await?
+            {
+                removed = removed.saturating_add(1);
+            }
+            sqlx::query(
+                "UPDATE bundle_search_indexes SET pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND pending_generation=? AND pending_state='CLEANING'",
+            )
+            .bind(&bundle_id)
+            .bind(pending_generation)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+        }
+
+        let mut generations = HashSet::new();
+        let mut protected_generations = HashSet::new();
+        let mut unremoved_artifacts = HashSet::new();
+        if let Some((generation, _, _, _)) = index
+            && generation > 0
+        {
+            generations.insert(generation);
+        }
+        for (generation, active_readers, cleanup_claimed) in artifact_rows {
+            generations.insert(generation);
+            unremoved_artifacts.insert(generation);
+            if active_readers > 0 || cleanup_claimed != 0 {
+                protected_generations.insert(generation);
+            }
+        }
+        if let Some(pending_generation) = pending_generation {
+            generations.remove(&pending_generation);
+            protected_generations.remove(&pending_generation);
+        }
+
+        for generation in generations {
+            if protected_generations.contains(&generation) {
+                continue;
+            }
+            let claimed = sqlx::query(
+                "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state IN ('ACTIVE','RETIRED') AND active_readers=0 AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
+            )
+            .bind(&bundle_id)
+            .bind(generation)
+            .bind(&bundle_id)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected();
             let has_artifact: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM bundle_search_artifacts WHERE bundle_id=? AND generation=?)",
             )
@@ -484,36 +858,57 @@ pub async fn cleanup_deleted_bundle_artifacts(
             .fetch_one(pool)
             .await
             .map_err(AppError::Database)?;
-            if has_artifact {
+            if claimed == 0 && has_artifact {
+                protected_generations.insert(generation);
                 continue;
             }
-        }
-        let cleanup_removed = match cleanup_publication_artifact(data_root, &bundle_id, generation)
+            let cleanup_removed = match cleanup_generation_artifacts(
+                data_root, &bundle_id, generation,
+            )
             .await
-        {
-            Ok(removed) => removed,
-            Err(error) => {
-                if claimed == 1 {
-                    sqlx::query("UPDATE bundle_search_artifacts SET cleanup_claimed_at=NULL WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
-                        .bind(&bundle_id)
-                        .bind(generation)
-                        .execute(pool)
-                        .await
-                        .map_err(AppError::Database)?;
+            {
+                Ok(removed) => removed,
+                Err(error) => {
+                    if claimed == 1 {
+                        sqlx::query("UPDATE bundle_search_artifacts SET cleanup_claimed_at=NULL WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
+                            .bind(&bundle_id)
+                            .bind(generation)
+                            .execute(pool)
+                            .await
+                            .map_err(AppError::Database)?;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+            };
+            if cleanup_removed {
+                removed = removed.saturating_add(1);
             }
-        };
-        if cleanup_removed {
+            if claimed == 1 {
+                sqlx::query("DELETE FROM bundle_search_artifacts WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
+                    .bind(&bundle_id)
+                    .bind(generation)
+                    .execute(pool)
+                    .await
+                    .map_err(AppError::Database)?;
+                unremoved_artifacts.remove(&generation);
+            }
+        }
+
+        protected_generations.extend(unremoved_artifacts);
+
+        removed = removed.saturating_add(
+            cleanup_orphan_final_generations(data_root, &bundle_id, &protected_generations).await?,
+        );
+        if cleanup_staging_bundle(data_root, &bundle_id).await? {
             removed = removed.saturating_add(1);
         }
-        sqlx::query("DELETE FROM bundle_search_artifacts WHERE bundle_id=? AND generation=? AND (cleanup_claimed_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM bundles WHERE id=? AND status <> 'DELETED'))")
-            .bind(&bundle_id)
-            .bind(generation)
-            .bind(&bundle_id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+        sqlx::query(
+            "UPDATE bundle_search_indexes SET state='FAILED', generation=0, artifact_key=NULL, pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE', last_error_code='RECOVERED_DELETED', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy'",
+        )
+        .bind(&bundle_id)
+        .execute(pool)
+        .await
+        .map_err(AppError::Database)?;
     }
     Ok(removed)
 }
@@ -781,6 +1176,310 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleted_bundle_reclaims_pending_generation_and_staging_idempotently() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name,status) VALUES('PENDINGDELETE','Pending delete','ACTIVE')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-pending-delete','PENDINGDELETE','hash','pending delete','DELETED')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state,pending_generation,pending_revision,pending_state) VALUES('bundle-pending-delete','tantivy',3,'READY',4,7,'BUILDING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_artifacts(bundle_id,generation,state) VALUES('bundle-pending-delete',2,'RETIRED'),('bundle-pending-delete',3,'ACTIVE')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let root = std::env::temp_dir().join(format!(
+            "rain-search-pending-delete-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let retired = root.join(artifact_relative_path("bundle-pending-delete", 2).unwrap());
+        let active = root.join(artifact_relative_path("bundle-pending-delete", 3).unwrap());
+        let pending = root.join(artifact_relative_path("bundle-pending-delete", 4).unwrap());
+        let staging = root
+            .join(".search-rebuild")
+            .join("bundle-pending-delete")
+            .join("4");
+        for path in [&retired, &active, &pending, &staging] {
+            tokio::fs::create_dir_all(path).await.unwrap();
+        }
+
+        let removed = cleanup_deleted_bundle_artifacts(&pool, &root)
+            .await
+            .unwrap();
+        assert_eq!(removed, 3);
+        assert!(!retired.exists());
+        assert!(!active.exists());
+        assert!(!pending.exists());
+        assert!(!staging.exists());
+        let metadata: (i64, Option<i64>, Option<i64>, String) = sqlx::query_as(
+            "SELECT generation,pending_generation,pending_revision,pending_state FROM bundle_search_indexes WHERE bundle_id='bundle-pending-delete'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(metadata, (0, None, None, "IDLE".into()));
+
+        assert_eq!(
+            cleanup_deleted_bundle_artifacts(&pool, &root)
+                .await
+                .unwrap(),
+            0
+        );
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn deleted_bundle_pending_cleanup_does_not_remove_leased_artifact() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues(code,name,status) VALUES('LEASEDELETE','Lease delete','ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-lease-delete','LEASEDELETE','hash','lease delete','DELETED')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state,pending_generation,pending_revision,pending_state) VALUES('bundle-lease-delete','tantivy',3,'READY',4,7,'BUILDING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_artifacts(bundle_id,generation,state,active_readers) VALUES('bundle-lease-delete',3,'ACTIVE',1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let root = std::env::temp_dir().join(format!(
+            "rain-search-lease-delete-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let active = root.join(artifact_relative_path("bundle-lease-delete", 3).unwrap());
+        let pending = root.join(artifact_relative_path("bundle-lease-delete", 4).unwrap());
+        let staging = root
+            .join(".search-rebuild")
+            .join("bundle-lease-delete")
+            .join("4");
+        for path in [&active, &pending, &staging] {
+            tokio::fs::create_dir_all(path).await.unwrap();
+        }
+
+        assert_eq!(
+            cleanup_deleted_bundle_artifacts(&pool, &root)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(active.exists());
+        assert!(!pending.exists());
+        assert!(!staging.exists());
+        let pending_state: (Option<i64>, Option<i64>, String) = sqlx::query_as(
+            "SELECT pending_generation,pending_revision,pending_state FROM bundle_search_indexes WHERE bundle_id='bundle-lease-delete'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_state, (None, None, "IDLE".into()));
+
+        sqlx::query("UPDATE bundle_search_artifacts SET active_readers=0 WHERE bundle_id='bundle-lease-delete' AND generation=3")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            cleanup_deleted_bundle_artifacts(&pool, &root)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(!active.exists());
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[cfg(feature = "tantivy-search")]
+    #[tokio::test]
+    async fn rebuild_claim_is_invalidated_when_bundle_is_deleted() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues(code,name,status) VALUES('CLAIMDELETE','Claim delete','ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-claim-delete','CLAIMDELETE','hash','claim delete','READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state,visibility_revision,compacted_revision,pending_generation,pending_revision,pending_owner,pending_state) VALUES('bundle-claim-delete','tantivy',1,'NEEDS_REBUILD',2,1,2,2,'test-owner','BUILDING')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let claim = crate::search::rebuild::RebuildClaim {
+            bundle_id: "bundle-claim-delete".into(),
+            active_generation: 1,
+            target_generation: 2,
+            target_revision: 2,
+            claim_token: "test-owner".into(),
+        };
+        assert!(
+            super::rebuild_claim_is_current(&pool, &claim)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE bundles SET status='DELETED' WHERE id='bundle-claim-delete'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !super::rebuild_claim_is_current(&pool, &claim)
+                .await
+                .unwrap()
+        );
+        pool.close().await;
+    }
+
+    #[cfg(feature = "tantivy-search")]
+    #[tokio::test]
+    async fn stale_rebuild_failure_does_not_remove_a_published_target() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues(code,name,status) VALUES('STALEPUBLISH','Stale publish','ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-stale-publish','STALEPUBLISH','hash','stale publish','READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state,visibility_revision,compacted_revision) VALUES('bundle-stale-publish','tantivy',2,'READY',2,2)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let claim = crate::search::rebuild::RebuildClaim {
+            bundle_id: "bundle-stale-publish".into(),
+            active_generation: 1,
+            target_generation: 2,
+            target_revision: 2,
+            claim_token: "test-owner".into(),
+        };
+        let root = std::env::temp_dir().join(format!(
+            "rain-search-stale-publish-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let target = root.join(artifact_relative_path("bundle-stale-publish", 2).unwrap());
+        tokio::fs::create_dir_all(&target).await.unwrap();
+
+        assert!(
+            !super::cleanup_rebuild_artifacts_if_owned(&pool, &root, &claim)
+                .await
+                .unwrap()
+        );
+        assert!(target.exists());
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[cfg(feature = "tantivy-search")]
+    #[tokio::test]
+    async fn cleanup_unpublished_reclaims_orphaned_rebuild_owner_staging() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues(code,name,status) VALUES('ORPHANSTAGING','Orphan staging','ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-orphan-staging','ORPHANSTAGING','hash','orphan staging','READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state) VALUES('bundle-orphan-staging','tantivy',2,'READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "rain-search-orphan-staging-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let staging = root
+            .join(".search-rebuild")
+            .join("bundle-orphan-staging")
+            .join("2")
+            .join("old-owner");
+        tokio::fs::create_dir_all(&staging).await.unwrap();
+        assert_eq!(
+            cleanup_unpublished_artifacts(&pool, &root).await.unwrap(),
+            1
+        );
+        assert!(!staging.exists());
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[cfg(feature = "tantivy-search")]
+    #[tokio::test]
+    async fn cleanup_unpublished_recovers_a_crashed_publishing_phase() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues(code,name,status) VALUES('PUBLISHCRASH','Publish crash','ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-publish-crash','PUBLISHCRASH','hash','publish crash','READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state,visibility_revision,compacted_revision,pending_generation,pending_revision,pending_owner,pending_phase,pending_state,updated_at) VALUES('bundle-publish-crash','tantivy',1,'NEEDS_REBUILD',2,1,2,2,'owner-crashed','PUBLISHING','BUILDING',datetime('now','-10 minutes'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "rain-search-publishing-crash-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let final_path = root.join(artifact_relative_path("bundle-publish-crash", 2).unwrap());
+        let staging = root
+            .join(".search-rebuild")
+            .join("bundle-publish-crash")
+            .join("2")
+            .join("owner-crashed");
+        tokio::fs::create_dir_all(&final_path).await.unwrap();
+        tokio::fs::create_dir_all(&staging).await.unwrap();
+
+        assert_eq!(
+            cleanup_unpublished_artifacts(&pool, &root).await.unwrap(),
+            1
+        );
+        assert!(!final_path.exists());
+        assert!(!staging.exists());
+        let pending: (Option<i64>, Option<String>, String) = sqlx::query_as(
+            "SELECT pending_generation,pending_owner,pending_state FROM bundle_search_indexes WHERE bundle_id='bundle-publish-crash'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, (None, None, "IDLE".to_owned()));
+        pool.close().await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
     async fn stale_initial_building_publication_is_recoverable() {
         let pool = crate::db::init_pool("sqlite::memory:").unwrap();
         crate::db::prepare_schema(&pool, true).await.unwrap();
@@ -802,6 +1501,11 @@ mod tests {
         ));
         let artifact = root.join(artifact_relative_path("bundle-building", generation).unwrap());
         tokio::fs::create_dir_all(&artifact).await.unwrap();
+        let staging = root
+            .join(".search-rebuild")
+            .join("bundle-building")
+            .join(generation.to_string());
+        tokio::fs::create_dir_all(&staging).await.unwrap();
         sqlx::query("UPDATE bundle_search_indexes SET updated_at=datetime('now','-10 minutes') WHERE bundle_id='bundle-building'")
             .execute(&pool)
             .await
@@ -810,6 +1514,7 @@ mod tests {
         let removed = cleanup_unpublished_artifacts(&pool, &root).await.unwrap();
         assert_eq!(removed, 1);
         assert!(!artifact.exists());
+        assert!(!staging.exists());
         let state: (String, i64) = sqlx::query_as(
             "SELECT state,generation FROM bundle_search_indexes WHERE bundle_id='bundle-building'",
         )
@@ -1036,5 +1741,61 @@ mod tests {
         .unwrap();
         assert_eq!(stale, 0);
         pool.close().await;
+    }
+
+    #[cfg(feature = "tantivy-search")]
+    #[tokio::test]
+    async fn rebuild_heartbeat_refreshes_only_the_current_owner() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        sqlx::query(
+            "INSERT INTO issues(code,name,status) VALUES('REBUILDHEARTBEAT','Rebuild heartbeat','ACTIVE')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-rebuild-heartbeat','REBUILDHEARTBEAT','hash','rebuild heartbeat','READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundle_search_indexes(bundle_id,backend,generation,state,visibility_revision,compacted_revision,pending_generation,pending_revision,pending_owner,pending_state,updated_at) VALUES('bundle-rebuild-heartbeat','tantivy',1,'NEEDS_REBUILD',2,1,2,2,'owner-a','BUILDING',datetime('now','-10 minutes'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let claim = crate::search::rebuild::RebuildClaim {
+            bundle_id: "bundle-rebuild-heartbeat".into(),
+            active_generation: 1,
+            target_generation: 2,
+            target_revision: 2,
+            claim_token: "owner-a".into(),
+        };
+        assert!(
+            super::refresh_rebuild_heartbeat(&pool, &claim)
+                .await
+                .unwrap()
+        );
+        let stale: i64 = sqlx::query_scalar(
+            "SELECT datetime(updated_at) <= datetime('now','-5 minutes') FROM bundle_search_indexes WHERE bundle_id='bundle-rebuild-heartbeat'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stale, 0);
+        claim_token_mismatch_does_not_refresh(&pool, &claim).await;
+        pool.close().await;
+    }
+
+    #[cfg(feature = "tantivy-search")]
+    async fn claim_token_mismatch_does_not_refresh(
+        pool: &sqlx::SqlitePool,
+        claim: &crate::search::rebuild::RebuildClaim,
+    ) {
+        let mut stale_claim = claim.clone();
+        stale_claim.claim_token = "owner-b".into();
+        assert!(
+            !super::refresh_rebuild_heartbeat(pool, &stale_claim)
+                .await
+                .unwrap()
+        );
     }
 }
