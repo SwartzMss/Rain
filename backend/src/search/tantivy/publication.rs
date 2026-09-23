@@ -30,6 +30,54 @@ use super::{
 
 const SPARSE_METADATA_COMMIT_CHUNKS: usize = 512;
 
+struct HeartbeatGuard(Option<tokio::task::JoinHandle<()>>);
+
+impl HeartbeatGuard {
+    fn new(task: tokio::task::JoinHandle<()>) -> Self {
+        Self(Some(task))
+    }
+
+    fn take(&mut self) -> tokio::task::JoinHandle<()> {
+        self.0.take().expect("publication heartbeat task missing")
+    }
+}
+
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+fn spawn_publication_heartbeat(
+    pool: &SqlitePool,
+    bundle_id: &str,
+    generation: i64,
+) -> tokio::task::JoinHandle<()> {
+    let heartbeat_pool = pool.clone();
+    let heartbeat_bundle_id = bundle_id.to_owned();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            match refresh_publication_heartbeat(&heartbeat_pool, &heartbeat_bundle_id, generation)
+                .await
+            {
+                Ok(()) => {}
+                Err(AppError::Conflict(_)) => break,
+                Err(error) => {
+                    tracing::warn!(
+                        bundle_id = %heartbeat_bundle_id,
+                        generation,
+                        %error,
+                        "failed to refresh Tantivy publication heartbeat"
+                    );
+                }
+            }
+        }
+    })
+}
+
 /// Ingest-time Tantivy builder. Cleaned chunks are sent directly to the
 /// bounded writer while SQLite receives only sparse navigation metadata.
 pub struct BundleBuildSession {
@@ -60,6 +108,8 @@ impl BundleBuildSession {
         budget: SearchResourceBudget,
     ) -> Result<Arc<Self>, AppError> {
         let relative = artifact_relative_path(bundle_id, generation)?;
+        let mut heartbeat =
+            HeartbeatGuard::new(spawn_publication_heartbeat(pool, bundle_id, generation));
         let staging = temp_dir
             .join("search")
             .join(bundle_id)
@@ -99,32 +149,7 @@ impl BundleBuildSession {
             _resource_permit: resource_permit,
             heartbeat_task: Mutex::new(None),
         });
-        let heartbeat_pool = pool.clone();
-        let heartbeat_bundle_id = bundle_id.to_owned();
-        let heartbeat_task = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                match refresh_publication_heartbeat(
-                    &heartbeat_pool,
-                    &heartbeat_bundle_id,
-                    generation,
-                )
-                .await
-                {
-                    Ok(()) => {}
-                    Err(AppError::Conflict(_)) => break,
-                    Err(error) => {
-                        tracing::warn!(
-                            bundle_id = %heartbeat_bundle_id,
-                            generation,
-                            %error,
-                            "failed to refresh Tantivy publication heartbeat"
-                        );
-                    }
-                }
-            }
-        });
-        *session.heartbeat_task.lock().await = Some(heartbeat_task);
+        *session.heartbeat_task.lock().await = Some(heartbeat.take());
         Ok(session)
     }
 
