@@ -7,8 +7,11 @@ use crate::{
     models::logs::{LogSearchHit, LogSearchResponse},
     search::{
         ContentSearchRequest, ContentSearchResult, ContentSearchScope, FilenameSearchRequest,
-        SearchIndex, publication::artifact_relative_path, search_tantivy_bundle,
+        SearchIndex,
+        publication::{acquire_generation_lease, artifact_relative_path},
+        search_tantivy_bundle_visible,
         sqlite::SqliteFtsSearchIndex,
+        visibility::snapshot_file_ids,
     },
 };
 
@@ -108,7 +111,7 @@ async fn search_logs_inner(
         Some((backend, state_name, generation, schema_version, tokenizer_version))
             if backend == "tantivy" =>
         {
-            if state_name != "READY" {
+            if !matches!(state_name.as_str(), "READY" | "NEEDS_REBUILD") {
                 return Err(AppError::Conflict(
                     "Bundle search index is not ready".into(),
                 ));
@@ -121,7 +124,16 @@ async fn search_logs_inner(
                 ));
             }
             let artifact = artifact_relative_path(&bundle.id, generation)?;
-            search_tantivy_bundle(state.storage.data_root.join(artifact), request).await?
+            let visible_file_ids = snapshot_file_ids(&state.db.pool, &bundle.id).await?;
+            let lease = acquire_generation_lease(&state.db.pool, &bundle.id, generation).await?;
+            let result = search_tantivy_bundle_visible(
+                state.storage.data_root.join(artifact),
+                request,
+                visible_file_ids,
+            )
+            .await;
+            lease.release().await?;
+            result?
         }
         _ => {
             SqliteFtsSearchIndex::new(state.db.pool.clone())
@@ -306,7 +318,7 @@ async fn search_issue_content_mixed(
         if backend != "tantivy" {
             continue;
         }
-        if state != "READY" {
+        if !matches!(state.as_str(), "READY" | "NEEDS_REBUILD") {
             return Err(AppError::Conflict(format!(
                 "Bundle {bundle_id} search index is not ready"
             )));
@@ -319,7 +331,9 @@ async fn search_issue_content_mixed(
             ));
         }
         let artifact = artifact_relative_path(&bundle_id, generation)?;
-        let result = search_tantivy_bundle(
+        let visible_file_ids = snapshot_file_ids(pool, &bundle_id).await?;
+        let lease = acquire_generation_lease(pool, &bundle_id, generation).await?;
+        let result = search_tantivy_bundle_visible(
             data_root.join(artifact),
             ContentSearchRequest {
                 scope: ContentSearchScope::Bundle {
@@ -332,8 +346,11 @@ async fn search_issue_content_mixed(
                 from: 0,
                 size: candidate_limit as i64,
             },
+            visible_file_ids,
         )
-        .await?;
+        .await;
+        lease.release().await?;
+        let result = result?;
         total = total.saturating_add(result.total);
         rows.extend(result.rows.into_iter().map(|mut row| {
             row.bundle_hash = Some(bundle_hash.clone());
