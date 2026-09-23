@@ -1,9 +1,10 @@
 #![cfg(feature = "tantivy-search")]
 
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 use sqlx::SqlitePool;
-use tokio::fs;
+use tokio::{fs, time};
+use uuid::Uuid;
 
 use crate::{
     error::AppError,
@@ -22,6 +23,7 @@ pub(crate) struct RebuildClaim {
     pub(crate) active_generation: i64,
     pub(crate) target_generation: i64,
     pub(crate) target_revision: i64,
+    pub(crate) claim_token: String,
 }
 
 /// Run at most one deletion compaction. The active generation remains READY
@@ -34,7 +36,46 @@ pub async fn run_once(
     let Some(claim) = claim_next(pool).await? else {
         return Ok(());
     };
-    let visible = snapshot_file_ids(pool, &claim.bundle_id).await?;
+    let _lifecycle = publication::lock_bundle_lifecycle(&claim.bundle_id).await;
+    if !publication::rebuild_claim_is_current(pool, &claim).await? {
+        return Ok(());
+    }
+    let lease = match publication::acquire_generation_lease(
+        pool,
+        &claim.bundle_id,
+        claim.active_generation,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = publication::cleanup_rebuild_artifacts_if_owned(pool, data_root, &claim).await;
+            publication::mark_rebuild_failed(pool, &claim, error_code(&error)).await;
+            return Err(error);
+        }
+    };
+    let heartbeat_pool = pool.clone();
+    let heartbeat_claim = claim.clone();
+    let heartbeat = tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            match publication::refresh_rebuild_heartbeat(&heartbeat_pool, &heartbeat_claim).await {
+                Ok(true) => {}
+                Ok(false) | Err(_) => break,
+            }
+        }
+    });
+    let visible = match snapshot_file_ids(pool, &claim.bundle_id).await {
+        Ok(visible) => visible,
+        Err(error) => {
+            heartbeat.abort();
+            let _ = publication::cleanup_rebuild_artifacts_if_owned(pool, data_root, &claim).await;
+            publication::mark_rebuild_failed(pool, &claim, error_code(&error)).await;
+            let _ = lease.release().await;
+            return Err(error);
+        }
+    };
     let source = data_root.join(artifact_relative_path(
         &claim.bundle_id,
         claim.active_generation,
@@ -46,13 +87,30 @@ pub async fn run_once(
     let staging = data_root
         .join(".search-rebuild")
         .join(&claim.bundle_id)
-        .join(claim.target_generation.to_string());
+        .join(claim.target_generation.to_string())
+        .join(&claim.claim_token);
     let result =
         build_and_publish(pool, &claim, source, staging, final_path, visible, budget).await;
+    heartbeat.abort();
     if let Err(error) = &result {
+        if let Err(cleanup_error) =
+            publication::cleanup_rebuild_artifacts_if_owned(pool, data_root, &claim).await
+        {
+            tracing::warn!(
+                bundle_id = %claim.bundle_id,
+                generation = claim.target_generation,
+                %cleanup_error,
+                "failed to remove cancelled Tantivy rebuild artifact"
+            );
+        }
         publication::mark_rebuild_failed(pool, &claim, error_code(error)).await;
     }
-    result
+    let release_result = lease.release().await;
+    match (result, release_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+    }
 }
 
 async fn build_and_publish(
@@ -73,11 +131,6 @@ async fn build_and_publish(
     if fs::try_exists(&staging).await.map_err(AppError::Io)? {
         fs::remove_dir_all(&staging).await.map_err(AppError::Io)?;
     }
-    if fs::try_exists(&final_path).await.map_err(AppError::Io)? {
-        fs::remove_dir_all(&final_path)
-            .await
-            .map_err(AppError::Io)?;
-    }
     let parent = staging
         .parent()
         .ok_or_else(|| AppError::Config("Tantivy rebuild staging has no parent".into()))?;
@@ -93,6 +146,25 @@ async fn build_and_publish(
     .map_err(|error| AppError::Config(format!("Tantivy rebuild task failed: {error}")))??;
     drop(permit);
 
+    if !publication::rebuild_claim_is_current(pool, claim).await? {
+        return Err(AppError::Conflict(
+            "Tantivy rebuild was cancelled while building".into(),
+        ));
+    }
+
+    if !publication::begin_rebuild_publication(pool, claim).await? {
+        return Err(AppError::Conflict(
+            "Tantivy rebuild was claimed by another worker before publication".into(),
+        ));
+    }
+
+    // The durable PUBLISHING phase prevents another worker or recovery pass
+    // from taking ownership while this shared final path is replaced.
+    if fs::try_exists(&final_path).await.map_err(AppError::Io)? {
+        fs::remove_dir_all(&final_path)
+            .await
+            .map_err(AppError::Io)?;
+    }
     if let Some(parent) = final_path.parent() {
         fs::create_dir_all(parent).await.map_err(AppError::Io)?;
     }
@@ -105,6 +177,11 @@ async fn build_and_publish(
         .map_err(|error| {
             AppError::Config(format!("Tantivy rebuild verification failed: {error}"))
         })??;
+    if !publication::rebuild_claim_is_current(pool, claim).await? {
+        return Err(AppError::Conflict(
+            "Tantivy rebuild was cancelled before publication".into(),
+        ));
+    }
     publication::publish_rebuild(pool, claim).await
 }
 
@@ -121,11 +198,13 @@ async fn claim_next(pool: &SqlitePool) -> Result<Option<RebuildClaim>, AppError>
                 return Ok(None);
             };
             let target_generation = active_generation.saturating_add(1);
+            let claim_token = Uuid::new_v4().to_string();
             let changed = sqlx::query(
-                "UPDATE bundle_search_indexes SET pending_generation=?, pending_revision=?, pending_state='BUILDING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND state='NEEDS_REBUILD' AND generation=? AND visibility_revision=? AND (pending_state IN ('IDLE','FAILED') OR (pending_state='BUILDING' AND datetime(updated_at) <= datetime('now','-5 minutes'))) ",
+                "UPDATE bundle_search_indexes SET pending_generation=?, pending_revision=?, pending_owner=?, pending_phase='BUILDING', pending_state='BUILDING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND state='NEEDS_REBUILD' AND generation=? AND visibility_revision=? AND (pending_state IN ('IDLE','FAILED') OR (pending_state='BUILDING' AND pending_phase='BUILDING' AND datetime(updated_at) <= datetime('now','-5 minutes'))) ",
             )
             .bind(target_generation)
             .bind(target_revision)
+            .bind(&claim_token)
             .bind(&bundle_id)
             .bind(active_generation)
             .bind(target_revision)
@@ -141,6 +220,7 @@ async fn claim_next(pool: &SqlitePool) -> Result<Option<RebuildClaim>, AppError>
                 active_generation,
                 target_generation,
                 target_revision,
+                claim_token,
             }))
         })
     })
