@@ -211,6 +211,6 @@ git add backend/src/search backend/src/lib.rs backend/src/routes/uploads.rs back
 git commit -m "feat: add bounded Tantivy resource budget"
 ```
 
-- [ ] **Step 3: Push and open a PR against `main`**
+- [x] **Step 3: Push and open a PR against `main`**
 
 Push `feat/pr4-resource-budget`, create a PR describing the budget, permit-release guarantees, and benchmark fields, then wait for GitHub CI before claiming completion.
