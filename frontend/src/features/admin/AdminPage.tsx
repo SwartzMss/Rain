@@ -26,6 +26,7 @@ import {
   groupSettingFields,
   recommendedRangeLabel,
   serializeSettingValue,
+  settingUnitLabel,
   settingInputValue,
 } from "./settingsFields";
 
@@ -369,6 +370,7 @@ const legacySettingKeys = new Set([
   "register_ip_limit_per_hour",
   "login_ip_limit_per_minute",
   "login_username_failure_limit_per_5_minutes",
+  "api_default_search_results",
   "issue_inactive_days",
   "cleanup_exempt_usernames",
 ]);
@@ -416,16 +418,20 @@ function MetadataSettingsGrid({
           : value;
         const inputValue = settingInputValue(field, configuredValue);
         const effectiveValue = effectiveValues[field.key] ?? configuredValue;
+        const isIssueContentSize = field.key === "issue_max_content_size";
+        const unit = settingUnitLabel(field);
         return (
           <label key={field.key} className="space-y-1 text-sm text-slate-600">
             <span className="flex items-start justify-between gap-2">
               <span>
                 <span className="block font-medium text-slate-700">
                   {field.description ?? field.key}
-                  {field.unit ? `（${field.unit}）` : ""}
+                  {unit ? `（${unit}）` : ""}
                 </span>
                 <span className="mt-1 block text-xs leading-5 text-slate-500">
-                  {field.min != null || field.max != null
+                  {isIssueContentSize
+                    ? "以 G 为单位输入；由后端校验配置值"
+                    : field.min != null || field.max != null
                     ? `允许范围：${field.min ?? "无下限"}–${field.max ?? "无上限"}`
                     : "由后端校验配置值"}
                   {recommendation ? `；${recommendation}` : ""}
@@ -461,7 +467,8 @@ function MetadataSettingsGrid({
             ) : (
               <input
                 aria-label={field.key}
-                type={field.value_type === "integer" ? "number" : "text"}
+                type={isIssueContentSize ? "text" : field.value_type === "integer" ? "number" : "text"}
+                inputMode={isIssueContentSize ? "decimal" : undefined}
                 min={field.min ?? undefined}
                 max={field.max ?? undefined}
                 value={inputValue as string | number}
@@ -472,8 +479,8 @@ function MetadataSettingsGrid({
             )}
             <span className="block text-xs text-slate-500">
               {effectiveSettingLabel(
-                configuredValue,
-                effectiveValue,
+                settingInputValue(field, configuredValue),
+                settingInputValue(field, effectiveValue),
                 pendingRestartFields.includes(field.key),
               )}
             </span>

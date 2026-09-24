@@ -143,6 +143,8 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 
 字节大小可写成纯字节数或二进制单位 `KiB`、`MiB`、`GiB`、`TiB`，单位不区分大小写，例如 `64 KiB`、`8 GiB`。所有大小和数量必须大于零。启动时还会验证 API 默认页大小不大于对应最大值；错误配置会阻止启动并指出变量名称。
 
+搜索接口未传入 `size` 时使用内置的 50 条默认值；旧的 `RAIN_API_DEFAULT_SEARCH_RESULTS` 环境变量仅为兼容保留，管理员无需单独配置。
+
 | 环境变量 | 默认值 | 用途 |
 | --- | ---: | --- |
 | `RAIN_ISSUE_MAX_CONTENT_SIZE` | `8 GiB` | 每个 Issue 最终可浏览文件总量；压缩包按解压后内容计算 |
@@ -161,7 +163,6 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_API_MAX_LINE_PAGE_BYTES` | `16 MiB` | 文件和临时结果行分页的近似最大字节数 |
 | `RAIN_API_CONCURRENT_LINE_READS` | `8` | 文件和临时结果行接口的全局并发读取数 |
 | `RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT` | `2` | 每个客户端的并发行读取数 |
-| `RAIN_API_DEFAULT_SEARCH_RESULTS` | `50` | 默认搜索结果数 |
 | `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
 | `RAIN_API_MAX_SEARCH_WINDOW` | `10000` | 单次搜索允许的最大 `from + size` 窗口（不能超过 100000） |
 | `RAIN_TEMP_RESULT_MAX_SIZE` | `64 MiB` | 单个临时搜索结果的 `.log/.meta/.idx` 总大小上限 |

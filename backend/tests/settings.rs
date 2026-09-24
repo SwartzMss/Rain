@@ -89,6 +89,16 @@ fn metadata_declares_auto_values_and_protected_settings() {
             .iter()
             .any(|field| { field.key == SettingKey::LoginUsernameFailureLimitPer5Minutes })
     );
+    let default_search_results = backend::settings::metadata::all()
+        .iter()
+        .find(|field| field.key == SettingKey::ApiDefaultSearchResults)
+        .expect("default search results metadata");
+    assert!(default_search_results.protected);
+    assert!(
+        !backend::settings::metadata::admin()
+            .iter()
+            .any(|field| field.key == SettingKey::ApiDefaultSearchResults)
+    );
 }
 
 #[test]
@@ -234,15 +244,26 @@ async fn save_requires_revision_and_applies_hot_values_atomically() {
         .await
         .expect("initialization");
 
+    let mut protected_changes = serde_json::Map::new();
+    protected_changes.insert("api_default_search_results".into(), serde_json::json!(25));
+    let protected = service
+        .save(initial.revision, &protected_changes, None)
+        .await
+        .expect_err("default search results are system-managed");
+    assert!(matches!(
+        protected,
+        backend::error::AppError::PublicApi {
+            code: "SETTINGS_PROTECTED_FIELD",
+            ..
+        }
+    ));
+
     let mut changes = serde_json::Map::new();
-    changes.insert("api_default_search_results".into(), serde_json::json!(25));
     changes.insert("search_tantivy_max_writers".into(), serde_json::json!(2));
     let saved = service
         .save(initial.revision, &changes, None)
         .await
         .expect("save");
-    assert_eq!(saved.snapshot.configured.api_default_search_results, 25);
-    assert_eq!(saved.snapshot.effective.api_default_search_results, 25);
     assert_eq!(saved.snapshot.configured.search_tantivy_max_writers, 2);
     assert_eq!(saved.snapshot.effective.search_tantivy_max_writers, 1);
     assert!(

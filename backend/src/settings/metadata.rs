@@ -269,7 +269,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             None,
             false,
         ),
-        ApiDefaultSearchResults => (Common, Default, Some(10), Some(100), false, None, false),
+        ApiDefaultSearchResults => (Common, Default, Some(10), Some(100), false, None, true),
         ApiMaxSearchResults => (Advanced, Collapsed, Some(50), Some(500), false, None, false),
         ApiMaxSearchWindow => (
             Advanced,
