@@ -1,5 +1,6 @@
 use serde::Serialize;
 use sqlx::FromRow;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -42,6 +43,56 @@ pub struct FileDeletionJobResponse {
     pub created_at: String,
     pub updated_at: String,
     pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct FileDeletionBatchItemInput {
+    pub bundle_id: String,
+    pub file_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileDeletionBatchItemResponse {
+    pub item_id: String,
+    pub bundle_id: String,
+    pub file_id: i64,
+    pub status: String,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileDeletionBatchResponse {
+    pub batch_id: String,
+    pub status: String,
+    pub total_items: i64,
+    pub completed_items: i64,
+    pub failed_items: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub finished_at: Option<String>,
+    pub items: Vec<FileDeletionBatchItemResponse>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct FileDeletionBatch {
+    id: String,
+    state: String,
+    total_items: i64,
+    completed_items: i64,
+    failed_items: i64,
+    created_at: String,
+    updated_at: String,
+    finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct FileDeletionBatchItem {
+    id: String,
+    bundle_id: String,
+    root_file_id: i64,
+    state: String,
+    job_id: Option<String>,
+    error_code: Option<String>,
 }
 
 impl From<FileDeletionJob> for FileDeletionJobResponse {
@@ -182,6 +233,265 @@ pub async fn load_file_deletion_job(
     .await
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("file deletion job {job_id}")))
+}
+
+pub async fn enqueue_file_deletion_batch(
+    pool: &sqlx::SqlitePool,
+    requested_by_user_id: &str,
+    items: &[FileDeletionBatchItemInput],
+) -> Result<FileDeletionBatchResponse, AppError> {
+    if items.is_empty() {
+        return Err(AppError::BadRequest("至少选择一个文件".into()));
+    }
+    if items.len() > 1000 {
+        return Err(AppError::BadRequest("单次最多删除 1000 个文件".into()));
+    }
+
+    let parsed_items = items
+        .iter()
+        .map(|item| {
+            let file_id = item
+                .file_id
+                .parse::<i64>()
+                .map_err(|_| AppError::BadRequest(format!("invalid file id: {}", item.file_id)))?;
+            Ok((item.bundle_id.trim().to_owned(), file_id))
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    let mut unique_targets = HashSet::new();
+    if parsed_items
+        .iter()
+        .any(|(bundle_id, file_id)| !unique_targets.insert((bundle_id.clone(), *file_id)))
+    {
+        return Err(AppError::BadRequest("批量删除中包含重复文件".into()));
+    }
+
+    let batch_id = Uuid::new_v4().to_string();
+    let input = (batch_id.as_str(), requested_by_user_id, &parsed_items);
+    crate::db::write::run(
+        pool,
+        "enqueue file deletion batch",
+        &input,
+        |conn, (batch_id, requested_by_user_id, parsed_items)| {
+            Box::pin(async move {
+                for (bundle_id, file_id) in parsed_items.iter() {
+                    let parent_ready: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE b.id=? AND b.status='READY' AND i.status='ACTIVE')",
+                    )
+                    .bind(bundle_id)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                    if !parent_ready {
+                        return Err(AppError::Conflict(format!(
+                            "bundle is no longer ready for file deletion: {bundle_id}"
+                        )));
+                    }
+                    let target_exists: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM files WHERE bundle_id=? AND id=? AND status IS NOT 'DELETING')",
+                    )
+                    .bind(bundle_id)
+                    .bind(file_id)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                    if !target_exists {
+                        return Err(AppError::NotFound(format!("file {file_id}")));
+                    }
+                }
+
+                sqlx::query(
+                    "INSERT INTO file_deletion_batches(id,requested_by_user_id,state,total_items) VALUES(?,?, 'QUEUED',?)",
+                )
+                .bind(batch_id)
+                .bind(requested_by_user_id)
+                .bind(parsed_items.len() as i64)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+
+                for (bundle_id, file_id) in parsed_items.iter() {
+                    sqlx::query(
+                        "INSERT INTO file_deletion_batch_items(id,batch_id,bundle_id,root_file_id) VALUES(?,?,?,?)",
+                    )
+                    .bind(Uuid::new_v4().to_string())
+                    .bind(batch_id)
+                    .bind(bundle_id)
+                    .bind(file_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                }
+                Ok(())
+            })
+        },
+    )
+    .await?;
+
+    load_file_deletion_batch(pool, &batch_id, requested_by_user_id).await
+}
+
+pub async fn load_file_deletion_batch(
+    pool: &sqlx::SqlitePool,
+    batch_id: &str,
+    user_id: &str,
+) -> Result<FileDeletionBatchResponse, AppError> {
+    let batch = sqlx::query_as::<_, FileDeletionBatch>(
+        "SELECT id,state,total_items,completed_items,failed_items,created_at,updated_at,finished_at FROM file_deletion_batches WHERE id=? AND requested_by_user_id=?",
+    )
+    .bind(batch_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::NotFound(format!("file deletion batch {batch_id}")))?;
+    let items = sqlx::query_as::<_, FileDeletionBatchItem>(
+        "SELECT id,bundle_id,root_file_id,state,job_id,error_code FROM file_deletion_batch_items WHERE batch_id=? ORDER BY created_at,id",
+    )
+    .bind(batch_id)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?
+    .into_iter()
+    .map(|item| FileDeletionBatchItemResponse {
+        item_id: item.id,
+        bundle_id: item.bundle_id,
+        file_id: item.root_file_id,
+        status: item.state,
+        error_code: item.error_code,
+    })
+    .collect();
+    Ok(FileDeletionBatchResponse {
+        batch_id: batch.id,
+        status: batch.state,
+        total_items: batch.total_items,
+        completed_items: batch.completed_items,
+        failed_items: batch.failed_items,
+        created_at: batch.created_at,
+        updated_at: batch.updated_at,
+        finished_at: batch.finished_at,
+        items,
+    })
+}
+
+pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<usize, AppError> {
+    let batches: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id,requested_by_user_id FROM file_deletion_batches WHERE state IN ('QUEUED','RUNNING') ORDER BY created_at,id LIMIT 32",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut changed = 0;
+    for (batch_id, requested_by_user_id) in batches {
+        sqlx::query("UPDATE file_deletion_batches SET state='RUNNING', updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
+            .bind(&batch_id)
+            .execute(pool)
+            .await
+            .map_err(AppError::Database)?;
+        let items = sqlx::query_as::<_, FileDeletionBatchItem>(
+            "SELECT id,bundle_id,root_file_id,state,job_id,error_code FROM file_deletion_batch_items WHERE batch_id=? AND state IN ('QUEUED','RUNNING') ORDER BY created_at,id",
+        )
+        .bind(&batch_id)
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+        for item in items {
+            if item.state == "QUEUED" {
+                match enqueue_file_deletion(
+                    pool,
+                    &item.bundle_id,
+                    item.root_file_id,
+                    &requested_by_user_id,
+                )
+                .await
+                {
+                    Ok(job) => {
+                        sqlx::query("UPDATE file_deletion_batch_items SET state='RUNNING', job_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
+                            .bind(job.id)
+                            .bind(&item.id)
+                            .execute(pool)
+                            .await
+                            .map_err(AppError::Database)?;
+                        changed += 1;
+                    }
+                    Err(AppError::Conflict(_)) => {}
+                    Err(error) => {
+                        sqlx::query("UPDATE file_deletion_batch_items SET state='FAILED', error_code=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
+                            .bind(error_code(&error))
+                            .bind(&item.id)
+                            .execute(pool)
+                            .await
+                            .map_err(AppError::Database)?;
+                        changed += 1;
+                    }
+                }
+                continue;
+            }
+            let Some(job_id) = item.job_id.as_deref() else {
+                continue;
+            };
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT state FROM file_deletion_jobs WHERE id=?")
+                    .bind(job_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(AppError::Database)?;
+            match state.as_deref() {
+                Some("SUCCEEDED") | Some("SUPERSEDED") => {
+                    sqlx::query("UPDATE file_deletion_batch_items SET state='SUCCEEDED', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='RUNNING'")
+                        .bind(&item.id)
+                        .execute(pool)
+                        .await
+                        .map_err(AppError::Database)?;
+                    changed += 1;
+                }
+                Some("QUEUED") | Some("RUNNING") | Some("RETRY_WAIT") => {}
+                Some(_) | None => {
+                    sqlx::query("UPDATE file_deletion_batch_items SET state='FAILED', error_code='JOB_LOST', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='RUNNING'")
+                        .bind(&item.id)
+                        .execute(pool)
+                        .await
+                        .map_err(AppError::Database)?;
+                    changed += 1;
+                }
+            }
+        }
+
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN state='SUCCEEDED' THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN state='FAILED' THEN 1 ELSE 0 END), 0) FROM file_deletion_batch_items WHERE batch_id=?",
+        )
+        .bind(&batch_id)
+        .fetch_one(pool)
+        .await
+        .map_err(AppError::Database)?;
+        let (total, completed, failed) = counts;
+        let done = completed + failed;
+        if done >= total {
+            let state = if failed == 0 {
+                "SUCCEEDED"
+            } else if completed == 0 {
+                "FAILED"
+            } else {
+                "PARTIAL"
+            };
+            sqlx::query("UPDATE file_deletion_batches SET state=?, completed_items=?, failed_items=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?")
+                .bind(state)
+                .bind(completed)
+                .bind(failed)
+                .bind(&batch_id)
+                .execute(pool)
+                .await
+                .map_err(AppError::Database)?;
+        } else {
+            sqlx::query("UPDATE file_deletion_batches SET state='RUNNING', completed_items=?, failed_items=?, updated_at=CURRENT_TIMESTAMP WHERE id=?")
+                .bind(completed)
+                .bind(failed)
+                .bind(&batch_id)
+                .execute(pool)
+                .await
+                .map_err(AppError::Database)?;
+        }
+    }
+    Ok(changed)
 }
 
 pub async fn process_file_deletion_jobs(pool: &sqlx::SqlitePool) -> Result<usize, AppError> {
@@ -487,7 +797,11 @@ pub async fn delete_file_tree(
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_file_tree, enqueue_file_deletion, process_file_deletion_jobs};
+    use super::{
+        FileDeletionBatchItemInput, delete_file_tree, enqueue_file_deletion,
+        enqueue_file_deletion_batch, load_file_deletion_batch, process_file_deletion_batches,
+        process_file_deletion_jobs,
+    };
 
     #[tokio::test]
     async fn delete_file_tree_uses_cascade_for_a_large_tree() {
@@ -686,6 +1000,78 @@ mod tests {
                 .await
                 .expect("content size");
         assert_eq!(content_size, 0);
+    }
+
+    #[tokio::test]
+    async fn batch_deletion_processes_multiple_files_as_one_task() {
+        let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");
+        crate::db::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('BATCH', 'BATCH')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('batch-owner','batch-owner','batch-owner','hash')")
+            .execute(&pool)
+            .await
+            .expect("insert owner");
+        sqlx::query("UPDATE issues SET owner_user_id='batch-owner' WHERE code='BATCH'")
+            .execute(&pool)
+            .await
+            .expect("assign owner");
+        sqlx::query("INSERT INTO bundles (id, issue_code, hash, name, status, content_size_bytes) VALUES ('batch-bundle', 'BATCH', 'batch-hash', 'batch', 'READY', 2)")
+            .execute(&pool)
+            .await
+            .expect("insert bundle");
+        let file_ids: Vec<i64> = {
+            let mut ids = Vec::new();
+            for name in ["one.log", "two.log"] {
+                ids.push(
+                    sqlx::query_scalar("INSERT INTO files (bundle_id, name, path, is_dir, size_bytes) VALUES ('batch-bundle', ?, ?, 0, 1) RETURNING id")
+                        .bind(name)
+                        .bind(format!("/{name}"))
+                        .fetch_one(&pool)
+                        .await
+                        .expect("insert file"),
+                );
+            }
+            ids
+        };
+        let batch = enqueue_file_deletion_batch(
+            &pool,
+            "batch-owner",
+            &file_ids
+                .iter()
+                .map(|file_id| FileDeletionBatchItemInput {
+                    bundle_id: "batch-bundle".into(),
+                    file_id: file_id.to_string(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("enqueue batch");
+        for _ in 0..20 {
+            process_file_deletion_batches(&pool)
+                .await
+                .expect("process batch coordinator");
+            process_file_deletion_jobs(&pool)
+                .await
+                .expect("process file deletion");
+            let current = load_file_deletion_batch(&pool, &batch.batch_id, "batch-owner")
+                .await
+                .expect("load batch");
+            if matches!(current.status.as_str(), "SUCCEEDED" | "PARTIAL" | "FAILED") {
+                break;
+            }
+        }
+        let finished = load_file_deletion_batch(&pool, &batch.batch_id, "batch-owner")
+            .await
+            .expect("load finished batch");
+        assert_eq!(finished.status, "SUCCEEDED");
+        assert_eq!(finished.total_items, 2);
+        assert_eq!(finished.completed_items, 2);
+        assert_eq!(finished.failed_items, 0);
     }
 
     #[tokio::test]

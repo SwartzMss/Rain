@@ -79,20 +79,51 @@ pub fn spawn_manual_issue_cleanup(
 pub fn spawn_file_deletion_cleanup(
     state: web::Data<crate::AppState>,
 ) -> tokio::task::JoinHandle<()> {
-    crate::spawn_periodic_job(
-        "file-deletion-cleanup",
-        std::time::Duration::ZERO,
-        std::time::Duration::from_secs(30),
-        move || {
-            let pool = state.db.pool.clone();
-            async move {
-                crate::services::file_deletion::process_file_deletion_jobs(&pool)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {},
+                _ = state.file_deletion_notify.notified() => {},
             }
-        },
-    )
+
+            // Continue yielded jobs immediately. The timer remains a recovery
+            // path for jobs left behind by a restart or a missed notification.
+            let mut reached_turn_limit = true;
+            for _ in 0..100 {
+                let batch_work =
+                    match crate::services::file_deletion::process_file_deletion_batches(
+                        &state.db.pool,
+                    )
+                    .await
+                    {
+                        Ok(processed) => processed,
+                        Err(error) => {
+                            reached_turn_limit = false;
+                            tracing::warn!(job = "file-deletion-cleanup", %error, "file deletion batch worker failed; will retry");
+                            break;
+                        }
+                    };
+                match crate::services::file_deletion::process_file_deletion_jobs(&state.db.pool)
+                    .await
+                {
+                    Ok(0) if batch_work == 0 => {
+                        reached_turn_limit = false;
+                        break;
+                    }
+                    Ok(_) => tokio::task::yield_now().await,
+                    Err(error) => {
+                        reached_turn_limit = false;
+                        tracing::warn!(job = "file-deletion-cleanup", %error, "file deletion worker failed; will retry");
+                        break;
+                    }
+                }
+            }
+            if reached_turn_limit {
+                state.file_deletion_notify.notify_one();
+            }
+        }
+    })
 }
 
 pub fn spawn_search_artifact_cleanup(
@@ -228,6 +259,8 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(files::download_file)
                 .service(files::delete_file_node)
                 .service(files::get_file_deletion_job)
+                .service(files::create_file_deletion_batch)
+                .service(files::get_file_deletion_batch)
                 .service(logs::search_issue_logs)
                 .service(logs::search_logs)
                 .service(temp_results::create_temp_result)

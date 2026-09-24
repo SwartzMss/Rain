@@ -27,6 +27,15 @@ export type FileRow = {
   uploadTaskId?: string;
 };
 
+export const canDeleteFileRow = (row: FileRow) =>
+  row.stage !== 'UPLOADING' &&
+  row.stage !== 'QUEUED' &&
+  row.stage !== 'RETRY_WAIT' &&
+  row.stage !== 'ACCEPTED' &&
+  Boolean(row.bundleHash) &&
+  row.status !== 'PROCESSING' &&
+  row.status !== 'PENDING';
+
 export const formatBytes = (bytes?: number | null) => {
   if (!bytes) return '-';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

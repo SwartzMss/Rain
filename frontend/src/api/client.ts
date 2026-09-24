@@ -25,6 +25,7 @@ import type {
   RegistrationSettings,
   AuthRateLimitsResponse,
   FileDeletionJobResponse,
+  FileDeletionBatchResponse,
   ResourceMode,
 } from './types';
 
@@ -265,6 +266,15 @@ export const rainApi = {
   },
   fetchFileDeletionJob(jobId: string) {
     return request<FileDeletionJobResponse>(`/api/file-deletion-jobs/${encodePathSegment(jobId)}`);
+  },
+  createFileDeletionBatch(items: Array<{ bundle_id: string; file_id: string }>) {
+    return request<FileDeletionBatchResponse>('/api/file-deletion-batches', {
+      method: 'POST',
+      body: JSON.stringify({ items })
+    });
+  },
+  fetchFileDeletionBatch(batchId: string) {
+    return request<FileDeletionBatchResponse>(`/api/file-deletion-batches/${encodePathSegment(batchId)}`);
   },
   deleteBundle(issueCode: string, bundleHash: string) {
     return request<void>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/bundles/${encodePathSegment(bundleHash)}`, { method: 'DELETE' });

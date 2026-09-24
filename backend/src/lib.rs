@@ -28,7 +28,7 @@ use std::{
 
 use sqlx::SqlitePool;
 use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
 use crate::config::{AppLimits, AuthConfig, DEFAULT_ISSUE_INACTIVE_DAYS};
@@ -273,6 +273,7 @@ pub struct AppState {
     pub limits: AppLimits,
     pub search_backend: crate::search::publication::SearchBackendKind,
     pub runtime_plan: Option<crate::runtime_adaptive::RuntimePlan>,
+    pub file_deletion_notify: Arc<Notify>,
 }
 
 const MAX_LINE_READ_CLIENTS: usize = 1024;
@@ -409,6 +410,7 @@ impl AppState {
             limits,
             search_backend: crate::search::publication::SearchBackendKind::SqliteFts,
             runtime_plan,
+            file_deletion_notify: Arc::new(Notify::new()),
         }
     }
 

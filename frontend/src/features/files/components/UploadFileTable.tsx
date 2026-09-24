@@ -1,16 +1,22 @@
 import { rainApi } from '../../../api/client';
 import { useAuth } from '../../../auth/AuthContext';
 import type { FileRow } from '../homeRows';
-import { formatBytes, stageClass, stageLabel } from '../homeRows';
+import { canDeleteFileRow, formatBytes, stageClass, stageLabel } from '../homeRows';
 import { FileIcon } from './FileIcons';
 
 type UploadFileTableProps = {
   bundlesError: string | null;
   currentIssueCode: string;
   deletingKey: string | null;
+  deletingKeys?: ReadonlySet<string>;
+  selectedRowKeys?: ReadonlySet<string>;
   fileRows: FileRow[];
   canWrite: boolean;
   onDeleteRow: (row: FileRow) => void;
+  onToggleRow?: (row: FileRow) => void;
+  onToggleAll?: (checked: boolean, rows: FileRow[]) => void;
+  onClearSelection?: () => void;
+  onDeleteSelected?: () => void;
   onRetryUpload: (taskId: string) => void;
 };
 
@@ -18,24 +24,64 @@ export function UploadFileTable({
   bundlesError,
   currentIssueCode,
   deletingKey,
+  deletingKeys,
+  selectedRowKeys,
   fileRows,
   canWrite,
   onDeleteRow,
+  onToggleRow,
+  onToggleAll,
+  onClearSelection,
+  onDeleteSelected,
   onRetryUpload
 }: UploadFileTableProps) {
   const auth = useAuth();
   const canDownload = auth.state.status === 'AUTHENTICATED';
+  const selectableRows = fileRows.filter((row) => canWrite && canDeleteFileRow(row));
+  const selectedCount = selectedRowKeys?.size ?? 0;
+  const allSelected = selectableRows.length > 0 && selectableRows.every((row) => selectedRowKeys?.has(row.key));
 
   return (
     <div className="rounded-2xl border border-slate-200/90 bg-white/95 p-4 shadow-[0_18px_48px_rgba(7,21,34,0.08)] backdrop-blur">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h3 className="text-lg font-semibold text-slate-950">文件列表</h3>
-        {bundlesError ? <span className="text-sm text-rose-600">{bundlesError}</span> : null}
+        <div className="flex items-center gap-3">
+          {selectedCount ? (
+            <>
+              <span className="text-sm text-slate-600">已选 {selectedCount} 项</span>
+              {onClearSelection ? (
+                <button type="button" className="text-sm text-slate-600 hover:text-slate-950" onClick={onClearSelection}>
+                  取消选择
+                </button>
+              ) : null}
+              {onDeleteSelected ? (
+                <button
+                  type="button"
+                  className="rounded-lg bg-rose-500 px-3 py-2 text-sm font-semibold text-white transition hover:bg-rose-600 disabled:opacity-60"
+                  onClick={onDeleteSelected}
+                  disabled={!!deletingKeys?.size}
+                >
+                  删除所选
+                </button>
+              ) : null}
+            </>
+          ) : null}
+          {bundlesError ? <span className="text-sm text-rose-600">{bundlesError}</span> : null}
+        </div>
       </div>
       <div className="overflow-x-auto rounded-lg border border-slate-200">
         <table className="min-w-full divide-y divide-slate-200 text-sm">
           <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
             <tr>
+              <th className="w-10 px-4 py-2.5 font-medium">
+                <input
+                  type="checkbox"
+                  aria-label="全选可删除文件"
+                  checked={allSelected}
+                  disabled={!selectableRows.length || !!deletingKeys?.size}
+                  onChange={(event) => onToggleAll?.(event.target.checked, selectableRows)}
+                />
+              </th>
               <th className="px-4 py-2.5 font-medium">文件名</th>
               <th className="px-4 py-2.5 font-medium">状态</th>
               <th className="px-4 py-2.5 font-medium">大小</th>
@@ -44,9 +90,19 @@ export function UploadFileTable({
           </thead>
           <tbody className="divide-y divide-slate-200 text-slate-700">
             {fileRows.map((row) => {
-              const deleting = deletingKey === row.key;
+              const deleting = deletingKey === row.key || deletingKeys?.has(row.key);
+              const selectable = canWrite && canDeleteFileRow(row);
               return (
                 <tr key={row.key} className="transition hover:bg-slate-50/80">
+                  <td className="px-4 py-3">
+                    <input
+                      type="checkbox"
+                      aria-label={`选择 ${row.name}`}
+                      checked={selectedRowKeys?.has(row.key) ?? false}
+                      disabled={!selectable || !!deletingKeys?.size}
+                      onChange={() => onToggleRow?.(row)}
+                    />
+                  </td>
                   <td className="max-w-[360px] truncate px-4 py-3">
                     <FileIcon name={row.name} className="mr-2 inline-block align-middle" />
                     {row.name}
@@ -87,7 +143,7 @@ export function UploadFileTable({
                     {row.stage === 'UPLOADING' || row.stage === 'ACCEPTED' || row.status === 'PROCESSING' || row.status === 'PENDING' ? (
                       <span role="status" className="mr-4 text-amber-700">处理中，暂不可删除</span>
                     ) : null}
-                    {canWrite && row.stage !== 'UPLOADING' && row.stage !== 'QUEUED' && row.stage !== 'RETRY_WAIT' && row.stage !== 'ACCEPTED' && row.bundleHash && row.status !== 'PROCESSING' && row.status !== 'PENDING' ? (
+                    {canDeleteFileRow(row) && canWrite ? (
                       <button
                         type="button"
                         className="text-rose-600 hover:text-rose-700 disabled:text-slate-600"
@@ -103,7 +159,7 @@ export function UploadFileTable({
             })}
             {!fileRows.length ? (
               <tr>
-                <td colSpan={4} className="px-4 py-10 text-center text-slate-500">
+                <td colSpan={5} className="px-4 py-10 text-center text-slate-500">
                   {currentIssueCode ? '暂无文件' : '请选择一个 Issue'}
                 </td>
               </tr>
