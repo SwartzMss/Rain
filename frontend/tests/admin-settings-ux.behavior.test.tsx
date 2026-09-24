@@ -112,6 +112,7 @@ it('presents metadata settings by visibility and reveals expert settings explici
         memory_limit_bytes: 512 * 1024 * 1024,
         cpu_source: 'fallback',
         memory_source: 'fallback',
+        memory_fallback_reason: 'memory_detection_unavailable',
         warnings: ['cpu_probe_fallback', 'memory_probe_fallback'],
       },
       upload_concurrent_processing_tasks: 1,
@@ -133,6 +134,7 @@ it('presents metadata settings by visibility and reveals expert settings explici
   await waitFor(() => expect(screen.getByText('常用配置')).toBeInTheDocument());
   expect(screen.getByTestId('runtime-resource-summary')).toBeInTheDocument();
   expect(screen.getAllByText(/fallback（探测不可用）/)).toHaveLength(2);
+  expect(screen.getByText('原因：内存探测不可用')).toBeInTheDocument();
   expect(screen.getByText(/自适应内存目标是启发式估算/)).toBeInTheDocument();
   expect(screen.getByText('高级运行参数')).toBeInTheDocument();
   expect(screen.queryByText('专家配置')).not.toBeInTheDocument();
@@ -239,4 +241,52 @@ it('renders resource modes and submits a manual mode change with its value', asy
       upload_concurrent_processing_tasks: 'manual',
     });
   });
+});
+
+it('renders proc meminfo as the memory source without a fallback reason', async () => {
+  vi.mocked(rainApi.me).mockResolvedValueOnce({
+    authenticated: true,
+    user: { id: 'admin', username: 'admin', role: 'ADMIN' },
+  });
+  vi.mocked(rainApi.fetchAdminSettings).mockResolvedValueOnce({
+    allow_registration: true,
+    updated_at: '',
+    updated_by_username: 'admin',
+    login_ip_limit_per_minute: 20,
+    login_username_failure_limit_per_5_minutes: 10,
+    issue_inactive_days: 0,
+    cleanup_exempt_usernames: [],
+    revision: '7',
+    configured: {},
+    effective: {},
+    fields: [],
+    runtime: {
+      policy_version: 'v1',
+      resources: {
+        cpu_cores: 20,
+        memory_limit_bytes: 64 * 1024 * 1024 * 1024,
+        cpu_source: 'os',
+        memory_source: 'proc_meminfo',
+        memory_fallback_reason: null,
+        warnings: [],
+      },
+      upload_concurrent_processing_tasks: 8,
+      search_tantivy_max_writers: 4,
+      search_tantivy_writer_heap_size: 256 * 1024 * 1024,
+      estimated_bytes: 1920 * 1024 * 1024,
+      adaptive_memory_target_bytes: 16 * 1024 * 1024 * 1024,
+      warnings: [],
+      decisions: [],
+    },
+  } as never);
+
+  render(
+    <MemoryRouter initialEntries={['/admin/settings']}>
+      <AuthProvider><AdminSettingsPage /></AuthProvider>
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => expect(screen.getByTestId('runtime-resource-summary')).toBeInTheDocument());
+  expect(screen.getByText('来源：/proc/meminfo')).toBeInTheDocument();
+  expect(screen.queryByText(/^原因：/)).not.toBeInTheDocument();
 });
