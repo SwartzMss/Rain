@@ -1,7 +1,7 @@
 use backend::{
     config::{AppLimits, AuthConfig},
     db,
-    settings::{ApplyMode, SettingKey, SettingsService, SettingsValues},
+    settings::{ApplyMode, ResourceMode, SettingKey, SettingsService, SettingsValues},
 };
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -45,6 +45,36 @@ fn metadata_exposes_presentation_contract_and_covers_supported_keys() {
     assert_eq!(serialized["visibility"], "default");
     assert!(serialized.get("recommended_min").is_some());
     assert!(serialized.get("recommended_max").is_some());
+}
+
+#[test]
+fn metadata_declares_auto_values_and_protected_settings() {
+    let processing = backend::settings::metadata::all()
+        .iter()
+        .find(|field| field.key == SettingKey::UploadConcurrentProcessingTasks)
+        .expect("processing metadata");
+    assert!(processing.supports_auto);
+    assert_eq!(processing.auto_value, Some(4));
+
+    let argon2 = backend::settings::metadata::all()
+        .iter()
+        .find(|field| field.key == SettingKey::Argon2Concurrency)
+        .expect("argon2 metadata");
+    assert!(argon2.protected);
+    assert!(
+        !backend::settings::metadata::admin()
+            .iter()
+            .any(|field| field.key == SettingKey::Argon2Concurrency)
+    );
+}
+
+#[test]
+fn resource_mode_serializes_stably() {
+    assert_eq!(serde_json::to_value(ResourceMode::Auto).unwrap(), "auto");
+    assert_eq!(
+        serde_json::to_value(ResourceMode::Manual).unwrap(),
+        "manual"
+    );
 }
 
 #[test]

@@ -9,6 +9,15 @@ pub enum ApplyMode {
     RestartRequired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceMode {
+    Auto,
+    Manual,
+}
+
+pub type ResourceModes = std::collections::BTreeMap<String, ResourceMode>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SettingKey {
@@ -226,6 +235,7 @@ pub struct SettingsSnapshot {
     pub revision: i64,
     pub configured: SettingsValues,
     pub effective: SettingsValues,
+    pub resource_modes: ResourceModes,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -60,6 +60,7 @@ impl SettingsService {
             revision: 0,
             configured: defaults.clone(),
             effective: defaults,
+            resource_modes: std::collections::BTreeMap::new(),
         };
         Self {
             pool,
@@ -89,6 +90,7 @@ impl SettingsService {
             revision,
             effective,
             configured,
+            resource_modes: previous.resource_modes.clone(),
         });
         *self.snapshot.write().await = snapshot.clone();
         Ok(snapshot)
@@ -270,6 +272,7 @@ impl SettingsService {
             revision: expected_revision + 1,
             configured: candidate,
             effective,
+            resource_modes: current.resource_modes.clone(),
         });
         let result = SaveResult {
             snapshot: (*snapshot).clone(),
@@ -413,6 +416,7 @@ impl SettingsService {
             revision,
             effective,
             configured,
+            resource_modes: previous.resource_modes.clone(),
         });
         *self.snapshot.write().await = snapshot.clone();
         Ok(snapshot)
