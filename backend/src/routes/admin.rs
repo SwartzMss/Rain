@@ -497,6 +497,8 @@ async fn settings_response_with_metadata(
             "search_tantivy_max_writers": plan.tantivy_max_writers,
             "search_tantivy_writer_heap_size": plan.tantivy_writer_heap_size,
             "estimated_bytes": plan.estimated_bytes,
+            "memory_estimate": plan.memory_estimate,
+            "current_process_rss_bytes": crate::runtime_adaptive::current_process_rss_bytes(),
             "adaptive_memory_target_bytes": plan.adaptive_memory_target_bytes,
             "warnings": plan.warnings,
             "decisions": plan.decisions,

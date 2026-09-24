@@ -111,13 +111,27 @@ pub struct RuntimeDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeMemoryEstimate {
+    /// Capacity reserved by the startup planner for upload processing tasks.
+    pub upload_processing_bytes: u64,
+    /// Capacity reserved by the startup planner for Tantivy writer heaps/tasks.
+    pub tantivy_writer_bytes: u64,
+    /// Capacity reserved by the startup planner for concurrent Tantivy queries.
+    pub tantivy_query_bytes: u64,
+    /// Sum of the planner's reservations; this is not live process RSS.
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePlan {
     pub resources: ResourceSnapshot,
     pub upload_processing_tasks: usize,
     pub tantivy_max_writers: usize,
     pub tantivy_writer_heap_size: u64,
     pub tantivy_max_concurrent_queries: usize,
+    /// Compatibility alias for `memory_estimate.total_bytes`.
     pub estimated_bytes: u64,
+    pub memory_estimate: RuntimeMemoryEstimate,
     /// Heuristic planning target, not an RSS or allocation hard limit.
     pub adaptive_memory_target_bytes: Option<u64>,
     pub warnings: Vec<String>,
@@ -212,22 +226,11 @@ pub fn resolve(
     // This target reserves a heuristic quarter of the detected memory for the
     // adaptive runtime. It is not a hard RSS or allocation limit.
     let adaptive_memory_target_bytes = memory.map(|bytes| bytes / 4);
-    let estimated = |p: usize, w: usize, h: u64, q: usize| {
-        (p as u64)
-            .saturating_mul(RESERVED_PER_TASK)
-            .saturating_add((w as u64).saturating_mul(h.saturating_add(RESERVED_PER_TASK)))
-            .saturating_add((q as u64).saturating_mul(RESERVED_PER_TASK))
-    };
-    let estimate_for_runtime = |p: usize, w: usize, h: u64, q: usize| {
-        if tantivy_enabled {
-            estimated(p, w, h, q)
-        } else {
-            estimated(p, 0, 0, 0)
-        }
-    };
+    let estimate_for_runtime =
+        |p: usize, w: usize, h: u64, q: usize| estimate_memory(p, w, h, q, tantivy_enabled);
 
     if let Some(target_bytes) = adaptive_memory_target_bytes {
-        while estimate_for_runtime(processing, writers, heap, queries) > target_bytes {
+        while estimate_for_runtime(processing, writers, heap, queries).total_bytes > target_bytes {
             if heap_mode == ResourceMode::Auto && heap > MIN_HEAP {
                 heap = heap.saturating_sub(16 * MIB).max(MIN_HEAP);
             } else if writers_mode == ResourceMode::Auto && writers > 1 {
@@ -265,16 +268,66 @@ pub fn resolve(
             decision(heap_mode, heap, "memory_budget"),
         ),
     ];
+    let memory_estimate = estimate_for_runtime(processing, writers, heap, queries);
     RuntimePlan {
         resources: resources.clone(),
         upload_processing_tasks: processing,
         tantivy_max_writers: writers,
         tantivy_writer_heap_size: heap,
         tantivy_max_concurrent_queries: queries,
-        estimated_bytes: estimate_for_runtime(processing, writers, heap, queries),
+        estimated_bytes: memory_estimate.total_bytes,
+        memory_estimate,
         adaptive_memory_target_bytes,
         warnings,
         decisions,
+    }
+}
+
+fn estimate_memory(
+    processing: usize,
+    writers: usize,
+    heap: u64,
+    queries: usize,
+    tantivy_enabled: bool,
+) -> RuntimeMemoryEstimate {
+    let upload_processing_bytes = (processing as u64).saturating_mul(RESERVED_PER_TASK);
+    let tantivy_writer_bytes = if tantivy_enabled {
+        (writers as u64).saturating_mul(heap.saturating_add(RESERVED_PER_TASK))
+    } else {
+        0
+    };
+    let tantivy_query_bytes = if tantivy_enabled {
+        (queries as u64).saturating_mul(RESERVED_PER_TASK)
+    } else {
+        0
+    };
+    let total_bytes = upload_processing_bytes
+        .saturating_add(tantivy_writer_bytes)
+        .saturating_add(tantivy_query_bytes);
+    RuntimeMemoryEstimate {
+        upload_processing_bytes,
+        tantivy_writer_bytes,
+        tantivy_query_bytes,
+        total_bytes,
+    }
+}
+
+/// Return the current process resident working set when the host exposes it.
+/// This is an observation for diagnostics; it is not used by the startup plan.
+pub fn current_process_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|contents| parse_linux_rss(&contents))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        read_windows_process_rss()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        None
     }
 }
 
@@ -332,6 +385,37 @@ fn parse_linux_meminfo(contents: &str) -> Option<u64> {
         }
         kib.checked_mul(1024)
     })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_rss(contents: &str) -> Option<u64> {
+    contents.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key != "VmRSS" {
+            return None;
+        }
+        let mut parts = value.split_whitespace();
+        let kib = parts.next()?.parse::<u64>().ok()?;
+        if parts.next()? != "kB" || kib == 0 {
+            return None;
+        }
+        kib.checked_mul(1024)
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_process_rss() -> Option<u64> {
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::System::{
+        ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+        Threading::GetCurrentProcess,
+    };
+
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { zeroed() };
+    let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    counters.cb = size;
+    let success = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
+    (success != 0 && counters.WorkingSetSize > 0).then_some(counters.WorkingSetSize as u64)
 }
 
 #[cfg(target_os = "linux")]
@@ -793,6 +877,14 @@ mod tests {
         assert_eq!(plan.tantivy_max_writers, 4);
         assert_eq!(plan.tantivy_writer_heap_size, 256 * MIB);
         assert_eq!(plan.tantivy_max_concurrent_queries, 16);
+        assert_eq!(plan.memory_estimate.upload_processing_bytes, 8 * 32 * MIB);
+        assert_eq!(
+            plan.memory_estimate.tantivy_writer_bytes,
+            4 * (256 * MIB + 32 * MIB)
+        );
+        assert_eq!(plan.memory_estimate.tantivy_query_bytes, 16 * 32 * MIB);
+        assert_eq!(plan.memory_estimate.total_bytes, 1920 * MIB);
+        assert_eq!(plan.estimated_bytes, plan.memory_estimate.total_bytes);
         assert!(
             !plan
                 .decisions
@@ -838,5 +930,16 @@ mod tests {
         let plan = resolve(&resources, &values(), &modes(ResourceMode::Auto), true);
         assert!(plan.estimated_bytes <= plan.adaptive_memory_target_bytes.unwrap());
         assert!(plan.tantivy_max_writers >= 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_linux_process_rss_as_bytes() {
+        assert_eq!(
+            parse_linux_rss("Name:\tbackend\nVmSize:\t2048 kB\nVmRSS:\t1234 kB\n"),
+            Some(1234 * 1024)
+        );
+        assert_eq!(parse_linux_rss("VmRSS:\t0 kB\n"), None);
+        assert_eq!(parse_linux_rss("VmRSS:\tunknown kB\n"), None);
     }
 }

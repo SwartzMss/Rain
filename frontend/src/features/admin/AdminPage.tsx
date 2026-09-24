@@ -785,7 +785,7 @@ export function AdminSettingsPage() {
           <SettingsSection
             icon="settings"
             title="运行时资源探测"
-            description="展示本次启动用于自适应计算的资源来源。fallback 表示探测不可用，内存目标是启发式估算，不是 RSS 或分配硬限制。"
+            description="展示启动资源来源、运行时预算和当前进程 RSS。预算用于并发规划，RSS 是当前观测值，两者不是同一个指标。"
           >
             <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2" data-testid="runtime-resource-summary">
               <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
@@ -795,7 +795,7 @@ export function AdminSettingsPage() {
                 </p>
               </div>
               <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
-                <span className="text-slate-500">内存限制</span>
+                <span className="text-slate-500">内存基数</span>
                 <p className="mt-1 font-medium text-slate-800">{formatRuntimeBytes(runtime.resources.memory_limit_bytes)}</p>
                 <p className="mt-1 text-xs text-slate-500">
                   来源：{resourceSourceLabel(runtime.resources.memory_source)}
@@ -811,8 +811,23 @@ export function AdminSettingsPage() {
                 <p className="mt-1 font-medium text-slate-800">{formatRuntimeBytes(runtime.adaptive_memory_target_bytes)}</p>
               </div>
               <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
-                <span className="text-slate-500">当前估算占用</span>
-                <p className="mt-1 font-medium text-slate-800">{formatRuntimeBytes(runtime.estimated_bytes)}</p>
+                <span className="text-slate-500">计划内存预算</span>
+                <p className="mt-1 font-medium text-slate-800">
+                  {formatRuntimeBytes(runtime.memory_estimate?.total_bytes ?? runtime.estimated_bytes)}
+                </p>
+                {runtime.memory_estimate ? (
+                  <p className="mt-1 text-xs leading-5 text-slate-500">
+                    上传 {formatRuntimeBytes(runtime.memory_estimate.upload_processing_bytes)}；
+                    writer {formatRuntimeBytes(runtime.memory_estimate.tantivy_writer_bytes)}；
+                    查询 {formatRuntimeBytes(runtime.memory_estimate.tantivy_query_bytes)}
+                  </p>
+                ) : null}
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
+                <span className="text-slate-500">当前进程 RSS</span>
+                <p className="mt-1 font-medium text-slate-800">
+                  {formatRuntimeBytes(runtime.current_process_rss_bytes ?? null)}
+                </p>
               </div>
             </div>
             {runtime.resources.warnings.length > 0 || runtime.warnings.length > 0 ? (
