@@ -10,7 +10,73 @@ use crate::{
     error::AppError,
 };
 
-use super::{SaveResult, SettingsSnapshot, SettingsValues};
+use super::{ResourceMode, ResourceModes, SaveResult, SettingsSnapshot, SettingsValues, metadata};
+
+const RESOURCE_MODE_KEYS: [&str; 5] = [
+    "upload_concurrent_processing_tasks",
+    "upload_concurrent_receive_tasks",
+    "search_tantivy_max_writers",
+    "api_concurrent_line_reads",
+    "temp_results_concurrent_materializations",
+];
+
+fn resource_mode_defaults() -> ResourceModes {
+    RESOURCE_MODE_KEYS
+        .into_iter()
+        .map(|key| (key.to_owned(), ResourceMode::Manual))
+        .collect()
+}
+
+fn resource_metadata(key: &str) -> Option<&'static metadata::FieldMetadata> {
+    metadata::all().iter().find(|field| {
+        serde_json::to_value(field.key)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .as_deref()
+            == Some(key)
+    })
+}
+
+fn normalize_resource_modes(modes: ResourceModes) -> Result<ResourceModes, AppError> {
+    if let Some(key) = modes
+        .keys()
+        .find(|key| !RESOURCE_MODE_KEYS.contains(&key.as_str()))
+    {
+        return Err(AppError::Config(format!(
+            "invalid resource setting mode key: {key}"
+        )));
+    }
+    let mut normalized = resource_mode_defaults();
+    normalized.extend(modes);
+    Ok(normalized)
+}
+
+fn validate_resource_mode_patch(modes: &ResourceModes) -> Result<(), AppError> {
+    if let Some(key) = modes
+        .keys()
+        .find(|key| !RESOURCE_MODE_KEYS.contains(&key.as_str()))
+    {
+        return Err(AppError::public(
+            StatusCode::BAD_REQUEST,
+            "SETTINGS_INVALID_REQUEST",
+            format!("不支持为该配置项设置资源模式：{key}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_protected_changes(
+    changes: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), AppError> {
+    if changes.contains_key("argon2_concurrency") {
+        return Err(AppError::public(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "SETTINGS_PROTECTED_FIELD",
+            "该配置项由系统安全策略管理，管理员不可修改",
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct SettingsService {
@@ -60,6 +126,7 @@ impl SettingsService {
             revision: 0,
             configured: defaults.clone(),
             effective: defaults,
+            resource_modes: resource_mode_defaults(),
         };
         Self {
             pool,
@@ -79,6 +146,7 @@ impl SettingsService {
         let _guard = self.save_lock.lock().await;
         let previous = self.snapshot().await;
         let configured = self.load_values(&previous.configured).await?;
+        let resource_modes = self.load_resource_modes().await?;
         let revision = self.load_revision().await?;
         let effective = if previous.revision == 0 {
             configured.clone()
@@ -89,6 +157,7 @@ impl SettingsService {
             revision,
             effective,
             configured,
+            resource_modes,
         });
         *self.snapshot.write().await = snapshot.clone();
         Ok(snapshot)
@@ -112,6 +181,44 @@ impl SettingsService {
         client_ip: Option<&str>,
         user_agent: Option<&str>,
     ) -> Result<SaveResult, AppError> {
+        self.save_with_context_and_modes(
+            expected_revision,
+            changes,
+            &ResourceModes::new(),
+            actor_user_id,
+            client_ip,
+            user_agent,
+        )
+        .await
+    }
+
+    pub async fn save_with_modes(
+        &self,
+        expected_revision: i64,
+        changes: &serde_json::Map<String, serde_json::Value>,
+        resource_modes: &ResourceModes,
+        actor_user_id: Option<&str>,
+    ) -> Result<SaveResult, AppError> {
+        self.save_with_context_and_modes(
+            expected_revision,
+            changes,
+            resource_modes,
+            actor_user_id,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn save_with_context_and_modes(
+        &self,
+        expected_revision: i64,
+        changes: &serde_json::Map<String, serde_json::Value>,
+        resource_modes: &ResourceModes,
+        actor_user_id: Option<&str>,
+        client_ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<SaveResult, AppError> {
         let _guard = self.save_lock.lock().await;
         let current = self.snapshot().await;
         if current.revision != expected_revision {
@@ -121,13 +228,15 @@ impl SettingsService {
                 "配置已被其他管理员更新，请刷新后重试",
             ));
         }
-        if changes.is_empty() {
+        if changes.is_empty() && resource_modes.is_empty() {
             return Err(AppError::api(
                 StatusCode::BAD_REQUEST,
                 "SETTINGS_INVALID_REQUEST",
                 "至少需要修改一个配置项",
             ));
         }
+        validate_resource_mode_patch(resource_modes)?;
+        validate_protected_changes(changes)?;
         if expected_revision == i64::MAX {
             return Err(AppError::public(
                 StatusCode::CONFLICT,
@@ -142,6 +251,20 @@ impl SettingsService {
             .ok_or_else(|| AppError::Config("settings are not an object".into()))?;
         for (key, value) in changes {
             candidate_json.insert(key.clone(), value.clone());
+        }
+        for (key, mode) in resource_modes {
+            if matches!(mode, ResourceMode::Auto) {
+                let auto_value = resource_metadata(key)
+                    .and_then(|field| field.auto_value)
+                    .ok_or_else(|| {
+                        AppError::public(
+                            StatusCode::BAD_REQUEST,
+                            "SETTINGS_INVALID_REQUEST",
+                            format!("配置项不支持 Auto 模式：{key}"),
+                        )
+                    })?;
+                candidate_json.insert(key.clone(), serde_json::json!(auto_value));
+            }
         }
         let candidate: SettingsValues = serde_json::from_value(serde_json::Value::Object(
             candidate_json.clone(),
@@ -167,6 +290,19 @@ impl SettingsService {
         for key in changes.keys() {
             if candidate_json.get(key) != current_map.get(key) {
                 changed_fields.push(key.clone());
+            }
+        }
+        let mut next_resource_modes = current.resource_modes.clone();
+        let mut mode_changed_fields = Vec::new();
+        for (key, mode) in resource_modes {
+            if next_resource_modes.get(key) != Some(mode) {
+                next_resource_modes.insert(key.clone(), *mode);
+                mode_changed_fields.push(key.clone());
+            }
+        }
+        for field in mode_changed_fields {
+            if !changed_fields.contains(&field) {
+                changed_fields.push(field);
             }
         }
         if changed_fields.is_empty() {
@@ -216,16 +352,28 @@ impl SettingsService {
         let pool = self.pool.clone();
         let update_values = candidate.clone();
         let old_values = current.configured.clone();
-        let changed_for_audit = changes.clone();
+        let mut changed_for_audit = changes.clone();
+        for (key, mode) in resource_modes {
+            if current.resource_modes.get(key) != Some(mode) {
+                changed_for_audit.insert(
+                    key.clone(),
+                    serde_json::to_value(mode)
+                        .map_err(|error| AppError::Config(error.to_string()))?,
+                );
+            }
+        }
+        let resource_modes_json = serde_json::to_string(&next_resource_modes)
+            .map_err(|error| AppError::Config(error.to_string()))?;
         db::write::run(&pool, "save system settings", &input, move |conn, input| {
             let values = update_values.clone();
             let old_values = old_values.clone();
             let changes = changed_for_audit.clone();
+            let resource_modes_json = resource_modes_json.clone();
             Box::pin(async move {
                 let updated = sqlx::query(
-                    "UPDATE system_settings SET allow_registration=?,session_ttl_seconds=?,register_ip_limit_per_hour=?,login_ip_limit_per_minute=?,login_username_failure_limit_per_5_minutes=?,argon2_concurrency=?,issue_inactive_days=?,issue_max_content_size=?,archive_max_working_size=?,upload_concurrent_processing_tasks=?,upload_concurrent_receive_tasks=?,upload_max_tmp_bytes=?,indexing_max_indexed_line_size=?,search_tantivy_max_writers=?,search_tantivy_writer_heap_size=?,api_file_preview_size=?,api_max_preview_line_size=?,api_default_line_page_size=?,api_max_line_page_size=?,api_max_line_page_bytes=?,api_concurrent_line_reads=?,api_concurrent_line_reads_per_client=?,api_default_search_results=?,api_max_search_results=?,api_max_search_window=?,temp_results_max_result_size=?,temp_results_max_total_size=?,temp_results_max_records=?,temp_results_concurrent_materializations=?,temp_results_max_sources=?,temp_results_max_scan_bytes=?,temp_results_max_scan_duration_seconds=?,cleanup_exempt_usernames_json=?,cleanup_exempt_users_initialized=1,updated_by_user_id=?,updated_at=CURRENT_TIMESTAMP,revision=revision+1 WHERE id=1 AND revision=?",
+                    "UPDATE system_settings SET allow_registration=?,session_ttl_seconds=?,register_ip_limit_per_hour=?,login_ip_limit_per_minute=?,login_username_failure_limit_per_5_minutes=?,argon2_concurrency=?,issue_inactive_days=?,issue_max_content_size=?,archive_max_working_size=?,upload_concurrent_processing_tasks=?,upload_concurrent_receive_tasks=?,upload_max_tmp_bytes=?,indexing_max_indexed_line_size=?,search_tantivy_max_writers=?,search_tantivy_writer_heap_size=?,api_file_preview_size=?,api_max_preview_line_size=?,api_default_line_page_size=?,api_max_line_page_size=?,api_max_line_page_bytes=?,api_concurrent_line_reads=?,api_concurrent_line_reads_per_client=?,api_default_search_results=?,api_max_search_results=?,api_max_search_window=?,temp_results_max_result_size=?,temp_results_max_total_size=?,temp_results_max_records=?,temp_results_concurrent_materializations=?,temp_results_max_sources=?,temp_results_max_scan_bytes=?,temp_results_max_scan_duration_seconds=?,cleanup_exempt_usernames_json=?,resource_modes_json=?,cleanup_exempt_users_initialized=1,updated_by_user_id=?,updated_at=CURRENT_TIMESTAMP,revision=revision+1 WHERE id=1 AND revision=?",
                 )
-                .bind(values.allow_registration as i64).bind(values.session_ttl_seconds as i64).bind(values.register_ip_limit_per_hour as i64).bind(values.login_ip_limit_per_minute as i64).bind(values.login_username_failure_limit_per_5_minutes as i64).bind(values.argon2_concurrency as i64).bind(values.issue_inactive_days as i64).bind(values.issue_max_content_size as i64).bind(values.archive_max_working_size as i64).bind(values.upload_concurrent_processing_tasks as i64).bind(values.upload_concurrent_receive_tasks as i64).bind(values.upload_max_tmp_bytes as i64).bind(values.indexing_max_indexed_line_size as i64).bind(values.search_tantivy_max_writers as i64).bind(values.search_tantivy_writer_heap_size as i64).bind(values.api_file_preview_size as i64).bind(values.api_max_preview_line_size as i64).bind(values.api_default_line_page_size).bind(values.api_max_line_page_size).bind(values.api_max_line_page_bytes as i64).bind(values.api_concurrent_line_reads as i64).bind(values.api_concurrent_line_reads_per_client as i64).bind(values.api_default_search_results).bind(values.api_max_search_results).bind(values.api_max_search_window).bind(values.temp_results_max_result_size as i64).bind(values.temp_results_max_total_size as i64).bind(values.temp_results_max_records).bind(values.temp_results_concurrent_materializations as i64).bind(values.temp_results_max_sources as i64).bind(values.temp_results_max_scan_bytes as i64).bind(values.temp_results_max_scan_duration_seconds as i64).bind(serde_json::to_string(&values.cleanup_exempt_usernames).map_err(|error| AppError::Config(error.to_string()))?).bind(input.1.as_deref()).bind(input.0)
+                .bind(values.allow_registration as i64).bind(values.session_ttl_seconds as i64).bind(values.register_ip_limit_per_hour as i64).bind(values.login_ip_limit_per_minute as i64).bind(values.login_username_failure_limit_per_5_minutes as i64).bind(values.argon2_concurrency as i64).bind(values.issue_inactive_days as i64).bind(values.issue_max_content_size as i64).bind(values.archive_max_working_size as i64).bind(values.upload_concurrent_processing_tasks as i64).bind(values.upload_concurrent_receive_tasks as i64).bind(values.upload_max_tmp_bytes as i64).bind(values.indexing_max_indexed_line_size as i64).bind(values.search_tantivy_max_writers as i64).bind(values.search_tantivy_writer_heap_size as i64).bind(values.api_file_preview_size as i64).bind(values.api_max_preview_line_size as i64).bind(values.api_default_line_page_size).bind(values.api_max_line_page_size).bind(values.api_max_line_page_bytes as i64).bind(values.api_concurrent_line_reads as i64).bind(values.api_concurrent_line_reads_per_client as i64).bind(values.api_default_search_results).bind(values.api_max_search_results).bind(values.api_max_search_window).bind(values.temp_results_max_result_size as i64).bind(values.temp_results_max_total_size as i64).bind(values.temp_results_max_records).bind(values.temp_results_concurrent_materializations as i64).bind(values.temp_results_max_sources as i64).bind(values.temp_results_max_scan_bytes as i64).bind(values.temp_results_max_scan_duration_seconds as i64).bind(serde_json::to_string(&values.cleanup_exempt_usernames).map_err(|error| AppError::Config(error.to_string()))?).bind(resource_modes_json).bind(input.1.as_deref()).bind(input.0)
                     .execute(&mut *conn).await.map_err(AppError::Database)?
                     .rows_affected();
                 if updated != 1 {
@@ -270,6 +418,7 @@ impl SettingsService {
             revision: expected_revision + 1,
             configured: candidate,
             effective,
+            resource_modes: next_resource_modes,
         });
         let result = SaveResult {
             snapshot: (*snapshot).clone(),
@@ -402,6 +551,7 @@ impl SettingsService {
         })
         .await?;
         let configured = self.load_values(&values).await?;
+        let resource_modes = self.load_resource_modes().await?;
         let revision = self.load_revision().await?;
         let previous = self.snapshot().await;
         let effective = if previous.revision == 0 {
@@ -413,6 +563,7 @@ impl SettingsService {
             revision,
             effective,
             configured,
+            resource_modes,
         });
         *self.snapshot.write().await = snapshot.clone();
         Ok(snapshot)
@@ -423,6 +574,18 @@ impl SettingsService {
             .fetch_one(&self.pool)
             .await
             .map_err(AppError::Database)
+    }
+
+    async fn load_resource_modes(&self) -> Result<ResourceModes, AppError> {
+        let raw: String = sqlx::query_scalar(
+            "SELECT COALESCE(resource_modes_json,'{}') FROM system_settings WHERE id=1",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        let modes: ResourceModes = serde_json::from_str(&raw)
+            .map_err(|error| AppError::Config(format!("invalid resource modes: {error}")))?;
+        normalize_resource_modes(modes)
     }
 
     async fn load_values(&self, fallback: &SettingsValues) -> Result<SettingsValues, AppError> {

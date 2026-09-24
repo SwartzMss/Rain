@@ -17,6 +17,11 @@ export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }
 export interface RegistrationStatus { allow_registration: boolean; }
 export type SettingCategory = 'common' | 'advanced' | 'expert';
 export type SettingVisibility = 'default' | 'collapsed' | 'expert';
+export type ResourceMode = 'auto' | 'manual';
+
+export interface AdminSecurityStatus {
+  argon2id_enabled: boolean;
+}
 
 export interface RegistrationSettingField {
   key: string;
@@ -35,6 +40,9 @@ export interface RegistrationSettingField {
   visibility: SettingVisibility;
   recommended_min?: number | null;
   recommended_max?: number | null;
+  supports_auto?: boolean;
+  auto_value?: number | null;
+  protected?: boolean;
 }
 
 export interface RegistrationSettings extends RegistrationStatus {
@@ -48,6 +56,9 @@ export interface RegistrationSettings extends RegistrationStatus {
   cleanup_exempt_usernames: string[];
   configured?: Record<string, unknown>;
   effective?: Record<string, unknown>;
+  resource_modes?: Record<string, ResourceMode>;
+  auto_values?: Record<string, number>;
+  security?: AdminSecurityStatus;
   restart_required?: boolean;
   pending_restart_fields?: string[];
   fields?: RegistrationSettingField[];

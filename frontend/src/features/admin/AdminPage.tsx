@@ -8,6 +8,7 @@ import type {
   UserStatus,
   AuthRateLimitEntry,
   RegistrationSettingField,
+  ResourceMode,
 } from "../../api/types";
 import { useAuth } from "../../auth/AuthContext";
 import { isAdmin } from "../../auth/permissions";
@@ -20,6 +21,7 @@ import {
 } from "./adminFlow";
 import {
   createSettingDraft,
+  effectiveSettingLabel,
   groupSettingFields,
   recommendedRangeLabel,
   serializeSettingValue,
@@ -354,19 +356,35 @@ function MetadataSettingsGrid({
   fields,
   draft,
   disabled,
+  resourceModes,
+  autoValues,
+  effectiveValues,
+  pendingRestartFields,
   onChange,
+  onModeChange,
 }: {
   fields: RegistrationSettingField[];
   draft: Record<string, unknown>;
   disabled: boolean;
+  resourceModes: Record<string, ResourceMode>;
+  autoValues: Record<string, number>;
+  effectiveValues: Record<string, unknown>;
+  pendingRestartFields: string[];
   onChange: (key: string, value: unknown) => void;
+  onModeChange: (key: string, mode: ResourceMode) => void;
 }) {
   return (
     <div className="grid gap-4 sm:grid-cols-2">
       {fields.map((field) => {
         const value = draft[field.key];
         const recommendation = recommendedRangeLabel(field);
-        const inputValue = settingInputValue(field, value);
+        const supportsAuto = field.supports_auto === true;
+        const mode = resourceModes[field.key] ?? "manual";
+        const configuredValue = supportsAuto && mode === "auto" && autoValues[field.key] != null
+          ? autoValues[field.key]
+          : value;
+        const inputValue = settingInputValue(field, configuredValue);
+        const effectiveValue = effectiveValues[field.key] ?? configuredValue;
         return (
           <label key={field.key} className="space-y-1 text-sm text-slate-600">
             <span className="flex items-start justify-between gap-2">
@@ -386,12 +404,27 @@ function MetadataSettingsGrid({
                 {field.apply_mode === "restart_required" ? "重启生效" : "即时生效"}
               </span>
             </span>
+            {supportsAuto ? (
+              <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+                <span>资源模式</span>
+                <select
+                  aria-label={`${field.key} mode`}
+                  value={mode}
+                  disabled={disabled}
+                  onChange={(event) => onModeChange(field.key, event.target.value as ResourceMode)}
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
+                >
+                  <option value="auto">自动</option>
+                  <option value="manual">手动</option>
+                </select>
+              </div>
+            ) : null}
             {field.value_type === "boolean" ? (
               <input
                 aria-label={field.key}
                 type="checkbox"
                 checked={Boolean(inputValue)}
-                disabled={disabled}
+                disabled={disabled || (supportsAuto && mode === "auto")}
                 onChange={(event) => onChange(field.key, event.target.checked)}
               />
             ) : (
@@ -401,11 +434,18 @@ function MetadataSettingsGrid({
                 min={field.min ?? undefined}
                 max={field.max ?? undefined}
                 value={inputValue as string | number}
-                disabled={disabled}
+                disabled={disabled || (supportsAuto && mode === "auto")}
                 onChange={(event) => onChange(field.key, event.target.value)}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2"
               />
             )}
+            <span className="block text-xs text-slate-500">
+              {effectiveSettingLabel(
+                configuredValue,
+                effectiveValue,
+                pendingRestartFields.includes(field.key),
+              )}
+            </span>
           </label>
         );
       })}
@@ -439,6 +479,11 @@ export function AdminSettingsPage() {
   const [commonDraft, setCommonDraft] = useState<Record<string, unknown>>({});
   const [advancedDraft, setAdvancedDraft] = useState<Record<string, unknown>>({});
   const [expertDraft, setExpertDraft] = useState<Record<string, unknown>>({});
+  const [resourceModes, setResourceModes] = useState<Record<string, ResourceMode>>({});
+  const [initialResourceModes, setInitialResourceModes] = useState<Record<string, ResourceMode>>({});
+  const [autoValues, setAutoValues] = useState<Record<string, number>>({});
+  const [effectiveValues, setEffectiveValues] = useState<Record<string, unknown>>({});
+  const [securityStatus, setSecurityStatus] = useState<{ argon2id_enabled: boolean } | undefined>();
   const [showExpertSettings, setShowExpertSettings] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
@@ -452,6 +497,11 @@ export function AdminSettingsPage() {
       setCleanupExemptUsernames(value.cleanup_exempt_usernames ?? []);
       setPendingRestartFields(value.pending_restart_fields ?? []);
       setRevision(value.revision ?? null);
+      setResourceModes(value.resource_modes ?? {});
+      setInitialResourceModes(value.resource_modes ?? {});
+      setAutoValues(value.auto_values ?? {});
+      setEffectiveValues(value.effective ?? {});
+      setSecurityStatus(value.security);
       const groups = groupSettingFields(value.fields ?? []);
       setCommonFields(groups.common.filter((field) => !legacySettingKeys.has(field.key)));
       setAdvancedFields(groups.advanced);
@@ -559,6 +609,16 @@ export function AdminSettingsPage() {
       setSaving(false);
     }
   };
+  const changeResourceMode = (
+    key: string,
+    mode: ResourceMode,
+    setDraft: (update: (current: Record<string, unknown>) => Record<string, unknown>) => void,
+  ) => {
+    setResourceModes((current) => ({ ...current, [key]: mode }));
+    if (mode === "auto" && autoValues[key] != null) {
+      setDraft((current) => ({ ...current, [key]: autoValues[key] }));
+    }
+  };
   const saveMetadataSettings = async (
     section: "common-settings" | "advanced-settings" | "expert-settings",
     fields: RegistrationSettingField[],
@@ -573,8 +633,21 @@ export function AdminSettingsPage() {
       const changes = Object.fromEntries(
         fields.map((field) => [field.key, serializeSettingValue(field, draft[field.key])]),
       );
-      const result = await rainApi.updateAdminSettingsV2(revision ?? "0", changes);
+      const resourceModePatch = Object.fromEntries(
+        fields
+          .filter((field) => field.supports_auto === true)
+          .filter((field) => (resourceModes[field.key] ?? "manual") !== (initialResourceModes[field.key] ?? "manual"))
+          .map((field) => [field.key, resourceModes[field.key] ?? "manual"]),
+      ) as Record<string, ResourceMode>;
+      const result = Object.keys(resourceModePatch).length > 0
+        ? await rainApi.updateAdminSettingsV2(revision ?? "0", changes, resourceModePatch)
+        : await rainApi.updateAdminSettingsV2(revision ?? "0", changes);
       setRevision(result.revision ?? null);
+      setResourceModes(result.resource_modes ?? resourceModes);
+      setInitialResourceModes(result.resource_modes ?? resourceModes);
+      setEffectiveValues(result.effective ?? effectiveValues);
+      setAutoValues(result.auto_values ?? autoValues);
+      setSecurityStatus(result.security ?? securityStatus);
       const nextDraft = createSettingDraft(fields, result.configured ?? draft);
       if (section === "common-settings") setCommonDraft(nextDraft);
       if (section === "advanced-settings") setAdvancedDraft(nextDraft);
@@ -636,6 +709,12 @@ export function AdminSettingsPage() {
           description="配置系统的注册、认证与过期策略，保障系统安全与稳定运行。"
         />
 
+        {securityStatus?.argon2id_enabled ? (
+          <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status">
+            Argon2id 已启用
+          </p>
+        ) : null}
+
         {pendingRestartFields.length > 0 ? (
           <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800" role="status">
             已保存但需要手动重启后生效：{pendingRestartFields.join("、")}
@@ -661,7 +740,12 @@ export function AdminSettingsPage() {
               fields={commonFields}
               draft={commonDraft}
               disabled={controlsDisabled || saving}
+              resourceModes={resourceModes}
+              autoValues={autoValues}
+              effectiveValues={effectiveValues}
+              pendingRestartFields={pendingRestartFields}
               onChange={(key, value) => setCommonDraft((current) => ({ ...current, [key]: value }))}
+              onModeChange={(key, mode) => changeResourceMode(key, mode, setCommonDraft)}
             />
             <div className="mt-5 flex justify-end">
               <button type="button" className={primaryButtonClass} disabled={controlsDisabled || saving} onClick={saveCommonSettings}>
@@ -689,7 +773,12 @@ export function AdminSettingsPage() {
                 fields={advancedFields}
                 draft={advancedDraft}
                 disabled={controlsDisabled || saving}
+                resourceModes={resourceModes}
+                autoValues={autoValues}
+                effectiveValues={effectiveValues}
+                pendingRestartFields={pendingRestartFields}
                 onChange={(key, value) => setAdvancedDraft((current) => ({ ...current, [key]: value }))}
+                onModeChange={(key, mode) => changeResourceMode(key, mode, setAdvancedDraft)}
               />
               <button type="button" className={`${primaryButtonClass} mt-5`} disabled={controlsDisabled || saving} onClick={saveAdvancedSettings}>
                 {saving ? "保存中…" : "保存高级运行参数"}
@@ -719,7 +808,12 @@ export function AdminSettingsPage() {
               fields={expertFields}
               draft={expertDraft}
               disabled={controlsDisabled || saving}
+              resourceModes={resourceModes}
+              autoValues={autoValues}
+              effectiveValues={effectiveValues}
+              pendingRestartFields={pendingRestartFields}
               onChange={(key, value) => setExpertDraft((current) => ({ ...current, [key]: value }))}
+              onModeChange={(key, mode) => changeResourceMode(key, mode, setExpertDraft)}
             />
             <button type="button" className={`${primaryButtonClass} mt-5`} disabled={controlsDisabled || saving} onClick={saveExpertSettings}>
               {saving ? "保存中…" : "保存专家配置"}

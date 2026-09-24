@@ -1,7 +1,9 @@
 use backend::{
     config::{AppLimits, AuthConfig},
     db,
-    settings::{ApplyMode, SettingKey, SettingsService, SettingsValues},
+    settings::{
+        ApplyMode, ResourceMode, ResourceModes, SettingKey, SettingsService, SettingsValues,
+    },
 };
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -45,6 +47,36 @@ fn metadata_exposes_presentation_contract_and_covers_supported_keys() {
     assert_eq!(serialized["visibility"], "default");
     assert!(serialized.get("recommended_min").is_some());
     assert!(serialized.get("recommended_max").is_some());
+}
+
+#[test]
+fn metadata_declares_auto_values_and_protected_settings() {
+    let processing = backend::settings::metadata::all()
+        .iter()
+        .find(|field| field.key == SettingKey::UploadConcurrentProcessingTasks)
+        .expect("processing metadata");
+    assert!(processing.supports_auto);
+    assert_eq!(processing.auto_value, Some(4));
+
+    let argon2 = backend::settings::metadata::all()
+        .iter()
+        .find(|field| field.key == SettingKey::Argon2Concurrency)
+        .expect("argon2 metadata");
+    assert!(argon2.protected);
+    assert!(
+        !backend::settings::metadata::admin()
+            .iter()
+            .any(|field| field.key == SettingKey::Argon2Concurrency)
+    );
+}
+
+#[test]
+fn resource_mode_serializes_stably() {
+    assert_eq!(serde_json::to_value(ResourceMode::Auto).unwrap(), "auto");
+    assert_eq!(
+        serde_json::to_value(ResourceMode::Manual).unwrap(),
+        "manual"
+    );
 }
 
 #[test]
@@ -98,6 +130,77 @@ async fn bootstrap_seeds_legacy_environment_once_and_database_wins_afterward() {
         .expect("second initialization");
     assert_eq!(second.configured.issue_max_content_size, 1234);
     assert!(!second.configured.allow_registration);
+}
+
+#[tokio::test]
+async fn resource_modes_default_to_manual_and_round_trip() {
+    let pool = pool();
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let service = SettingsService::new(pool.clone());
+    let initial = service
+        .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
+        .await
+        .expect("initialize");
+
+    assert_eq!(
+        initial.resource_modes["upload_concurrent_processing_tasks"],
+        ResourceMode::Manual
+    );
+
+    let mut modes = ResourceModes::new();
+    modes.insert(
+        "upload_concurrent_processing_tasks".into(),
+        ResourceMode::Auto,
+    );
+    let saved = service
+        .save_with_modes(initial.revision, &serde_json::Map::new(), &modes, None)
+        .await
+        .expect("save mode");
+
+    assert_eq!(
+        saved.snapshot.resource_modes["upload_concurrent_processing_tasks"],
+        ResourceMode::Auto
+    );
+    assert_eq!(
+        saved.snapshot.configured.upload_concurrent_processing_tasks,
+        4
+    );
+
+    let reloaded = SettingsService::new(pool)
+        .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
+        .await
+        .expect("reload");
+    assert_eq!(
+        reloaded.resource_modes["upload_concurrent_processing_tasks"],
+        ResourceMode::Auto
+    );
+}
+
+#[tokio::test]
+async fn unsupported_resource_modes_are_rejected_without_writes() {
+    let pool = pool();
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let service = SettingsService::new(pool.clone());
+    let initial = service
+        .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
+        .await
+        .expect("initialize");
+
+    let mut modes = ResourceModes::new();
+    modes.insert("api_max_search_window".into(), ResourceMode::Auto);
+    let error = service
+        .save_with_modes(initial.revision, &serde_json::Map::new(), &modes, None)
+        .await
+        .expect_err("unsupported Auto field");
+
+    assert!(matches!(
+        error,
+        backend::error::AppError::PublicApi {
+            code: "SETTINGS_INVALID_REQUEST",
+            ..
+        }
+    ));
+    assert_eq!(service.snapshot().await.revision, initial.revision);
 }
 
 #[tokio::test]

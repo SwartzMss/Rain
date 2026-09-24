@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::auth::UserStatus;
+use crate::{auth::UserStatus, settings::ResourceMode};
 
 #[derive(Debug, Deserialize)]
 pub struct AdminListQuery {
@@ -56,6 +56,7 @@ pub struct UpdateRegistrationSettings {
     /// compatibility with early clients, but responses always use strings.
     pub expected_revision: Option<serde_json::Value>,
     pub changes: Option<serde_json::Map<String, serde_json::Value>>,
+    pub resource_modes: Option<std::collections::BTreeMap<String, ResourceMode>>,
     pub allow_registration: Option<bool>,
     pub login_ip_limit_per_minute: Option<usize>,
     pub login_username_failure_limit_per_5_minutes: Option<usize>,
