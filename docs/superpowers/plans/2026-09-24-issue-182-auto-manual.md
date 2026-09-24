@@ -18,7 +18,7 @@
 - Modify: backend/src/settings/mod.rs
 - Test: backend/tests/settings.rs
 
-- [ ] Step 1: Write failing model and metadata tests
+- [x] Step 1: Write failing model and metadata tests
 
 Add tests before production changes:
 
@@ -49,7 +49,7 @@ fn resource_mode_serializes_stably() {
 
 The tests must initially fail because ResourceMode, the metadata fields, and metadata::admin do not exist.
 
-- [ ] Step 2: Run the focused tests and confirm the expected failure
+- [x] Step 2: Run the focused tests and confirm the expected failure
 
 Run from backend/:
 
@@ -60,7 +60,7 @@ cargo test --locked --test settings resource_mode_serializes_stably
 
 Expected: compilation failure for the missing symbols.
 
-- [ ] Step 3: Add the resource mode and metadata fields
+- [x] Step 3: Add the resource mode and metadata fields
 
 In backend/src/settings/model.rs add:
 
@@ -87,7 +87,7 @@ pub fn admin() -> Vec<&'static FieldMetadata> {
 
 Keep all() as the exhaustive internal table so SettingKey::ALL coverage remains complete. Do not remove Argon2 from runtime construction.
 
-- [ ] Step 4: Run the focused tests and formatting
+- [x] Step 4: Run the focused tests and formatting
 
 ~~~bash
 cargo fmt --check
@@ -97,7 +97,7 @@ cargo test --locked --test settings resource_mode_serializes_stably
 
 Expected: formatting passes and both tests pass.
 
-- [ ] Step 5: Commit the model and metadata contract
+- [x] Step 5: Commit the model and metadata contract
 
 ~~~bash
 git add backend/src/settings/model.rs backend/src/settings/metadata.rs backend/src/settings/mod.rs backend/tests/settings.rs
@@ -112,7 +112,7 @@ git commit -m "feat: add resource setting modes and protected metadata"
 - Modify: backend/src/settings/model.rs
 - Test: backend/tests/settings.rs
 
-- [ ] Step 1: Write failing persistence tests
+- [x] Step 1: Write failing persistence tests
 
 Add tests for default Manual behavior, Auto fixed-value behavior, and rejected policies:
 
@@ -179,7 +179,7 @@ async fn unsupported_resource_modes_are_rejected_without_writes() {
 
 The tests must fail before migration and service support exist.
 
-- [ ] Step 2: Add the SQL migration
+- [x] Step 2: Add the SQL migration
 
 Create backend/migrations/0011_resource_setting_modes.sql:
 
@@ -190,7 +190,7 @@ ADD COLUMN resource_modes_json TEXT NOT NULL DEFAULT '{}';
 
 The empty JSON object makes existing rows resolve every supported resource setting to Manual. Do not add a new table or change numeric setting columns.
 
-- [ ] Step 3: Implement mode loading, normalization, and validation
+- [x] Step 3: Implement mode loading, normalization, and validation
 
 In settings/service.rs:
 
@@ -205,7 +205,7 @@ The save path merges a partial mode patch with the current normalized map. For e
 
 Update the existing transaction to write resource_modes_json alongside numeric fields. Return the new snapshot while retaining current hot/restart effective merge logic.
 
-- [ ] Step 4: Run focused persistence tests
+- [x] Step 4: Run focused persistence tests
 
 ~~~bash
 cargo fmt --check
