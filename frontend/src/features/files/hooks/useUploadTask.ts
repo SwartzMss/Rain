@@ -92,6 +92,7 @@ export function useUploadTask(options: {
     uploadFailed,
     uploadProgress: activeTask?.progressPercent ?? 0,
     uploadSelection,
+    tasks: uploadTasks,
     uploadTasks,
     uploading,
     uploadingRef

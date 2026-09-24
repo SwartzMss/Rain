@@ -8,7 +8,7 @@ type UploadPanelProps = {
   onFilesSelected: (files: File[]) => void;
   uploadDisabled: boolean;
   uploadError: string | null;
-  uploadTasks: readonly UploadTaskSnapshot[];
+  uploadTasks?: readonly UploadTaskSnapshot[];
   uploading: boolean;
 };
 
@@ -19,7 +19,7 @@ export function UploadPanel({
   onFilesSelected,
   uploadDisabled,
   uploadError,
-  uploadTasks,
+  uploadTasks = [],
   uploading
 }: UploadPanelProps) {
   const uploadingCount = uploadTasks.filter((task) => task.status === 'UPLOADING').length;
