@@ -16,16 +16,6 @@ pub(crate) fn parse(value: &str) -> Option<NaiveDateTime> {
     .find_map(|format| NaiveDateTime::parse_from_str(&value, format).ok())
     .and_then(|datetime| datetime.with_nanosecond((datetime.nanosecond() / 1_000_000) * 1_000_000))
 }
-/// Formats a wall-clock value canonically without adding timezone information.
-pub(crate) fn format(value: NaiveDateTime) -> String {
-    let base = value.format("%Y-%m-%d %H:%M:%S").to_string();
-    let millis = value.nanosecond() / 1_000_000;
-    if millis == 0 {
-        return base;
-    }
-
-    format!("{base}.{millis:03}")
-}
 
 /// Encodes calendar fields into a sortable wall-clock comparison key.
 ///

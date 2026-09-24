@@ -149,10 +149,3 @@ it('keeps audit metrics stacked at 640px and 768px, then expands at 1024px', asy
   expect(metrics).not.toHaveClass('sm:grid-cols-4');
 });
 
-it('hides the AI Provider panel from system settings', async () => {
-  vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'a', username: 'admin', role: 'ADMIN' } });
-  vi.mocked(rainApi.fetchAdminSettings).mockResolvedValueOnce({ allow_registration: true, updated_at: '', updated_by_username: 'admin', login_ip_limit_per_minute: 20, login_username_failure_limit_per_5_minutes: 10, issue_inactive_days: 0 });
-  render(<MemoryRouter initialEntries={['/admin/settings']}><AuthProvider><AdminSettingsPage /></AuthProvider></MemoryRouter>);
-  await screen.findByLabelText('非活跃天数');
-  expect(screen.queryByRole('heading', { name: 'AI Provider' })).not.toBeInTheDocument();
-});

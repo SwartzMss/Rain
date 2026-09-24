@@ -59,7 +59,6 @@ report admission wait, active/queued writers, heap reservation, and total build
 time. Startup and the periodic cleanup task remove unpublished generations and
 artifacts for deleted Bundles.
 
-Skill search remains on the SQLite adapter in this release, and query
-fan-out/reader caching are deliberately conservative. Old data directories are
-not rebuilt automatically; see the large-log baseline for the first one-host
-comparison rather than treating it as a production SLO.
+Query fan-out and reader caching are deliberately conservative. Old data
+directories are not rebuilt automatically; see the large-log baseline for the
+first one-host comparison rather than treating it as a production SLO.

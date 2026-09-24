@@ -50,7 +50,6 @@ async fn recovery_gate_blocks_api_but_allows_health_endpoints() {
         test::call_service(&app, test::TestRequest::get().uri("/healthz").to_request()).await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    state.recovery.mark_stale_skill_runs_ready();
     state.recovery.mark_stale_processing_bundles_ready();
     let response = test::call_service(
         &app,
