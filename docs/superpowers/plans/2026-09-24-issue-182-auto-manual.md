@@ -384,7 +384,7 @@ git commit -m "feat: add resource mode frontend contract"
 - Modify: frontend/src/features/admin/settingsFields.ts
 - Test: frontend/tests/admin-settings-ux.behavior.test.tsx
 
-- [ ] Step 1: Add failing rendered behavior tests
+- [x] Step 1: Add failing rendered behavior tests
 
 Extend the settings fixture with resource_modes, auto_values, effective, and security. Assert:
 
@@ -397,7 +397,7 @@ expect(screen.getByText('Argon2id 已启用')).toBeInTheDocument();
 
 Add a Manual assertion that selecting Manual enables numeric input and saving sends both numeric changes and resource_modes to updateAdminSettingsV2.
 
-- [ ] Step 2: Run rendered tests and confirm failure
+- [x] Step 2: Run rendered tests and confirm failure
 
 ~~~bash
 cd frontend
@@ -406,7 +406,7 @@ npx vitest run tests/admin-settings-ux.behavior.test.tsx
 
 Expected: failure because the metadata grid has no mode selector, effective-value label, or security status.
 
-- [ ] Step 3: Implement mode-aware metadata rendering
+- [x] Step 3: Implement mode-aware metadata rendering
 
 Update AdminSettingsPage state to retain resourceModes, autoValues, effectiveValues, and securityStatus from GET. Extend MetadataSettingsGrid with the mode map and effective values.
 
@@ -422,7 +422,7 @@ When saving a metadata group, pass changed modes as the third v2 payload propert
 
 Add a compact security panel near the settings header that renders Argon2id 已启用 only when security.argon2id_enabled is true.
 
-- [ ] Step 4: Run focused frontend and admin guard tests
+- [x] Step 4: Run focused frontend and admin guard tests
 
 ~~~bash
 cd frontend
