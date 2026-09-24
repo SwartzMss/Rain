@@ -45,7 +45,7 @@ function resourceSourceLabel(source: "os" | "cgroup" | "proc_meminfo" | "fallbac
   if (source === "fallback") return "fallback（探测不可用）";
   if (source === "cgroup") return "cgroup 限制";
   if (source === "proc_meminfo") return "/proc/meminfo";
-  return "操作系统";
+  return "操作系统 API";
 }
 
 function memoryFallbackReasonLabel(reason: string): string {

@@ -670,6 +670,26 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn cgroup_memory_limit_decodes_escaped_mount_paths() {
+        use std::{collections::HashMap, path::Path};
+
+        let proc_cgroup = "0::/app\n";
+        let mountinfo = "42 1 0:42 / /sys/fs/cgroup/my\\040cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+        let files = HashMap::from([("/sys/fs/cgroup/my cgroup/app/memory.max", "2147483648")]);
+        let read_file = |path: &Path| {
+            files
+                .get(path.to_str().expect("synthetic paths are utf-8"))
+                .map(|value| (*value).to_owned())
+        };
+
+        assert_eq!(
+            cgroup_memory_limit(proc_cgroup, mountinfo, read_file),
+            Some(2 * GIB)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn cgroup_memory_limit_ignores_unlimited_and_invalid_values() {
         use std::{collections::HashMap, path::Path};
 
