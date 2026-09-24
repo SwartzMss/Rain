@@ -15,6 +15,28 @@ export interface AdminUserPage { items: AdminUser[]; next_cursor: string | null;
 export interface AuditLog { id: string; actor_type: 'USER' | 'SYSTEM'; actor_user_id: string | null; target_user_id: string | null; target_username: string | null; action: string; old_value: string | null; new_value: string | null; client_ip: string | null; user_agent?: string | null; created_at: string; }
 export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }
 export interface RegistrationStatus { allow_registration: boolean; }
+export type SettingCategory = 'common' | 'advanced' | 'expert';
+export type SettingVisibility = 'default' | 'collapsed' | 'expert';
+
+export interface RegistrationSettingField {
+  key: string;
+  db_column: string;
+  env_name: string;
+  value_type?: string;
+  unit?: string | null;
+  default_value?: unknown;
+  default_rule?: string | null;
+  min?: number | null;
+  max?: number | null;
+  description?: string;
+  apply_mode: 'hot' | 'restart_required';
+  sensitive?: boolean;
+  category: SettingCategory;
+  visibility: SettingVisibility;
+  recommended_min?: number | null;
+  recommended_max?: number | null;
+}
+
 export interface RegistrationSettings extends RegistrationStatus {
   schema_version?: number;
   revision?: string;
@@ -28,20 +50,7 @@ export interface RegistrationSettings extends RegistrationStatus {
   effective?: Record<string, unknown>;
   restart_required?: boolean;
   pending_restart_fields?: string[];
-  fields?: Array<{
-    key: string;
-    db_column: string;
-    env_name: string;
-    value_type?: string;
-    unit?: string | null;
-    default_value?: unknown;
-    default_rule?: string | null;
-    min?: number | null;
-    max?: number | null;
-    description?: string;
-    apply_mode: 'hot' | 'restart_required';
-    sensitive?: boolean;
-  }>;
+  fields?: RegistrationSettingField[];
 }
 export interface AuthRateLimitEntry { key: string; username: string | null; ip: string | null; current_count: number; limit: number; window_seconds: number; last_event_at: string | null; retry_after_seconds: number; limited: boolean; }
 export interface AuthRateLimitsResponse { username_failures: AuthRateLimitEntry[]; login_ips: AuthRateLimitEntry[]; }

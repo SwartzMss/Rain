@@ -27,6 +27,27 @@ fn metadata_covers_every_supported_setting_and_declares_apply_mode() {
 }
 
 #[test]
+fn metadata_exposes_presentation_contract_and_covers_supported_keys() {
+    let fields = backend::settings::metadata::all();
+    let keys: std::collections::HashSet<_> = fields.iter().map(|field| field.key).collect();
+    assert_eq!(fields.len(), SettingKey::ALL.len());
+    assert_eq!(keys.len(), fields.len());
+    assert!(fields.iter().all(|field| {
+        field.recommended_min.unwrap_or(0) <= field.recommended_max.unwrap_or(u64::MAX)
+    }));
+
+    let issue_size = fields
+        .iter()
+        .find(|field| field.key == SettingKey::IssueMaxContentSize)
+        .expect("issue size metadata");
+    let serialized = serde_json::to_value(issue_size).expect("serializable metadata");
+    assert_eq!(serialized["category"], "common");
+    assert_eq!(serialized["visibility"], "default");
+    assert!(serialized.get("recommended_min").is_some());
+    assert!(serialized.get("recommended_max").is_some());
+}
+
+#[test]
 fn validation_checks_the_full_candidate_and_cross_field_limits() {
     let mut values = SettingsValues::from_config(&AppLimits::default(), &AuthConfig::default());
     values.api_default_search_results = 101;

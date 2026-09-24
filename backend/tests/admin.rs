@@ -300,6 +300,21 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(settings.status(), StatusCode::OK);
     let body: serde_json::Value = test::read_body_json(settings).await;
     assert_eq!(body["allow_registration"], false);
+    let fields = body["fields"].as_array().expect("settings metadata");
+    let issue_size = fields
+        .iter()
+        .find(|field| field["key"] == "issue_max_content_size")
+        .expect("issue size metadata");
+    assert_eq!(issue_size["category"], "common");
+    assert_eq!(issue_size["visibility"], "default");
+    assert_eq!(issue_size["recommended_min"], 1024_u64.pow(3));
+    assert_eq!(issue_size["recommended_max"], 32_u64 * 1024_u64.pow(3));
+    let argon2 = fields
+        .iter()
+        .find(|field| field["key"] == "argon2_concurrency")
+        .expect("argon2 metadata");
+    assert_eq!(argon2["category"], "expert");
+    assert_eq!(argon2["visibility"], "expert");
     let revision = body["revision"].as_str().expect("settings revision");
     let missing_revision = test::call_service(
         &app,

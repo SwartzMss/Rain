@@ -172,7 +172,11 @@ export const rainApi = {
     adminSettingsRevision = value.revision;
     return value;
   },
-  updateAdminSettingsV2(expected_revision: string, changes: Record<string, unknown>) { return request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ expected_revision, changes }) }); },
+  async updateAdminSettingsV2(expected_revision: string, changes: Record<string, unknown>) {
+    const value = await request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ expected_revision, changes }) });
+    adminSettingsRevision = value.revision;
+    return value;
+  },
   fetchAuthRateLimits() { return request<AuthRateLimitsResponse>('/api/admin/auth-rate-limits'); },
   clearAuthRateLimit(type: 'usernames' | 'ips', key: string) { return request<void>(`/api/admin/auth-rate-limits/${type}/${encodePathSegment(key)}`, { method: 'DELETE' }); },
   clearAllAuthRateLimits(type: 'usernames' | 'ips') { return request<void>(`/api/admin/auth-rate-limits/${type}`, { method: 'DELETE' }); },
