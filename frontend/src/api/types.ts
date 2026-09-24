@@ -65,7 +65,8 @@ export interface RegistrationSettings extends RegistrationStatus {
       cpu_cores: number;
       memory_limit_bytes: number | null;
       cpu_source: 'os' | 'cgroup' | 'fallback';
-      memory_source: 'os' | 'cgroup' | 'fallback';
+      memory_source: 'os' | 'cgroup' | 'proc_meminfo' | 'fallback';
+      memory_fallback_reason: string | null;
       warnings: string[];
     };
     upload_concurrent_processing_tasks: number;

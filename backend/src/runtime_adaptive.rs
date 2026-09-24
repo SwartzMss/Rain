@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "linux")]
+use std::path::{Path, PathBuf};
+
 use crate::{
     config::AppLimits,
     settings::{ResourceMode, ResourceModes, SettingsValues},
@@ -24,12 +27,14 @@ const MAX_QUERIES: usize = 16;
 const MIN_HEAP: u64 = 16 * MIB;
 const MAX_HEAP: u64 = 256 * MIB;
 const RESERVED_PER_TASK: u64 = 32 * MIB;
+const MEMORY_FALLBACK_REASON: &str = "memory_detection_unavailable";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceSource {
     Os,
     Cgroup,
+    ProcMeminfo,
     Fallback,
 }
 
@@ -39,6 +44,7 @@ pub struct ResourceSnapshot {
     pub memory_limit_bytes: Option<u64>,
     pub cpu_source: ResourceSource,
     pub memory_source: ResourceSource,
+    pub memory_fallback_reason: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -49,6 +55,7 @@ impl ResourceSnapshot {
             memory_limit_bytes: Some(512 * MIB),
             cpu_source: ResourceSource::Fallback,
             memory_source: ResourceSource::Fallback,
+            memory_fallback_reason: Some(MEMORY_FALLBACK_REASON.into()),
             warnings: vec!["resource_probe_fallback".into()],
         }
     }
@@ -61,18 +68,29 @@ impl ResourceSnapshot {
             snapshot.cpu_source = ResourceSource::Os;
         }
 
+        let memory = {
+            #[cfg(target_os = "linux")]
+            {
+                select_memory_source(read_linux_memory_limit(), read_linux_meminfo(), None)
+            }
+            #[cfg(target_os = "windows")]
+            {
+                select_memory_source(None, None, read_windows_total_memory())
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            {
+                select_memory_source(None, None, None)
+            }
+        };
+        snapshot.memory_limit_bytes = Some(memory.bytes);
+        snapshot.memory_source = memory.source;
+        snapshot.memory_fallback_reason = memory.fallback_reason.map(str::to_owned);
+
         #[cfg(target_os = "linux")]
         {
             if let Some(quota_cores) = read_linux_cpu_quota() {
                 snapshot.cpu_cores = snapshot.cpu_cores.min(quota_cores).max(1);
                 snapshot.cpu_source = ResourceSource::Cgroup;
-            }
-            if let Some(memory) = read_linux_memory_limit() {
-                snapshot.memory_limit_bytes = Some(memory);
-                snapshot.memory_source = ResourceSource::Cgroup;
-            } else if let Some(memory) = read_linux_meminfo() {
-                snapshot.memory_limit_bytes = Some(memory);
-                snapshot.memory_source = ResourceSource::Os;
             }
         }
         if snapshot.cpu_source == ResourceSource::Fallback {
@@ -104,6 +122,46 @@ pub struct RuntimePlan {
     pub adaptive_memory_target_bytes: Option<u64>,
     pub warnings: Vec<String>,
     pub decisions: Vec<(String, RuntimeDecision)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryDetection {
+    bytes: u64,
+    source: ResourceSource,
+    fallback_reason: Option<&'static str>,
+}
+
+fn select_memory_source(
+    cgroup: Option<u64>,
+    proc_meminfo: Option<u64>,
+    os: Option<u64>,
+) -> MemoryDetection {
+    if let Some(bytes) = cgroup.filter(|bytes| *bytes > 0) {
+        return MemoryDetection {
+            bytes,
+            source: ResourceSource::Cgroup,
+            fallback_reason: None,
+        };
+    }
+    if let Some(bytes) = proc_meminfo.filter(|bytes| *bytes > 0) {
+        return MemoryDetection {
+            bytes,
+            source: ResourceSource::ProcMeminfo,
+            fallback_reason: None,
+        };
+    }
+    if let Some(bytes) = os.filter(|bytes| *bytes > 0) {
+        return MemoryDetection {
+            bytes,
+            source: ResourceSource::Os,
+            fallback_reason: None,
+        };
+    }
+    MemoryDetection {
+        bytes: 512 * MIB,
+        source: ResourceSource::Fallback,
+        fallback_reason: Some(MEMORY_FALLBACK_REASON),
+    }
 }
 
 impl RuntimePlan {
@@ -255,36 +313,201 @@ fn decision(mode: ResourceMode, value: u64, reason: &str) -> RuntimeDecision {
 #[cfg(target_os = "linux")]
 fn read_linux_meminfo() -> Option<u64> {
     let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_linux_meminfo(&contents)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_meminfo(contents: &str) -> Option<u64> {
     contents.lines().find_map(|line| {
         let mut parts = line.split_whitespace();
         if parts.next()? != "MemTotal:" {
             return None;
         }
-        parts.next()?.parse::<u64>().ok()?.checked_mul(1024)
+        if parts.next_back()? != "kB" {
+            return None;
+        }
+        let kib = parts.next()?.parse::<u64>().ok()?;
+        if kib == 0 {
+            return None;
+        }
+        kib.checked_mul(1024)
     })
 }
 
 #[cfg(target_os = "linux")]
 fn read_linux_memory_limit() -> Option<u64> {
-    for path in [
-        "/sys/fs/cgroup/memory.max",
-        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-    ] {
-        let Ok(value) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let value = value.trim().to_owned();
-        if value == "max" {
-            continue;
+    let proc_cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    cgroup_memory_limit(&proc_cgroup, &mountinfo, |path| {
+        std::fs::read_to_string(path).ok()
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CgroupKind {
+    V1,
+    V2,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CgroupMembership {
+    kind: CgroupKind,
+    path: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CgroupMount {
+    kind: CgroupKind,
+    root: PathBuf,
+    mount_point: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_memberships(contents: &str) -> Vec<CgroupMembership> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, ':');
+            let hierarchy = parts.next()?;
+            let controllers = parts.next()?;
+            let path = parts.next()?;
+            let kind = if hierarchy == "0" && controllers.is_empty() {
+                CgroupKind::V2
+            } else if controllers
+                .split(',')
+                .any(|controller| controller == "memory")
+            {
+                CgroupKind::V1
+            } else {
+                return None;
+            };
+            Some(CgroupMembership {
+                kind,
+                path: PathBuf::from(path),
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_mounts(contents: &str) -> Vec<CgroupMount> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let (mount_fields, filesystem_fields) = line.split_once(" - ")?;
+            let mount_fields = mount_fields.split_whitespace().collect::<Vec<_>>();
+            if mount_fields.len() < 6 {
+                return None;
+            }
+            let filesystem_fields = filesystem_fields.split_whitespace().collect::<Vec<_>>();
+            if filesystem_fields.len() < 3 {
+                return None;
+            }
+            let kind = match filesystem_fields[0] {
+                "cgroup2" => CgroupKind::V2,
+                "cgroup"
+                    if filesystem_fields[2]
+                        .split(',')
+                        .any(|option| option == "memory") =>
+                {
+                    CgroupKind::V1
+                }
+                _ => return None,
+            };
+            Some(CgroupMount {
+                kind,
+                root: PathBuf::from(unescape_mountinfo_path(mount_fields[3])?),
+                mount_point: PathBuf::from(unescape_mountinfo_path(mount_fields[4])?),
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo_path(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 3 < bytes.len() {
+            let digits = &bytes[index + 1..index + 4];
+            if digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+                let decoded_byte =
+                    (digits[0] - b'0') * 64 + (digits[1] - b'0') * 8 + (digits[2] - b'0');
+                decoded.push(decoded_byte);
+                index += 4;
+                continue;
+            }
         }
-        let Ok(bytes) = value.parse::<u64>() else {
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_memory_value(value: &str) -> Option<u64> {
+    let value = value.split_whitespace().next()?;
+    if value == "max" {
+        return None;
+    }
+    let bytes = value.parse::<u64>().ok()?;
+    (bytes > 0 && bytes < 1 << 60).then_some(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit<F>(proc_cgroup: &str, mountinfo: &str, read_file: F) -> Option<u64>
+where
+    F: Fn(&Path) -> Option<String>,
+{
+    let memberships = parse_cgroup_memberships(proc_cgroup);
+    let mounts = parse_cgroup_mounts(mountinfo);
+    let mut limit: Option<u64> = None;
+
+    for mount in mounts {
+        let Some(membership) = memberships
+            .iter()
+            .find(|membership| membership.kind == mount.kind)
+        else {
             continue;
         };
-        if bytes > 0 && bytes < 1 << 60 {
-            return Some(bytes);
+        let Ok(relative_path) = membership.path.strip_prefix(&mount.root) else {
+            continue;
+        };
+        let mut current_path = mount.mount_point.clone();
+        current_path.push(relative_path);
+        let file_name = match mount.kind {
+            CgroupKind::V1 => "memory.limit_in_bytes",
+            CgroupKind::V2 => "memory.max",
+        };
+
+        loop {
+            if let Some(candidate) = read_file(&current_path.join(file_name))
+                .and_then(|value| parse_cgroup_memory_value(&value))
+            {
+                limit = Some(limit.map_or(candidate, |current| current.min(candidate)));
+            }
+            if current_path == mount.mount_point || !current_path.pop() {
+                break;
+            }
         }
     }
-    None
+
+    limit
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_total_memory() -> Option<u64> {
+    use std::mem::size_of;
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    let success = unsafe { GlobalMemoryStatusEx(&mut status) };
+    (success != 0 && status.ullTotalPhys > 0).then_some(status.ullTotalPhys)
 }
 
 #[cfg(target_os = "linux")]
@@ -349,6 +572,212 @@ mod tests {
         .collect()
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_memtotal_as_bytes() {
+        let contents = "MemTotal:       24511652 kB\nMemFree:         4289624 kB\n";
+
+        assert_eq!(parse_linux_meminfo(contents), Some(24511652 * 1024));
+        assert_eq!(parse_linux_meminfo("MemFree: 123 kB\n"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_invalid_meminfo_values() {
+        for contents in [
+            "MemTotal: not-a-number kB\n",
+            "MemTotal: 12 MB\n",
+            "MemTotal: 0 kB\n",
+            "MemTotal: 18446744073709551615 kB\n",
+        ] {
+            assert_eq!(parse_linux_meminfo(contents), None, "{contents}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v2_memory_limit_uses_current_and_ancestor_limits() {
+        use std::{collections::HashMap, path::Path};
+
+        let proc_cgroup = "0::/user.slice/user-1000.slice/session.scope\n";
+        let mountinfo =
+            "42 1 0:42 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+        let files = HashMap::from([
+            (
+                "/sys/fs/cgroup/user.slice/user-1000.slice/session.scope/memory.max",
+                "max",
+            ),
+            (
+                "/sys/fs/cgroup/user.slice/user-1000.slice/memory.max",
+                "68719476736",
+            ),
+        ]);
+        let read_file = |path: &Path| {
+            files
+                .get(path.to_str().expect("synthetic paths are utf-8"))
+                .map(|value| (*value).to_owned())
+        };
+
+        assert_eq!(
+            cgroup_memory_limit(proc_cgroup, mountinfo, read_file),
+            Some(64 * GIB)
+        );
+
+        let files = HashMap::from([
+            (
+                "/sys/fs/cgroup/user.slice/user-1000.slice/session.scope/memory.max",
+                "2147483648",
+            ),
+            (
+                "/sys/fs/cgroup/user.slice/user-1000.slice/memory.max",
+                "4294967296",
+            ),
+        ]);
+        let read_file = |path: &Path| {
+            files
+                .get(path.to_str().expect("synthetic paths are utf-8"))
+                .map(|value| (*value).to_owned())
+        };
+
+        assert_eq!(
+            cgroup_memory_limit(proc_cgroup, mountinfo, read_file),
+            Some(2 * GIB)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_v1_memory_controller_reads_memory_limit() {
+        use std::{collections::HashMap, path::Path};
+
+        let proc_cgroup = "5:memory:/docker/abc\n";
+        let mountinfo = "43 1 0:43 / /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime - cgroup cgroup rw,memory\n";
+        let files = HashMap::from([(
+            "/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes",
+            "2147483648",
+        )]);
+        let read_file = |path: &Path| {
+            files
+                .get(path.to_str().expect("synthetic paths are utf-8"))
+                .map(|value| (*value).to_owned())
+        };
+
+        assert_eq!(
+            cgroup_memory_limit(proc_cgroup, mountinfo, read_file),
+            Some(2 * GIB)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_memory_limit_decodes_escaped_mount_paths() {
+        use std::{collections::HashMap, path::Path};
+
+        let proc_cgroup = "0::/app\n";
+        let mountinfo = "42 1 0:42 / /sys/fs/cgroup/my\\040cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+        let files = HashMap::from([("/sys/fs/cgroup/my cgroup/app/memory.max", "2147483648")]);
+        let read_file = |path: &Path| {
+            files
+                .get(path.to_str().expect("synthetic paths are utf-8"))
+                .map(|value| (*value).to_owned())
+        };
+
+        assert_eq!(
+            cgroup_memory_limit(proc_cgroup, mountinfo, read_file),
+            Some(2 * GIB)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_memory_limit_ignores_unlimited_and_invalid_values() {
+        use std::{collections::HashMap, path::Path};
+
+        let proc_cgroup = "0::/user.slice/session.scope\n";
+        let mountinfo =
+            "42 1 0:42 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n";
+        let files = HashMap::from([
+            ("/sys/fs/cgroup/user.slice/session.scope/memory.max", "max"),
+            ("/sys/fs/cgroup/user.slice/memory.max", "0"),
+            ("/sys/fs/cgroup/memory.max", "not-a-number"),
+        ]);
+        let read_file = |path: &Path| {
+            files
+                .get(path.to_str().expect("synthetic paths are utf-8"))
+                .map(|value| (*value).to_owned())
+        };
+
+        assert_eq!(cgroup_memory_limit(proc_cgroup, mountinfo, read_file), None);
+
+        let proc_cgroup = "5:memory:/docker/abc\n";
+        let mountinfo = "43 1 0:43 / /sys/fs/cgroup/memory rw,nosuid,nodev,noexec,relatime - cgroup cgroup rw,memory\n";
+        let files = HashMap::from([(
+            "/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes",
+            "9223372036854771712",
+        )]);
+        let read_file = |path: &Path| {
+            files
+                .get(path.to_str().expect("synthetic paths are utf-8"))
+                .map(|value| (*value).to_owned())
+        };
+
+        assert_eq!(cgroup_memory_limit(proc_cgroup, mountinfo, read_file), None);
+    }
+
+    #[test]
+    fn resource_source_serializes_proc_meminfo() {
+        assert_eq!(
+            serde_json::to_value(ResourceSource::ProcMeminfo).expect("source serializes"),
+            serde_json::json!("proc_meminfo")
+        );
+    }
+
+    #[test]
+    fn memory_probe_prefers_container_host_and_os_sources_in_order() {
+        assert_eq!(
+            select_memory_source(Some(2 * GIB), Some(64 * GIB), Some(128 * GIB)),
+            MemoryDetection {
+                bytes: 2 * GIB,
+                source: ResourceSource::Cgroup,
+                fallback_reason: None,
+            }
+        );
+        assert_eq!(
+            select_memory_source(None, Some(64 * GIB), Some(128 * GIB)),
+            MemoryDetection {
+                bytes: 64 * GIB,
+                source: ResourceSource::ProcMeminfo,
+                fallback_reason: None,
+            }
+        );
+        assert_eq!(
+            select_memory_source(None, None, Some(128 * GIB)),
+            MemoryDetection {
+                bytes: 128 * GIB,
+                source: ResourceSource::Os,
+                fallback_reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn memory_probe_fallback_exposes_reason() {
+        assert_eq!(
+            select_memory_source(None, None, None),
+            MemoryDetection {
+                bytes: 512 * MIB,
+                source: ResourceSource::Fallback,
+                fallback_reason: Some("memory_detection_unavailable"),
+            }
+        );
+        assert_eq!(
+            ResourceSnapshot::conservative()
+                .memory_fallback_reason
+                .as_deref(),
+            Some("memory_detection_unavailable")
+        );
+    }
+
     #[test]
     fn auto_plan_scales_with_cpu_and_memory() {
         let resources = ResourceSnapshot {
@@ -356,6 +785,7 @@ mod tests {
             memory_limit_bytes: Some(64 * GIB),
             cpu_source: ResourceSource::Cgroup,
             memory_source: ResourceSource::Cgroup,
+            memory_fallback_reason: None,
             warnings: Vec::new(),
         };
         let plan = resolve(&resources, &values(), &modes(ResourceMode::Auto), true);
@@ -383,6 +813,7 @@ mod tests {
             memory_limit_bytes: Some(512 * MIB),
             cpu_source: ResourceSource::Cgroup,
             memory_source: ResourceSource::Cgroup,
+            memory_fallback_reason: None,
             warnings: Vec::new(),
         };
         let mut configured = values();
@@ -398,9 +829,10 @@ mod tests {
     fn low_memory_auto_plan_degrades_before_reporting_over_budget() {
         let resources = ResourceSnapshot {
             cpu_cores: 16,
-            memory_limit_bytes: Some(1 * GIB),
+            memory_limit_bytes: Some(GIB),
             cpu_source: ResourceSource::Cgroup,
             memory_source: ResourceSource::Cgroup,
+            memory_fallback_reason: None,
             warnings: Vec::new(),
         };
         let plan = resolve(&resources, &values(), &modes(ResourceMode::Auto), true);

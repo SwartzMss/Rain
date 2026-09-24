@@ -42,10 +42,16 @@ function formatRuntimeBytes(value: number | null): string {
   return `${amount >= 10 || unit === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
 }
 
-function resourceSourceLabel(source: "os" | "cgroup" | "fallback"): string {
+function resourceSourceLabel(source: "os" | "cgroup" | "proc_meminfo" | "fallback"): string {
   if (source === "fallback") return "fallback（探测不可用）";
   if (source === "cgroup") return "cgroup 限制";
-  return "操作系统";
+  if (source === "proc_meminfo") return "/proc/meminfo";
+  return "操作系统 API";
+}
+
+function memoryFallbackReasonLabel(reason: string): string {
+  if (reason === "memory_detection_unavailable") return "内存探测不可用";
+  return reason;
 }
 
 function runtimeWarningLabel(warning: string): string {
@@ -790,9 +796,15 @@ export function AdminSettingsPage() {
               </div>
               <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
                 <span className="text-slate-500">内存限制</span>
-                <p className="mt-1 font-medium text-slate-800">
-                  {formatRuntimeBytes(runtime.resources.memory_limit_bytes)} · {resourceSourceLabel(runtime.resources.memory_source)}
+                <p className="mt-1 font-medium text-slate-800">{formatRuntimeBytes(runtime.resources.memory_limit_bytes)}</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  来源：{resourceSourceLabel(runtime.resources.memory_source)}
                 </p>
+                {runtime.resources.memory_source === "fallback" && runtime.resources.memory_fallback_reason ? (
+                  <p className="mt-1 text-xs text-amber-700">
+                    原因：{memoryFallbackReasonLabel(runtime.resources.memory_fallback_reason)}
+                  </p>
+                ) : null}
               </div>
               <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
                 <span className="text-slate-500">自适应内存目标</span>
