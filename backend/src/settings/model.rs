@@ -47,6 +47,44 @@ pub enum SettingKey {
     TempResultsMaxScanDurationSeconds,
 }
 
+impl SettingKey {
+    pub const ALL: &'static [Self] = &[
+        Self::AllowRegistration,
+        Self::SessionTtlSeconds,
+        Self::RegisterIpLimitPerHour,
+        Self::LoginIpLimitPerMinute,
+        Self::LoginUsernameFailureLimitPer5Minutes,
+        Self::Argon2Concurrency,
+        Self::IssueInactiveDays,
+        Self::CleanupExemptUsernames,
+        Self::IssueMaxContentSize,
+        Self::ArchiveMaxWorkingSize,
+        Self::UploadConcurrentProcessingTasks,
+        Self::UploadConcurrentReceiveTasks,
+        Self::UploadMaxTmpBytes,
+        Self::IndexingMaxIndexedLineSize,
+        Self::SearchTantivyMaxWriters,
+        Self::SearchTantivyWriterHeapSize,
+        Self::ApiFilePreviewSize,
+        Self::ApiMaxPreviewLineSize,
+        Self::ApiDefaultLinePageSize,
+        Self::ApiMaxLinePageSize,
+        Self::ApiMaxLinePageBytes,
+        Self::ApiConcurrentLineReads,
+        Self::ApiConcurrentLineReadsPerClient,
+        Self::ApiDefaultSearchResults,
+        Self::ApiMaxSearchResults,
+        Self::ApiMaxSearchWindow,
+        Self::TempResultsMaxResultSize,
+        Self::TempResultsMaxTotalSize,
+        Self::TempResultsMaxRecords,
+        Self::TempResultsConcurrentMaterializations,
+        Self::TempResultsMaxSources,
+        Self::TempResultsMaxScanBytes,
+        Self::TempResultsMaxScanDurationSeconds,
+    ];
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum SettingValue {

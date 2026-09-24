@@ -2,12 +2,53 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use super::{ApplyMode, SettingKey};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingCategory {
+    Common,
+    Advanced,
+    Expert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingVisibility {
+    Default,
+    Collapsed,
+    Expert,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FieldMetadata {
     pub key: SettingKey,
     pub db_column: &'static str,
     pub env_name: &'static str,
     pub apply_mode: ApplyMode,
+    pub category: SettingCategory,
+    pub visibility: SettingVisibility,
+    pub recommended_min: Option<u64>,
+    pub recommended_max: Option<u64>,
+}
+
+impl FieldMetadata {
+    pub const fn new(
+        key: SettingKey,
+        db_column: &'static str,
+        env_name: &'static str,
+        apply_mode: ApplyMode,
+    ) -> Self {
+        let (category, visibility, recommended_min, recommended_max) = presentation(key);
+        Self {
+            key,
+            db_column,
+            env_name,
+            apply_mode,
+            category,
+            visibility,
+            recommended_min,
+            recommended_max,
+        }
+    }
 }
 
 impl Serialize for FieldMetadata {
@@ -17,7 +58,7 @@ impl Serialize for FieldMetadata {
     {
         let (value_type, unit, default_value, default_rule, min, max, description) =
             details(self.key);
-        let mut output = serializer.serialize_struct("FieldMetadata", 13)?;
+        let mut output = serializer.serialize_struct("FieldMetadata", 17)?;
         output.serialize_field("key", &self.key)?;
         output.serialize_field("db_column", self.db_column)?;
         output.serialize_field("env_name", self.env_name)?;
@@ -34,7 +75,59 @@ impl Serialize for FieldMetadata {
             &matches!(self.apply_mode, ApplyMode::RestartRequired),
         )?;
         output.serialize_field("sensitive", &false)?;
+        output.serialize_field("category", &self.category)?;
+        output.serialize_field("visibility", &self.visibility)?;
+        output.serialize_field("recommended_min", &self.recommended_min)?;
+        output.serialize_field("recommended_max", &self.recommended_max)?;
         output.end()
+    }
+}
+
+type Presentation = (SettingCategory, SettingVisibility, Option<u64>, Option<u64>);
+
+const fn presentation(key: SettingKey) -> Presentation {
+    use SettingCategory::{Advanced, Common, Expert};
+    use SettingKey::*;
+    use SettingVisibility::{Collapsed, Default, Expert as ExpertVisibility};
+
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+
+    match key {
+        AllowRegistration => (Common, Default, None, None),
+        SessionTtlSeconds => (Common, Default, Some(86_400), Some(2_592_000)),
+        RegisterIpLimitPerHour => (Common, Default, Some(1), Some(100)),
+        LoginIpLimitPerMinute => (Common, Default, Some(5), Some(100)),
+        LoginUsernameFailureLimitPer5Minutes => (Common, Default, Some(5), Some(50)),
+        Argon2Concurrency => (Expert, ExpertVisibility, Some(1), Some(16)),
+        IssueInactiveDays => (Common, Default, Some(7), Some(30)),
+        CleanupExemptUsernames => (Common, Default, None, None),
+        IssueMaxContentSize => (Common, Default, Some(GIB), Some(32 * GIB)),
+        ArchiveMaxWorkingSize => (Advanced, Collapsed, Some(2 * GIB), Some(64 * GIB)),
+        UploadConcurrentProcessingTasks => (Advanced, Collapsed, Some(1), Some(8)),
+        UploadConcurrentReceiveTasks => (Advanced, Collapsed, Some(1), Some(8)),
+        UploadMaxTmpBytes => (Advanced, Collapsed, Some(8 * GIB), Some(128 * GIB)),
+        IndexingMaxIndexedLineSize => (Expert, ExpertVisibility, Some(64 * KIB), Some(MIB)),
+        SearchTantivyMaxWriters => (Expert, ExpertVisibility, Some(1), Some(4)),
+        SearchTantivyWriterHeapSize => (Expert, ExpertVisibility, Some(16 * MIB), Some(256 * MIB)),
+        ApiFilePreviewSize => (Advanced, Collapsed, Some(16 * KIB), Some(MIB)),
+        ApiMaxPreviewLineSize => (Advanced, Collapsed, Some(64 * KIB), Some(16 * MIB)),
+        ApiDefaultLinePageSize => (Advanced, Collapsed, Some(100), Some(5_000)),
+        ApiMaxLinePageSize => (Advanced, Collapsed, Some(1_000), Some(10_000)),
+        ApiMaxLinePageBytes => (Advanced, Collapsed, Some(MIB), Some(32 * MIB)),
+        ApiConcurrentLineReads => (Expert, ExpertVisibility, Some(1), Some(16)),
+        ApiConcurrentLineReadsPerClient => (Expert, ExpertVisibility, Some(1), Some(4)),
+        ApiDefaultSearchResults => (Common, Default, Some(10), Some(100)),
+        ApiMaxSearchResults => (Advanced, Collapsed, Some(50), Some(500)),
+        ApiMaxSearchWindow => (Advanced, Collapsed, Some(1_000), Some(50_000)),
+        TempResultsMaxResultSize => (Advanced, Collapsed, Some(16 * MIB), Some(256 * MIB)),
+        TempResultsMaxTotalSize => (Advanced, Collapsed, Some(256 * MIB), Some(8 * GIB)),
+        TempResultsMaxRecords => (Advanced, Collapsed, Some(100), Some(10_000)),
+        TempResultsConcurrentMaterializations => (Expert, ExpertVisibility, Some(1), Some(4)),
+        TempResultsMaxSources => (Advanced, Collapsed, Some(1_000), Some(50_000)),
+        TempResultsMaxScanBytes => (Advanced, Collapsed, Some(256 * MIB), Some(8 * GIB)),
+        TempResultsMaxScanDurationSeconds => (Advanced, Collapsed, Some(10), Some(300)),
     }
 }
 
@@ -220,204 +313,205 @@ fn details(key: SettingKey) -> FieldDetails {
 pub fn all() -> &'static [FieldMetadata] {
     use ApplyMode::{Hot as H, RestartRequired as R};
     use SettingKey::*;
-    &[
-        FieldMetadata {
-            key: AllowRegistration,
-            db_column: "allow_registration",
-            env_name: "RAIN_ALLOW_REGISTRATION",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: SessionTtlSeconds,
-            db_column: "session_ttl_seconds",
-            env_name: "RAIN_SESSION_TTL_SECONDS",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: RegisterIpLimitPerHour,
-            db_column: "register_ip_limit_per_hour",
-            env_name: "RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: LoginIpLimitPerMinute,
-            db_column: "login_ip_limit_per_minute",
-            env_name: "RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: LoginUsernameFailureLimitPer5Minutes,
-            db_column: "login_username_failure_limit_per_5_minutes",
-            env_name: "RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: Argon2Concurrency,
-            db_column: "argon2_concurrency",
-            env_name: "RAIN_AUTH_ARGON2_CONCURRENCY",
-            apply_mode: R,
-        },
-        FieldMetadata {
-            key: IssueInactiveDays,
-            db_column: "issue_inactive_days",
-            env_name: "RAIN_ISSUE_INACTIVE_DAYS",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: CleanupExemptUsernames,
-            db_column: "cleanup_exempt_usernames_json",
-            env_name: "RAIN_CLEANUP_EXEMPT_USERS",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: IssueMaxContentSize,
-            db_column: "issue_max_content_size",
-            env_name: "RAIN_ISSUE_MAX_CONTENT_SIZE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ArchiveMaxWorkingSize,
-            db_column: "archive_max_working_size",
-            env_name: "RAIN_ARCHIVE_MAX_WORKING_SIZE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: UploadConcurrentProcessingTasks,
-            db_column: "upload_concurrent_processing_tasks",
-            env_name: "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS",
-            apply_mode: R,
-        },
-        FieldMetadata {
-            key: UploadConcurrentReceiveTasks,
-            db_column: "upload_concurrent_receive_tasks",
-            env_name: "RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS",
-            apply_mode: R,
-        },
-        FieldMetadata {
-            key: UploadMaxTmpBytes,
-            db_column: "upload_max_tmp_bytes",
-            env_name: "RAIN_UPLOAD_MAX_TMP_BYTES",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: IndexingMaxIndexedLineSize,
-            db_column: "indexing_max_indexed_line_size",
-            env_name: "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE",
-            apply_mode: R,
-        },
-        FieldMetadata {
-            key: SearchTantivyMaxWriters,
-            db_column: "search_tantivy_max_writers",
-            env_name: "RAIN_SEARCH_TANTIVY_MAX_WRITERS",
-            apply_mode: R,
-        },
-        FieldMetadata {
-            key: SearchTantivyWriterHeapSize,
-            db_column: "search_tantivy_writer_heap_size",
-            env_name: "RAIN_SEARCH_TANTIVY_WRITER_HEAP",
-            apply_mode: R,
-        },
-        FieldMetadata {
-            key: ApiFilePreviewSize,
-            db_column: "api_file_preview_size",
-            env_name: "RAIN_API_FILE_PREVIEW_SIZE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ApiMaxPreviewLineSize,
-            db_column: "api_max_preview_line_size",
-            env_name: "RAIN_API_MAX_PREVIEW_LINE_SIZE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ApiDefaultLinePageSize,
-            db_column: "api_default_line_page_size",
-            env_name: "RAIN_API_DEFAULT_LINE_PAGE_SIZE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ApiMaxLinePageSize,
-            db_column: "api_max_line_page_size",
-            env_name: "RAIN_API_MAX_LINE_PAGE_SIZE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ApiMaxLinePageBytes,
-            db_column: "api_max_line_page_bytes",
-            env_name: "RAIN_API_MAX_LINE_PAGE_BYTES",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ApiConcurrentLineReads,
-            db_column: "api_concurrent_line_reads",
-            env_name: "RAIN_API_CONCURRENT_LINE_READS",
-            apply_mode: R,
-        },
-        FieldMetadata {
-            key: ApiConcurrentLineReadsPerClient,
-            db_column: "api_concurrent_line_reads_per_client",
-            env_name: "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ApiDefaultSearchResults,
-            db_column: "api_default_search_results",
-            env_name: "RAIN_API_DEFAULT_SEARCH_RESULTS",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ApiMaxSearchResults,
-            db_column: "api_max_search_results",
-            env_name: "RAIN_API_MAX_SEARCH_RESULTS",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: ApiMaxSearchWindow,
-            db_column: "api_max_search_window",
-            env_name: "RAIN_API_MAX_SEARCH_WINDOW",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: TempResultsMaxResultSize,
-            db_column: "temp_results_max_result_size",
-            env_name: "RAIN_TEMP_RESULT_MAX_SIZE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: TempResultsMaxTotalSize,
-            db_column: "temp_results_max_total_size",
-            env_name: "RAIN_TEMP_RESULT_MAX_TOTAL_SIZE",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: TempResultsMaxRecords,
-            db_column: "temp_results_max_records",
-            env_name: "RAIN_TEMP_RESULT_MAX_RECORDS",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: TempResultsConcurrentMaterializations,
-            db_column: "temp_results_concurrent_materializations",
-            env_name: "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
-            apply_mode: R,
-        },
-        FieldMetadata {
-            key: TempResultsMaxSources,
-            db_column: "temp_results_max_sources",
-            env_name: "RAIN_TEMP_RESULT_MAX_SOURCES",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: TempResultsMaxScanBytes,
-            db_column: "temp_results_max_scan_bytes",
-            env_name: "RAIN_TEMP_RESULT_MAX_SCAN_BYTES",
-            apply_mode: H,
-        },
-        FieldMetadata {
-            key: TempResultsMaxScanDurationSeconds,
-            db_column: "temp_results_max_scan_duration_seconds",
-            env_name: "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS",
-            apply_mode: H,
-        },
-    ]
+    const FIELDS: &[FieldMetadata] = &[
+        FieldMetadata::new(
+            AllowRegistration,
+            "allow_registration",
+            "RAIN_ALLOW_REGISTRATION",
+            H,
+        ),
+        FieldMetadata::new(
+            SessionTtlSeconds,
+            "session_ttl_seconds",
+            "RAIN_SESSION_TTL_SECONDS",
+            H,
+        ),
+        FieldMetadata::new(
+            RegisterIpLimitPerHour,
+            "register_ip_limit_per_hour",
+            "RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR",
+            H,
+        ),
+        FieldMetadata::new(
+            LoginIpLimitPerMinute,
+            "login_ip_limit_per_minute",
+            "RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE",
+            H,
+        ),
+        FieldMetadata::new(
+            LoginUsernameFailureLimitPer5Minutes,
+            "login_username_failure_limit_per_5_minutes",
+            "RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES",
+            H,
+        ),
+        FieldMetadata::new(
+            Argon2Concurrency,
+            "argon2_concurrency",
+            "RAIN_AUTH_ARGON2_CONCURRENCY",
+            R,
+        ),
+        FieldMetadata::new(
+            IssueInactiveDays,
+            "issue_inactive_days",
+            "RAIN_ISSUE_INACTIVE_DAYS",
+            H,
+        ),
+        FieldMetadata::new(
+            CleanupExemptUsernames,
+            "cleanup_exempt_usernames_json",
+            "RAIN_CLEANUP_EXEMPT_USERS",
+            H,
+        ),
+        FieldMetadata::new(
+            IssueMaxContentSize,
+            "issue_max_content_size",
+            "RAIN_ISSUE_MAX_CONTENT_SIZE",
+            H,
+        ),
+        FieldMetadata::new(
+            ArchiveMaxWorkingSize,
+            "archive_max_working_size",
+            "RAIN_ARCHIVE_MAX_WORKING_SIZE",
+            H,
+        ),
+        FieldMetadata::new(
+            UploadConcurrentProcessingTasks,
+            "upload_concurrent_processing_tasks",
+            "RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS",
+            R,
+        ),
+        FieldMetadata::new(
+            UploadConcurrentReceiveTasks,
+            "upload_concurrent_receive_tasks",
+            "RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS",
+            R,
+        ),
+        FieldMetadata::new(
+            UploadMaxTmpBytes,
+            "upload_max_tmp_bytes",
+            "RAIN_UPLOAD_MAX_TMP_BYTES",
+            H,
+        ),
+        FieldMetadata::new(
+            IndexingMaxIndexedLineSize,
+            "indexing_max_indexed_line_size",
+            "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE",
+            R,
+        ),
+        FieldMetadata::new(
+            SearchTantivyMaxWriters,
+            "search_tantivy_max_writers",
+            "RAIN_SEARCH_TANTIVY_MAX_WRITERS",
+            R,
+        ),
+        FieldMetadata::new(
+            SearchTantivyWriterHeapSize,
+            "search_tantivy_writer_heap_size",
+            "RAIN_SEARCH_TANTIVY_WRITER_HEAP",
+            R,
+        ),
+        FieldMetadata::new(
+            ApiFilePreviewSize,
+            "api_file_preview_size",
+            "RAIN_API_FILE_PREVIEW_SIZE",
+            H,
+        ),
+        FieldMetadata::new(
+            ApiMaxPreviewLineSize,
+            "api_max_preview_line_size",
+            "RAIN_API_MAX_PREVIEW_LINE_SIZE",
+            H,
+        ),
+        FieldMetadata::new(
+            ApiDefaultLinePageSize,
+            "api_default_line_page_size",
+            "RAIN_API_DEFAULT_LINE_PAGE_SIZE",
+            H,
+        ),
+        FieldMetadata::new(
+            ApiMaxLinePageSize,
+            "api_max_line_page_size",
+            "RAIN_API_MAX_LINE_PAGE_SIZE",
+            H,
+        ),
+        FieldMetadata::new(
+            ApiMaxLinePageBytes,
+            "api_max_line_page_bytes",
+            "RAIN_API_MAX_LINE_PAGE_BYTES",
+            H,
+        ),
+        FieldMetadata::new(
+            ApiConcurrentLineReads,
+            "api_concurrent_line_reads",
+            "RAIN_API_CONCURRENT_LINE_READS",
+            R,
+        ),
+        FieldMetadata::new(
+            ApiConcurrentLineReadsPerClient,
+            "api_concurrent_line_reads_per_client",
+            "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT",
+            H,
+        ),
+        FieldMetadata::new(
+            ApiDefaultSearchResults,
+            "api_default_search_results",
+            "RAIN_API_DEFAULT_SEARCH_RESULTS",
+            H,
+        ),
+        FieldMetadata::new(
+            ApiMaxSearchResults,
+            "api_max_search_results",
+            "RAIN_API_MAX_SEARCH_RESULTS",
+            H,
+        ),
+        FieldMetadata::new(
+            ApiMaxSearchWindow,
+            "api_max_search_window",
+            "RAIN_API_MAX_SEARCH_WINDOW",
+            H,
+        ),
+        FieldMetadata::new(
+            TempResultsMaxResultSize,
+            "temp_results_max_result_size",
+            "RAIN_TEMP_RESULT_MAX_SIZE",
+            H,
+        ),
+        FieldMetadata::new(
+            TempResultsMaxTotalSize,
+            "temp_results_max_total_size",
+            "RAIN_TEMP_RESULT_MAX_TOTAL_SIZE",
+            H,
+        ),
+        FieldMetadata::new(
+            TempResultsMaxRecords,
+            "temp_results_max_records",
+            "RAIN_TEMP_RESULT_MAX_RECORDS",
+            H,
+        ),
+        FieldMetadata::new(
+            TempResultsConcurrentMaterializations,
+            "temp_results_concurrent_materializations",
+            "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
+            R,
+        ),
+        FieldMetadata::new(
+            TempResultsMaxSources,
+            "temp_results_max_sources",
+            "RAIN_TEMP_RESULT_MAX_SOURCES",
+            H,
+        ),
+        FieldMetadata::new(
+            TempResultsMaxScanBytes,
+            "temp_results_max_scan_bytes",
+            "RAIN_TEMP_RESULT_MAX_SCAN_BYTES",
+            H,
+        ),
+        FieldMetadata::new(
+            TempResultsMaxScanDurationSeconds,
+            "temp_results_max_scan_duration_seconds",
+            "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS",
+            H,
+        ),
+    ];
+    FIELDS
 }
