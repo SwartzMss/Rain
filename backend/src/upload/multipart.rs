@@ -105,6 +105,26 @@ impl TempBudget {
             }
         }
     }
+
+    /// Reserve bytes whose lifetime is persisted outside the current request.
+    /// The caller must release the same number of bytes when the persisted
+    /// owner reaches a terminal state.
+    pub fn reserve_persistent(
+        used: Arc<AtomicU64>,
+        max: Arc<AtomicU64>,
+        bytes: u64,
+    ) -> Result<(), AppError> {
+        let budget = Self {
+            used,
+            reserved: Arc::new(AtomicU64::new(0)),
+            max,
+        };
+        budget.reserve(bytes)
+    }
+
+    pub fn release_persistent(used: &AtomicU64, bytes: u64) {
+        used.fetch_sub(bytes, Ordering::AcqRel);
+    }
 }
 
 impl Drop for ReceiveReservation {

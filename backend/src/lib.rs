@@ -107,6 +107,7 @@ pub struct UploadRuntime {
     pub tmp_bytes: Arc<AtomicU64>,
     pub tmp_max_bytes: Arc<AtomicU64>,
     pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
+    pub session_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
 }
 
 pub struct SearchRuntime {
@@ -136,7 +137,19 @@ impl UploadRuntime {
             tmp_bytes: Arc::new(AtomicU64::new(0)),
             tmp_max_bytes: Arc::new(AtomicU64::new(u64::MAX)),
             temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
+            session_locks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn session_lock(&self, session_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = self
+            .session_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
     }
 }
 
