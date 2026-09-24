@@ -318,6 +318,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
         "session_ttl_seconds",
         "register_ip_limit_per_hour",
         "login_username_failure_limit_per_5_minutes",
+        "api_default_search_results",
     ] {
         assert!(!fields.iter().any(|field| field["key"] == key));
     }
@@ -380,7 +381,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
             .uri("/api/admin/settings")
             .cookie(cookie.clone())
             .set_json(serde_json::json!({
-                "changes": {"api_default_search_results": 25}
+                "changes": {"api_max_search_results": 100}
             }))
             .to_request(),
     )
@@ -394,7 +395,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
             .set_json(serde_json::json!({
                 "expected_revision": revision,
                 "changes": {
-                    "api_default_search_results": 25,
+                    "api_max_search_results": 100,
                     "search_tantivy_max_writers": 2
                 }
             }))
@@ -403,7 +404,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
     .await;
     assert_eq!(versioned_update.status(), StatusCode::OK);
     let body: serde_json::Value = test::read_body_json(versioned_update).await;
-    assert_eq!(body["configured"]["api_default_search_results"], 25);
+    assert_eq!(body["configured"]["api_max_search_results"], 100);
     assert!(
         body["pending_restart_fields"]
             .as_array()

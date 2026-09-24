@@ -9,7 +9,9 @@ import {
   effectiveSettingLabel,
   groupSettingFields,
   recommendedRangeLabel,
+  serializeSettingValue,
   serializeResourceModePatch,
+  settingInputValue,
 } from '../src/features/admin/settingsFields';
 
 vi.mock('../src/api/client', () => ({
@@ -40,6 +42,12 @@ const expertField = {
   visibility: 'expert' as const,
 };
 
+const issueContentSizeField = {
+  key: 'issue_max_content_size',
+  value_type: 'integer',
+  unit: 'bytes',
+} as const;
+
 it('groups metadata fields by backend category', () => {
   expect(groupSettingFields([commonField, advancedField, expertField])).toEqual({
     common: [commonField],
@@ -61,6 +69,12 @@ it('formats configured and effective values separately', () => {
 it('serializes resource mode patches without changing legacy values', () => {
   expect(serializeResourceModePatch('upload_concurrent_processing_tasks', 'auto'))
     .toEqual({ upload_concurrent_processing_tasks: 'auto' });
+});
+
+it('uses human-readable gigabytes for the Issue content limit', () => {
+  expect(settingInputValue(issueContentSizeField, 8 * 1024 ** 3)).toBe('8G');
+  expect(serializeSettingValue(issueContentSizeField, '8G')).toBe(8 * 1024 ** 3);
+  expect(serializeSettingValue(issueContentSizeField, '1.5G')).toBe(1.5 * 1024 ** 3);
 });
 
 it('presents metadata settings by visibility and reveals expert settings explicitly', async () => {
@@ -138,6 +152,7 @@ it('presents metadata settings by visibility and reveals expert settings explici
   expect(screen.queryByText('专家配置')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '显示专家配置' })).toBeInTheDocument();
   expect(screen.getByText(/推荐 1–32/)).toBeInTheDocument();
+  expect(screen.getByLabelText('issue_max_content_size')).toHaveValue('8G');
   expect(screen.getAllByText('即时生效').length).toBeGreaterThan(0);
   expect(screen.getByText('重启生效')).toBeInTheDocument();
 
