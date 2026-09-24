@@ -13,7 +13,10 @@ use sqlx::{
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
 
-use crate::error::AppError;
+use crate::{
+    config::DEFAULT_ISSUE_INACTIVE_DAYS,
+    error::AppError,
+};
 use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 
 mod migrations;
@@ -651,8 +654,9 @@ pub async fn load_or_initialize_cleanup_exempt_users(
         |conn, legacy_json| {
             Box::pin(async move {
                 sqlx::query(
-                    "INSERT OR IGNORE INTO system_settings(id, allow_registration) VALUES(1, 1)",
+                    "INSERT OR IGNORE INTO system_settings(id, allow_registration, issue_inactive_days) VALUES(1, 1, ?)",
                 )
+                .bind(DEFAULT_ISSUE_INACTIVE_DAYS as i64)
                 .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;

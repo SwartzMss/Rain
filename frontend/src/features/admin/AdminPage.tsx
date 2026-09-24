@@ -490,7 +490,7 @@ export function AdminSettingsPage() {
   const [allowed, setAllowed] = useState(true);
   const [ipLimit, setIpLimit] = useState(20);
   const [usernameLimit, setUsernameLimit] = useState(10);
-  const [issueInactiveDays, setIssueInactiveDays] = useState<number | "">(0);
+  const [issueInactiveDays, setIssueInactiveDays] = useState<number | "">(7);
   const [cleanupExemptUsernames, setCleanupExemptUsernames] = useState<string[]>([]);
   const [cleanupInput, setCleanupInput] = useState("");
   const [loading, setLoading] = useState(true);

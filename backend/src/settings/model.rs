@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AppLimits, AuthConfig};
+use crate::config::{AppLimits, AuthConfig, DEFAULT_ISSUE_INACTIVE_DAYS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,7 +151,7 @@ impl SettingsValues {
             login_username_failure_limit_per_5_minutes: auth
                 .login_username_failure_limit_per_5_minutes,
             argon2_concurrency: auth.argon2_concurrency,
-            issue_inactive_days: 0,
+            issue_inactive_days: DEFAULT_ISSUE_INACTIVE_DAYS,
             cleanup_exempt_usernames: Vec::new(),
             issue_max_content_size: limits.issue_max_content_size,
             archive_max_working_size: limits.archive_max_working_size,

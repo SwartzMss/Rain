@@ -12,6 +12,7 @@ const KIB: u64 = 1024;
 const MIB: u64 = KIB * 1024;
 const GIB: u64 = MIB * 1024;
 pub const MAX_TEMP_RESULT_LOGICAL_LINE_BYTES: u64 = 8 * MIB;
+pub const DEFAULT_ISSUE_INACTIVE_DAYS: usize = 7;
 
 fn optional_env(name: &str) -> Result<Option<String>, AppError> {
     match env::var(name) {
@@ -726,7 +727,7 @@ impl AppConfig {
 }
 
 fn parse_issue_inactive_days(value: Option<&str>) -> Result<usize, AppError> {
-    let days = value.unwrap_or("0").parse::<usize>().map_err(|_| {
+    let days = value.unwrap_or("7").parse::<usize>().map_err(|_| {
         AppError::Config("RAIN_ISSUE_INACTIVE_DAYS must be 0 or an integer between 7 and 30".into())
     })?;
     if days != 0 && !(7..=30).contains(&days) {
@@ -748,7 +749,7 @@ mod tests {
 
     #[test]
     fn issue_inactive_days_accepts_zero_or_seven_through_thirty() {
-        assert_eq!(parse_issue_inactive_days(None).unwrap(), 0);
+        assert_eq!(parse_issue_inactive_days(None).unwrap(), 7);
         assert_eq!(parse_issue_inactive_days(Some("0")).unwrap(), 0);
         assert_eq!(parse_issue_inactive_days(Some("7")).unwrap(), 7);
         assert_eq!(parse_issue_inactive_days(Some("30")).unwrap(), 30);

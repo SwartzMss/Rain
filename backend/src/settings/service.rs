@@ -474,9 +474,10 @@ impl SettingsService {
             let values = closure_values.clone();
             Box::pin(async move {
                 sqlx::query(
-                    "INSERT OR IGNORE INTO system_settings(id,allow_registration) VALUES(1,?)",
+                    "INSERT OR IGNORE INTO system_settings(id,allow_registration,issue_inactive_days) VALUES(1,?,?)",
                 )
                 .bind(values.allow_registration as i64)
+                .bind(values.issue_inactive_days as i64)
                 .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;

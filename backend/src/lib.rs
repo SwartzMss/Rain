@@ -31,7 +31,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use crate::blob_store::{BlobStore, LocalCasBlobStore};
-use crate::config::{AppLimits, AuthConfig};
+use crate::config::{AppLimits, AuthConfig, DEFAULT_ISSUE_INACTIVE_DAYS};
 use crate::error::AppError;
 use crate::search::resource::SearchResourceBudget;
 use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
@@ -402,7 +402,7 @@ impl AppState {
             auth_runtime,
             recovery: Arc::new(RecoveryRuntime::ready()),
             readiness_cache: ReadinessCache::default(),
-            issue_inactive_days: AtomicUsize::new(0),
+            issue_inactive_days: AtomicUsize::new(DEFAULT_ISSUE_INACTIVE_DAYS),
             issue_cleanup_policy: Arc::new(IssueCleanupPolicy::default()),
             issue_cleanup_policy_override: Arc::new(Mutex::new(None)),
             settings,

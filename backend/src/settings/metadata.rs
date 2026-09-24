@@ -386,11 +386,11 @@ fn details(key: SettingKey) -> FieldDetails {
         IssueInactiveDays => (
             "integer",
             Some("days"),
-            serde_json::json!(0),
+            serde_json::json!(7),
             None,
             Some(0),
             Some(30),
-            "Issue 自动清理闲置天数；0 表示关闭",
+            "Issue 自动清理闲置天数；默认 7 天，0 表示关闭",
         ),
         CleanupExemptUsernames => (
             "string_array",
