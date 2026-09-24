@@ -28,6 +28,7 @@ pub struct FieldMetadata {
     pub visibility: SettingVisibility,
     pub recommended_min: Option<u64>,
     pub recommended_max: Option<u64>,
+    pub supports_auto: bool,
 }
 
 impl FieldMetadata {
@@ -47,6 +48,12 @@ impl FieldMetadata {
             visibility,
             recommended_min,
             recommended_max,
+            supports_auto: matches!(
+                key,
+                SettingKey::UploadConcurrentProcessingTasks
+                    | SettingKey::SearchTantivyMaxWriters
+                    | SettingKey::SearchTantivyWriterHeapSize
+            ),
         }
     }
 }
@@ -58,7 +65,7 @@ impl Serialize for FieldMetadata {
     {
         let (value_type, unit, default_value, default_rule, min, max, description) =
             details(self.key);
-        let mut output = serializer.serialize_struct("FieldMetadata", 17)?;
+        let mut output = serializer.serialize_struct("FieldMetadata", 18)?;
         output.serialize_field("key", &self.key)?;
         output.serialize_field("db_column", self.db_column)?;
         output.serialize_field("env_name", self.env_name)?;
@@ -79,6 +86,7 @@ impl Serialize for FieldMetadata {
         output.serialize_field("visibility", &self.visibility)?;
         output.serialize_field("recommended_min", &self.recommended_min)?;
         output.serialize_field("recommended_max", &self.recommended_max)?;
+        output.serialize_field("supports_auto", &self.supports_auto)?;
         output.end()
     }
 }

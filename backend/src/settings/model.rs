@@ -2,6 +2,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{AppLimits, AuthConfig};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptiveMode {
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdaptiveModes {
+    pub upload_concurrent_processing_tasks: AdaptiveMode,
+    pub search_tantivy_max_writers: AdaptiveMode,
+    pub search_tantivy_writer_heap_size: AdaptiveMode,
+}
+
+impl Default for AdaptiveModes {
+    fn default() -> Self {
+        Self::manual()
+    }
+}
+
+impl AdaptiveModes {
+    pub fn auto() -> Self {
+        Self {
+            upload_concurrent_processing_tasks: AdaptiveMode::Auto,
+            search_tantivy_max_writers: AdaptiveMode::Auto,
+            search_tantivy_writer_heap_size: AdaptiveMode::Auto,
+        }
+    }
+
+    pub fn manual() -> Self {
+        Self {
+            upload_concurrent_processing_tasks: AdaptiveMode::Manual,
+            search_tantivy_max_writers: AdaptiveMode::Manual,
+            search_tantivy_writer_heap_size: AdaptiveMode::Manual,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyMode {
@@ -226,6 +265,7 @@ pub struct SettingsSnapshot {
     pub revision: i64,
     pub configured: SettingsValues,
     pub effective: SettingsValues,
+    pub modes: AdaptiveModes,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

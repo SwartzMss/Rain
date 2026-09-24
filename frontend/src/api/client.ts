@@ -172,8 +172,8 @@ export const rainApi = {
     adminSettingsRevision = value.revision;
     return value;
   },
-  async updateAdminSettingsV2(expected_revision: string, changes: Record<string, unknown>) {
-    const value = await request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ expected_revision, changes }) });
+  async updateAdminSettingsV2(expected_revision: string, changes: Record<string, unknown>, modes?: Record<string, 'auto' | 'manual'>) {
+    const value = await request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ expected_revision, changes, modes }) });
     adminSettingsRevision = value.revision;
     return value;
   },

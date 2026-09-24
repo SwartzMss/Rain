@@ -1,0 +1,1 @@
+ALTER TABLE system_settings ADD COLUMN adaptive_modes_json TEXT NOT NULL DEFAULT '{"upload_concurrent_processing_tasks":"manual","search_tantivy_max_writers":"manual","search_tantivy_writer_heap_size":"manual"}';

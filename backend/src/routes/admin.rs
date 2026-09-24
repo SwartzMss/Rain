@@ -10,6 +10,7 @@ use crate::{
     error::AppError,
     models::admin::*,
     services::issue_cleanup_policy::IssueCleanupPolicy,
+    settings::AdaptiveMode,
 };
 
 fn limit(value: Option<i64>) -> Result<i64, AppError> {
@@ -375,11 +376,33 @@ pub async fn update_settings(
         .headers()
         .get("user-agent")
         .and_then(|value| value.to_str().ok());
+    let modes = body.modes.clone().or_else(|| {
+        let mut inferred = current.modes.clone();
+        let mut changed = false;
+        for field in changes.keys() {
+            let mode = match field.as_str() {
+                "upload_concurrent_processing_tasks" => {
+                    Some(&mut inferred.upload_concurrent_processing_tasks)
+                }
+                "search_tantivy_max_writers" => Some(&mut inferred.search_tantivy_max_writers),
+                "search_tantivy_writer_heap_size" => {
+                    Some(&mut inferred.search_tantivy_writer_heap_size)
+                }
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                *mode = AdaptiveMode::Manual;
+                changed = true;
+            }
+        }
+        changed.then_some(inferred)
+    });
     let result = state
         .settings
-        .save_with_context(
+        .save_with_modes(
             expected_revision,
             &changes,
+            modes.as_ref(),
             Some(&admin.0.id),
             client_ip.as_deref(),
             user_agent,
@@ -464,6 +487,20 @@ async fn settings_response_with_metadata(
     .await
     .map_err(AppError::Database)?;
     let mut response = settings_response(snapshot);
+    if let Some(plan) = &state.runtime_plan {
+        response["runtime"] = serde_json::json!({
+            "policy_version": "v1",
+            "resources": plan.resources,
+            "upload_concurrent_processing_tasks": plan.upload_processing_tasks,
+            "search_tantivy_max_writers": plan.tantivy_max_writers,
+            "search_tantivy_writer_heap_size": plan.tantivy_writer_heap_size,
+            "search_tantivy_max_concurrent_queries": plan.tantivy_max_concurrent_queries,
+            "estimated_bytes": plan.estimated_bytes,
+            "budget_bytes": plan.budget_bytes,
+            "warnings": plan.warnings,
+            "decisions": plan.decisions,
+        });
+    }
     response["updated_at"] = serde_json::Value::String(updated_at);
     response["updated_by_username"] = updated_by_username
         .map(serde_json::Value::String)
@@ -493,7 +530,7 @@ fn settings_response(
         .filter(|field| configured.get(*field) != effective.get(*field))
         .collect();
     serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "revision": snapshot.revision.to_string(),
         "allow_registration": snapshot.configured.allow_registration,
         "login_ip_limit_per_minute": snapshot.configured.login_ip_limit_per_minute,
@@ -502,6 +539,7 @@ fn settings_response(
         "cleanup_exempt_usernames": snapshot.configured.cleanup_exempt_usernames,
         "configured": configured,
         "effective": effective,
+        "modes": snapshot.modes,
         "restart_required": !pending_restart_fields.is_empty(),
         "pending_restart_fields": pending_restart_fields,
         "fields": crate::settings::metadata::all(),

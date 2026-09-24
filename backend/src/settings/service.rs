@@ -10,7 +10,7 @@ use crate::{
     error::AppError,
 };
 
-use super::{SaveResult, SettingsSnapshot, SettingsValues};
+use super::{AdaptiveModes, SaveResult, SettingsSnapshot, SettingsValues};
 
 #[derive(Clone)]
 pub struct SettingsService {
@@ -60,6 +60,7 @@ impl SettingsService {
             revision: 0,
             configured: defaults.clone(),
             effective: defaults,
+            modes: AdaptiveModes::manual(),
         };
         Self {
             pool,
@@ -72,6 +73,23 @@ impl SettingsService {
         self.snapshot.read().await.clone()
     }
 
+    /// Publish values that were actually used to construct process runtimes.
+    /// This does not touch the database or configuration revision.
+    pub async fn set_effective(&self, effective: SettingsValues) -> Result<(), AppError> {
+        effective
+            .validate()
+            .map_err(|errors| AppError::Config(format!("effective settings: {errors:?}")))?;
+        let current = self.snapshot().await;
+        let snapshot = Arc::new(SettingsSnapshot {
+            revision: current.revision,
+            configured: current.configured.clone(),
+            effective,
+            modes: current.modes.clone(),
+        });
+        *self.snapshot.write().await = snapshot;
+        Ok(())
+    }
+
     /// Reload the already-initialized row without mutating the database. This
     /// is used by management reads created by tests or by an embedded caller;
     /// normal application startup calls `initialize` once before serving HTTP.
@@ -79,16 +97,14 @@ impl SettingsService {
         let _guard = self.save_lock.lock().await;
         let previous = self.snapshot().await;
         let configured = self.load_values(&previous.configured).await?;
+        let modes = self.load_modes(&previous.modes).await?;
         let revision = self.load_revision().await?;
-        let effective = if previous.revision == 0 {
-            configured.clone()
-        } else {
-            merge_effective(&previous.effective, &configured)?
-        };
+        let effective = merge_effective(&previous.effective, &configured)?;
         let snapshot = Arc::new(SettingsSnapshot {
             revision,
             effective,
             configured,
+            modes,
         });
         *self.snapshot.write().await = snapshot.clone();
         Ok(snapshot)
@@ -112,8 +128,50 @@ impl SettingsService {
         client_ip: Option<&str>,
         user_agent: Option<&str>,
     ) -> Result<SaveResult, AppError> {
+        self.save_with_context_and_modes(
+            expected_revision,
+            changes,
+            None,
+            actor_user_id,
+            client_ip,
+            user_agent,
+        )
+        .await
+    }
+
+    pub async fn save_with_modes(
+        &self,
+        expected_revision: i64,
+        changes: &serde_json::Map<String, serde_json::Value>,
+        modes: Option<&AdaptiveModes>,
+        actor_user_id: Option<&str>,
+        client_ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<SaveResult, AppError> {
+        self.save_with_context_and_modes(
+            expected_revision,
+            changes,
+            modes,
+            actor_user_id,
+            client_ip,
+            user_agent,
+        )
+        .await
+    }
+
+    async fn save_with_context_and_modes(
+        &self,
+        expected_revision: i64,
+        changes: &serde_json::Map<String, serde_json::Value>,
+        modes: Option<&AdaptiveModes>,
+        actor_user_id: Option<&str>,
+        client_ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<SaveResult, AppError> {
         let _guard = self.save_lock.lock().await;
         let current = self.snapshot().await;
+        let next_modes = modes.cloned().unwrap_or_else(|| current.modes.clone());
+        let modes_changed = next_modes != current.modes;
         if current.revision != expected_revision {
             return Err(AppError::public(
                 StatusCode::CONFLICT,
@@ -121,7 +179,7 @@ impl SettingsService {
                 "配置已被其他管理员更新，请刷新后重试",
             ));
         }
-        if changes.is_empty() {
+        if changes.is_empty() && modes.is_none() {
             return Err(AppError::api(
                 StatusCode::BAD_REQUEST,
                 "SETTINGS_INVALID_REQUEST",
@@ -169,7 +227,7 @@ impl SettingsService {
                 changed_fields.push(key.clone());
             }
         }
-        if changed_fields.is_empty() {
+        if changed_fields.is_empty() && !modes_changed {
             return Ok(SaveResult {
                 snapshot: (*current).clone(),
                 changed_fields,
@@ -215,17 +273,19 @@ impl SettingsService {
         );
         let pool = self.pool.clone();
         let update_values = candidate.clone();
+        let update_modes = next_modes.clone();
         let old_values = current.configured.clone();
         let changed_for_audit = changes.clone();
         db::write::run(&pool, "save system settings", &input, move |conn, input| {
             let values = update_values.clone();
+            let modes = update_modes.clone();
             let old_values = old_values.clone();
             let changes = changed_for_audit.clone();
             Box::pin(async move {
                 let updated = sqlx::query(
-                    "UPDATE system_settings SET allow_registration=?,session_ttl_seconds=?,register_ip_limit_per_hour=?,login_ip_limit_per_minute=?,login_username_failure_limit_per_5_minutes=?,argon2_concurrency=?,issue_inactive_days=?,issue_max_content_size=?,archive_max_working_size=?,upload_concurrent_processing_tasks=?,upload_concurrent_receive_tasks=?,upload_max_tmp_bytes=?,indexing_max_indexed_line_size=?,search_tantivy_max_writers=?,search_tantivy_writer_heap_size=?,api_file_preview_size=?,api_max_preview_line_size=?,api_default_line_page_size=?,api_max_line_page_size=?,api_max_line_page_bytes=?,api_concurrent_line_reads=?,api_concurrent_line_reads_per_client=?,api_default_search_results=?,api_max_search_results=?,api_max_search_window=?,temp_results_max_result_size=?,temp_results_max_total_size=?,temp_results_max_records=?,temp_results_concurrent_materializations=?,temp_results_max_sources=?,temp_results_max_scan_bytes=?,temp_results_max_scan_duration_seconds=?,cleanup_exempt_usernames_json=?,cleanup_exempt_users_initialized=1,updated_by_user_id=?,updated_at=CURRENT_TIMESTAMP,revision=revision+1 WHERE id=1 AND revision=?",
+                    "UPDATE system_settings SET allow_registration=?,session_ttl_seconds=?,register_ip_limit_per_hour=?,login_ip_limit_per_minute=?,login_username_failure_limit_per_5_minutes=?,argon2_concurrency=?,issue_inactive_days=?,issue_max_content_size=?,archive_max_working_size=?,upload_concurrent_processing_tasks=?,upload_concurrent_receive_tasks=?,upload_max_tmp_bytes=?,indexing_max_indexed_line_size=?,search_tantivy_max_writers=?,search_tantivy_writer_heap_size=?,api_file_preview_size=?,api_max_preview_line_size=?,api_default_line_page_size=?,api_max_line_page_size=?,api_max_line_page_bytes=?,api_concurrent_line_reads=?,api_concurrent_line_reads_per_client=?,api_default_search_results=?,api_max_search_results=?,api_max_search_window=?,temp_results_max_result_size=?,temp_results_max_total_size=?,temp_results_max_records=?,temp_results_concurrent_materializations=?,temp_results_max_sources=?,temp_results_max_scan_bytes=?,temp_results_max_scan_duration_seconds=?,cleanup_exempt_usernames_json=?,adaptive_modes_json=?,cleanup_exempt_users_initialized=1,updated_by_user_id=?,updated_at=CURRENT_TIMESTAMP,revision=revision+1 WHERE id=1 AND revision=?",
                 )
-                .bind(values.allow_registration as i64).bind(values.session_ttl_seconds as i64).bind(values.register_ip_limit_per_hour as i64).bind(values.login_ip_limit_per_minute as i64).bind(values.login_username_failure_limit_per_5_minutes as i64).bind(values.argon2_concurrency as i64).bind(values.issue_inactive_days as i64).bind(values.issue_max_content_size as i64).bind(values.archive_max_working_size as i64).bind(values.upload_concurrent_processing_tasks as i64).bind(values.upload_concurrent_receive_tasks as i64).bind(values.upload_max_tmp_bytes as i64).bind(values.indexing_max_indexed_line_size as i64).bind(values.search_tantivy_max_writers as i64).bind(values.search_tantivy_writer_heap_size as i64).bind(values.api_file_preview_size as i64).bind(values.api_max_preview_line_size as i64).bind(values.api_default_line_page_size).bind(values.api_max_line_page_size).bind(values.api_max_line_page_bytes as i64).bind(values.api_concurrent_line_reads as i64).bind(values.api_concurrent_line_reads_per_client as i64).bind(values.api_default_search_results).bind(values.api_max_search_results).bind(values.api_max_search_window).bind(values.temp_results_max_result_size as i64).bind(values.temp_results_max_total_size as i64).bind(values.temp_results_max_records).bind(values.temp_results_concurrent_materializations as i64).bind(values.temp_results_max_sources as i64).bind(values.temp_results_max_scan_bytes as i64).bind(values.temp_results_max_scan_duration_seconds as i64).bind(serde_json::to_string(&values.cleanup_exempt_usernames).map_err(|error| AppError::Config(error.to_string()))?).bind(input.1.as_deref()).bind(input.0)
+                .bind(values.allow_registration as i64).bind(values.session_ttl_seconds as i64).bind(values.register_ip_limit_per_hour as i64).bind(values.login_ip_limit_per_minute as i64).bind(values.login_username_failure_limit_per_5_minutes as i64).bind(values.argon2_concurrency as i64).bind(values.issue_inactive_days as i64).bind(values.issue_max_content_size as i64).bind(values.archive_max_working_size as i64).bind(values.upload_concurrent_processing_tasks as i64).bind(values.upload_concurrent_receive_tasks as i64).bind(values.upload_max_tmp_bytes as i64).bind(values.indexing_max_indexed_line_size as i64).bind(values.search_tantivy_max_writers as i64).bind(values.search_tantivy_writer_heap_size as i64).bind(values.api_file_preview_size as i64).bind(values.api_max_preview_line_size as i64).bind(values.api_default_line_page_size).bind(values.api_max_line_page_size).bind(values.api_max_line_page_bytes as i64).bind(values.api_concurrent_line_reads as i64).bind(values.api_concurrent_line_reads_per_client as i64).bind(values.api_default_search_results).bind(values.api_max_search_results).bind(values.api_max_search_window).bind(values.temp_results_max_result_size as i64).bind(values.temp_results_max_total_size as i64).bind(values.temp_results_max_records).bind(values.temp_results_concurrent_materializations as i64).bind(values.temp_results_max_sources as i64).bind(values.temp_results_max_scan_bytes as i64).bind(values.temp_results_max_scan_duration_seconds as i64).bind(serde_json::to_string(&values.cleanup_exempt_usernames).map_err(|error| AppError::Config(error.to_string()))?).bind(serde_json::to_string(&modes).map_err(|error| AppError::Config(error.to_string()))?).bind(input.1.as_deref()).bind(input.0)
                     .execute(&mut *conn).await.map_err(AppError::Database)?
                     .rows_affected();
                 if updated != 1 {
@@ -270,6 +330,7 @@ impl SettingsService {
             revision: expected_revision + 1,
             configured: candidate,
             effective,
+            modes: next_modes,
         });
         let result = SaveResult {
             snapshot: (*snapshot).clone(),
@@ -307,9 +368,10 @@ impl SettingsService {
             let values = closure_values.clone();
             Box::pin(async move {
                 sqlx::query(
-                    "INSERT OR IGNORE INTO system_settings(id,allow_registration) VALUES(1,?)",
+                    "INSERT OR IGNORE INTO system_settings(id,allow_registration,adaptive_modes_json) VALUES(1,?,?)",
                 )
                 .bind(values.allow_registration as i64)
+                .bind(serde_json::to_string(&AdaptiveModes::auto()).map_err(|error| AppError::Config(error.to_string()))?)
                 .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;
@@ -402,6 +464,7 @@ impl SettingsService {
         })
         .await?;
         let configured = self.load_values(&values).await?;
+        let modes = self.load_modes(&AdaptiveModes::auto()).await?;
         let revision = self.load_revision().await?;
         let previous = self.snapshot().await;
         let effective = if previous.revision == 0 {
@@ -413,6 +476,7 @@ impl SettingsService {
             revision,
             effective,
             configured,
+            modes,
         });
         *self.snapshot.write().await = snapshot.clone();
         Ok(snapshot)
@@ -423,6 +487,20 @@ impl SettingsService {
             .fetch_one(&self.pool)
             .await
             .map_err(AppError::Database)
+    }
+
+    async fn load_modes(&self, fallback: &AdaptiveModes) -> Result<AdaptiveModes, AppError> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT adaptive_modes_json FROM system_settings WHERE id=1")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(AppError::Database)?;
+        raw.map(|value| {
+            serde_json::from_str(&value)
+                .map_err(|error| AppError::Config(format!("invalid adaptive modes: {error}")))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or_else(|| fallback.clone()))
     }
 
     async fn load_values(&self, fallback: &SettingsValues) -> Result<SettingsValues, AppError> {

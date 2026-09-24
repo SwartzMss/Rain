@@ -1,7 +1,7 @@
 use backend::{
     config::{AppLimits, AuthConfig},
     db,
-    settings::{ApplyMode, SettingKey, SettingsService, SettingsValues},
+    settings::{AdaptiveModes, ApplyMode, SettingKey, SettingsService, SettingsValues},
 };
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -142,4 +142,33 @@ async fn save_requires_revision_and_applies_hot_values_atomically() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn adaptive_modes_are_saved_atomically_with_the_settings_revision() {
+    let pool = pool();
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let service = SettingsService::new(pool.clone());
+    let initial = service
+        .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
+        .await
+        .expect("initialization");
+
+    let modes = AdaptiveModes::manual();
+    let saved = service
+        .save_with_modes(
+            initial.revision,
+            &serde_json::Map::new(),
+            Some(&modes),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("save adaptive modes");
+    assert_eq!(saved.snapshot.modes, modes);
+    assert_eq!(saved.snapshot.revision, initial.revision + 1);
+
+    let reloaded = service.load().await.expect("reload");
+    assert_eq!(reloaded.modes, AdaptiveModes::manual());
 }

@@ -35,6 +35,7 @@ export interface RegistrationSettingField {
   visibility: SettingVisibility;
   recommended_min?: number | null;
   recommended_max?: number | null;
+  supports_auto?: boolean;
 }
 
 export interface RegistrationSettings extends RegistrationStatus {
@@ -50,6 +51,25 @@ export interface RegistrationSettings extends RegistrationStatus {
   effective?: Record<string, unknown>;
   restart_required?: boolean;
   pending_restart_fields?: string[];
+  modes?: Record<string, 'auto' | 'manual'>;
+  runtime?: {
+    policy_version: string;
+    resources: {
+      cpu_cores: number;
+      memory_limit_bytes: number | null;
+      cpu_source: 'os' | 'cgroup' | 'fallback';
+      memory_source: 'os' | 'cgroup' | 'fallback';
+      warnings: string[];
+    };
+    upload_concurrent_processing_tasks: number;
+    search_tantivy_max_writers: number;
+    search_tantivy_writer_heap_size: number;
+    search_tantivy_max_concurrent_queries: number;
+    estimated_bytes: number;
+    budget_bytes: number | null;
+    warnings: string[];
+    decisions: Array<[string, { value: number; mode: 'auto' | 'manual'; reason: string }]>
+  };
   fields?: RegistrationSettingField[];
 }
 export interface AuthRateLimitEntry { key: string; username: string | null; ip: string | null; current_count: number; limit: number; window_seconds: number; last_event_at: string | null; retry_after_seconds: number; limited: boolean; }
