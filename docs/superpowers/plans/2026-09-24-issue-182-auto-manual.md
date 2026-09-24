@@ -309,7 +309,7 @@ git commit -m "feat: expose resource modes and protect argon2 settings"
 - Modify: frontend/src/features/admin/settingsFields.ts
 - Test: frontend/tests/admin-settings-ux.behavior.test.tsx
 
-- [ ] Step 1: Write failing helper tests
+- [x] Step 1: Write failing helper tests
 
 Add:
 
@@ -332,11 +332,11 @@ cd frontend
 npx vitest run tests/admin-settings-ux.behavior.test.tsx
 ~~~
 
-- [ ] Step 2: Extend frontend API types
+- [x] Step 2: Extend frontend API types
 
 In frontend/src/api/types.ts add ResourceMode as auto/manual and AdminSecurityStatus with argon2id_enabled. Add supports_auto, auto_value, resource_modes, auto_values, and security to the existing API types. Update the v2 client PATCH helper to accept an optional resource_modes object and include it only for the new payload.
 
-- [ ] Step 3: Implement pure display and payload helpers
+- [x] Step 3: Implement pure display and payload helpers
 
 In settingsFields.ts add:
 
@@ -360,7 +360,7 @@ export function serializeResourceModePatch(
 
 Keep numeric conversion in serializeSettingValue. Do not calculate Auto values in TypeScript.
 
-- [ ] Step 4: Run focused frontend helper tests
+- [x] Step 4: Run focused frontend helper tests
 
 ~~~bash
 cd frontend
