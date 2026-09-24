@@ -54,7 +54,8 @@ The tests must initially fail because ResourceMode, the metadata fields, and met
 Run from backend/:
 
 ~~~bash
-cargo test --locked --test settings metadata_declares_auto_values_and_protected_settings resource_mode_serializes_stably
+cargo test --locked --test settings metadata_declares_auto_values_and_protected_settings
+cargo test --locked --test settings resource_mode_serializes_stably
 ~~~
 
 Expected: compilation failure for the missing symbols.
@@ -90,7 +91,8 @@ Keep all() as the exhaustive internal table so SettingKey::ALL coverage remains 
 
 ~~~bash
 cargo fmt --check
-cargo test --locked --test settings metadata_declares_auto_values_and_protected_settings resource_mode_serializes_stably
+cargo test --locked --test settings metadata_declares_auto_values_and_protected_settings
+cargo test --locked --test settings resource_mode_serializes_stably
 ~~~
 
 Expected: formatting passes and both tests pass.
@@ -501,4 +503,3 @@ gh pr create --base main --head fix/issue-182-auto-manual \
 ~~~
 
 After opening the PR, wait for the remote Build and Test check and report its result before claiming the PR is ready for review.
-

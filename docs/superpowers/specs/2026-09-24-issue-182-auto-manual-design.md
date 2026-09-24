@@ -46,6 +46,16 @@ The initial Auto-capable allowlist is:
 - `api_concurrent_line_reads`;
 - `temp_results_concurrent_materializations`.
 
+The fixed Auto values are the current safe application defaults:
+
+| Setting | Auto value |
+| --- | ---: |
+| `upload_concurrent_processing_tasks` | 4 |
+| `upload_concurrent_receive_tasks` | 4 |
+| `search_tantivy_max_writers` | 1 |
+| `api_concurrent_line_reads` | 8 |
+| `temp_results_concurrent_materializations` | 2 |
+
 The existing numeric columns remain the canonical configured values. Switching to Auto writes the field's fixed backend-owned `auto_value` into that numeric setting and persists the mode atomically. Switching to Manual persists the submitted numeric value and mode together. This keeps the existing `configured` and `effective` snapshots backward-compatible while giving the UI an explicit mode map.
 
 Metadata for Auto-capable fields adds:
