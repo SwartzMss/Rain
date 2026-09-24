@@ -133,6 +133,13 @@ it('presents metadata settings by visibility and reveals expert settings explici
       search_tantivy_max_writers: 1,
       search_tantivy_writer_heap_size: 16 * 1024 * 1024,
       estimated_bytes: 112 * 1024 * 1024,
+      memory_estimate: {
+        upload_processing_bytes: 32 * 1024 * 1024,
+        tantivy_writer_bytes: 48 * 1024 * 1024,
+        tantivy_query_bytes: 32 * 1024 * 1024,
+        total_bytes: 112 * 1024 * 1024,
+      },
+      current_process_rss_bytes: 80 * 1024 * 1024,
       adaptive_memory_target_bytes: 128 * 1024 * 1024,
       warnings: ['adaptive_memory_target_is_heuristic'],
       decisions: [],
@@ -147,6 +154,12 @@ it('presents metadata settings by visibility and reveals expert settings explici
 
   await waitFor(() => expect(screen.getByText('常用配置')).toBeInTheDocument());
   expect(screen.getByTestId('runtime-resource-summary')).toBeInTheDocument();
+  expect(screen.getByText('计划内存预算')).toBeInTheDocument();
+  expect(screen.getByText('当前进程 RSS')).toBeInTheDocument();
+  expect(screen.getByText('80 MiB')).toBeInTheDocument();
+  expect(screen.getByText(/上传 32 MiB/)).toBeInTheDocument();
+  expect(screen.getByText(/writer 48 MiB/)).toBeInTheDocument();
+  expect(screen.getByText(/查询 32 MiB/)).toBeInTheDocument();
   expect(screen.getAllByText(/fallback（探测不可用）/)).toHaveLength(2);
   expect(screen.getByText('原因：内存探测不可用')).toBeInTheDocument();
   expect(screen.getByText(/自适应内存目标是启发式估算/)).toBeInTheDocument();

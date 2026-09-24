@@ -51,4 +51,6 @@ tantivy = { version = "0.26.2", optional = true }
 windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
 ] }

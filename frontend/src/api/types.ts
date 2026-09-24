@@ -73,6 +73,13 @@ export interface RegistrationSettings extends RegistrationStatus {
     search_tantivy_max_writers: number;
     search_tantivy_writer_heap_size: number;
     estimated_bytes: number;
+    memory_estimate?: {
+      upload_processing_bytes: number;
+      tantivy_writer_bytes: number;
+      tantivy_query_bytes: number;
+      total_bytes: number;
+    };
+    current_process_rss_bytes?: number | null;
     adaptive_memory_target_bytes: number | null;
     warnings: string[];
     decisions: Array<[string, { value: number; mode: ResourceMode; reason: string }]>
