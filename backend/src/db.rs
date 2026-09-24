@@ -13,11 +13,8 @@ use sqlx::{
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
 
-use crate::{
-    config::DEFAULT_ISSUE_INACTIVE_DAYS,
-    error::AppError,
-};
 use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
+use crate::{config::DEFAULT_ISSUE_INACTIVE_DAYS, error::AppError};
 
 mod migrations;
 pub mod write;
