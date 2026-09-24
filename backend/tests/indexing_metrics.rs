@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use backend::{
@@ -41,6 +42,25 @@ impl<S: Subscriber> Layer<S> for Events {
     }
 }
 
+async fn remove_fixture_dir(root: std::path::PathBuf) {
+    for attempt in 0..50 {
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => return,
+            Err(error)
+                if attempt < 49
+                    && (matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied
+                            | std::io::ErrorKind::DirectoryNotEmpty
+                    ) || error.raw_os_error() == Some(32)) =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("failed to remove test fixture: {error}"),
+        }
+    }
+}
+
 async fn process(fail: bool) -> Events {
     let events = Events::default();
     let subscriber = tracing_subscriber::registry().with(events.clone());
@@ -70,7 +90,8 @@ async fn process(fail: bool) -> Events {
         }).await;
         assert_eq!(result.is_err(), fail);
         pool.close().await;
-        std::fs::remove_dir_all(root).unwrap();
+        drop(pool);
+        remove_fixture_dir(root).await;
     }.with_subscriber(subscriber).await;
     events
 }
