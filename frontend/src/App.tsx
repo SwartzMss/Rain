@@ -36,7 +36,7 @@ function App() {
   }, []);
 
   return (
-    <div className="min-h-screen text-slate-900">
+    <div className="flex min-h-screen flex-col text-slate-900">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-slate-950/95 shadow-lg shadow-slate-950/15 backdrop-blur-xl">
         <div className="mx-auto flex h-16 w-full max-w-none items-center justify-between gap-3 px-6">
           <Link to={auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user) ? '/admin/users' : '/'} className="text-white no-underline">
@@ -102,7 +102,7 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-none px-5 py-5">
+      <main className="mx-auto w-full max-w-none flex-1 px-5 py-5">
         <Routes>
           <Route path="/" element={auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user) ? <Navigate to="/admin/users" replace /> : <HomeView />} />
           <Route path="/login" element={<AuthPage mode="login" />} />
@@ -118,6 +118,32 @@ function App() {
           <Route path="/temp-results/:resultId" element={<TempResultRoute />} />
         </Routes>
       </main>
+
+      <footer className="border-t border-white/10 bg-slate-950 text-slate-300">
+        <div className="mx-auto flex min-h-20 w-full max-w-none flex-wrap items-center justify-between gap-x-8 gap-y-3 px-5 py-4 text-sm">
+          <div className="flex items-center gap-3">
+            <span className="font-semibold text-white">Rain</span>
+            <span className="text-slate-500">·</span>
+            <span>日志分析工具</span>
+          </div>
+          <nav aria-label="联系信息" className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <a
+              className="text-slate-300 no-underline transition hover:text-cyan-200"
+              href="mailto:swartz_lubel@outlook.com"
+            >
+              swartz_lubel@outlook.com
+            </a>
+            <a
+              className="text-cyan-300 no-underline transition hover:text-cyan-200"
+              href="https://github.com/SwartzMss/Rain"
+              target="_blank"
+              rel="noreferrer"
+            >
+              GitHub ↗
+            </a>
+          </nav>
+        </div>
+      </footer>
     </div>
   );
 }
