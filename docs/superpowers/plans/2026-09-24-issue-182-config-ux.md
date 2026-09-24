@@ -16,8 +16,7 @@
 - Modify: `backend/src/settings/metadata.rs`
 - Modify: `backend/src/settings/model.rs`
 - Modify: `backend/src/settings/mod.rs`
-- Test: `backend/src/settings/metadata.rs` existing metadata tests
-- Test: `backend/src/settings/model.rs` existing serialization tests, if needed
+- Test: `backend/tests/settings.rs` existing metadata tests
 
 - [ ] **Step 1: Add the presentation enums and metadata fields**
 
@@ -43,6 +42,8 @@ pub enum SettingVisibility {
 
 `FieldMetadata` must expose `category`, `visibility`, `recommended_min`, and `recommended_max` in the API response. Recommended bounds are advisory and separate from the existing hard `min`/`max` bounds.
 
+Add an exhaustive `SettingKey::ALL` array in `backend/src/settings/model.rs` so coverage tests can compare the metadata table against the supported setting enum without maintaining a second test-only list.
+
 - [ ] **Step 2: Assign every existing `SettingKey` a category, visibility, and recommendation**
 
 Update the single metadata table in `backend/src/settings/metadata.rs`. Use these rules:
@@ -64,17 +65,21 @@ Extend the metadata test module with assertions that:
 
 ```rust
 assert_eq!(metadata::all().len(), SettingKey::ALL.len());
-assert!(metadata::all().iter().all(|field| field.recommended_min.unwrap_or(0) <= field.recommended_max.unwrap_or(u64::MAX)));
+let keys: std::collections::HashSet<_> = metadata::all().iter().map(|field| field.key).collect();
+assert_eq!(keys.len(), metadata::all().len());
+assert!(metadata::all().iter().all(|field| {
+    field.recommended_min.unwrap_or(0) <= field.recommended_max.unwrap_or(u64::MAX)
+}));
 ```
 
 Use the repository’s existing `SettingKey`/metadata coverage pattern rather than introducing a second source of truth. The test must also assert that the serialized response contains the new keys.
 
 - [ ] **Step 4: Run the focused backend tests and observe the expected failure before implementation is complete**
 
-Run:
+Run from the backend directory:
 
 ```bash
-cargo test metadata --lib
+cargo test --test settings metadata
 ```
 
 Expected: the new assertions initially fail because the metadata contract and assignments are not complete.
@@ -83,11 +88,11 @@ Expected: the new assertions initially fail because the metadata contract and as
 
 Complete the enum serialization, all metadata assignments, and invariant checks. Do not alter validation logic or settings persistence.
 
-Run:
+Run from the backend directory:
 
 ```bash
 cargo fmt --check
-cargo test metadata --lib
+cargo test --test settings metadata
 ```
 
 Expected: formatting passes and all focused metadata tests pass.
@@ -103,23 +108,34 @@ git commit -m "feat: classify admin settings metadata"
 
 **Files:**
 - Modify: `frontend/src/api/types.ts`
-- Modify: `frontend/src/features/admin/AdminPage.tsx` or create `frontend/src/features/admin/settingsFields.ts`
-- Test: `frontend/tests/admin-guard.behavior.test.tsx` or a new `frontend/tests/admin-settings-ux.behavior.test.tsx`
+- Create: `frontend/src/features/admin/settingsFields.ts`
+- Test: `frontend/tests/admin-settings-ux.behavior.test.tsx`
 
 - [ ] **Step 1: Extend the API type for metadata presentation fields**
 
-Add the exact serialized values:
+Extract the inline field type from `RegistrationSettings` and add the exact serialized values:
 
 ```ts
 type SettingCategory = 'common' | 'advanced' | 'expert';
 type SettingVisibility = 'default' | 'collapsed' | 'expert';
 
-interface RegistrationSettingField {
-  // existing fields...
+export interface RegistrationSettingField {
+  key: string;
+  db_column: string;
+  env_name: string;
+  value_type?: string;
+  unit?: string | null;
+  default_value?: unknown;
+  default_rule?: string | null;
+  min?: number | null;
+  max?: number | null;
+  description?: string;
   category: SettingCategory;
   visibility: SettingVisibility;
   recommended_min?: number | null;
   recommended_max?: number | null;
+  apply_mode: 'hot' | 'restart_required';
+  sensitive?: boolean;
 }
 ```
 
@@ -167,10 +183,10 @@ it('formats only advisory recommended ranges', () => {
 
 - [ ] **Step 4: Run the focused frontend test and verify it fails for the missing helpers**
 
-Run:
+Run from the frontend directory:
 
 ```bash
-npm test -- --run frontend/tests/admin-settings-ux.behavior.test.tsx
+npm test -- --run tests/admin-settings-ux.behavior.test.tsx
 ```
 
 Expected: FAIL because the grouping helpers do not yet exist.
@@ -208,10 +224,10 @@ Also assert that clicking the reveal control renders the expert field, that adva
 
 - [ ] **Step 2: Run the rendered test and verify the expected presentation failure**
 
-Run:
+Run from the frontend directory:
 
 ```bash
-npm test -- --run frontend/tests/admin-settings-ux.behavior.test.tsx
+npm test -- --run tests/admin-settings-ux.behavior.test.tsx
 ```
 
 Expected: FAIL because the current page has one undifferentiated advanced section and no expert reveal control.
@@ -220,7 +236,7 @@ Expected: FAIL because the current page has one undifferentiated advanced sectio
 
 Keep the current dedicated common controls for registration, authentication limits, Issue expiry, and cleanup users. For metadata-driven fields:
 
-- render Common fields in the default page area;
+- render Common metadata fields not covered by a dedicated control in a visible “常用配置” section with its own draft and revision-checked save action;
 - render Advanced fields in a closed `<details>` section;
 - keep Expert fields out of the DOM until `showExpertSettings` is true;
 - render a separate expert section after the reveal action;
@@ -232,10 +248,10 @@ The reveal control changes visibility only; it must not mutate drafts or submit 
 
 - [ ] **Step 4: Run the focused rendered tests and the existing admin tests**
 
-Run:
+Run from the frontend directory:
 
 ```bash
-npm test -- --run frontend/tests/admin-settings-ux.behavior.test.tsx frontend/tests/admin-guard.behavior.test.tsx
+npm test -- --run tests/admin-settings-ux.behavior.test.tsx tests/admin-guard.behavior.test.tsx
 ```
 
 Expected: all settings UX and existing admin guard tests pass.
