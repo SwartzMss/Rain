@@ -52,7 +52,7 @@ describe('upload queue', () => {
 
     queue.enqueue('ISSUE-1', [new File(['a'], 'a.log'), new File(['b'], 'b.log'), new File(['c'], 'c.log')]);
     await settleQueue();
-    requests.get('a.log')!.reject(new Error('bad upload'));
+    requests.get('a.log')!.reject(Object.assign(new Error('bad upload'), { status: 400 }));
     await settleQueue();
 
     expect(queue.getTasks('ISSUE-1').find((task) => task.name === 'a.log')?.status).toBe('FAILED');

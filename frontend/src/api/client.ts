@@ -34,7 +34,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status?: number,
-    readonly code?: string
+    readonly code?: string,
+    readonly retryAfterMs?: number
   ) {
     super(message);
     this.name = 'ApiError';
@@ -61,7 +62,19 @@ export function normalizeIssueCode(value: string): string {
 
 const encodePathSegment = (value: string) => encodeURIComponent(value);
 
-function parseErrorResponse(text: string, status: number): ApiError {
+function parseRetryAfterMs(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : undefined;
+}
+
+function parseErrorResponse(
+  text: string,
+  status: number,
+  retryAfterHeader?: string | null
+): ApiError {
   let message = text;
   let code: string | undefined;
   try {
@@ -79,7 +92,12 @@ function parseErrorResponse(text: string, status: number): ApiError {
     // Keep the original response text when it is not JSON.
   }
 
-  return new ApiError(message || `请求失败：${status}`, status, code);
+  return new ApiError(
+    message || `请求失败：${status}`,
+    status,
+    code,
+    parseRetryAfterMs(retryAfterHeader)
+  );
 }
 
 export function shouldRevalidateAuthentication(status: number, text: string): boolean {
@@ -125,7 +143,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (shouldRevalidateAuthentication(response.status, text)) {
       window.dispatchEvent(new Event('rain:authentication-required'));
     }
-    throw parseErrorResponse(text, response.status);
+    throw parseErrorResponse(text, response.status, response.headers.get('Retry-After'));
   }
 
   if (!text) {
@@ -321,7 +339,7 @@ export const rainApi = {
           if (shouldRevalidateAuthentication(xhr.status, xhr.responseText)) {
             window.dispatchEvent(new Event('rain:authentication-required'));
           }
-          reject(parseErrorResponse(xhr.responseText, xhr.status));
+          reject(parseErrorResponse(xhr.responseText, xhr.status, xhr.getResponseHeader('Retry-After')));
           return;
         }
 
