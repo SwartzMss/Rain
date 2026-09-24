@@ -307,7 +307,11 @@ async fn registration_settings_are_persistent_and_admin_only() {
         body["resource_modes"]["upload_concurrent_processing_tasks"],
         "manual"
     );
-    assert_eq!(body["auto_values"]["upload_concurrent_processing_tasks"], 4);
+    assert!(
+        body["auto_values"]
+            .as_object()
+            .is_some_and(|values| !values.contains_key("upload_concurrent_processing_tasks"))
+    );
     let fields = body["fields"].as_array().expect("settings metadata");
     assert!(
         !fields
@@ -319,6 +323,28 @@ async fn registration_settings_are_persistent_and_admin_only() {
         "register_ip_limit_per_hour",
         "login_username_failure_limit_per_5_minutes",
         "api_default_search_results",
+        "archive_max_working_size",
+        "upload_concurrent_processing_tasks",
+        "upload_concurrent_receive_tasks",
+        "upload_max_tmp_bytes",
+        "indexing_max_indexed_line_size",
+        "search_tantivy_max_writers",
+        "search_tantivy_writer_heap_size",
+        "api_file_preview_size",
+        "api_max_preview_line_size",
+        "api_default_line_page_size",
+        "api_max_line_page_size",
+        "api_max_line_page_bytes",
+        "api_concurrent_line_reads",
+        "api_concurrent_line_reads_per_client",
+        "api_max_search_window",
+        "temp_results_max_result_size",
+        "temp_results_max_total_size",
+        "temp_results_max_records",
+        "temp_results_concurrent_materializations",
+        "temp_results_max_sources",
+        "temp_results_max_scan_bytes",
+        "temp_results_max_scan_duration_seconds",
     ] {
         assert!(!fields.iter().any(|field| field["key"] == key));
     }
@@ -330,6 +356,11 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(issue_size["visibility"], "default");
     assert_eq!(issue_size["recommended_min"], 1024_u64.pow(3));
     assert_eq!(issue_size["recommended_max"], 32_u64 * 1024_u64.pow(3));
+    assert!(
+        fields
+            .iter()
+            .any(|field| field["key"] == "api_max_search_results")
+    );
     let revision = body["revision"].as_str().expect("settings revision");
     let settings_audits_before: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_logs WHERE action='SETTINGS_UPDATED'")
@@ -394,10 +425,22 @@ async fn registration_settings_are_persistent_and_admin_only() {
             .cookie(cookie.clone())
             .set_json(serde_json::json!({
                 "expected_revision": revision,
-                "changes": {
-                    "api_max_search_results": 100,
-                    "search_tantivy_max_writers": 2
-                }
+                "changes": {"search_tantivy_max_writers": 2}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(versioned_update.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = test::read_body_json(versioned_update).await;
+    assert_eq!(body["code"], "SETTINGS_PROTECTED_FIELD");
+    let versioned_update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({
+                "expected_revision": revision,
+                "changes": {"api_max_search_results": 100}
             }))
             .to_request(),
     )
@@ -408,7 +451,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert!(
         body["pending_restart_fields"]
             .as_array()
-            .is_some_and(|fields| fields
+            .is_some_and(|fields| !fields
                 .iter()
                 .any(|field| field == "search_tantivy_max_writers"))
     );

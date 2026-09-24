@@ -57,6 +57,12 @@ fn metadata_declares_auto_values_and_protected_settings() {
         .expect("processing metadata");
     assert!(processing.supports_auto);
     assert_eq!(processing.auto_value, Some(4));
+    assert!(processing.protected);
+    assert!(
+        !backend::settings::metadata::admin()
+            .iter()
+            .any(|field| field.key == SettingKey::UploadConcurrentProcessingTasks)
+    );
 
     let argon2 = backend::settings::metadata::all()
         .iter()
@@ -98,6 +104,26 @@ fn metadata_declares_auto_values_and_protected_settings() {
         !backend::settings::metadata::admin()
             .iter()
             .any(|field| field.key == SettingKey::ApiDefaultSearchResults)
+    );
+    let search_page_limit = backend::settings::metadata::all()
+        .iter()
+        .find(|field| field.key == SettingKey::ApiMaxSearchResults)
+        .expect("search page limit metadata");
+    assert!(!search_page_limit.protected);
+    assert!(
+        backend::settings::metadata::admin()
+            .iter()
+            .any(|field| field.key == SettingKey::ApiMaxSearchResults)
+    );
+    let search_window = backend::settings::metadata::all()
+        .iter()
+        .find(|field| field.key == SettingKey::ApiMaxSearchWindow)
+        .expect("search window metadata");
+    assert!(search_window.protected);
+    assert!(
+        !backend::settings::metadata::admin()
+            .iter()
+            .any(|field| field.key == SettingKey::ApiMaxSearchWindow)
     );
 }
 
@@ -258,26 +284,40 @@ async fn save_requires_revision_and_applies_hot_values_atomically() {
         }
     ));
 
+    let mut protected_runtime_changes = serde_json::Map::new();
+    protected_runtime_changes.insert("search_tantivy_max_writers".into(), serde_json::json!(2));
+    let protected = service
+        .save(initial.revision, &protected_runtime_changes, None)
+        .await
+        .expect_err("search writer settings are system-managed");
+    assert!(matches!(
+        protected,
+        backend::error::AppError::PublicApi {
+            code: "SETTINGS_PROTECTED_FIELD",
+            ..
+        }
+    ));
+
     let mut changes = serde_json::Map::new();
-    changes.insert("search_tantivy_max_writers".into(), serde_json::json!(2));
+    changes.insert("api_max_search_results".into(), serde_json::json!(80));
     let saved = service
         .save(initial.revision, &changes, None)
         .await
         .expect("save");
-    assert_eq!(saved.snapshot.configured.search_tantivy_max_writers, 2);
-    assert_eq!(saved.snapshot.effective.search_tantivy_max_writers, 1);
+    assert_eq!(saved.snapshot.configured.api_max_search_results, 80);
+    assert_eq!(saved.snapshot.effective.api_max_search_results, 80);
     assert!(
         saved
-            .pending_restart_fields
-            .contains(&"search_tantivy_max_writers".to_owned())
+            .hot_applied_fields
+            .contains(&"api_max_search_results".to_owned())
     );
 
     let reloaded = service
         .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
         .await
         .expect("reload");
-    assert_eq!(reloaded.configured.search_tantivy_max_writers, 2);
-    assert_eq!(reloaded.effective.search_tantivy_max_writers, 1);
+    assert_eq!(reloaded.configured.api_max_search_results, 80);
+    assert_eq!(reloaded.effective.api_max_search_results, 80);
 
     let stale = service.save(initial.revision, &changes, None).await;
     assert!(matches!(
