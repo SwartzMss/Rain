@@ -53,19 +53,9 @@ export function HomeView() {
       buildFileRows({
         bundleFiles: bundles.bundleFiles,
         bundles: bundles.bundles,
-        uploadFailed: upload.uploadFailed,
-        uploadProgress: upload.uploadProgress,
-        uploadSelection: upload.uploadSelection,
-        uploading: upload.uploading
+        uploadTasks: upload.uploadTasks
       }),
-    [
-      bundles.bundleFiles,
-      bundles.bundles,
-      upload.uploadFailed,
-      upload.uploadProgress,
-      upload.uploadSelection,
-      upload.uploading
-    ]
+    [bundles.bundleFiles, bundles.bundles, upload.uploadTasks]
   );
 
   const selectIssue = useCallback(
@@ -227,7 +217,6 @@ export function HomeView() {
               uploadDisabled={upload.uploadDisabled}
               uploadError={upload.uploadError}
               uploading={upload.uploading}
-              uploadingRef={upload.uploadingRef}
             />
           ) : null}
         </div>

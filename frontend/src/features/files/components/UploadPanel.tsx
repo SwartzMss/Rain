@@ -8,7 +8,6 @@ type UploadPanelProps = {
   uploadDisabled: boolean;
   uploadError: string | null;
   uploading: boolean;
-  uploadingRef: RefObject<boolean>;
 };
 
 export function UploadPanel({
@@ -18,8 +17,7 @@ export function UploadPanel({
   onFilesSelected,
   uploadDisabled,
   uploadError,
-  uploading,
-  uploadingRef
+  uploading
 }: UploadPanelProps) {
   const handleUpload = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -35,7 +33,7 @@ export function UploadPanel({
         className="hidden"
         disabled={uploadDisabled}
         onChange={(event) => {
-          if (!canWrite || uploadDisabled || uploadingRef.current) return;
+          if (!canWrite || uploadDisabled) return;
           const files = event.target.files;
           if (files?.length) {
             onFilesSelected(Array.from(files));
@@ -49,7 +47,7 @@ export function UploadPanel({
         className="flex min-h-28 items-center justify-between gap-4 rounded-xl border border-dashed border-slate-300 bg-gradient-to-br from-slate-50 to-sky-50/50 px-5 py-4 text-sm transition hover:border-sky-400 hover:shadow-[inset_0_0_0_1px_rgba(6,182,212,0.08)] aria-disabled:opacity-60"
         aria-disabled={uploadDisabled}
         onClick={() => {
-          if (canWrite && !uploadDisabled && !uploadingRef.current) {
+          if (canWrite && !uploadDisabled) {
             fileInputRef.current?.click();
           }
         }}
@@ -60,7 +58,7 @@ export function UploadPanel({
         onDrop={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          if (!canWrite || uploadDisabled || uploadingRef.current) return;
+          if (!canWrite || uploadDisabled) return;
           if (event.dataTransfer.files.length) {
             onFilesSelected(Array.from(event.dataTransfer.files));
           }

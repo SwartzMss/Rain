@@ -114,7 +114,133 @@ describe('upload and bundle polling behavior', () => {
     unmount();
   });
 
-  it('keeps an in-flight upload disabled when switching Issues resets the selection', async () => {
+  it('uploads each selected file independently with at most two active requests', async () => {
+    const requests = new Map<string, ReturnType<typeof deferred<UploadResponse>>>();
+    vi.mocked(rainApi.uploadLogs).mockImplementation(async (_issueCode, files) => {
+      const file = files[0];
+      const request = deferred<UploadResponse>();
+      requests.set(file.name, request);
+      return request.promise;
+    });
+    const loadBundles = vi.fn().mockResolvedValue(undefined);
+    const loadIssues = vi.fn().mockResolvedValue(undefined);
+    const { result, unmount } = renderHook(() =>
+      useUploadTask({ currentIssueCode: 'ISSUE-QUEUE-A', loadBundles, loadIssues })
+    );
+
+    await act(async () => {
+      await result.current.performUpload([
+        new File(['a'], 'a.log'),
+        new File(['b'], 'b.log'),
+        new File(['c'], 'c.log')
+      ]);
+      await Promise.resolve();
+    });
+
+    expect(vi.mocked(rainApi.uploadLogs).mock.calls.map(([, files]) => files.map((file) => file.name))).toEqual([
+      ['a.log'],
+      ['b.log']
+    ]);
+    expect(result.current.uploadTasks.map((task) => task.status)).toEqual([
+      'UPLOADING',
+      'UPLOADING',
+      'QUEUED'
+    ]);
+
+    await act(async () => {
+      requests.get('a.log')!.resolve(uploadResponse('queue-a'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(vi.mocked(rainApi.uploadLogs).mock.calls.map(([, files]) => files.map((file) => file.name))).toEqual([
+      ['a.log'],
+      ['b.log'],
+      ['c.log']
+    ]);
+    expect(result.current.uploadTasks.find((task) => task.name === 'a.log')?.status).toBe('ACCEPTED');
+
+    await act(async () => {
+      requests.get('b.log')!.resolve(uploadResponse('queue-b'));
+      requests.get('c.log')!.resolve(uploadResponse('queue-c'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    unmount();
+  });
+
+  it('keeps a failed file independent from later files in the same selection', async () => {
+    const requests = new Map<string, ReturnType<typeof deferred<UploadResponse>>>();
+    vi.mocked(rainApi.uploadLogs).mockImplementation(async (_issueCode, files) => {
+      const file = files[0];
+      const request = deferred<UploadResponse>();
+      requests.set(file.name, request);
+      return request.promise;
+    });
+    const { result, unmount } = renderHook(() =>
+      useUploadTask({
+        currentIssueCode: 'ISSUE-QUEUE-B',
+        loadBundles: vi.fn().mockResolvedValue(undefined),
+        loadIssues: vi.fn().mockResolvedValue(undefined)
+      })
+    );
+
+    await act(async () => {
+      await result.current.performUpload([
+        new File(['a'], 'failed.log'),
+        new File(['b'], 'active.log'),
+        new File(['c'], 'queued.log')
+      ]);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      requests.get('failed.log')!.reject(Object.assign(new Error('invalid upload'), { status: 400 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.uploadTasks.find((task) => task.name === 'failed.log')?.status).toBe('FAILED');
+    expect(requests.has('queued.log')).toBe(true);
+
+    await act(async () => {
+      requests.get('active.log')!.resolve(uploadResponse('queue-active'));
+      requests.get('queued.log')!.resolve(uploadResponse('queue-queued'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    unmount();
+  });
+
+  it('filters tasks by their original Issue when the selected Issue changes', async () => {
+    const issueAUpload = deferred<UploadResponse>();
+    vi.mocked(rainApi.uploadLogs).mockReturnValueOnce(issueAUpload.promise);
+    const { result, rerender, unmount } = renderHook(
+      ({ issueCode }) =>
+        useUploadTask({
+          currentIssueCode: issueCode,
+          loadBundles: vi.fn().mockResolvedValue(undefined),
+          loadIssues: vi.fn().mockResolvedValue(undefined)
+        }),
+      { initialProps: { issueCode: 'ISSUE-QUEUE-C-A' } }
+    );
+
+    await act(async () => {
+      await result.current.performUpload([new File(['a'], 'issue-a.log')]);
+      await Promise.resolve();
+    });
+    rerender({ issueCode: 'ISSUE-QUEUE-C-B' });
+    expect(result.current.uploadTasks).toEqual([]);
+    expect(result.current.uploading).toBe(false);
+    expect(result.current.uploadDisabled).toBe(false);
+
+    await act(async () => {
+      issueAUpload.resolve(uploadResponse('queue-issue-a'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    unmount();
+  });
+
+  it('keeps an in-flight upload associated with its original Issue when switching Issues', async () => {
     const uploadA = deferred<UploadResponse>();
     vi.mocked(rainApi.uploadLogs).mockReturnValueOnce(uploadA.promise);
     const loadBundles = vi.fn().mockResolvedValue(undefined);
@@ -130,14 +256,14 @@ describe('upload and bundle polling behavior', () => {
       await Promise.resolve();
     });
     expect(result.current.uploading).toBe(true);
-    expect(result.current.uploadDisabled).toBe(true);
+    expect(result.current.uploadDisabled).toBe(false);
 
     rerender({ issueCode: 'ISSUE-B' });
     act(() => result.current.resetSelection());
 
-    expect(result.current.uploading).toBe(true);
-    expect(result.current.uploadDisabled).toBe(true);
-    expect(result.current.uploadingRef.current).toBe(true);
+    expect(result.current.uploading).toBe(false);
+    expect(result.current.uploadDisabled).toBe(false);
+    expect(result.current.uploadingRef.current).toBe(false);
 
     await act(async () => {
       uploadA.resolve(uploadResponse('task-a', 'PROCESSING'));
@@ -167,7 +293,7 @@ describe('upload and bundle polling behavior', () => {
     });
     rerender({ issueCode: 'ISSUE-B' });
     act(() => result.current.resetSelection());
-    expect(result.current.uploadDisabled).toBe(true);
+    expect(result.current.uploadDisabled).toBe(false);
 
     await act(async () => {
       uploadA.reject(new Error('Issue A upload failed'));
@@ -193,7 +319,7 @@ describe('upload and bundle polling behavior', () => {
     const loadBundles = vi.fn().mockResolvedValue(undefined);
     const loadIssues = vi.fn().mockResolvedValue(undefined);
     const { result, unmount } = renderHook(() =>
-      useUploadTask({ currentIssueCode: 'ISSUE-A', loadBundles, loadIssues })
+      useUploadTask({ currentIssueCode: 'ISSUE-CURRENT-FAIL', loadBundles, loadIssues })
     );
 
     await act(async () => {
@@ -203,7 +329,7 @@ describe('upload and bundle polling behavior', () => {
     expect(result.current.uploading).toBe(false);
     expect(result.current.uploadDisabled).toBe(false);
     expect(result.current.uploadFailed).toBe(true);
-    expect(result.current.uploadError).toContain('current Issue upload failed');
+    expect(result.current.uploadError).toContain('接收结果未确认');
     expect(result.current.uploadSelection).toEqual([{ name: 'a.log', sizeBytes: 1 }]);
     expect(result.current.uploadingRef.current).toBe(false);
     unmount();
