@@ -12,7 +12,7 @@ use crate::{
 
 use super::{ResourceMode, ResourceModes, SaveResult, SettingsSnapshot, SettingsValues, metadata};
 
-const RESOURCE_MODE_KEYS: [&str; 5] = [
+const RESOURCE_MODE_KEYS: [&str; 6] = [
     "upload_concurrent_processing_tasks",
     "upload_concurrent_receive_tasks",
     "search_tantivy_max_writers",
