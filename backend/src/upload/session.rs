@@ -255,6 +255,22 @@ pub async fn list_sessions(
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
+pub async fn list_issue_sessions(
+    pool: &SqlitePool,
+    owner_user_id: &str,
+    issue_code: &str,
+) -> Result<Vec<UploadSession>, AppError> {
+    let rows = sqlx::query_as::<_, UploadSessionRow>(
+        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE owner_user_id = ? AND issue_code = ? AND status IN ('OPEN', 'FINALIZING') ORDER BY updated_at ASC",
+    )
+    .bind(owner_user_id)
+    .bind(issue_code)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
 pub async fn cancel_session(
     pool: &SqlitePool,
     session_id: &str,
@@ -417,39 +433,30 @@ pub async fn list_recoverable(pool: &SqlitePool) -> Result<Vec<UploadSession>, A
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
-pub async fn expire_sessions(pool: &SqlitePool) -> Result<Vec<UploadSession>, AppError> {
-    let candidates = sqlx::query_as::<_, UploadSessionRow>(
+pub async fn list_expired(pool: &SqlitePool) -> Result<Vec<UploadSession>, AppError> {
+    let rows = sqlx::query_as::<_, UploadSessionRow>(
         "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') AND (datetime(expires_at) <= CURRENT_TIMESTAMP OR datetime(updated_at) <= datetime('now', '-24 hours'))",
     )
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
-    let mut expired = Vec::new();
-    for row in candidates {
-        let session: UploadSession = row.try_into()?;
-        let updated = crate::db::write::run(
-            pool,
-            "expire upload session",
-            &(&session.id,),
-            |conn, (session_id,)| {
-                Box::pin(async move {
-                    let result = sqlx::query(
-                        "UPDATE upload_sessions SET status='EXPIRED', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('OPEN', 'FINALIZING')",
-                    )
-                    .bind(*session_id)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(AppError::Database)?;
-                    Ok(result.rows_affected() == 1)
-                })
-            },
-        )
-        .await?;
-        if updated {
-            expired.push(session);
-        }
-    }
-    Ok(expired)
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
+pub async fn expire_session(pool: &SqlitePool, session_id: &str) -> Result<bool, AppError> {
+    crate::db::write::run(pool, "expire upload session", &(session_id,), |conn, (session_id,)| {
+        Box::pin(async move {
+            let result = sqlx::query(
+                "UPDATE upload_sessions SET status='EXPIRED', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('OPEN', 'FINALIZING') AND (datetime(expires_at) <= CURRENT_TIMESTAMP OR datetime(updated_at) <= datetime('now', '-24 hours'))",
+            )
+            .bind(*session_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            Ok(result.rows_affected() == 1)
+        })
+    })
+    .await
 }
 
 pub async fn mark_finalizing(

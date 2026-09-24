@@ -226,11 +226,56 @@ pub async fn delete_upload_session(
     }
     let session = cancel_session(&state.db.pool, &session_id, &user.0.id).await?;
     if before.status != session.status && matches!(session.status, SessionStatus::Cancelled) {
-        TempBudget::release_persistent(&state.upload.tmp_bytes, before.file_size_bytes);
-        let path = state.storage.data_root.join(&before.input_path);
-        let _ = fs::remove_dir_all(path.parent().unwrap_or(&path)).await;
+        cleanup_cancelled_session(&state, &before).await;
     }
     Ok(session_response(session, StatusCode::OK))
+}
+
+pub(crate) async fn cancel_issue_sessions(
+    state: &web::Data<AppState>,
+    issue_code: &str,
+    owner_user_id: &str,
+) -> Result<(), AppError> {
+    let sessions =
+        crate::upload::session::list_issue_sessions(&state.db.pool, owner_user_id, issue_code)
+            .await?;
+    for session in sessions {
+        let lock = state.upload.session_lock(&session.id);
+        let _guard = lock.lock().await;
+        let before = crate::upload::session::get_session(&state.db.pool, &session.id).await?;
+        if before.owner_user_id != owner_user_id {
+            continue;
+        }
+        let cancelled =
+            crate::upload::session::cancel_session(&state.db.pool, &session.id, owner_user_id)
+                .await?;
+        if cancelled.status == SessionStatus::Cancelled && before.status != SessionStatus::Cancelled
+        {
+            cleanup_cancelled_session(state, &before).await;
+        }
+    }
+    Ok(())
+}
+
+async fn cleanup_cancelled_session(state: &web::Data<AppState>, session: &UploadSession) {
+    let path = state.storage.data_root.join(&session.input_path);
+    let cleanup_dir = path.parent().unwrap_or(&path).to_path_buf();
+    let reservation = crate::upload::multipart::ReceiveReservation::adopt_persistent(
+        state.upload.tmp_bytes.clone(),
+        state.upload.tmp_max_bytes.clone(),
+        session.file_size_bytes,
+    );
+    match fs::remove_dir_all(&cleanup_dir).await {
+        Ok(()) => drop(reservation),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => drop(reservation),
+        Err(error) => {
+            tracing::warn!(path = %cleanup_dir.display(), %error, "upload session cleanup deferred");
+            state
+                .upload
+                .temp_cleanup_queue
+                .enqueue(cleanup_dir, reservation);
+        }
+    }
 }
 
 #[put("/upload-sessions/{session_id}/chunks/{chunk_index}")]

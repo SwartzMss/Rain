@@ -15,8 +15,8 @@ use crate::{
         job::{UploadJob, spawn_upload_job},
         multipart::{ReceiveReservation, TempBudget, UploadedFile},
         session::{
-            SessionStatus, UploadSession, attach_processing_bundle, expire_sessions, get_session,
-            list_finalizing, list_recoverable, mark_delivered, mark_failed,
+            SessionStatus, UploadSession, attach_processing_bundle, expire_session, get_session,
+            list_expired, list_finalizing, list_recoverable, mark_delivered, mark_failed,
         },
     },
 };
@@ -41,12 +41,43 @@ pub fn spawn(state: actix_web::web::Data<AppState>) -> tokio::task::JoinHandle<(
 }
 
 pub async fn run_once(state: &AppState) -> Result<u64, AppError> {
-    let expired = expire_sessions(&state.db.pool).await?;
-    for session in expired {
-        TempBudget::release_persistent(&state.upload.tmp_bytes, session.file_size_bytes);
-        let _ =
-            fs::remove_dir_all(state.storage.data_root.join(".uploads").join(&session.id)).await;
-        let _ = fs::remove_dir_all(state.storage.data_root.join(".tmp").join(&session.id)).await;
+    let expiry_candidates = list_expired(&state.db.pool).await?;
+    for candidate in expiry_candidates {
+        let lock = state.upload.session_lock(&candidate.id);
+        let _guard = lock.lock().await;
+        if !expire_session(&state.db.pool, &candidate.id).await? {
+            continue;
+        }
+        let session = get_session(&state.db.pool, &candidate.id).await?;
+        let reservation = ReceiveReservation::adopt_persistent(
+            state.upload.tmp_bytes.clone(),
+            state.upload.tmp_max_bytes.clone(),
+            session.file_size_bytes,
+        );
+        let upload_dir = state.storage.data_root.join(".uploads").join(&session.id);
+        let temp_dir = state.storage.data_root.join(".tmp").join(&session.id);
+        let cleanup = async {
+            match fs::remove_dir_all(&upload_dir).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err((upload_dir.clone(), error)),
+            }
+            match fs::remove_dir_all(&temp_dir).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err((temp_dir.clone(), error)),
+            }
+            Ok::<(), (std::path::PathBuf, std::io::Error)>(())
+        };
+        if let Err((cleanup_path, error)) = cleanup.await {
+            warn!(session_id = %session.id, %error, "expired upload session cleanup deferred");
+            state
+                .upload
+                .temp_cleanup_queue
+                .enqueue(cleanup_path, reservation);
+        } else {
+            drop(reservation);
+        }
     }
     let sessions = list_finalizing(&state.db.pool).await?;
     let count = sessions.len() as u64;
@@ -198,8 +229,23 @@ pub async fn reconcile_startup(pool: &sqlx::SqlitePool, data_root: &Path) -> Res
     let mut changed = 0;
     for session in sessions {
         let path = data_root.join(&session.input_path);
-        let Ok(metadata) = fs::metadata(&path).await else {
-            continue;
+        let metadata = match fs::metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let handoff_dir = data_root.join(".tmp").join(&session.id);
+                if fs::metadata(handoff_dir).await.is_err() {
+                    mark_failed(
+                        pool,
+                        &session.id,
+                        "UPLOAD_INPUT_MISSING",
+                        "上传临时文件丢失",
+                    )
+                    .await?;
+                    changed += 1;
+                }
+                continue;
+            }
+            Err(error) => return Err(AppError::Io(error)),
         };
         if metadata.len() > session.committed_offset {
             let file = OpenOptions::new()

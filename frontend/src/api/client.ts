@@ -11,6 +11,7 @@ import type {
   TempResultLinesResponse,
   TempResultPreviewResponse,
   UploadResponse,
+  UploadSessionResponse,
   UploadTaskResponse,
   AuthMeResponse,
   Credentials,
@@ -122,7 +123,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set('Accept', 'application/json');
   }
 
-  if (!isFormData && !headers.has('Content-Type')) {
+  const isBinaryBody = typeof Blob !== 'undefined' && init?.body instanceof Blob;
+
+  if (!isFormData && !isBinaryBody && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
@@ -354,5 +357,34 @@ export const rainApi = {
       xhr.onabort = () => reject(new Error('上传已取消'));
       xhr.send(formData);
     });
+  },
+  createUploadSession(issueCode: string, payload: { file_name: string; file_size_bytes: number; last_modified_ms?: number; idempotency_key: string }) {
+    return request<UploadSessionResponse>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/upload-sessions`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  fetchUploadSessions(issueCode: string) {
+    return request<UploadSessionResponse[]>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/upload-sessions`);
+  },
+  fetchUploadSession(sessionId: string) {
+    return request<UploadSessionResponse>(`/api/upload-sessions/${encodePathSegment(sessionId)}`);
+  },
+  deleteUploadSession(sessionId: string) {
+    return request<UploadSessionResponse>(`/api/upload-sessions/${encodePathSegment(sessionId)}`, { method: 'DELETE' });
+  },
+  uploadUploadSessionChunk(sessionId: string, chunkIndex: number, offset: number, chunk: Blob, sha256: string) {
+    return request<UploadSessionResponse>(`/api/upload-sessions/${encodePathSegment(sessionId)}/chunks/${chunkIndex}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Upload-Offset': String(offset),
+        'X-Chunk-SHA256': sha256
+      },
+      body: chunk
+    });
+  },
+  completeUploadSession(sessionId: string) {
+    return request<UploadSessionResponse>(`/api/upload-sessions/${encodePathSegment(sessionId)}/complete`, { method: 'POST' });
   }
 };

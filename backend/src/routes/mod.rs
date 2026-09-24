@@ -19,7 +19,7 @@ pub use issues::resume_manual_issue_deletions;
 mod logs;
 mod saved_searches;
 mod temp_results;
-mod upload_sessions;
+pub(crate) mod upload_sessions;
 mod uploads;
 
 pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) -> tokio::task::JoinHandle<()> {

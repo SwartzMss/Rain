@@ -808,6 +808,9 @@ pub async fn delete_issue(
             }
         }
     }
+
+    super::upload_sessions::cancel_issue_sessions(&state, &issue_code, &user.0.id).await?;
+
     let bundles: Vec<BundleIdRow> = sqlx::query_as(
         r#"
         SELECT id, issue_code, status

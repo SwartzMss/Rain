@@ -236,7 +236,7 @@ Add `POST /api/upload-sessions/{session_id}/complete`. Under the session lock, r
 
 Add startup recovery for FINALIZING sessions and handoff records before accepting requests. Change stale Bundle recovery so it does not mark a not-yet-delivered session’s processing record as an unrelated interrupted Bundle. If the Issue is deleted during finalization, cancel the session and remove its input safely.
 
-- [ ] **Step 5: Run backend formatting, focused tests, and existing upload tests**
+- [x] **Step 5: Run backend formatting, focused tests, and existing upload tests**
 
 Run:
 
@@ -248,7 +248,7 @@ cargo test upload:: -- --nocapture
 
 Expected: all commands pass, including the existing multipart upload and archive-limit tests.
 
-- [ ] **Step 6: Commit chunking and handoff**
+- [x] **Step 6: Commit chunking and handoff**
 
 ```bash
 git add backend/src/routes/upload_sessions.rs backend/src/upload/session.rs backend/src/upload/multipart.rs backend/src/upload/job.rs backend/src/upload/lifecycle.rs backend/src/main.rs backend/tests/upload_sessions.rs
@@ -265,23 +265,23 @@ git commit -m "feat: support durable resumable upload chunks"
 - Modify: `frontend/src/features/files/hooks/useUploadTask.ts`
 - Test: `frontend/tests/resumable-upload.behavior.test.ts`
 
-- [ ] **Step 1: Write failing transport tests**
+- [x] **Step 1: Write failing transport tests**
 
 Test the real resumable operation with mocked `rainApi` responses:
 
 Add four tests: a 17 MiB `File` must produce two 8 MiB requests and one 1 MiB request while progress uses the confirmed server offset; a rejected chunk response must trigger GET and continue from the returned offset; a same-name/same-size file with a different confirmed-prefix hash must stop with a reselect error; and the IndexedDB record must contain session metadata and chunk hashes but no file bytes.
 
-- [ ] **Step 2: Run the focused frontend test and verify it fails**
+- [x] **Step 2: Run the focused frontend test and verify it fails**
 
 Run: `npx vitest run tests/resumable-upload.behavior.test.ts` from `frontend/`.
 
 Expected: FAIL because session API types, IndexedDB metadata, and transport do not exist.
 
-- [ ] **Step 3: Add API types and client methods**
+- [x] **Step 3: Add API types and client methods**
 
 Add `UploadSessionResponse`, `UploadSessionListResponse`, `UploadChunkResponse`, and `UploadSessionCompleteResponse` types. Add client methods for create/list/get/chunk/complete/delete using `fetch`, `PUT` raw bytes, `X-Upload-Offset`, `X-Chunk-SHA256`, and `Content-Length`. Treat `409` as a structured offset/hash conflict and preserve `Retry-After` from `429`.
 
-- [ ] **Step 4: Implement resumable transport and IndexedDB metadata**
+- [x] **Step 4: Implement resumable transport and IndexedDB metadata**
 
 Create a small module that:
 
@@ -294,11 +294,11 @@ Create a small module that:
 
 The resumable operation must expose `onProgress(sentBytes, confirmedBytes, totalBytes)` so the Phase 1 queue can display confirmed transfer progress and preserve the existing two-file concurrency limit.
 
-- [ ] **Step 5: Integrate session selection and recovery into the hook**
+- [x] **Step 5: Integrate session selection and recovery into the hook**
 
 Use the resumable operation in the existing global queue for large files. On a new page load, list recoverable sessions for the current Issue and associate a selected local file only after metadata and confirmed-prefix hashes match. Keep backend processing polling separate; a delivered session yields the existing Bundle task ID.
 
-- [ ] **Step 6: Run focused and complete frontend tests**
+- [x] **Step 6: Run focused and complete frontend tests**
 
 Run:
 
@@ -311,7 +311,7 @@ npm test
 
 Expected: all tests pass and Phase 1 queue tests remain green.
 
-- [ ] **Step 7: Commit frontend resumable transport**
+- [x] **Step 7: Commit frontend resumable transport**
 
 ```bash
 git add frontend/src/api/types.ts frontend/src/api/client.ts frontend/src/features/files/resumableUpload.ts frontend/src/features/files/uploadQueue.ts frontend/src/features/files/hooks/useUploadTask.ts frontend/tests/resumable-upload.behavior.test.ts
@@ -328,15 +328,15 @@ git commit -m "feat: resume large uploads from confirmed chunks"
 - Modify: `backend/tests/upload_sessions.rs`
 - Modify: `docs/superpowers/specs/2026-09-24-issue-181-upload-design.md`
 
-- [ ] **Step 1: Add cleanup and deletion tests**
+- [x] **Step 1: Add cleanup and deletion tests**
 
 Verify session expiry after idle 24 hours and hard age 7 days, no expiry extension from status reads or duplicate old chunks, Issue deletion invalidates and removes session input, cleanup failures retain capacity reservations, and a lower temp-space limit blocks new sessions without deleting active ones.
 
-- [ ] **Step 2: Implement periodic session cleanup and startup reconciliation**
+- [x] **Step 2: Implement periodic session cleanup and startup reconciliation**
 
 Add a periodic worker alongside existing cleanup jobs. It must lock a session, transition it to EXPIRED/CANCELLED before filesystem deletion, release capacity only after successful deletion, and retry failed removals. Startup must reconcile session rows with `.uploads`, truncate tails beyond confirmed offsets, mark missing inputs FAILED, and rebuild the persistent temp budget before readiness opens.
 
-- [ ] **Step 3: Run the full repository verification**
+- [x] **Step 3: Run the full repository verification**
 
 Run from the repository root:
 
@@ -351,7 +351,7 @@ cargo test
 
 Expected: all backend and frontend commands pass; existing archive-bomb, quota, ownership, Windows cleanup, and Phase 1 queue tests remain green.
 
-- [ ] **Step 4: Update the design status and commit documentation**
+- [x] **Step 4: Update the design status and commit documentation**
 
 Change the Phase 2 status in `docs/superpowers/specs/2026-09-24-issue-181-upload-design.md` to record the exact implemented endpoint and recovery boundary. Do not claim multi-process same-session support, background indexing resume, or automatic browser file access after reload unless separately implemented and tested.
 

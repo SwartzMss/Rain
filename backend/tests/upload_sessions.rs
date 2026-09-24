@@ -677,3 +677,70 @@ fn format_digest(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
+
+#[tokio::test]
+async fn expired_session_is_terminal_before_input_cleanup_and_capacity_release() {
+    let pool = SqlitePoolOptions::new()
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let user = match users::create_user(&pool, "session-expiry-owner", "hash")
+        .await
+        .unwrap()
+    {
+        CreateUserOutcome::Created(user) => user,
+        CreateUserOutcome::DuplicateUsername => panic!("duplicate test user"),
+    };
+    sqlx::query("INSERT INTO issues (code, name, owner_user_id) VALUES ('SESSIONEXPIRY', 'Session Expiry', ?)")
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let data_root = std::env::temp_dir().join(format!("rain-upload-session-{}", Uuid::new_v4()));
+    let session_dir = data_root.join(".uploads").join("expired-session");
+    tokio::fs::create_dir_all(&session_dir).await.unwrap();
+    tokio::fs::write(session_dir.join("input.part"), b"expired")
+        .await
+        .unwrap();
+    create_session(
+        &pool,
+        CreateSessionRow {
+            id: "expired-session".into(),
+            issue_code: "SESSIONEXPIRY".into(),
+            owner_user_id: user.id,
+            idempotency_key: "expiry-key".into(),
+            file_name: "expired.log".into(),
+            file_size_bytes: 64 * 1024 * 1024,
+            last_modified_ms: None,
+            chunk_size_bytes: CHUNK_SIZE_BYTES,
+            input_path: ".uploads/expired-session/input.part".into(),
+            expires_at: "2000-01-01 00:00:00".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = AppState::new(pool.clone(), data_root.clone(), AppLimits::default());
+    state
+        .upload
+        .tmp_bytes
+        .store(64 * 1024 * 1024, std::sync::atomic::Ordering::Release);
+    backend::upload::session_finalizer::run_once(&state)
+        .await
+        .unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM upload_sessions WHERE id=?")
+        .bind("expired-session")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "EXPIRED");
+    assert_eq!(
+        state
+            .upload
+            .tmp_bytes
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    assert!(tokio::fs::metadata(session_dir).await.is_err());
+    let _ = tokio::fs::remove_dir_all(data_root).await;
+}

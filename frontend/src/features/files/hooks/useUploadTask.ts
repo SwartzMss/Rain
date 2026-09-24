@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { normalizeApiError, rainApi } from '../../../api/client';
+import { normalizeApiError } from '../../../api/client';
 import type { UploadResponse } from '../../../api/types';
 import {
   createUploadQueue,
@@ -7,10 +7,9 @@ import {
   type UploadQueueTaskStatus
 } from '../uploadQueue';
 import type { UploadSelectionItem } from '../uploadRows';
+import { uploadFileWithResume } from '../resumableUpload';
 
-const uploadQueue = createUploadQueue<UploadResponse>((issueCode, file, onProgress) =>
-  rainApi.uploadLogs(issueCode, [file], onProgress)
-);
+const uploadQueue = createUploadQueue<UploadResponse>(uploadFileWithResume);
 
 const transportStatuses: UploadQueueTaskStatus[] = ['QUEUED', 'UPLOADING', 'RETRY_WAIT'];
 const failureStatuses: UploadQueueTaskStatus[] = ['FAILED', 'UNCONFIRMED'];
