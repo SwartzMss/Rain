@@ -493,7 +493,7 @@ git add docs/configuration.md docs/superpowers/plans/2026-09-24-issue-182-auto-m
 git commit -m "docs: document issue 182 resource modes"
 ~~~
 
-- [ ] Step 6: Push and create the independent PR
+- [x] Step 6: Push and create the independent PR
 
 ~~~bash
 git push -u origin fix/issue-182-auto-manual
