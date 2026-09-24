@@ -255,12 +255,24 @@ fn decision(mode: ResourceMode, value: u64, reason: &str) -> RuntimeDecision {
 #[cfg(target_os = "linux")]
 fn read_linux_meminfo() -> Option<u64> {
     let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    parse_linux_meminfo(&contents)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_meminfo(contents: &str) -> Option<u64> {
     contents.lines().find_map(|line| {
         let mut parts = line.split_whitespace();
         if parts.next()? != "MemTotal:" {
             return None;
         }
-        parts.next()?.parse::<u64>().ok()?.checked_mul(1024)
+        if parts.next_back()? != "kB" {
+            return None;
+        }
+        let kib = parts.next()?.parse::<u64>().ok()?;
+        if kib == 0 {
+            return None;
+        }
+        kib.checked_mul(1024)
     })
 }
 
@@ -347,6 +359,28 @@ mod tests {
         .into_iter()
         .map(|key| (key.to_owned(), mode))
         .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_memtotal_as_bytes() {
+        let contents = "MemTotal:       24511652 kB\nMemFree:         4289624 kB\n";
+
+        assert_eq!(parse_linux_meminfo(contents), Some(24511652 * 1024));
+        assert_eq!(parse_linux_meminfo("MemFree: 123 kB\n"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_invalid_meminfo_values() {
+        for contents in [
+            "MemTotal: not-a-number kB\n",
+            "MemTotal: 12 MB\n",
+            "MemTotal: 0 kB\n",
+            "MemTotal: 18446744073709551615 kB\n",
+        ] {
+            assert_eq!(parse_linux_meminfo(contents), None, "{contents}");
+        }
     }
 
     #[test]
