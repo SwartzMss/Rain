@@ -17,6 +17,11 @@ export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }
 export interface RegistrationStatus { allow_registration: boolean; }
 export type SettingCategory = 'common' | 'advanced' | 'expert';
 export type SettingVisibility = 'default' | 'collapsed' | 'expert';
+export type ResourceMode = 'auto' | 'manual';
+
+export interface AdminSecurityStatus {
+  argon2id_enabled: boolean;
+}
 
 export interface RegistrationSettingField {
   key: string;
@@ -36,6 +41,8 @@ export interface RegistrationSettingField {
   recommended_min?: number | null;
   recommended_max?: number | null;
   supports_auto?: boolean;
+  auto_value?: number | null;
+  protected?: boolean;
 }
 
 export interface RegistrationSettings extends RegistrationStatus {
@@ -49,9 +56,9 @@ export interface RegistrationSettings extends RegistrationStatus {
   cleanup_exempt_usernames: string[];
   configured?: Record<string, unknown>;
   effective?: Record<string, unknown>;
-  restart_required?: boolean;
-  pending_restart_fields?: string[];
-  modes?: Record<string, 'auto' | 'manual'>;
+  resource_modes?: Record<string, ResourceMode>;
+  auto_values?: Record<string, number>;
+  security?: AdminSecurityStatus;
   runtime?: {
     policy_version: string;
     resources: {
@@ -67,8 +74,10 @@ export interface RegistrationSettings extends RegistrationStatus {
     estimated_bytes: number;
     adaptive_memory_target_bytes: number | null;
     warnings: string[];
-    decisions: Array<[string, { value: number; mode: 'auto' | 'manual'; reason: string }]>
+    decisions: Array<[string, { value: number; mode: ResourceMode; reason: string }]>
   };
+  restart_required?: boolean;
+  pending_restart_fields?: string[];
   fields?: RegistrationSettingField[];
 }
 export interface AuthRateLimitEntry { key: string; username: string | null; ip: string | null; current_count: number; limit: number; window_seconds: number; last_event_at: string | null; retry_after_seconds: number; limited: boolean; }

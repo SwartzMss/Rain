@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::AppLimits,
-    settings::{AdaptiveMode, AdaptiveModes, SettingsValues},
+    settings::{ResourceMode, ResourceModes, SettingsValues},
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -88,7 +88,7 @@ impl ResourceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeDecision {
     pub value: u64,
-    pub mode: AdaptiveMode,
+    pub mode: ResourceMode,
     pub reason: String,
 }
 
@@ -117,7 +117,7 @@ impl RuntimePlan {
 pub fn resolve(
     resources: &ResourceSnapshot,
     configured: &SettingsValues,
-    modes: &AdaptiveModes,
+    modes: &ResourceModes,
     tantivy_enabled: bool,
 ) -> RuntimePlan {
     let cores = resources.cpu_cores.max(1);
@@ -129,18 +129,21 @@ pub fn resolve(
         .unwrap_or(MIN_HEAP);
     let auto_queries = cores.clamp(MIN_QUERIES, MAX_QUERIES);
 
+    let processing_mode = mode_for(modes, "upload_concurrent_processing_tasks");
+    let writers_mode = mode_for(modes, "search_tantivy_max_writers");
+    let heap_mode = mode_for(modes, "search_tantivy_writer_heap_size");
     let mut processing = choose(
-        modes.upload_concurrent_processing_tasks,
+        processing_mode,
         configured.upload_concurrent_processing_tasks,
         auto_processing,
     );
     let mut writers = choose(
-        modes.search_tantivy_max_writers,
+        writers_mode,
         configured.search_tantivy_max_writers,
         auto_writers,
     );
     let mut heap = choose_bytes(
-        modes.search_tantivy_writer_heap_size,
+        heap_mode,
         configured.search_tantivy_writer_heap_size,
         auto_heap,
     );
@@ -167,13 +170,11 @@ pub fn resolve(
 
     if let Some(target_bytes) = adaptive_memory_target_bytes {
         while estimate_for_runtime(processing, writers, heap, queries) > target_bytes {
-            if modes.search_tantivy_writer_heap_size == AdaptiveMode::Auto && heap > MIN_HEAP {
+            if heap_mode == ResourceMode::Auto && heap > MIN_HEAP {
                 heap = heap.saturating_sub(16 * MIB).max(MIN_HEAP);
-            } else if modes.search_tantivy_max_writers == AdaptiveMode::Auto && writers > 1 {
+            } else if writers_mode == ResourceMode::Auto && writers > 1 {
                 writers -= 1;
-            } else if modes.upload_concurrent_processing_tasks == AdaptiveMode::Auto
-                && processing > 1
-            {
+            } else if processing_mode == ResourceMode::Auto && processing > 1 {
                 processing -= 1;
             } else if tantivy_enabled && queries > 1 {
                 queries -= 1;
@@ -191,23 +192,19 @@ pub fn resolve(
     let mut decisions = Vec::new();
     decisions.push((
         "upload_concurrent_processing_tasks".into(),
-        decision(
-            modes.upload_concurrent_processing_tasks,
-            processing as u64,
-            "cpu_capacity",
-        ),
+        decision(processing_mode, processing as u64, "cpu_capacity"),
     ));
     decisions.push((
         "search_tantivy_max_writers".into(),
         decision(
-            modes.search_tantivy_max_writers,
+            writers_mode,
             writers as u64,
             "cpu_capacity_and_memory_budget",
         ),
     ));
     decisions.push((
         "search_tantivy_writer_heap_size".into(),
-        decision(modes.search_tantivy_writer_heap_size, heap, "memory_budget"),
+        decision(heap_mode, heap, "memory_budget"),
     ));
     RuntimePlan {
         resources: resources.clone(),
@@ -222,27 +219,31 @@ pub fn resolve(
     }
 }
 
-fn choose(mode: AdaptiveMode, configured: usize, auto: usize) -> usize {
-    if mode == AdaptiveMode::Auto {
+fn mode_for(modes: &ResourceModes, key: &str) -> ResourceMode {
+    modes.get(key).copied().unwrap_or(ResourceMode::Manual)
+}
+
+fn choose(mode: ResourceMode, configured: usize, auto: usize) -> usize {
+    if mode == ResourceMode::Auto {
         auto
     } else {
         configured.max(1)
     }
 }
 
-fn choose_bytes(mode: AdaptiveMode, configured: u64, auto: u64) -> u64 {
-    if mode == AdaptiveMode::Auto {
+fn choose_bytes(mode: ResourceMode, configured: u64, auto: u64) -> u64 {
+    if mode == ResourceMode::Auto {
         auto
     } else {
         configured.max(1)
     }
 }
 
-fn decision(mode: AdaptiveMode, value: u64, reason: &str) -> RuntimeDecision {
+fn decision(mode: ResourceMode, value: u64, reason: &str) -> RuntimeDecision {
     RuntimeDecision {
         value,
         mode,
-        reason: if mode == AdaptiveMode::Auto {
+        reason: if mode == ResourceMode::Auto {
             reason.into()
         } else {
             "configured_value".into()
@@ -336,6 +337,17 @@ mod tests {
         SettingsValues::from_config(&AppLimits::default(), &AuthConfig::default())
     }
 
+    fn modes(mode: ResourceMode) -> ResourceModes {
+        [
+            "upload_concurrent_processing_tasks",
+            "search_tantivy_max_writers",
+            "search_tantivy_writer_heap_size",
+        ]
+        .into_iter()
+        .map(|key| (key.to_owned(), mode))
+        .collect()
+    }
+
     #[test]
     fn auto_plan_scales_with_cpu_and_memory() {
         let resources = ResourceSnapshot {
@@ -345,7 +357,7 @@ mod tests {
             memory_source: ResourceSource::Cgroup,
             warnings: Vec::new(),
         };
-        let plan = resolve(&resources, &values(), &AdaptiveModes::auto(), true);
+        let plan = resolve(&resources, &values(), &modes(ResourceMode::Auto), true);
         assert_eq!(plan.upload_processing_tasks, 8);
         assert_eq!(plan.tantivy_max_writers, 4);
         assert_eq!(plan.tantivy_writer_heap_size, 256 * MIB);
@@ -375,7 +387,7 @@ mod tests {
         let mut configured = values();
         configured.search_tantivy_max_writers = 3;
         configured.search_tantivy_writer_heap_size = 64 * MIB;
-        let modes = AdaptiveModes::manual();
+        let modes = modes(ResourceMode::Manual);
         let plan = resolve(&resources, &configured, &modes, true);
         assert_eq!(plan.tantivy_max_writers, 3);
         assert_eq!(plan.tantivy_writer_heap_size, 64 * MIB);
@@ -390,7 +402,7 @@ mod tests {
             memory_source: ResourceSource::Cgroup,
             warnings: Vec::new(),
         };
-        let plan = resolve(&resources, &values(), &AdaptiveModes::auto(), true);
+        let plan = resolve(&resources, &values(), &modes(ResourceMode::Auto), true);
         assert!(plan.estimated_bytes <= plan.adaptive_memory_target_bytes.unwrap());
         assert!(plan.tantivy_max_writers >= 1);
     }

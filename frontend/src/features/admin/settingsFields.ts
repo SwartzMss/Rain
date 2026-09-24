@@ -1,4 +1,4 @@
-import type { RegistrationSettingField, SettingCategory } from '../../api/types';
+import type { RegistrationSettingField, ResourceMode, SettingCategory } from '../../api/types';
 
 export type SettingFieldGroups = Record<SettingCategory, RegistrationSettingField[]>;
 
@@ -40,4 +40,20 @@ export function serializeSettingValue(field: RegistrationSettingField, value: un
     return String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);
   }
   return value;
+}
+
+export function effectiveSettingLabel(
+  configured: unknown,
+  effective: unknown,
+  pendingRestart: boolean,
+): string {
+  const suffix = pendingRestart ? '（待重启）' : '';
+  return `已配置 ${String(configured)}；当前生效 ${String(effective)}${suffix}`;
+}
+
+export function serializeResourceModePatch(
+  key: string,
+  mode: ResourceMode,
+): Record<string, ResourceMode> {
+  return { [key]: mode };
 }

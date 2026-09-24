@@ -29,6 +29,8 @@ pub struct FieldMetadata {
     pub recommended_min: Option<u64>,
     pub recommended_max: Option<u64>,
     pub supports_auto: bool,
+    pub auto_value: Option<u64>,
+    pub protected: bool,
 }
 
 impl FieldMetadata {
@@ -38,7 +40,15 @@ impl FieldMetadata {
         env_name: &'static str,
         apply_mode: ApplyMode,
     ) -> Self {
-        let (category, visibility, recommended_min, recommended_max) = presentation(key);
+        let (
+            category,
+            visibility,
+            recommended_min,
+            recommended_max,
+            supports_auto,
+            auto_value,
+            protected,
+        ) = presentation(key);
         Self {
             key,
             db_column,
@@ -48,12 +58,9 @@ impl FieldMetadata {
             visibility,
             recommended_min,
             recommended_max,
-            supports_auto: matches!(
-                key,
-                SettingKey::UploadConcurrentProcessingTasks
-                    | SettingKey::SearchTantivyMaxWriters
-                    | SettingKey::SearchTantivyWriterHeapSize
-            ),
+            supports_auto,
+            auto_value,
+            protected,
         }
     }
 }
@@ -65,7 +72,7 @@ impl Serialize for FieldMetadata {
     {
         let (value_type, unit, default_value, default_rule, min, max, description) =
             details(self.key);
-        let mut output = serializer.serialize_struct("FieldMetadata", 18)?;
+        let mut output = serializer.serialize_struct("FieldMetadata", 20)?;
         output.serialize_field("key", &self.key)?;
         output.serialize_field("db_column", self.db_column)?;
         output.serialize_field("env_name", self.env_name)?;
@@ -87,11 +94,21 @@ impl Serialize for FieldMetadata {
         output.serialize_field("recommended_min", &self.recommended_min)?;
         output.serialize_field("recommended_max", &self.recommended_max)?;
         output.serialize_field("supports_auto", &self.supports_auto)?;
+        output.serialize_field("auto_value", &self.auto_value)?;
+        output.serialize_field("protected", &self.protected)?;
         output.end()
     }
 }
 
-type Presentation = (SettingCategory, SettingVisibility, Option<u64>, Option<u64>);
+type Presentation = (
+    SettingCategory,
+    SettingVisibility,
+    Option<u64>,
+    Option<u64>,
+    bool,
+    Option<u64>,
+    bool,
+);
 
 const fn presentation(key: SettingKey) -> Presentation {
     use SettingCategory::{Advanced, Common, Expert};
@@ -103,39 +120,223 @@ const fn presentation(key: SettingKey) -> Presentation {
     const GIB: u64 = MIB * 1024;
 
     match key {
-        AllowRegistration => (Common, Default, None, None),
-        SessionTtlSeconds => (Common, Default, Some(86_400), Some(2_592_000)),
-        RegisterIpLimitPerHour => (Common, Default, Some(1), Some(100)),
-        LoginIpLimitPerMinute => (Common, Default, Some(5), Some(100)),
-        LoginUsernameFailureLimitPer5Minutes => (Common, Default, Some(5), Some(50)),
-        Argon2Concurrency => (Expert, ExpertVisibility, Some(1), Some(16)),
-        IssueInactiveDays => (Common, Default, Some(7), Some(30)),
-        CleanupExemptUsernames => (Common, Default, None, None),
-        IssueMaxContentSize => (Common, Default, Some(GIB), Some(32 * GIB)),
-        ArchiveMaxWorkingSize => (Advanced, Collapsed, Some(2 * GIB), Some(64 * GIB)),
-        UploadConcurrentProcessingTasks => (Advanced, Collapsed, Some(1), Some(8)),
-        UploadConcurrentReceiveTasks => (Advanced, Collapsed, Some(1), Some(8)),
-        UploadMaxTmpBytes => (Advanced, Collapsed, Some(8 * GIB), Some(128 * GIB)),
-        IndexingMaxIndexedLineSize => (Expert, ExpertVisibility, Some(64 * KIB), Some(MIB)),
-        SearchTantivyMaxWriters => (Expert, ExpertVisibility, Some(1), Some(4)),
-        SearchTantivyWriterHeapSize => (Expert, ExpertVisibility, Some(16 * MIB), Some(256 * MIB)),
-        ApiFilePreviewSize => (Advanced, Collapsed, Some(16 * KIB), Some(MIB)),
-        ApiMaxPreviewLineSize => (Advanced, Collapsed, Some(64 * KIB), Some(16 * MIB)),
-        ApiDefaultLinePageSize => (Advanced, Collapsed, Some(100), Some(5_000)),
-        ApiMaxLinePageSize => (Advanced, Collapsed, Some(1_000), Some(10_000)),
-        ApiMaxLinePageBytes => (Advanced, Collapsed, Some(MIB), Some(32 * MIB)),
-        ApiConcurrentLineReads => (Expert, ExpertVisibility, Some(1), Some(16)),
-        ApiConcurrentLineReadsPerClient => (Expert, ExpertVisibility, Some(1), Some(4)),
-        ApiDefaultSearchResults => (Common, Default, Some(10), Some(100)),
-        ApiMaxSearchResults => (Advanced, Collapsed, Some(50), Some(500)),
-        ApiMaxSearchWindow => (Advanced, Collapsed, Some(1_000), Some(50_000)),
-        TempResultsMaxResultSize => (Advanced, Collapsed, Some(16 * MIB), Some(256 * MIB)),
-        TempResultsMaxTotalSize => (Advanced, Collapsed, Some(256 * MIB), Some(8 * GIB)),
-        TempResultsMaxRecords => (Advanced, Collapsed, Some(100), Some(10_000)),
-        TempResultsConcurrentMaterializations => (Expert, ExpertVisibility, Some(1), Some(4)),
-        TempResultsMaxSources => (Advanced, Collapsed, Some(1_000), Some(50_000)),
-        TempResultsMaxScanBytes => (Advanced, Collapsed, Some(256 * MIB), Some(8 * GIB)),
-        TempResultsMaxScanDurationSeconds => (Advanced, Collapsed, Some(10), Some(300)),
+        AllowRegistration => (Common, Default, None, None, false, None, false),
+        SessionTtlSeconds => (
+            Common,
+            Default,
+            Some(86_400),
+            Some(2_592_000),
+            false,
+            None,
+            false,
+        ),
+        RegisterIpLimitPerHour => (Common, Default, Some(1), Some(100), false, None, false),
+        LoginIpLimitPerMinute => (Common, Default, Some(5), Some(100), false, None, false),
+        LoginUsernameFailureLimitPer5Minutes => {
+            (Common, Default, Some(5), Some(50), false, None, false)
+        }
+        Argon2Concurrency => (
+            Expert,
+            ExpertVisibility,
+            Some(1),
+            Some(16),
+            false,
+            None,
+            true,
+        ),
+        IssueInactiveDays => (Common, Default, Some(7), Some(30), false, None, false),
+        CleanupExemptUsernames => (Common, Default, None, None, false, None, false),
+        IssueMaxContentSize => (
+            Common,
+            Default,
+            Some(GIB),
+            Some(32 * GIB),
+            false,
+            None,
+            false,
+        ),
+        ArchiveMaxWorkingSize => (
+            Advanced,
+            Collapsed,
+            Some(2 * GIB),
+            Some(64 * GIB),
+            false,
+            None,
+            false,
+        ),
+        UploadConcurrentProcessingTasks => {
+            (Advanced, Collapsed, Some(1), Some(8), true, Some(4), false)
+        }
+        UploadConcurrentReceiveTasks => {
+            (Advanced, Collapsed, Some(1), Some(8), true, Some(4), false)
+        }
+        UploadMaxTmpBytes => (
+            Advanced,
+            Collapsed,
+            Some(8 * GIB),
+            Some(128 * GIB),
+            false,
+            None,
+            false,
+        ),
+        IndexingMaxIndexedLineSize => (
+            Expert,
+            ExpertVisibility,
+            Some(64 * KIB),
+            Some(MIB),
+            false,
+            None,
+            false,
+        ),
+        SearchTantivyMaxWriters => (
+            Expert,
+            ExpertVisibility,
+            Some(1),
+            Some(4),
+            true,
+            Some(1),
+            false,
+        ),
+        SearchTantivyWriterHeapSize => (
+            Expert,
+            ExpertVisibility,
+            Some(16 * MIB),
+            Some(256 * MIB),
+            true,
+            Some(64 * MIB),
+            false,
+        ),
+        ApiFilePreviewSize => (
+            Advanced,
+            Collapsed,
+            Some(16 * KIB),
+            Some(MIB),
+            false,
+            None,
+            false,
+        ),
+        ApiMaxPreviewLineSize => (
+            Advanced,
+            Collapsed,
+            Some(64 * KIB),
+            Some(16 * MIB),
+            false,
+            None,
+            false,
+        ),
+        ApiDefaultLinePageSize => (
+            Advanced,
+            Collapsed,
+            Some(100),
+            Some(5_000),
+            false,
+            None,
+            false,
+        ),
+        ApiMaxLinePageSize => (
+            Advanced,
+            Collapsed,
+            Some(1_000),
+            Some(10_000),
+            false,
+            None,
+            false,
+        ),
+        ApiMaxLinePageBytes => (
+            Advanced,
+            Collapsed,
+            Some(MIB),
+            Some(32 * MIB),
+            false,
+            None,
+            false,
+        ),
+        ApiConcurrentLineReads => (
+            Expert,
+            ExpertVisibility,
+            Some(1),
+            Some(16),
+            true,
+            Some(8),
+            false,
+        ),
+        ApiConcurrentLineReadsPerClient => (
+            Expert,
+            ExpertVisibility,
+            Some(1),
+            Some(4),
+            false,
+            None,
+            false,
+        ),
+        ApiDefaultSearchResults => (Common, Default, Some(10), Some(100), false, None, false),
+        ApiMaxSearchResults => (Advanced, Collapsed, Some(50), Some(500), false, None, false),
+        ApiMaxSearchWindow => (
+            Advanced,
+            Collapsed,
+            Some(1_000),
+            Some(50_000),
+            false,
+            None,
+            false,
+        ),
+        TempResultsMaxResultSize => (
+            Advanced,
+            Collapsed,
+            Some(16 * MIB),
+            Some(256 * MIB),
+            false,
+            None,
+            false,
+        ),
+        TempResultsMaxTotalSize => (
+            Advanced,
+            Collapsed,
+            Some(256 * MIB),
+            Some(8 * GIB),
+            false,
+            None,
+            false,
+        ),
+        TempResultsMaxRecords => (
+            Advanced,
+            Collapsed,
+            Some(100),
+            Some(10_000),
+            false,
+            None,
+            false,
+        ),
+        TempResultsConcurrentMaterializations => (
+            Expert,
+            ExpertVisibility,
+            Some(1),
+            Some(4),
+            true,
+            Some(2),
+            false,
+        ),
+        TempResultsMaxSources => (
+            Advanced,
+            Collapsed,
+            Some(1_000),
+            Some(50_000),
+            false,
+            None,
+            false,
+        ),
+        TempResultsMaxScanBytes => (
+            Advanced,
+            Collapsed,
+            Some(256 * MIB),
+            Some(8 * GIB),
+            false,
+            None,
+            false,
+        ),
+        TempResultsMaxScanDurationSeconds => {
+            (Advanced, Collapsed, Some(10), Some(300), false, None, false)
+        }
     }
 }
 
@@ -522,4 +723,8 @@ pub fn all() -> &'static [FieldMetadata] {
         ),
     ];
     FIELDS
+}
+
+pub fn admin() -> Vec<&'static FieldMetadata> {
+    all().iter().filter(|field| !field.protected).collect()
 }

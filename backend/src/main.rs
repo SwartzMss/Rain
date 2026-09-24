@@ -123,7 +123,7 @@ async fn main() -> std::io::Result<()> {
     let runtime_plan = backend::runtime_adaptive::resolve(
         &runtime_resources,
         &bootstrap_snapshot.configured,
-        &bootstrap_snapshot.modes,
+        &bootstrap_snapshot.resource_modes,
         config.search_backend == backend::search::publication::SearchBackendKind::Tantivy,
     );
     runtime_plan.apply_to_limits(&mut config.limits);

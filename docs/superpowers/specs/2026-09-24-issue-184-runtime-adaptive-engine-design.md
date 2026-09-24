@@ -18,7 +18,7 @@
 
 | 当前实现 | 设计约束 |
 | --- | --- |
-| `backend/src/settings/model.rs` 已有 `SettingsSnapshot { revision, configured, effective }`，值均为具体类型 | 保留现有数字字段兼容性，通过独立 modes 表达 Auto；不要用 0 或 null 冒充 Auto |
+| `backend/src/settings/model.rs` 已有 `SettingsSnapshot { revision, configured, effective, resource_modes }`，值均为具体类型 | 复用 #182 的 `resource_modes` 表达 Auto；不要用 0 或 null 冒充 Auto |
 | `settings/service.rs` 对 writer、upload processing 等使用 restart-required；保存有 revision 检查和审计 | 新引擎沿用保存事务及审计，不另设一套配置写入入口 |
 | `main.rs` 先 bootstrap initialize、把 configured 应用到 config，构建 AppState 后再次 initialize | 启动必须改为一次解析、一次 runtime 构造、一次实际状态发布，避免第二次 initialize 覆盖有效值 |
 | `lib.rs` 构建 `UploadRuntime`、`SearchRuntime` 和 semaphore | 资源计算必须发生在这些对象构造之前 |
@@ -75,10 +75,10 @@ DB 配置意图 + 资源探测快照 + policy_version
 
 ## 5. 配置意图、候选值、实际值
 
-保留现有 `configured` 数值映射，新增稀疏的 `modes` 映射，仅允许首批四个 key，取值 `auto | manual`。
+保留现有 `configured` 数值映射，复用 #182 的 `resource_modes` 映射表达 `auto | manual`。#182 的资源模式仍覆盖其既有字段；本期 runtime resolver 只消费上传处理并发、Tantivy writer 数量和 writer heap 三个动态目标。
 
 - `configured[key]`：管理员保存的数值，Auto 时仅为保留的手工值/兼容值。
-- `modes[key]`：真正决定如何解释 configured。
+- `resource_modes[key]`：真正决定如何解释 configured。
 - `candidate[key]`：当前配置在本进程启动资源快照下解析出的目标值。
 - `effective[key]`：当前 runtime 真正使用的数值。
 - `decisions[key]`：candidate 与 effective 各自的来源、原因、policy_version 和资源快照 ID。
@@ -169,28 +169,27 @@ GET 只读状态，不重新计算或应用资源。当前 `settings.load()` 需
 
 ## 9. API 与 UI
 
-保留 endpoint 和现有数值映射，响应提升为 schema_version=3，增加 modes、candidate、runtime、decisions。metadata 增加 supports_auto；既有 category/visibility 保留。
+保留 endpoint 和现有数值映射，响应增加 runtime、decisions。metadata 复用 #182 的 resource mode contract；既有 category/visibility 保留。
 
 示意响应片段（省略其他字段）：
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 2,
   "revision": "12",
   "configured": { "search_tantivy_max_writers": 1 },
-  "modes": { "search_tantivy_max_writers": "auto" },
-  "candidate": { "search_tantivy_max_writers": 4 },
+  "resource_modes": { "search_tantivy_max_writers": "auto" },
   "effective": { "search_tantivy_max_writers": 1 },
   "pending_restart_fields": ["search_tantivy_max_writers"],
   "runtime": { "generation": "1", "policy_version": "v1" }
 }
 ```
 
-保存形态：`{ expected_revision, changes, modes }`。只改 modes 也是合法请求；同事务应用，revision 冲突仍返回 409。未知 key、非 adaptive key 的 mode、未知 mode 和非法数值返回 422。
+保存形态：`{ expected_revision, changes, resource_modes }`。只改 resource modes 也是合法请求；同事务应用，revision 冲突仍返回 409。未知 key、非 resource key 的 mode、未知 mode 和非法数值返回 422。
 
 兼容规则：旧客户端显式提交 adaptive 数字且未带对应 mode 时，视为选择 Manual；只更新其他字段不改变 modes。新客户端切 Auto 发送 mode，保留手工数字；切 Manual 未提供新数字时使用存储值，UI 必须先显示该值，不能让用户误以为会沿用 effective。仅更新 mode 的请求需要调整现有“changes 不得为空”校验。
 
-页面延续 #182 的分类：每个支持 Auto 的字段显示模式；Auto 下显示当前有效值、待重启目标值（如有）、简短原因，手工输入隐藏或禁用。原因来自后端稳定 reason code + 参数，前端负责中文文案。Manual 显示输入值与预算警告。Auto 卡片不能把保留的 configured 数字当作当前使用值。
+页面延续 #182 的分类：每个支持 Auto 的字段显示模式；Auto 下显示当前有效值、待重启目标值（如有）、简短原因，手工输入隐藏或禁用。原因来自后端稳定 reason code + 参数，前端负责中文文案。Manual 显示输入值与预算警告。运行时资源卡片显示探测来源、fallback 警告和启发式内存目标。Auto 卡片不能把保留的 configured 数字当作当前使用值。
 
 v1 不新增独立运行监控页面。资源快照只向管理员暴露，与现有 settings 权限一致，保持 private/no-store。
 
@@ -198,13 +197,13 @@ v1 不新增独立运行监控页面。资源快照只向管理员暴露，与�
 
 新增 migration，编号取实现时 main 的下一个空闲号，不能写死为当前假定编号。
 
-- 给 system_settings 增加 `adaptive_modes_json`；查询并发是 runtime plan 的派生值，不增加持久化列。
-- JSON 只存允许的 modes，数值继续使用原有 typed columns；不把整个 settings 改成无约束 JSON。
-- migration 中已有行：现存三个目标字段按 Manual 解释；查询并发不增加持久化列，也不增加管理员 mode。即便现存值恰好等于旧默认，也不能据此猜测用户没有手工配置。
-- 新安装：三个管理员可配置目标字段默认 Auto；首次初始化显式提供的旧 ENV 对应字段转 Manual。查询并发始终由 runtime 内部派生。配置解析层需要保留“是否显式设置”的 provenance，不能只看最终数值判断。
+- 沿用 `system_settings.resource_modes_json`；查询并发是 runtime plan 的派生值，不增加持久化列。
+- JSON 只存允许的 resource modes，数值继续使用原有 typed columns；不把整个 settings 改成无约束 JSON。
+- migration 中已有行：三个 runtime 目标字段缺省按 Manual 解释；查询并发不增加持久化列，也不增加管理员 mode。即便现存值恰好等于旧默认，也不能据此猜测用户没有手工配置。
+- 新安装和升级实例沿用 #182 的 Manual 初始策略；管理员切换这三个字段为 Auto 后，重启时由资源探测和 resolver 计算动态值。查询并发始终由 runtime 内部派生。
 - 安装状态依据初始化前的持久化状态，在旧 bootstrap 插入行前识别；不能因先执行 INSERT 而把新安装误判为升级。
-- 数字列与 modes、revision、审计在同一事务更新。Auto 计算结果不写回数字列。
-- 老实例可由管理员一次将四字段切 Auto；升级不能自动替换用户意图。
+- 数字列与 resource modes、revision、审计在同一事务更新。Auto 计算结果不写回数字列。
+- 老实例可由管理员一次将三个 runtime 目标字段切 Auto；升级不能自动替换用户意图。
 - 降级到旧二进制会忽略 modes 并使用存储数字，可能与当前 Auto 结果不同；回退流程先把期望数值保存为 Manual 并备份数据库，不承诺无感降级。
 
 ## 11. 可观测性与后续闭环边界
@@ -236,12 +235,12 @@ v1 不新增独立运行监控页面。资源快照只向管理员暴露，与�
 | --- | --- |
 | 纯函数 | 相同输入相同结果；上表样例；低内存退让；单位/溢出；Auto 范围；Manual 不被覆盖 |
 | 探测 | cgroup v1/v2、祖先限制、quota<1、Windows 受限进程、读取失败、未知来源 |
-| 升级 | 老值等于默认仍保留 Manual；新安装 Auto；显式 ENV Manual；初始化重入不改变 modes |
-| 保存 | modes-only、混合修改、非法模式、旧客户端数字写入、revision 冲突、事务失败不发布候选状态 |
+| 升级 | 老值等于默认仍保留 Manual；resource modes 沿用 #182 的持久化策略；初始化重入不改变 resource modes |
+| 保存 | resource-modes-only、混合修改、非法模式、旧客户端数字写入、revision 冲突、事务失败不发布候选状态 |
 | 生命周期 | GET 无副作用；保存后 effective 不变；重启后才应用；再次 initialize 不覆盖实际快照 |
 | 并发 | query 全局与每请求同时受限；上传与重建共享 writer admission；取消任务不提前释放额度 |
 | 前端 | Auto/Manual、候选/实际值、待重启、fallback 原因、#182 分组与保存权限回归 |
 
 性能验证用相同输入集比较 main 固定默认值与 Auto：受限 1CPU/512MiB、2CPU/2GiB、8CPU/16GiB、16CPU/64GiB，覆盖纯上传、纯搜索、混合负载、并发重建。采集吞吐、查询 p95/p99、峰值 RSS、writer 排队、失败率。资源受限环境不得在代表性负载出现新增 OOM；大机器混合负载若搜索明显恶化，收紧并发策略，不以吞吐单指标验收。具体量化回归阈值应由先测得的 main 基线确定并在实现 PR 固定。
 
-验收映射：Auto 支持由 modes + resolver 完成；configured/effective 由 API/UI 展示；默认无需理解底层参数由新安装 Auto 完成；不同硬件默认值由资源探测、确定性策略及基准验证完成；对应测试覆盖纯函数、升级和实际执行路径。实时 workload/storage/index-size 调参明确属于后续阶段。
+验收映射：Auto 支持由 resource modes + resolver 完成；configured/effective 由 API/UI 展示；不同硬件的动态值由资源探测、确定性策略及基准验证完成；对应测试覆盖纯函数、升级和实际执行路径。实时 workload/storage/index-size 调参明确属于后续阶段。

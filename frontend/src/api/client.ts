@@ -24,7 +24,8 @@ import type {
   RegistrationStatus,
   RegistrationSettings,
   AuthRateLimitsResponse,
-  FileDeletionJobResponse
+  FileDeletionJobResponse,
+  ResourceMode,
 } from './types';
 
 const API_BASE_URL = '';
@@ -172,8 +173,8 @@ export const rainApi = {
     adminSettingsRevision = value.revision;
     return value;
   },
-  async updateAdminSettingsV2(expected_revision: string, changes: Record<string, unknown>, modes?: Record<string, 'auto' | 'manual'>) {
-    const value = await request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ expected_revision, changes, modes }) });
+  async updateAdminSettingsV2(expected_revision: string, changes: Record<string, unknown>, resource_modes?: Record<string, ResourceMode>) {
+    const value = await request<RegistrationSettings>('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ expected_revision, changes, ...(resource_modes && Object.keys(resource_modes).length > 0 ? { resource_modes } : {}) }) });
     adminSettingsRevision = value.revision;
     return value;
   },

@@ -278,12 +278,14 @@ async fn registration_settings_are_persistent_and_admin_only() {
     )
     .await
     .expect("user session");
+    let mut test_limits = AppLimits::default();
+    test_limits.upload.concurrent_processing_tasks = 2;
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
                 pool.clone(),
                 PathBuf::from("data"),
-                AppLimits::default(),
+                test_limits,
             )))
             .configure(routes::register),
     )
@@ -300,7 +302,18 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(settings.status(), StatusCode::OK);
     let body: serde_json::Value = test::read_body_json(settings).await;
     assert_eq!(body["allow_registration"], false);
+    assert_eq!(body["security"]["argon2id_enabled"], true);
+    assert_eq!(
+        body["resource_modes"]["upload_concurrent_processing_tasks"],
+        "manual"
+    );
+    assert_eq!(body["auto_values"]["upload_concurrent_processing_tasks"], 4);
     let fields = body["fields"].as_array().expect("settings metadata");
+    assert!(
+        !fields
+            .iter()
+            .any(|field| field["key"] == "argon2_concurrency")
+    );
     let issue_size = fields
         .iter()
         .find(|field| field["key"] == "issue_max_content_size")
@@ -309,13 +322,33 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert_eq!(issue_size["visibility"], "default");
     assert_eq!(issue_size["recommended_min"], 1024_u64.pow(3));
     assert_eq!(issue_size["recommended_max"], 32_u64 * 1024_u64.pow(3));
-    let argon2 = fields
-        .iter()
-        .find(|field| field["key"] == "argon2_concurrency")
-        .expect("argon2 metadata");
-    assert_eq!(argon2["category"], "expert");
-    assert_eq!(argon2["visibility"], "expert");
     let revision = body["revision"].as_str().expect("settings revision");
+    let settings_audits_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_logs WHERE action='SETTINGS_UPDATED'")
+            .fetch_one(&pool)
+            .await
+            .expect("settings audit count");
+    let protected_update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({
+                "expected_revision": revision,
+                "changes": {"argon2_concurrency": 1}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(protected_update.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let error: serde_json::Value = test::read_body_json(protected_update).await;
+    assert_eq!(error["code"], "SETTINGS_PROTECTED_FIELD");
+    let settings_audits_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_logs WHERE action='SETTINGS_UPDATED'")
+            .fetch_one(&pool)
+            .await
+            .expect("settings audit count");
+    assert_eq!(settings_audits_after, settings_audits_before);
     let missing_revision = test::call_service(
         &app,
         test::TestRequest::patch()
@@ -352,6 +385,32 @@ async fn registration_settings_are_persistent_and_admin_only() {
             .is_some_and(|fields| fields
                 .iter()
                 .any(|field| field == "search_tantivy_max_writers"))
+    );
+    let mode_update = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({
+                "expected_revision": body["revision"],
+                "resource_modes": {"upload_concurrent_processing_tasks": "auto"}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(mode_update.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(mode_update).await;
+    assert_eq!(
+        body["resource_modes"]["upload_concurrent_processing_tasks"],
+        "auto"
+    );
+    assert_eq!(body["configured"]["upload_concurrent_processing_tasks"], 4);
+    assert!(
+        body["pending_restart_fields"]
+            .as_array()
+            .is_some_and(|fields| fields
+                .iter()
+                .any(|field| field == "upload_concurrent_processing_tasks"))
     );
     let update = test::call_service(
         &app,
