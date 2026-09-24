@@ -166,9 +166,15 @@ async fn main() -> std::io::Result<()> {
     )
     .await;
     run_optional_recovery_stage(
+        "resumable-upload-reconciliation",
+        STARTUP_RECOVERY_TIMEOUT,
+        backend::upload::session_finalizer::reconcile_startup(&pool, &config.data_root),
+    )
+    .await;
+    run_optional_recovery_stage(
         "temporary-upload-cleanup",
         STARTUP_RECOVERY_TIMEOUT,
-        cleanup_temp_uploads(&config.data_root),
+        cleanup_temp_uploads(&pool, &config.data_root),
     )
     .await;
 
@@ -210,6 +216,18 @@ async fn main() -> std::io::Result<()> {
         )
         .await
         .expect("failed to load converged system settings into runtime");
+    let active_upload_session_bytes =
+        backend::upload::session::active_declared_bytes(&app_state.db.pool)
+            .await
+            .expect("failed to restore upload session capacity accounting");
+    app_state.upload.tmp_bytes.store(
+        active_upload_session_bytes,
+        std::sync::atomic::Ordering::Release,
+    );
+    info!(
+        active_upload_session_bytes,
+        "restored persistent upload session capacity accounting"
+    );
     app_state.issue_cleanup_policy = Arc::new(cleanup_policy.clone());
     app_state.search_backend = config.search_backend;
     for username in cleanup_policy.usernames() {
@@ -304,6 +322,9 @@ async fn main() -> std::io::Result<()> {
     }
     background_tasks.push(backend::upload::job::spawn_temp_cleanup_worker(
         shared_state.upload.temp_cleanup_queue.clone(),
+    ));
+    background_tasks.push(backend::upload::session_finalizer::spawn(
+        shared_state.clone(),
     ));
     background_tasks.push(backend::routes::spawn_temp_result_cleanup(
         shared_state.clone(),
@@ -433,7 +454,17 @@ fn spawn_invariant_recovery_supervisor(
     })
 }
 
-async fn cleanup_temp_uploads(data_root: &std::path::Path) -> std::io::Result<u64> {
+async fn cleanup_temp_uploads(
+    pool: &sqlx::SqlitePool,
+    data_root: &std::path::Path,
+) -> std::io::Result<u64> {
+    let protected: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT id FROM upload_sessions WHERE status='FINALIZING'")
+            .fetch_all(pool)
+            .await
+            .map_err(std::io::Error::other)?
+            .into_iter()
+            .collect();
     let temp_root = data_root.join(".tmp");
     match tokio::fs::metadata(&temp_root).await {
         Ok(_) => {}
@@ -445,6 +476,9 @@ async fn cleanup_temp_uploads(data_root: &std::path::Path) -> std::io::Result<u6
     let mut failed = 0u64;
     let mut entries = tokio::fs::read_dir(&temp_root).await?;
     while let Some(entry) = entries.next_entry().await? {
+        if protected.contains(&entry.file_name().to_string_lossy().into_owned()) {
+            continue;
+        }
         let path = entry.path();
         let result = match entry.file_type().await {
             Ok(file_type) if file_type.is_dir() => tokio::fs::remove_dir_all(&path).await,

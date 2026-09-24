@@ -143,7 +143,7 @@ git commit -m "feat: add durable upload session storage"
 - Modify: `backend/src/upload/session.rs`
 - Test: `backend/tests/upload_sessions.rs`
 
-- [ ] **Step 1: Write failing HTTP tests**
+- [x] **Step 1: Write failing HTTP tests**
 
 Cover these concrete cases with the existing Actix test fixture:
 
@@ -153,13 +153,13 @@ Cover these concrete cases with the existing Actix test fixture:
 4. `GET /api/issues/{code}/upload-sessions` only lists the owner’s nonterminal sessions; `GET /api/upload-sessions/{id}` returns the exact authoritative offset.
 5. `DELETE` is idempotent for OPEN sessions and returns conflict with the delivered `task_id` after delivery.
 
-- [ ] **Step 2: Run the focused tests and verify they fail**
+- [x] **Step 2: Run the focused tests and verify they fail**
 
 Run: `cargo test --test upload_sessions -- --nocapture` from `backend/`.
 
 Expected: FAIL because the routes are not registered.
 
-- [ ] **Step 3: Implement create/list/get/delete handlers**
+- [x] **Step 3: Implement create/list/get/delete handlers**
 
 Use `RequireBusinessUser`, `normalize_issue_code`, and `require_issue_owner`. The create JSON body is:
 
@@ -175,13 +175,13 @@ struct CreateUploadSessionRequest {
 
 Reject empty/oversized names, negative/overflow values, file sizes above the existing per-request upload maximum, and idempotency keys outside a bounded 1–128 byte range. Create the `.uploads/{session_id}` directory and empty input file using server-generated names. On a database or capacity failure, remove the just-created directory and release the reservation. Return `Cache-Control: no-store, private` for all session responses.
 
-- [ ] **Step 4: Register routes and verify lifecycle tests**
+- [x] **Step 4: Register routes and verify lifecycle tests**
 
 Register `upload_sessions` in the `/api` scope. Run: `cargo test --test upload_sessions -- --nocapture`.
 
 Expected: all lifecycle and ownership tests pass.
 
-- [ ] **Step 5: Commit the lifecycle API**
+- [x] **Step 5: Commit the lifecycle API**
 
 ```bash
 git add backend/src/routes/upload_sessions.rs backend/src/routes/mod.rs backend/src/upload/session.rs backend/tests/upload_sessions.rs
@@ -199,17 +199,17 @@ git commit -m "feat: expose resumable upload session lifecycle"
 - Modify: `backend/src/main.rs`
 - Test: `backend/tests/upload_sessions.rs`
 
-- [ ] **Step 1: Write failing chunk and recovery tests**
+- [x] **Step 1: Write failing chunk and recovery tests**
 
 Add three tests. The first sends the first 8 MiB with the correct offset and SHA-256, repeats the same chunk and expects the same confirmed offset, sends a conflicting duplicate and expects 409, sends a future offset and expects 409 with the authoritative offset, sends a bad SHA-256 and verifies the file length is unchanged, then sends the short final chunk. The second completes the session, repeats complete after discarding the first response, and asserts one DELIVERED session and one Bundle row. The third writes 1 MiB beyond the database offset, runs startup reconciliation, and asserts the input is truncated to the committed offset.
 
-- [ ] **Step 2: Run tests and verify the new behavior fails**
+- [x] **Step 2: Run tests and verify the new behavior fails**
 
 Run: `cargo test --test upload_sessions -- --nocapture` from `backend/`.
 
 Expected: FAIL because chunk and complete endpoints are not present.
 
-- [ ] **Step 3: Implement raw sequential chunk handling**
+- [x] **Step 3: Implement raw sequential chunk handling**
 
 Add `PUT /api/upload-sessions/{session_id}/chunks/{chunk_index}` with:
 
@@ -224,7 +224,7 @@ Add `PUT /api/upload-sessions/{session_id}/chunks/{chunk_index}` with:
 
 Return `{ session_id, status, committed_offset, next_chunk_index, expires_at }` and do not extend expiry on GET or duplicate old-chunk requests.
 
-- [ ] **Step 4: Implement complete and the persistent finalizer**
+- [x] **Step 4: Implement complete and the persistent finalizer**
 
 Add `POST /api/upload-sessions/{session_id}/complete`. Under the session lock, require all bytes committed, transition OPEN to FINALIZING idempotently, and return `202` with the session status. A background periodic worker claims FINALIZING sessions and:
 

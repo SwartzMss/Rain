@@ -74,6 +74,14 @@ impl ReceiveReservation {
         }
     }
 
+    /// Adopt bytes already counted by a durable upload session. Dropping the
+    /// returned reservation releases those bytes exactly once.
+    pub fn adopt_persistent(used: Arc<AtomicU64>, max: Arc<AtomicU64>, bytes: u64) -> Self {
+        let reservation = Self::new_with_dynamic_max(used, max);
+        reservation.budget.reserved.store(bytes, Ordering::Release);
+        reservation
+    }
+
     fn reserve(&self, bytes: u64) -> Result<(), AppError> {
         self.budget.reserve(bytes)
     }

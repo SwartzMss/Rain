@@ -87,6 +87,15 @@ pub struct CreateSessionRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct UploadSessionChunk {
+    pub session_id: String,
+    pub chunk_index: i64,
+    pub offset_bytes: i64,
+    pub size_bytes: i64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
 struct UploadSessionRow {
     id: String,
     issue_code: String,
@@ -230,6 +239,76 @@ pub async fn find_by_idempotency(
     row.try_into()
 }
 
+pub async fn list_sessions(
+    pool: &SqlitePool,
+    owner_user_id: &str,
+    issue_code: &str,
+) -> Result<Vec<UploadSession>, AppError> {
+    let rows = sqlx::query_as::<_, UploadSessionRow>(
+        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE owner_user_id = ? AND issue_code = ? AND status IN ('OPEN', 'FINALIZING') ORDER BY updated_at DESC",
+    )
+    .bind(owner_user_id)
+    .bind(issue_code)
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
+pub async fn cancel_session(
+    pool: &SqlitePool,
+    session_id: &str,
+    owner_user_id: &str,
+) -> Result<UploadSession, AppError> {
+    let existing = get_session(pool, session_id).await?;
+    if existing.owner_user_id != owner_user_id {
+        return Err(AppError::NotFound("upload session not found".into()));
+    }
+    if existing.status == SessionStatus::Delivered {
+        return Err(AppError::public(
+            actix_web::http::StatusCode::CONFLICT,
+            "UPLOAD_SESSION_DELIVERED",
+            format!(
+                "upload session already delivered as {}",
+                existing.bundle_id.as_deref().unwrap_or("unknown task")
+            ),
+        ));
+    }
+    if matches!(
+        existing.status,
+        SessionStatus::Cancelled | SessionStatus::Expired | SessionStatus::Failed
+    ) {
+        return Ok(existing);
+    }
+    crate::db::write::run(
+        pool,
+        "cancel upload session",
+        &(session_id, owner_user_id),
+        |conn, (session_id, owner_user_id)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE upload_sessions SET status='CANCELLED', updated_at=CURRENT_TIMESTAMP WHERE id=? AND owner_user_id=? AND status IN ('OPEN', 'FINALIZING')",
+                )
+                .bind(*session_id)
+                .bind(*owner_user_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                Ok(())
+            })
+        },
+    )
+    .await?;
+    get_session(pool, session_id).await
+}
+
+pub fn same_create_metadata(session: &UploadSession, input: &CreateSessionRow) -> bool {
+    session.file_name == input.file_name
+        && session.file_size_bytes == input.file_size_bytes
+        && session.last_modified_ms == input.last_modified_ms
+        && session.chunk_size_bytes == input.chunk_size_bytes
+}
+
 pub async fn active_declared_bytes(pool: &SqlitePool) -> Result<u64, AppError> {
     let total: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(file_size_bytes), 0) FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING')",
@@ -239,6 +318,294 @@ pub async fn active_declared_bytes(pool: &SqlitePool) -> Result<u64, AppError> {
     .map_err(AppError::Database)?;
     u64::try_from(total)
         .map_err(|_| AppError::Config("upload session byte total is negative".into()))
+}
+
+pub async fn find_chunk(
+    pool: &SqlitePool,
+    session_id: &str,
+    chunk_index: u64,
+) -> Result<Option<UploadSessionChunk>, AppError> {
+    let chunk_index = i64::try_from(chunk_index)
+        .map_err(|_| AppError::BadRequest("upload session chunk index is too large".into()))?;
+    sqlx::query_as::<_, UploadSessionChunk>(
+        "SELECT session_id, chunk_index, offset_bytes, size_bytes, sha256 FROM upload_session_chunks WHERE session_id=? AND chunk_index=?",
+    )
+    .bind(session_id)
+    .bind(chunk_index)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::Database)
+}
+
+pub async fn record_chunk(
+    pool: &SqlitePool,
+    session_id: &str,
+    chunk_index: u64,
+    offset_bytes: u64,
+    size_bytes: u64,
+    sha256: &str,
+) -> Result<UploadSession, AppError> {
+    let chunk_index = i64::try_from(chunk_index)
+        .map_err(|_| AppError::BadRequest("upload session chunk index is too large".into()))?;
+    let offset_bytes = i64::try_from(offset_bytes)
+        .map_err(|_| AppError::BadRequest("upload session offset is too large".into()))?;
+    let size_bytes = i64::try_from(size_bytes)
+        .map_err(|_| AppError::BadRequest("upload session chunk is too large".into()))?;
+    crate::db::write::run(
+        pool,
+        "record upload session chunk",
+        &(session_id, chunk_index, offset_bytes, size_bytes, sha256),
+        |conn, (session_id, chunk_index, offset_bytes, size_bytes, sha256)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO upload_session_chunks (session_id, chunk_index, offset_bytes, size_bytes, sha256) VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(*session_id)
+                .bind(*chunk_index)
+                .bind(*offset_bytes)
+                .bind(*size_bytes)
+                .bind(*sha256)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    if is_unique_violation(&error) {
+                        AppError::Conflict("upload session chunk already exists".into())
+                    } else {
+                        AppError::Database(error)
+                    }
+                })?;
+                let updated = sqlx::query(
+                    "UPDATE upload_sessions SET committed_offset=committed_offset + ?, next_chunk_index=next_chunk_index + 1, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='OPEN' AND committed_offset=? AND next_chunk_index=?",
+                )
+                .bind(*size_bytes)
+                .bind(*session_id)
+                .bind(*offset_bytes)
+                .bind(*chunk_index)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                if updated.rows_affected() != 1 {
+                    return Err(AppError::Conflict(
+                        "upload session offset changed; retry from the authoritative offset"
+                            .into(),
+                    ));
+                }
+                load_by_id(conn, session_id).await
+            })
+        },
+    )
+    .await
+}
+
+pub async fn list_finalizing(pool: &SqlitePool) -> Result<Vec<UploadSession>, AppError> {
+    let rows = sqlx::query_as::<_, UploadSessionRow>(
+        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE status='FINALIZING' ORDER BY updated_at ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
+pub async fn list_recoverable(pool: &SqlitePool) -> Result<Vec<UploadSession>, AppError> {
+    let rows = sqlx::query_as::<_, UploadSessionRow>(
+        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') ORDER BY updated_at ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
+pub async fn expire_sessions(pool: &SqlitePool) -> Result<Vec<UploadSession>, AppError> {
+    let candidates = sqlx::query_as::<_, UploadSessionRow>(
+        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') AND (datetime(expires_at) <= CURRENT_TIMESTAMP OR datetime(updated_at) <= datetime('now', '-24 hours'))",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(AppError::Database)?;
+    let mut expired = Vec::new();
+    for row in candidates {
+        let session: UploadSession = row.try_into()?;
+        let updated = crate::db::write::run(
+            pool,
+            "expire upload session",
+            &(&session.id,),
+            |conn, (session_id,)| {
+                Box::pin(async move {
+                    let result = sqlx::query(
+                        "UPDATE upload_sessions SET status='EXPIRED', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('OPEN', 'FINALIZING')",
+                    )
+                    .bind(*session_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                    Ok(result.rows_affected() == 1)
+                })
+            },
+        )
+        .await?;
+        if updated {
+            expired.push(session);
+        }
+    }
+    Ok(expired)
+}
+
+pub async fn mark_finalizing(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> Result<UploadSession, AppError> {
+    crate::db::write::run(pool, "mark upload session finalizing", &(session_id,), |conn, (session_id,)| {
+        Box::pin(async move {
+            sqlx::query("UPDATE upload_sessions SET status='FINALIZING', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='OPEN'")
+                .bind(*session_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+            Ok(())
+        })
+    })
+    .await?;
+    get_session(pool, session_id).await
+}
+
+pub async fn mark_delivered(
+    pool: &SqlitePool,
+    session_id: &str,
+    bundle_id: &str,
+) -> Result<UploadSession, AppError> {
+    crate::db::write::run(
+        pool,
+        "mark upload session delivered",
+        &(session_id, bundle_id),
+        |conn, (session_id, bundle_id)| {
+            Box::pin(async move {
+                let updated = sqlx::query(
+                    "UPDATE upload_sessions SET status='DELIVERED', bundle_id=COALESCE(bundle_id, ?), updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='FINALIZING'",
+                )
+                .bind(*bundle_id)
+                .bind(*session_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                if updated.rows_affected() != 1 {
+                    return Err(AppError::Conflict(
+                        "upload session is no longer finalizing".into(),
+                    ));
+                }
+                Ok(())
+            })
+        },
+    )
+    .await?;
+    get_session(pool, session_id).await
+}
+
+pub async fn mark_failed(
+    pool: &SqlitePool,
+    session_id: &str,
+    code: &str,
+    reason: &str,
+) -> Result<(), AppError> {
+    crate::db::write::run(
+        pool,
+        "mark upload session failed",
+        &(session_id, code, reason),
+        |conn, (session_id, code, reason)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE upload_sessions SET status='FAILED', failure_code=?, failure_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('OPEN', 'FINALIZING')",
+                )
+                .bind(*code)
+                .bind(*reason)
+                .bind(*session_id)
+                .execute(&mut *conn)
+                .await
+                .map(|_| ())
+                .map_err(AppError::Database)
+            })
+        },
+    )
+    .await
+}
+
+pub async fn attach_processing_bundle(
+    pool: &SqlitePool,
+    session_id: &str,
+    bundle_id: &str,
+    bundle_hash: &str,
+) -> Result<UploadSession, AppError> {
+    crate::db::write::run(
+        pool,
+        "attach processing bundle to upload session",
+        &(session_id, bundle_id, bundle_hash),
+        |conn, (session_id, bundle_id, bundle_hash)| {
+            Box::pin(async move {
+                let session: Option<(String, String, String, i64, Option<String>)> =
+                    sqlx::query_as(
+                        "SELECT issue_code, owner_user_id, file_name, file_size_bytes, bundle_id FROM upload_sessions WHERE id=? AND status='FINALIZING'",
+                    )
+                    .bind(*session_id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                let Some((issue_code, owner_user_id, file_name, file_size_bytes, existing_bundle)) =
+                    session
+                else {
+                    return Err(AppError::Conflict(
+                        "upload session is not ready for finalization".into(),
+                    ));
+                };
+                if let Some(existing_bundle) = existing_bundle {
+                    if existing_bundle != *bundle_id {
+                        return Err(AppError::Conflict(
+                            "upload session is attached to another bundle".into(),
+                        ));
+                    }
+                    return load_by_id(conn, session_id).await;
+                }
+                let inserted = sqlx::query(
+                    "INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, uploader_user_id, size_bytes) SELECT ?, issue_code, ?, file_name, 'PROCESSING', 'RECEIVING', owner_user_id, file_size_bytes FROM upload_sessions WHERE id=? AND status='FINALIZING' AND bundle_id IS NULL AND EXISTS (SELECT 1 FROM issues WHERE code=? AND status='ACTIVE')",
+                )
+                .bind(*bundle_id)
+                .bind(*bundle_hash)
+                .bind(*session_id)
+                .bind(&issue_code)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                if inserted.rows_affected() != 1 {
+                    return Err(AppError::Conflict(
+                        "issue is missing or being deleted".into(),
+                    ));
+                }
+                sqlx::query(
+                    "INSERT OR IGNORE INTO bundle_search_indexes (bundle_id, backend, state) VALUES (?, 'sqlite_fts', 'BUILDING')",
+                )
+                .bind(*bundle_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                let updated = sqlx::query(
+                    "UPDATE upload_sessions SET bundle_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='FINALIZING' AND bundle_id IS NULL",
+                )
+                .bind(*bundle_id)
+                .bind(*session_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                if updated.rows_affected() != 1 {
+                    return Err(AppError::Conflict(
+                        "upload session changed during finalization".into(),
+                    ));
+                }
+                let _ = (owner_user_id, file_name, file_size_bytes);
+                load_by_id(conn, session_id).await
+            })
+        },
+    )
+    .await
 }
 
 async fn load_by_id(
