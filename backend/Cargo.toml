@@ -48,4 +48,7 @@ caseless = "0.2"
 tantivy = { version = "0.26.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+] }
