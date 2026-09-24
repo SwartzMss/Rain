@@ -189,23 +189,24 @@ pub fn resolve(
         heap = configured.search_tantivy_writer_heap_size;
     }
 
-    let mut decisions = Vec::new();
-    decisions.push((
-        "upload_concurrent_processing_tasks".into(),
-        decision(processing_mode, processing as u64, "cpu_capacity"),
-    ));
-    decisions.push((
-        "search_tantivy_max_writers".into(),
-        decision(
-            writers_mode,
-            writers as u64,
-            "cpu_capacity_and_memory_budget",
+    let decisions = vec![
+        (
+            "upload_concurrent_processing_tasks".into(),
+            decision(processing_mode, processing as u64, "cpu_capacity"),
         ),
-    ));
-    decisions.push((
-        "search_tantivy_writer_heap_size".into(),
-        decision(heap_mode, heap, "memory_budget"),
-    ));
+        (
+            "search_tantivy_max_writers".into(),
+            decision(
+                writers_mode,
+                writers as u64,
+                "cpu_capacity_and_memory_budget",
+            ),
+        ),
+        (
+            "search_tantivy_writer_heap_size".into(),
+            decision(heap_mode, heap, "memory_budget"),
+        ),
+    ];
     RuntimePlan {
         resources: resources.clone(),
         upload_processing_tasks: processing,

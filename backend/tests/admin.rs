@@ -314,6 +314,13 @@ async fn registration_settings_are_persistent_and_admin_only() {
             .iter()
             .any(|field| field["key"] == "argon2_concurrency")
     );
+    for key in [
+        "session_ttl_seconds",
+        "register_ip_limit_per_hour",
+        "login_username_failure_limit_per_5_minutes",
+    ] {
+        assert!(!fields.iter().any(|field| field["key"] == key));
+    }
     let issue_size = fields
         .iter()
         .find(|field| field["key"] == "issue_max_content_size")
@@ -349,6 +356,24 @@ async fn registration_settings_are_persistent_and_admin_only() {
             .await
             .expect("settings audit count");
     assert_eq!(settings_audits_after, settings_audits_before);
+    let protected_auth_defaults = test::call_service(
+        &app,
+        test::TestRequest::patch()
+            .uri("/api/admin/settings")
+            .cookie(cookie.clone())
+            .set_json(serde_json::json!({
+                "expected_revision": revision,
+                "changes": {"session_ttl_seconds": 86400}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        protected_auth_defaults.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let error: serde_json::Value = test::read_body_json(protected_auth_defaults).await;
+    assert_eq!(error["code"], "SETTINGS_PROTECTED_FIELD");
     let missing_revision = test::call_service(
         &app,
         test::TestRequest::patch()
