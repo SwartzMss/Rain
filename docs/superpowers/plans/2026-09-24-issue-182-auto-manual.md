@@ -230,7 +230,7 @@ git commit -m "feat: persist resource setting modes"
 - Test: backend/tests/admin.rs
 - Test: backend/tests/settings.rs
 
-- [ ] Step 1: Write failing API and protection tests
+- [x] Step 1: Write failing API and protection tests
 
 Extend the existing admin settings integration test after the initial GET:
 
@@ -247,7 +247,7 @@ assert_eq!(body["auto_values"]["upload_concurrent_processing_tasks"], 4);
 
 Add a PATCH with the current revision and changes containing argon2_concurrency. Assert HTTP 422, code SETTINGS_PROTECTED_FIELD, unchanged revision, and no audit update. Add a mode-only Auto PATCH and assert mode auto, configured value 4, and a pending restart entry for the restart-required field.
 
-- [ ] Step 2: Run the API test and observe the expected failure
+- [x] Step 2: Run the API test and observe the expected failure
 
 ~~~bash
 cargo test --locked --test admin registration_settings_are_persistent_and_admin_only
@@ -255,7 +255,7 @@ cargo test --locked --test admin registration_settings_are_persistent_and_admin_
 
 Expected: failure because the response has no security, resource_modes, or auto_values and protected-field handling is absent.
 
-- [ ] Step 3: Extend the request type and route response
+- [x] Step 3: Extend the request type and route response
 
 In backend/src/models/admin.rs add:
 
@@ -284,7 +284,7 @@ AppError::public(
 
 Reject malformed mode combinations using SETTINGS_INVALID_REQUEST. Do not update runtime resources for restart-required fields and preserve existing hot authentication/cleanup updates.
 
-- [ ] Step 4: Run backend API and regression tests
+- [x] Step 4: Run backend API and regression tests
 
 ~~~bash
 cargo fmt --check

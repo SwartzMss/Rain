@@ -65,6 +65,19 @@ fn validate_resource_mode_patch(modes: &ResourceModes) -> Result<(), AppError> {
     Ok(())
 }
 
+fn validate_protected_changes(
+    changes: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), AppError> {
+    if changes.contains_key("argon2_concurrency") {
+        return Err(AppError::public(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "SETTINGS_PROTECTED_FIELD",
+            "该配置项由系统安全策略管理，管理员不可修改",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct SettingsService {
     pool: SqlitePool,
@@ -223,6 +236,7 @@ impl SettingsService {
             ));
         }
         validate_resource_mode_patch(resource_modes)?;
+        validate_protected_changes(changes)?;
         if expected_revision == i64::MAX {
             return Err(AppError::public(
                 StatusCode::CONFLICT,

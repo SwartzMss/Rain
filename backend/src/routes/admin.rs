@@ -10,6 +10,7 @@ use crate::{
     error::AppError,
     models::admin::*,
     services::issue_cleanup_policy::IssueCleanupPolicy,
+    settings::{self, SettingsValues},
 };
 
 fn limit(value: Option<i64>) -> Result<i64, AppError> {
@@ -281,6 +282,21 @@ pub async fn update_settings(
     body: web::Json<UpdateRegistrationSettings>,
 ) -> Result<HttpResponse, AppError> {
     let current = state.settings.load().await?;
+    if body.changes.as_ref().is_some_and(|changes| {
+        changes.keys().any(|key| {
+            settings::metadata::all().iter().any(|field| {
+                field.protected
+                    && serde_json::to_value(field.key).ok().as_ref()
+                        == Some(&serde_json::Value::String(key.clone()))
+            })
+        })
+    }) {
+        return Err(AppError::public(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "SETTINGS_PROTECTED_FIELD",
+            "该配置项由系统安全策略管理，管理员不可修改",
+        ));
+    }
     if let Some(value) = body.issue_inactive_days.as_ref()
         && !value
             .as_i64()
@@ -359,7 +375,7 @@ pub async fn update_settings(
     }
     let expected_revision = match body.expected_revision.as_ref() {
         Some(value) => parse_revision(value)?,
-        None if body.changes.is_some() => {
+        None if body.changes.is_some() || body.resource_modes.is_some() => {
             return Err(AppError::api(
                 StatusCode::PRECONDITION_REQUIRED,
                 "SETTINGS_REVISION_REQUIRED",
@@ -375,11 +391,13 @@ pub async fn update_settings(
         .headers()
         .get("user-agent")
         .and_then(|value| value.to_str().ok());
+    let resource_modes = body.resource_modes.clone().unwrap_or_default();
     let result = state
         .settings
-        .save_with_context(
+        .save_with_context_and_modes(
             expected_revision,
             &changes,
+            &resource_modes,
             Some(&admin.0.id),
             client_ip.as_deref(),
             user_agent,
@@ -474,10 +492,8 @@ async fn settings_response_with_metadata(
 fn settings_response(
     snapshot: &std::sync::Arc<crate::settings::SettingsSnapshot>,
 ) -> serde_json::Value {
-    let configured =
-        serde_json::to_value(&snapshot.configured).unwrap_or_else(|_| serde_json::json!({}));
-    let effective =
-        serde_json::to_value(&snapshot.effective).unwrap_or_else(|_| serde_json::json!({}));
+    let configured = public_settings_map(&snapshot.configured);
+    let effective = public_settings_map(&snapshot.effective);
     let restart_fields = [
         "argon2_concurrency",
         "upload_concurrent_processing_tasks",
@@ -490,8 +506,24 @@ fn settings_response(
     ];
     let pending_restart_fields: Vec<&str> = restart_fields
         .into_iter()
+        .filter(|field| *field != "argon2_concurrency")
         .filter(|field| configured.get(*field) != effective.get(*field))
         .collect();
+    let auto_values = settings::metadata::admin()
+        .into_iter()
+        .filter_map(|field| {
+            field.auto_value.map(|value| {
+                (
+                    serde_json::to_value(field.key)
+                        .expect("setting metadata keys serialize")
+                        .as_str()
+                        .expect("setting metadata keys are strings")
+                        .to_owned(),
+                    serde_json::json!(value),
+                )
+            })
+        })
+        .collect::<serde_json::Map<_, _>>();
     serde_json::json!({
         "schema_version": 2,
         "revision": snapshot.revision.to_string(),
@@ -502,10 +534,21 @@ fn settings_response(
         "cleanup_exempt_usernames": snapshot.configured.cleanup_exempt_usernames,
         "configured": configured,
         "effective": effective,
+        "resource_modes": snapshot.resource_modes,
+        "auto_values": auto_values,
+        "security": {"argon2id_enabled": true},
         "restart_required": !pending_restart_fields.is_empty(),
         "pending_restart_fields": pending_restart_fields,
-        "fields": crate::settings::metadata::all(),
+        "fields": settings::metadata::admin(),
     })
+}
+
+fn public_settings_map(values: &SettingsValues) -> serde_json::Value {
+    let mut value = serde_json::to_value(values).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.remove("argon2_concurrency");
+    }
+    value
 }
 
 #[get("/admin/users")]
