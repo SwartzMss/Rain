@@ -18,9 +18,9 @@ Rain 将配置分成三类：
 
 ## 资源并发模式
 
-以下资源字段支持 `Manual`/`Auto` 模式：上传处理并发、上传接收并发、Tantivy writer、全局行读取并发和临时结果物化并发。已有数据库和新安装默认都是 `Manual`。`Auto` 使用后端固定值（依次为 `4`、`4`、`1`、`8`、`2`），不是根据 CPU 或内存实时计算；管理员不能在 Auto 模式下覆盖该数值。
+以下资源字段支持 `Manual`/`Auto` 模式：上传处理并发、上传接收并发、Tantivy writer、Tantivy writer heap、全局行读取并发和临时结果物化并发。已有数据库和新安装默认都是 `Manual`。上传处理并发、Tantivy writer 和 writer heap 在重启时由 runtime adaptive engine 根据 CPU/内存资源计算；其他字段继续使用后端固定 Auto 值。管理员不能在 Auto 模式下覆盖该数值。
 
-管理设置会同时返回 `configured` 和 `effective`。重启生效字段在保存后可能出现两者不一致，页面会标记“待重启”；Rain 不会在线调整已创建的并发运行时，也不会自动重启。Argon2id 始终由系统安全策略管理，管理员只能看到“Argon2id 已启用”状态，不能修改或通过管理 API 读取其并发数。CPU/内存感知、自适应调节、遥测和在线运行时调优暂未启用。
+管理设置会同时返回 `configured` 和 `effective`，并展示本次启动的资源来源、fallback 警告、估算占用和启发式内存目标。重启生效字段在保存后可能出现两者不一致，页面会标记“待重启”；Rain 不会在线调整已创建的并发运行时，也不会自动重启。Argon2id 始终由系统安全策略管理，管理员只能看到“Argon2id 已启用”状态，不能修改或通过管理 API 读取其并发数。query concurrency 是内部 runtime 保护参数，不出现在管理员 resource modes 或 RuntimeDecision 中。
 
 Issue 内容搜索会在每个请求内最多并行查询 2 个 Tantivy bundle，进程内最多同时执行 4 个 Tantivy 查询；单 bundle 搜索也计入进程级额度。结果仍按统一排序键合并并分页，搜索取消或索引删除时会保留查询任务和 generation lease 的生命周期保护。
 

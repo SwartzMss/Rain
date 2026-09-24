@@ -59,6 +59,23 @@ export interface RegistrationSettings extends RegistrationStatus {
   resource_modes?: Record<string, ResourceMode>;
   auto_values?: Record<string, number>;
   security?: AdminSecurityStatus;
+  runtime?: {
+    policy_version: string;
+    resources: {
+      cpu_cores: number;
+      memory_limit_bytes: number | null;
+      cpu_source: 'os' | 'cgroup' | 'fallback';
+      memory_source: 'os' | 'cgroup' | 'fallback';
+      warnings: string[];
+    };
+    upload_concurrent_processing_tasks: number;
+    search_tantivy_max_writers: number;
+    search_tantivy_writer_heap_size: number;
+    estimated_bytes: number;
+    adaptive_memory_target_bytes: number | null;
+    warnings: string[];
+    decisions: Array<[string, { value: number; mode: ResourceMode; reason: string }]>
+  };
   restart_required?: boolean;
   pending_restart_fields?: string[];
   fields?: RegistrationSettingField[];

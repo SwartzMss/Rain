@@ -8,6 +8,7 @@ import type {
   UserStatus,
   AuthRateLimitEntry,
   RegistrationSettingField,
+  RegistrationSettings,
   ResourceMode,
 } from "../../api/types";
 import { useAuth } from "../../auth/AuthContext";
@@ -27,6 +28,34 @@ import {
   serializeSettingValue,
   settingInputValue,
 } from "./settingsFields";
+
+function formatRuntimeBytes(value: number | null): string {
+  if (value === null) return "未知";
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let amount = value;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit += 1;
+  }
+  return `${amount >= 10 || unit === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
+}
+
+function resourceSourceLabel(source: "os" | "cgroup" | "fallback"): string {
+  if (source === "fallback") return "fallback（探测不可用）";
+  if (source === "cgroup") return "cgroup 限制";
+  return "操作系统";
+}
+
+function runtimeWarningLabel(warning: string): string {
+  const labels: Record<string, string> = {
+    cpu_probe_fallback: "CPU 资源探测不可用，使用保守 fallback（1 核）",
+    memory_probe_fallback: "内存资源探测不可用，使用保守 fallback（512 MiB）",
+    adaptive_memory_target_is_heuristic: "自适应内存目标是启发式估算，不是硬限制",
+    estimated_budget_exceeded: "最低合法并发计划仍超过启发式内存目标",
+  };
+  return labels[warning] ?? warning;
+}
 
 function parseAdminDate(value: string): Date {
   const normalized = value.trim().replace(/ UTC$/i, "Z").replace(" ", "T");
@@ -473,6 +502,7 @@ export function AdminSettingsPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [pendingRestartFields, setPendingRestartFields] = useState<string[]>([]);
   const [revision, setRevision] = useState<string | null>(null);
+  const [runtime, setRuntime] = useState<RegistrationSettings["runtime"]>();
   const [commonFields, setCommonFields] = useState<RegistrationSettingField[]>([]);
   const [advancedFields, setAdvancedFields] = useState<RegistrationSettingField[]>([]);
   const [expertFields, setExpertFields] = useState<RegistrationSettingField[]>([]);
@@ -497,6 +527,7 @@ export function AdminSettingsPage() {
       setCleanupExemptUsernames(value.cleanup_exempt_usernames ?? []);
       setPendingRestartFields(value.pending_restart_fields ?? []);
       setRevision(value.revision ?? null);
+      setRuntime(value.runtime);
       setResourceModes(value.resource_modes ?? {});
       setInitialResourceModes(value.resource_modes ?? {});
       setAutoValues(value.auto_values ?? {});
@@ -535,6 +566,7 @@ export function AdminSettingsPage() {
       setIssueInactiveDays(result.issue_inactive_days);
       setPendingRestartFields(result.pending_restart_fields ?? []);
       setRevision(result.revision ?? null);
+      setRuntime(result.runtime);
       setMessage("设置已保存");
     } catch (e) {
       setSaveError(normalizeApiError(e));
@@ -568,6 +600,7 @@ export function AdminSettingsPage() {
       setIssueInactiveDays(result.issue_inactive_days);
       setPendingRestartFields(result.pending_restart_fields ?? []);
       setRevision(result.revision ?? null);
+      setRuntime(result.runtime);
       setMessage("Issue 过期配置已保存");
     } catch (e) {
       setSaveError(normalizeApiError(e));
@@ -601,6 +634,7 @@ export function AdminSettingsPage() {
       setCleanupExemptUsernames(result.cleanup_exempt_usernames ?? []);
       setPendingRestartFields(result.pending_restart_fields ?? []);
       setRevision(result.revision ?? null);
+      setRuntime(result.runtime);
       setMessage("自动清理白名单已保存");
     } catch (e) {
       setSaveError(normalizeApiError(e));
@@ -643,11 +677,13 @@ export function AdminSettingsPage() {
         ? await rainApi.updateAdminSettingsV2(revision ?? "0", changes, resourceModePatch)
         : await rainApi.updateAdminSettingsV2(revision ?? "0", changes);
       setRevision(result.revision ?? null);
+      setRuntime(result.runtime);
       setResourceModes(result.resource_modes ?? resourceModes);
       setInitialResourceModes(result.resource_modes ?? resourceModes);
       setEffectiveValues(result.effective ?? effectiveValues);
       setAutoValues(result.auto_values ?? autoValues);
       setSecurityStatus(result.security ?? securityStatus);
+      setRuntime(result.runtime);
       const nextDraft = createSettingDraft(fields, result.configured ?? draft);
       if (section === "common-settings") setCommonDraft(nextDraft);
       if (section === "advanced-settings") setAdvancedDraft(nextDraft);
@@ -728,6 +764,47 @@ export function AdminSettingsPage() {
           >
             {loadError}
           </p>
+        ) : null}
+
+        {runtime ? (
+          <SettingsSection
+            icon="settings"
+            title="运行时资源探测"
+            description="展示本次启动用于自适应计算的资源来源。fallback 表示探测不可用，内存目标是启发式估算，不是 RSS 或分配硬限制。"
+          >
+            <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2" data-testid="runtime-resource-summary">
+              <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
+                <span className="text-slate-500">CPU</span>
+                <p className="mt-1 font-medium text-slate-800">
+                  {runtime.resources.cpu_cores} 核 · {resourceSourceLabel(runtime.resources.cpu_source)}
+                </p>
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
+                <span className="text-slate-500">内存限制</span>
+                <p className="mt-1 font-medium text-slate-800">
+                  {formatRuntimeBytes(runtime.resources.memory_limit_bytes)} · {resourceSourceLabel(runtime.resources.memory_source)}
+                </p>
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
+                <span className="text-slate-500">自适应内存目标</span>
+                <p className="mt-1 font-medium text-slate-800">{formatRuntimeBytes(runtime.adaptive_memory_target_bytes)}</p>
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
+                <span className="text-slate-500">当前估算占用</span>
+                <p className="mt-1 font-medium text-slate-800">{formatRuntimeBytes(runtime.estimated_bytes)}</p>
+              </div>
+            </div>
+            {runtime.resources.warnings.length > 0 || runtime.warnings.length > 0 ? (
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                <p className="font-semibold">资源探测提示</p>
+                <p className="mt-1">
+                  {[...new Set([...runtime.resources.warnings, ...runtime.warnings])]
+                    .map(runtimeWarningLabel)
+                    .join("；")}
+                </p>
+              </div>
+            ) : null}
+          </SettingsSection>
         ) : null}
 
         {commonFields.length > 0 ? (

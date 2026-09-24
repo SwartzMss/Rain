@@ -16,6 +16,7 @@ const RESOURCE_MODE_KEYS: [&str; 5] = [
     "upload_concurrent_processing_tasks",
     "upload_concurrent_receive_tasks",
     "search_tantivy_max_writers",
+    "search_tantivy_writer_heap_size",
     "api_concurrent_line_reads",
     "temp_results_concurrent_materializations",
 ];
@@ -137,6 +138,23 @@ impl SettingsService {
 
     pub async fn snapshot(&self) -> Arc<SettingsSnapshot> {
         self.snapshot.read().await.clone()
+    }
+
+    /// Publish values that were actually used to construct process runtimes.
+    /// This does not touch the database or configuration revision.
+    pub async fn set_effective(&self, effective: SettingsValues) -> Result<(), AppError> {
+        effective
+            .validate()
+            .map_err(|errors| AppError::Config(format!("effective settings: {errors:?}")))?;
+        let current = self.snapshot().await;
+        let snapshot = Arc::new(SettingsSnapshot {
+            revision: current.revision,
+            configured: current.configured.clone(),
+            effective,
+            resource_modes: current.resource_modes.clone(),
+        });
+        *self.snapshot.write().await = snapshot;
+        Ok(())
     }
 
     /// Reload the already-initialized row without mutating the database. This

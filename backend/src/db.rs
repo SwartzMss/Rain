@@ -620,7 +620,8 @@ pub async fn load_or_initialize_system_settings(
     let issue_inactive_days = i64::try_from(issue_inactive_days)
         .map_err(|_| AppError::Config("Issue 非活跃天数过大".into()))?;
     sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days) VALUES(1, ?, ?, ?, ?)")
-        .bind(allow_registration as i64).bind(ip).bind(username).bind(issue_inactive_days).execute(pool).await.map_err(AppError::Database)?;
+        .bind(allow_registration as i64).bind(ip).bind(username).bind(issue_inactive_days)
+        .execute(pool).await.map_err(AppError::Database)?;
     let row: (i64, i64, i64, i64) = sqlx::query_as("SELECT allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days FROM system_settings WHERE id=1").fetch_one(pool).await.map_err(AppError::Database)?;
     let ip = usize::try_from(row.1)
         .map_err(|_| AppError::Config("数据库中的 IP 限流阈值无效".into()))?;

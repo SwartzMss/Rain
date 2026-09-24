@@ -119,6 +119,26 @@ async fn main() -> std::io::Result<()> {
     bootstrap_snapshot
         .configured
         .apply_to_config(&mut config.limits, &mut config.auth);
+    let runtime_resources = backend::runtime_adaptive::ResourceSnapshot::probe();
+    let runtime_plan = backend::runtime_adaptive::resolve(
+        &runtime_resources,
+        &bootstrap_snapshot.configured,
+        &bootstrap_snapshot.resource_modes,
+        config.search_backend == backend::search::publication::SearchBackendKind::Tantivy,
+    );
+    runtime_plan.apply_to_limits(&mut config.limits);
+    info!(
+        cpu_cores = runtime_resources.cpu_cores,
+        memory_limit_bytes = ?runtime_resources.memory_limit_bytes,
+        upload_processing_tasks = runtime_plan.upload_processing_tasks,
+        tantivy_max_writers = runtime_plan.tantivy_max_writers,
+        tantivy_writer_heap_size = runtime_plan.tantivy_writer_heap_size,
+        tantivy_max_concurrent_queries = runtime_plan.tantivy_max_concurrent_queries,
+        estimated_bytes = runtime_plan.estimated_bytes,
+        adaptive_memory_target_bytes = ?runtime_plan.adaptive_memory_target_bytes,
+        warnings = ?runtime_plan.warnings,
+        "resolved adaptive runtime plan"
+    );
     log_sqlite_file_sizes(&config.database_url).await;
 
     if config.reset_db {
@@ -199,12 +219,13 @@ async fn main() -> std::io::Result<()> {
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     info!(limits = ?config.limits, "effective application limits");
-    let mut app_state = AppState::with_blob_store_and_auth(
+    let mut app_state = AppState::with_blob_store_and_auth_and_runtime_plan(
         pool,
         config.data_root.clone(),
         config.limits.clone(),
         config.auth.clone(),
         blob_store,
+        runtime_plan.clone(),
     );
     app_state
         .settings
@@ -216,6 +237,16 @@ async fn main() -> std::io::Result<()> {
         )
         .await
         .expect("failed to load converged system settings into runtime");
+    let current_effective = app_state.settings.snapshot().await;
+    let mut effective = current_effective.effective.clone();
+    effective.upload_concurrent_processing_tasks = runtime_plan.upload_processing_tasks;
+    effective.search_tantivy_max_writers = runtime_plan.tantivy_max_writers;
+    effective.search_tantivy_writer_heap_size = runtime_plan.tantivy_writer_heap_size;
+    app_state
+        .settings
+        .set_effective(effective)
+        .await
+        .expect("failed to publish adaptive runtime values");
     let active_upload_session_bytes =
         backend::upload::session::active_declared_bytes(&app_state.db.pool)
             .await

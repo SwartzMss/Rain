@@ -8,6 +8,7 @@ pub mod log_expression;
 pub mod models;
 pub mod repositories;
 pub mod routes;
+pub mod runtime_adaptive;
 pub mod search;
 pub mod services;
 pub mod settings;
@@ -117,13 +118,15 @@ pub struct SearchRuntime {
 }
 
 impl SearchRuntime {
-    pub fn new(max_writers: usize, writer_heap_size_bytes: u64) -> Self {
+    pub fn new(
+        max_writers: usize,
+        writer_heap_size_bytes: u64,
+        max_concurrent_queries: usize,
+    ) -> Self {
         Self {
             tantivy_budget: SearchResourceBudget::new(max_writers, writer_heap_size_bytes)
                 .expect("validated Tantivy resource budget"),
-            query_permits: Arc::new(Semaphore::new(
-                crate::search::resource::MAX_CONCURRENT_TANTIVY_QUERIES,
-            )),
+            query_permits: Arc::new(Semaphore::new(max_concurrent_queries.max(1))),
             generation_leases: crate::search::generation_lease::GenerationLeaseRegistry::shared(),
         }
     }
@@ -269,6 +272,7 @@ pub struct AppState {
     pub settings: SettingsService,
     pub limits: AppLimits,
     pub search_backend: crate::search::publication::SearchBackendKind,
+    pub runtime_plan: Option<crate::runtime_adaptive::RuntimePlan>,
 }
 
 const MAX_LINE_READ_CLIENTS: usize = 1024;
@@ -327,7 +331,34 @@ impl AppState {
         auth: AuthConfig,
         blob_store: Arc<dyn BlobStore>,
     ) -> Self {
-        Self::with_blob_store_auth(pool, data_root, limits, auth, blob_store)
+        Self::with_blob_store_auth(
+            pool,
+            data_root,
+            limits,
+            auth,
+            blob_store,
+            crate::search::resource::MAX_CONCURRENT_TANTIVY_QUERIES,
+            None,
+        )
+    }
+
+    pub fn with_blob_store_and_auth_and_runtime_plan(
+        pool: SqlitePool,
+        data_root: PathBuf,
+        limits: AppLimits,
+        auth: AuthConfig,
+        blob_store: Arc<dyn BlobStore>,
+        runtime_plan: crate::runtime_adaptive::RuntimePlan,
+    ) -> Self {
+        Self::with_blob_store_auth(
+            pool,
+            data_root,
+            limits,
+            auth,
+            blob_store,
+            runtime_plan.tantivy_max_concurrent_queries,
+            Some(runtime_plan),
+        )
     }
 
     fn with_blob_store_auth(
@@ -336,6 +367,8 @@ impl AppState {
         limits: AppLimits,
         auth: AuthConfig,
         blob_store: Arc<dyn BlobStore>,
+        max_concurrent_queries: usize,
+        runtime_plan: Option<crate::runtime_adaptive::RuntimePlan>,
     ) -> Self {
         let upload = UploadRuntime::new(
             limits.upload.concurrent_processing_tasks,
@@ -347,6 +380,7 @@ impl AppState {
         let search = SearchRuntime::new(
             limits.search.tantivy_max_writers,
             limits.search.tantivy_writer_heap_size,
+            max_concurrent_queries,
         );
         let temp_results = TempResultRuntime::new(limits.temp_results.concurrent_materializations);
         let line_read_permits = Arc::new(Semaphore::new(limits.api.concurrent_line_reads));
@@ -374,6 +408,7 @@ impl AppState {
             settings,
             limits,
             search_backend: crate::search::publication::SearchBackendKind::SqliteFts,
+            runtime_plan,
         }
     }
 

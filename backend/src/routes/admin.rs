@@ -482,6 +482,19 @@ async fn settings_response_with_metadata(
     .await
     .map_err(AppError::Database)?;
     let mut response = settings_response(snapshot);
+    if let Some(plan) = &state.runtime_plan {
+        response["runtime"] = serde_json::json!({
+            "policy_version": "v1",
+            "resources": plan.resources,
+            "upload_concurrent_processing_tasks": plan.upload_processing_tasks,
+            "search_tantivy_max_writers": plan.tantivy_max_writers,
+            "search_tantivy_writer_heap_size": plan.tantivy_writer_heap_size,
+            "estimated_bytes": plan.estimated_bytes,
+            "adaptive_memory_target_bytes": plan.adaptive_memory_target_bytes,
+            "warnings": plan.warnings,
+            "decisions": plan.decisions,
+        });
+    }
     response["updated_at"] = serde_json::Value::String(updated_at);
     response["updated_by_username"] = updated_by_username
         .map(serde_json::Value::String)

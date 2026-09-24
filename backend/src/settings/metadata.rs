@@ -202,8 +202,8 @@ const fn presentation(key: SettingKey) -> Presentation {
             ExpertVisibility,
             Some(16 * MIB),
             Some(256 * MIB),
-            false,
-            None,
+            true,
+            Some(64 * MIB),
             false,
         ),
         ApiFilePreviewSize => (

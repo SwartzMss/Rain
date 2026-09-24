@@ -105,6 +105,23 @@ it('presents metadata settings by visibility and reveals expert settings explici
         recommended_min: 1, recommended_max: 16,
       },
     ],
+    runtime: {
+      policy_version: 'v1',
+      resources: {
+        cpu_cores: 1,
+        memory_limit_bytes: 512 * 1024 * 1024,
+        cpu_source: 'fallback',
+        memory_source: 'fallback',
+        warnings: ['cpu_probe_fallback', 'memory_probe_fallback'],
+      },
+      upload_concurrent_processing_tasks: 1,
+      search_tantivy_max_writers: 1,
+      search_tantivy_writer_heap_size: 16 * 1024 * 1024,
+      estimated_bytes: 112 * 1024 * 1024,
+      adaptive_memory_target_bytes: 128 * 1024 * 1024,
+      warnings: ['adaptive_memory_target_is_heuristic'],
+      decisions: [],
+    },
   } as never);
 
   render(
@@ -114,6 +131,9 @@ it('presents metadata settings by visibility and reveals expert settings explici
   );
 
   await waitFor(() => expect(screen.getByText('常用配置')).toBeInTheDocument());
+  expect(screen.getByTestId('runtime-resource-summary')).toBeInTheDocument();
+  expect(screen.getAllByText(/fallback（探测不可用）/)).toHaveLength(2);
+  expect(screen.getByText(/自适应内存目标是启发式估算/)).toBeInTheDocument();
   expect(screen.getByText('高级运行参数')).toBeInTheDocument();
   expect(screen.queryByText('专家配置')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '显示专家配置' })).toBeInTheDocument();
