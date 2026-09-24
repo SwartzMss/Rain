@@ -2,7 +2,7 @@ use actix_files::NamedFile;
 use actix_web::{
     HttpResponse, delete, get,
     http::header::{Charset, ContentDisposition, DispositionParam, DispositionType, ExtendedValue},
-    web,
+    post, web,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -15,7 +15,10 @@ use crate::{
     models::files::{FileNode, FileNodeResponse},
     repositories::files::{fetch_children, fetch_file, resolve_file_path, to_file_node},
     services::{
-        file_deletion::{FileDeletionJobResponse, enqueue_file_deletion, load_file_deletion_job},
+        file_deletion::{
+            FileDeletionBatchItemInput, FileDeletionJobResponse, enqueue_file_deletion,
+            enqueue_file_deletion_batch, load_file_deletion_batch, load_file_deletion_job,
+        },
         file_reader::{read_file_lines, read_file_preview},
     },
 };
@@ -34,6 +37,11 @@ struct FilePath {
 struct LinesQuery {
     start: Option<i64>,
     limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct FileDeletionBatchRequest {
+    items: Vec<FileDeletionBatchItemInput>,
 }
 
 // scoped under /api in routes::register
@@ -224,6 +232,7 @@ pub async fn delete_file_node(
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
     let job = enqueue_file_deletion(&state.db.pool, &bundle.id, parsed_id, &user.0.id).await?;
+    state.file_deletion_notify.notify_one();
     touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "file deletion").await;
 
     Ok(HttpResponse::Accepted().json(FileDeletionJobResponse::from(job)))
@@ -237,4 +246,35 @@ pub async fn get_file_deletion_job(
 ) -> Result<HttpResponse, AppError> {
     let job = load_file_deletion_job(&state.db.pool, &job_id, &user.0.id).await?;
     Ok(HttpResponse::Ok().json(FileDeletionJobResponse::from(job)))
+}
+
+#[post("/file-deletion-batches")]
+pub async fn create_file_deletion_batch(
+    user: RequireBusinessUser,
+    payload: web::Json<FileDeletionBatchRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let mut issue_codes = std::collections::HashSet::new();
+    for item in &payload.items {
+        let bundle = load_bundle(&state.db.pool, &item.bundle_id).await?;
+        require_issue_owner(&state.db.pool, &bundle.issue_code, &user.0.id).await?;
+        ensure_bundle_ready(&bundle)?;
+        issue_codes.insert(bundle.issue_code);
+    }
+    let batch = enqueue_file_deletion_batch(&state.db.pool, &user.0.id, &payload.items).await?;
+    state.file_deletion_notify.notify_one();
+    for issue_code in issue_codes {
+        touch_issue_activity_best_effort(&state.db.pool, &issue_code, "file deletion batch").await;
+    }
+    Ok(HttpResponse::Accepted().json(batch))
+}
+
+#[get("/file-deletion-batches/{batch_id}")]
+pub async fn get_file_deletion_batch(
+    user: RequireBusinessUser,
+    batch_id: web::Path<String>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, AppError> {
+    let batch = load_file_deletion_batch(&state.db.pool, &batch_id, &user.0.id).await?;
+    Ok(HttpResponse::Ok().json(batch))
 }

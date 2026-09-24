@@ -41,7 +41,7 @@ export function IssueSelector({
             className="rounded-lg bg-slate-950 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
             onClick={onCreateClick}
           >
-            + 新建 Issue
+            新建 Issue
           </button>
         ) : null}
       </div>

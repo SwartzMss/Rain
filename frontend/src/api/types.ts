@@ -188,6 +188,26 @@ export interface FileDeletionJobResponse {
   finished_at: string | null;
 }
 
+export interface FileDeletionBatchItem {
+  item_id: string;
+  bundle_id: string;
+  file_id: number;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  error_code: string | null;
+}
+
+export interface FileDeletionBatchResponse {
+  batch_id: string;
+  status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'PARTIAL' | 'FAILED';
+  total_items: number;
+  completed_items: number;
+  failed_items: number;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  items: FileDeletionBatchItem[];
+}
+
 export interface FileNodeResponse {
   node: FileNode;
   children?: FileNode[];
