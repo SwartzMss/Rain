@@ -128,9 +128,9 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(2_592_000),
             false,
             None,
-            false,
+            true,
         ),
-        RegisterIpLimitPerHour => (Common, Default, Some(1), Some(100), false, None, false),
+        RegisterIpLimitPerHour => (Common, Default, Some(1), Some(100), false, None, true),
         LoginIpLimitPerMinute => (Common, Default, Some(5), Some(100), false, None, false),
         LoginUsernameFailureLimitPer5Minutes => {
             (Common, Default, Some(5), Some(50), false, None, false)
@@ -726,5 +726,11 @@ pub fn all() -> &'static [FieldMetadata] {
 }
 
 pub fn admin() -> Vec<&'static FieldMetadata> {
-    all().iter().filter(|field| !field.protected).collect()
+    all()
+        .iter()
+        .filter(|field| {
+            !field.protected
+                && !matches!(field.key, SettingKey::LoginUsernameFailureLimitPer5Minutes)
+        })
+        .collect()
 }

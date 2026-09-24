@@ -365,6 +365,8 @@ function AdminGuard({ children }: { children: ReactNode }) {
 
 const legacySettingKeys = new Set([
   "allow_registration",
+  "session_ttl_seconds",
+  "register_ip_limit_per_hour",
   "login_ip_limit_per_minute",
   "login_username_failure_limit_per_5_minutes",
   "issue_inactive_days",

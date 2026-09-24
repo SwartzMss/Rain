@@ -297,6 +297,13 @@ pub async fn update_settings(
             "该配置项由系统安全策略管理，管理员不可修改",
         ));
     }
+    if body.session_ttl_seconds.is_some() || body.register_ip_limit_per_hour.is_some() {
+        return Err(AppError::public(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "SETTINGS_PROTECTED_FIELD",
+            "该配置项由系统安全策略管理，管理员不可修改",
+        ));
+    }
     if let Some(value) = body.issue_inactive_days.as_ref()
         && !value
             .as_i64()

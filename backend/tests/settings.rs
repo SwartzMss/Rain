@@ -68,6 +68,27 @@ fn metadata_declares_auto_values_and_protected_settings() {
             .iter()
             .any(|field| field.key == SettingKey::Argon2Concurrency)
     );
+
+    for key in [
+        SettingKey::SessionTtlSeconds,
+        SettingKey::RegisterIpLimitPerHour,
+    ] {
+        let field = backend::settings::metadata::all()
+            .iter()
+            .find(|field| field.key == key)
+            .expect("system-managed metadata");
+        assert!(field.protected);
+        assert!(
+            !backend::settings::metadata::admin()
+                .iter()
+                .any(|candidate| candidate.key == key)
+        );
+    }
+    assert!(
+        !backend::settings::metadata::admin()
+            .iter()
+            .any(|field| { field.key == SettingKey::LoginUsernameFailureLimitPer5Minutes })
+    );
 }
 
 #[test]

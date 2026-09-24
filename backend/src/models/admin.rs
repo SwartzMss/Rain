@@ -58,6 +58,8 @@ pub struct UpdateRegistrationSettings {
     pub changes: Option<serde_json::Map<String, serde_json::Value>>,
     pub resource_modes: Option<std::collections::BTreeMap<String, ResourceMode>>,
     pub allow_registration: Option<bool>,
+    pub session_ttl_seconds: Option<u64>,
+    pub register_ip_limit_per_hour: Option<usize>,
     pub login_ip_limit_per_minute: Option<usize>,
     pub login_username_failure_limit_per_5_minutes: Option<usize>,
     pub issue_inactive_days: Option<serde_json::Value>,

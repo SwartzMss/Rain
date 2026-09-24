@@ -29,7 +29,6 @@ RAIN_LOG_DIR=./log
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8080
 RESET_DB=false
-RAIN_SESSION_TTL_SECONDS=604800
 ```
 
 ### 2. 构建前端
@@ -173,14 +172,14 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_TEMP_RESULT_MAX_SCAN_BYTES` | `1 GiB` | 单次临时结果物化允许扫描的源文件字节数 |
 | `RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS` | `30` | 单次临时结果物化的扫描超时时间（秒） |
 | — | `8 MiB` | Temp Result 单行物化前缀上限；超出部分继续参与表达式匹配，结果会标记为截断 |
-| `RAIN_SESSION_TTL_SECONDS` | `604800` | 登录 Session 有效期（秒），默认 7 天 |
 | `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
 | `RAIN_AUTH_ARGON2_CONCURRENCY` | `5` | Argon2 哈希与校验并发上限 |
 | `RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE` | `20` | 同一 IP 每分钟登录尝试上限 |
 | `RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES` | `10` | 同一用户名每 5 分钟失败登录上限 |
 | `RAIN_ISSUE_INACTIVE_DAYS` | `7` | Issue 非活跃自动过期天数；0 关闭，启用范围 7–30 |
 | `RAIN_CLEANUP_EXEMPT_USERS` | 空 | 仅用于首次启动迁移到数据库的逗号分隔白名单；之后请在管理员系统设置中维护，数据库配置优先，支持大小写输入 |
-| `RAIN_AUTH_REGISTER_IP_LIMIT_PER_HOUR` | `10` | 同一 IP 每小时注册尝试上限 |
+
+登录 Session 有效期和单 IP 每小时注册尝试次数使用系统安全默认值，不在管理员配置页面开放。旧环境变量入口和数据库列仅为升级兼容保留，普通部署无需设置。
 
 默认配置会使用：
 
