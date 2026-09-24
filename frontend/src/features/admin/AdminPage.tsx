@@ -7,7 +7,7 @@ import type {
   AuditLog,
   UserStatus,
   AuthRateLimitEntry,
-  RegistrationSettings,
+  RegistrationSettingField,
 } from "../../api/types";
 import { useAuth } from "../../auth/AuthContext";
 import { isAdmin } from "../../auth/permissions";
@@ -18,6 +18,13 @@ import {
   runAdminAction,
   type CursorHistory,
 } from "./adminFlow";
+import {
+  createSettingDraft,
+  groupSettingFields,
+  recommendedRangeLabel,
+  serializeSettingValue,
+  settingInputValue,
+} from "./settingsFields";
 
 function parseAdminDate(value: string): Date {
   const normalized = value.trim().replace(/ UTC$/i, "Z").replace(" ", "T");
@@ -325,18 +332,92 @@ function AdminGuard({ children }: { children: ReactNode }) {
   return <AdminShell>{children}</AdminShell>;
 }
 
+const legacySettingKeys = new Set([
+  "allow_registration",
+  "login_ip_limit_per_minute",
+  "login_username_failure_limit_per_5_minutes",
+  "issue_inactive_days",
+  "cleanup_exempt_usernames",
+]);
+
+type SettingsFeedbackSection =
+  | "registration"
+  | "rate-limits"
+  | "issue-expiry"
+  | "cleanup-exempt-users"
+  | "common-settings"
+  | "advanced-settings"
+  | "expert-settings"
+  | null;
+
+function MetadataSettingsGrid({
+  fields,
+  draft,
+  disabled,
+  onChange,
+}: {
+  fields: RegistrationSettingField[];
+  draft: Record<string, unknown>;
+  disabled: boolean;
+  onChange: (key: string, value: unknown) => void;
+}) {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      {fields.map((field) => {
+        const value = draft[field.key];
+        const recommendation = recommendedRangeLabel(field);
+        const inputValue = settingInputValue(field, value);
+        return (
+          <label key={field.key} className="space-y-1 text-sm text-slate-600">
+            <span className="flex items-start justify-between gap-2">
+              <span>
+                <span className="block font-medium text-slate-700">
+                  {field.description ?? field.key}
+                  {field.unit ? `（${field.unit}）` : ""}
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-slate-500">
+                  {field.min != null || field.max != null
+                    ? `允许范围：${field.min ?? "无下限"}–${field.max ?? "无上限"}`
+                    : "由后端校验配置值"}
+                  {recommendation ? `；${recommendation}` : ""}
+                </span>
+              </span>
+              <span className="shrink-0 text-xs text-slate-400">
+                {field.apply_mode === "restart_required" ? "重启生效" : "即时生效"}
+              </span>
+            </span>
+            {field.value_type === "boolean" ? (
+              <input
+                aria-label={field.key}
+                type="checkbox"
+                checked={Boolean(inputValue)}
+                disabled={disabled}
+                onChange={(event) => onChange(field.key, event.target.checked)}
+              />
+            ) : (
+              <input
+                aria-label={field.key}
+                type={field.value_type === "integer" ? "number" : "text"}
+                min={field.min ?? undefined}
+                max={field.max ?? undefined}
+                value={inputValue as string | number}
+                disabled={disabled}
+                onChange={(event) => onChange(field.key, event.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2"
+              />
+            )}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
 export function AdminPage() {
   return <Navigate to="/admin/users" replace />;
 }
 
 export function AdminSettingsPage() {
-  const legacySettingKeys = new Set([
-    "allow_registration",
-    "login_ip_limit_per_minute",
-    "login_username_failure_limit_per_5_minutes",
-    "issue_inactive_days",
-    "cleanup_exempt_usernames",
-  ]);
   const [allowed, setAllowed] = useState(true);
   const [ipLimit, setIpLimit] = useState(20);
   const [usernameLimit, setUsernameLimit] = useState(10);
@@ -347,15 +428,18 @@ export function AdminSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [hasLoadedSettings, setHasLoadedSettings] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [feedbackSection, setFeedbackSection] = useState<
-    "registration" | "rate-limits" | "issue-expiry" | "cleanup-exempt-users" | null
-  >(null);
+  const [feedbackSection, setFeedbackSection] = useState<SettingsFeedbackSection>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [pendingRestartFields, setPendingRestartFields] = useState<string[]>([]);
   const [revision, setRevision] = useState<string | null>(null);
-  const [advancedFields, setAdvancedFields] = useState<NonNullable<RegistrationSettings["fields"]>>([]);
+  const [commonFields, setCommonFields] = useState<RegistrationSettingField[]>([]);
+  const [advancedFields, setAdvancedFields] = useState<RegistrationSettingField[]>([]);
+  const [expertFields, setExpertFields] = useState<RegistrationSettingField[]>([]);
+  const [commonDraft, setCommonDraft] = useState<Record<string, unknown>>({});
   const [advancedDraft, setAdvancedDraft] = useState<Record<string, unknown>>({});
+  const [expertDraft, setExpertDraft] = useState<Record<string, unknown>>({});
+  const [showExpertSettings, setShowExpertSettings] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
@@ -368,14 +452,13 @@ export function AdminSettingsPage() {
       setCleanupExemptUsernames(value.cleanup_exempt_usernames ?? []);
       setPendingRestartFields(value.pending_restart_fields ?? []);
       setRevision(value.revision ?? null);
-      const fields = (value.fields ?? []).filter((field) => !legacySettingKeys.has(field.key));
-      setAdvancedFields(fields);
-      setAdvancedDraft(
-        fields.reduce<Record<string, unknown>>((draft, field) => {
-          draft[field.key] = value.configured?.[field.key] ?? field.default_value ?? "";
-          return draft;
-        }, {}),
-      );
+      const groups = groupSettingFields(value.fields ?? []);
+      setCommonFields(groups.common.filter((field) => !legacySettingKeys.has(field.key)));
+      setAdvancedFields(groups.advanced);
+      setExpertFields(groups.expert);
+      setCommonDraft(createSettingDraft(groups.common.filter((field) => !legacySettingKeys.has(field.key)), value.configured));
+      setAdvancedDraft(createSettingDraft(groups.advanced, value.configured));
+      setExpertDraft(createSettingDraft(groups.expert, value.configured));
       setHasLoadedSettings(true);
     } catch (e) {
       setHasLoadedSettings(false);
@@ -476,30 +559,40 @@ export function AdminSettingsPage() {
       setSaving(false);
     }
   };
-  const saveAdvancedSettings = async () => {
-    setFeedbackSection(null);
+  const saveMetadataSettings = async (
+    section: "common-settings" | "advanced-settings" | "expert-settings",
+    fields: RegistrationSettingField[],
+    draft: Record<string, unknown>,
+    successMessage: string,
+  ) => {
+    setFeedbackSection(section);
     setSaving(true);
     setMessage(null);
     setSaveError(null);
     try {
       const changes = Object.fromEntries(
-        advancedFields.map((field) => {
-          const value = advancedDraft[field.key];
-          if (field.value_type === "integer") return [field.key, Number(value)];
-          return [field.key, value];
-        }),
+        fields.map((field) => [field.key, serializeSettingValue(field, draft[field.key])]),
       );
       const result = await rainApi.updateAdminSettingsV2(revision ?? "0", changes);
       setRevision(result.revision ?? null);
-      setAdvancedDraft(result.configured ?? advancedDraft);
+      const nextDraft = createSettingDraft(fields, result.configured ?? draft);
+      if (section === "common-settings") setCommonDraft(nextDraft);
+      if (section === "advanced-settings") setAdvancedDraft(nextDraft);
+      if (section === "expert-settings") setExpertDraft(nextDraft);
       setPendingRestartFields(result.pending_restart_fields ?? []);
-      setMessage("运行参数已保存");
+      setMessage(successMessage);
     } catch (e) {
       setSaveError(normalizeApiError(e));
     } finally {
       setSaving(false);
     }
   };
+  const saveCommonSettings = () =>
+    void saveMetadataSettings("common-settings", commonFields, commonDraft, "常用配置已保存");
+  const saveAdvancedSettings = () =>
+    void saveMetadataSettings("advanced-settings", advancedFields, advancedDraft, "高级运行参数已保存");
+  const saveExpertSettings = () =>
+    void saveMetadataSettings("expert-settings", expertFields, expertDraft, "专家配置已保存");
   const sectionFeedback = (section: typeof feedbackSection) => {
     if (feedbackSection !== section) return null;
     if (message) {
@@ -558,6 +651,27 @@ export function AdminSettingsPage() {
           </p>
         ) : null}
 
+        {commonFields.length > 0 ? (
+          <SettingsSection
+            icon="settings"
+            title="常用配置"
+            description="常用业务参数，建议根据实际使用规模调整。"
+          >
+            <MetadataSettingsGrid
+              fields={commonFields}
+              draft={commonDraft}
+              disabled={controlsDisabled || saving}
+              onChange={(key, value) => setCommonDraft((current) => ({ ...current, [key]: value }))}
+            />
+            <div className="mt-5 flex justify-end">
+              <button type="button" className={primaryButtonClass} disabled={controlsDisabled || saving} onClick={saveCommonSettings}>
+                {saving ? "保存中…" : "保存常用配置"}
+              </button>
+            </div>
+            {sectionFeedback("common-settings")}
+          </SettingsSection>
+        ) : null}
+
         {advancedFields.length > 0 ? (
           <details className="rounded-2xl border border-slate-200/90 bg-white/95 shadow-[0_12px_32px_rgba(15,23,42,0.06)] backdrop-blur">
             <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 px-5 py-4 sm:px-6 [&::-webkit-details-marker]:hidden">
@@ -569,51 +683,49 @@ export function AdminSettingsPage() {
             </summary>
             <div className="border-t border-slate-100 p-5 sm:p-6">
               <p className="mb-4 text-sm leading-6 text-slate-500">
-                保存后，标记“重启生效”的项目需要重启服务；其他项目即时生效。
+                推荐范围仅供参考；保存后，标记“重启生效”的项目需要重启服务，其他项目即时生效。
               </p>
-              <div className="grid gap-4 sm:grid-cols-2">
-              {advancedFields.map((field) => {
-                const value = advancedDraft[field.key];
-                const label = `${field.description ?? field.key}${field.unit ? `（${field.unit}）` : ""}`;
-                return (
-                  <label key={field.key} className="space-y-1 text-sm text-slate-600">
-                    <span className="flex items-center justify-between gap-2">
-                      <span>{label}</span>
-                      <span className="text-xs text-slate-400">
-                        {field.apply_mode === "restart_required" ? "重启生效" : "即时生效"}
-                      </span>
-                    </span>
-                    {field.value_type === "boolean" ? (
-                      <input
-                        aria-label={field.key}
-                        type="checkbox"
-                        checked={Boolean(value)}
-                        disabled={controlsDisabled || saving}
-                        onChange={(event) => setAdvancedDraft((current) => ({ ...current, [field.key]: event.target.checked }))}
-                      />
-                    ) : (
-                      <input
-                        aria-label={field.key}
-                        type={field.value_type === "integer" ? "number" : "text"}
-                        min={field.min ?? undefined}
-                        max={field.max ?? undefined}
-                        value={Array.isArray(value) ? value.join(",") : String(value ?? "")}
-                        disabled={controlsDisabled || saving}
-                        onChange={(event) => setAdvancedDraft((current) => ({ ...current, [field.key]: event.target.value }))}
-                        className="w-full rounded-lg border border-slate-300 px-3 py-2"
-                      />
-                    )}
-                  </label>
-                );
-              })}
-            </div>
-            <button type="button" className={`${primaryButtonClass} mt-5`} disabled={controlsDisabled || saving} onClick={() => void saveAdvancedSettings()}>
-              {saving ? "保存中…" : "保存运行参数"}
-            </button>
-            {saveError && !feedbackSection ? <p className="mt-3 text-sm text-rose-700" role="alert">保存失败：{saveError}</p> : null}
-            {message && !feedbackSection ? <p className="mt-3 text-sm text-emerald-700" role="status">{message}</p> : null}
+              <MetadataSettingsGrid
+                fields={advancedFields}
+                draft={advancedDraft}
+                disabled={controlsDisabled || saving}
+                onChange={(key, value) => setAdvancedDraft((current) => ({ ...current, [key]: value }))}
+              />
+              <button type="button" className={`${primaryButtonClass} mt-5`} disabled={controlsDisabled || saving} onClick={saveAdvancedSettings}>
+                {saving ? "保存中…" : "保存高级运行参数"}
+              </button>
+              {sectionFeedback("advanced-settings")}
             </div>
           </details>
+        ) : null}
+
+        {expertFields.length > 0 && !showExpertSettings ? (
+          <button
+            type="button"
+            className="w-full rounded-2xl border border-dashed border-slate-300 bg-white/70 px-5 py-4 text-sm font-semibold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700"
+            onClick={() => setShowExpertSettings(true)}
+          >
+            显示专家配置
+          </button>
+        ) : null}
+
+        {expertFields.length > 0 && showExpertSettings ? (
+          <SettingsSection
+            icon="settings"
+            title="专家配置"
+            description="内部资源调优参数，仅建议在明确了解资源影响时修改。"
+          >
+            <MetadataSettingsGrid
+              fields={expertFields}
+              draft={expertDraft}
+              disabled={controlsDisabled || saving}
+              onChange={(key, value) => setExpertDraft((current) => ({ ...current, [key]: value }))}
+            />
+            <button type="button" className={`${primaryButtonClass} mt-5`} disabled={controlsDisabled || saving} onClick={saveExpertSettings}>
+              {saving ? "保存中…" : "保存专家配置"}
+            </button>
+            {sectionFeedback("expert-settings")}
+          </SettingsSection>
         ) : null}
 
         <SettingsSection
