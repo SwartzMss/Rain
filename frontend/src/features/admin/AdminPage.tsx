@@ -847,13 +847,13 @@ export function AdminSettingsPage() {
             <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 px-5 py-4 sm:px-6 [&::-webkit-details-marker]:hidden">
               <span>
                 <span className="block text-lg font-semibold text-slate-950">高级运行参数</span>
-                <span className="mt-1 block text-sm text-slate-500">资源与请求保护限制，通常无需调整（{advancedFields.length} 项）</span>
+                <span className="mt-1 block text-sm text-slate-500">仅保留搜索结果页的行数上限；其他资源保护参数由系统管理（{advancedFields.length} 项）</span>
               </span>
               <span className="text-sm font-medium text-cyan-700">点击展开或收起</span>
             </summary>
             <div className="border-t border-slate-100 p-5 sm:p-6">
               <p className="mb-4 text-sm leading-6 text-slate-500">
-                推荐范围仅供参考；保存后，标记“重启生效”的项目需要重启服务，其他项目即时生效。
+                搜索结果上限按行数计算，不是响应字节数；响应大小、扫描资源和并发保护使用系统默认值。
               </p>
               <MetadataSettingsGrid
                 fields={advancedFields}

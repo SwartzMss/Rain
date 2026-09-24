@@ -111,6 +111,8 @@ type Presentation = (
 );
 
 const fn presentation(key: SettingKey) -> Presentation {
+    // Protected runtime guardrails stay persisted for compatibility, but are
+    // omitted from the administrator-editable metadata surface.
     use SettingCategory::{Advanced, Common, Expert};
     use SettingKey::*;
     use SettingVisibility::{Collapsed, Default, Expert as ExpertVisibility};
@@ -162,13 +164,13 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(64 * GIB),
             false,
             None,
-            false,
+            true,
         ),
         UploadConcurrentProcessingTasks => {
-            (Advanced, Collapsed, Some(1), Some(8), true, Some(4), false)
+            (Advanced, Collapsed, Some(1), Some(8), true, Some(4), true)
         }
         UploadConcurrentReceiveTasks => {
-            (Advanced, Collapsed, Some(1), Some(8), true, Some(4), false)
+            (Advanced, Collapsed, Some(1), Some(8), true, Some(4), true)
         }
         UploadMaxTmpBytes => (
             Advanced,
@@ -177,7 +179,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(128 * GIB),
             false,
             None,
-            false,
+            true,
         ),
         IndexingMaxIndexedLineSize => (
             Expert,
@@ -186,7 +188,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(MIB),
             false,
             None,
-            false,
+            true,
         ),
         SearchTantivyMaxWriters => (
             Expert,
@@ -195,7 +197,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(4),
             true,
             Some(1),
-            false,
+            true,
         ),
         SearchTantivyWriterHeapSize => (
             Expert,
@@ -204,7 +206,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(256 * MIB),
             true,
             Some(64 * MIB),
-            false,
+            true,
         ),
         ApiFilePreviewSize => (
             Advanced,
@@ -213,7 +215,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(MIB),
             false,
             None,
-            false,
+            true,
         ),
         ApiMaxPreviewLineSize => (
             Advanced,
@@ -222,7 +224,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(16 * MIB),
             false,
             None,
-            false,
+            true,
         ),
         ApiDefaultLinePageSize => (
             Advanced,
@@ -231,7 +233,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(5_000),
             false,
             None,
-            false,
+            true,
         ),
         ApiMaxLinePageSize => (
             Advanced,
@@ -240,7 +242,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(10_000),
             false,
             None,
-            false,
+            true,
         ),
         ApiMaxLinePageBytes => (
             Advanced,
@@ -249,7 +251,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(32 * MIB),
             false,
             None,
-            false,
+            true,
         ),
         ApiConcurrentLineReads => (
             Expert,
@@ -258,7 +260,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(16),
             true,
             Some(8),
-            false,
+            true,
         ),
         ApiConcurrentLineReadsPerClient => (
             Expert,
@@ -267,7 +269,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(4),
             false,
             None,
-            false,
+            true,
         ),
         ApiDefaultSearchResults => (Common, Default, Some(10), Some(100), false, None, true),
         ApiMaxSearchResults => (Advanced, Collapsed, Some(50), Some(500), false, None, false),
@@ -278,7 +280,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(50_000),
             false,
             None,
-            false,
+            true,
         ),
         TempResultsMaxResultSize => (
             Advanced,
@@ -287,7 +289,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(256 * MIB),
             false,
             None,
-            false,
+            true,
         ),
         TempResultsMaxTotalSize => (
             Advanced,
@@ -296,7 +298,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(8 * GIB),
             false,
             None,
-            false,
+            true,
         ),
         TempResultsMaxRecords => (
             Advanced,
@@ -305,7 +307,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(10_000),
             false,
             None,
-            false,
+            true,
         ),
         TempResultsConcurrentMaterializations => (
             Expert,
@@ -314,7 +316,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(4),
             true,
             Some(2),
-            false,
+            true,
         ),
         TempResultsMaxSources => (
             Advanced,
@@ -323,7 +325,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(50_000),
             false,
             None,
-            false,
+            true,
         ),
         TempResultsMaxScanBytes => (
             Advanced,
@@ -332,10 +334,10 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(8 * GIB),
             false,
             None,
-            false,
+            true,
         ),
         TempResultsMaxScanDurationSeconds => {
-            (Advanced, Collapsed, Some(10), Some(300), false, None, false)
+            (Advanced, Collapsed, Some(10), Some(300), false, None, true)
         }
     }
 }
