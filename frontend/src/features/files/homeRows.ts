@@ -1,6 +1,10 @@
 import type { FileNode, UploadStage, UploadStatus, UploadSummary } from '../../api/types';
 import { uploadFailureMessage } from './uploadFailure';
-import { createOptimisticUploadRows, type UploadSelectionItem } from './uploadRows';
+import {
+  createOptimisticUploadRows,
+  type LocalUploadStage,
+  type UploadTaskSnapshot
+} from './uploadRows';
 
 export type BundleFileState = {
   files: FileNode[];
@@ -16,10 +20,11 @@ export type FileRow = {
   file?: FileNode;
   name: string;
   status: UploadStatus;
-  stage: UploadStage | 'UPLOADING';
+  stage: UploadStage | LocalUploadStage;
   progressPercent?: number;
   sizeBytes?: number;
   failureReason?: string | null;
+  uploadTaskId?: string;
 };
 
 export const formatBytes = (bytes?: number | null) => {
@@ -31,7 +36,11 @@ export const formatBytes = (bytes?: number | null) => {
 };
 
 export const stageLabel = (stage: FileRow['stage'], progressPercent?: number) => {
+  if (stage === 'QUEUED') return '等待上传';
   if (stage === 'UPLOADING') return `上传中 ${progressPercent ?? 0}%`;
+  if (stage === 'RETRY_WAIT') return '等待重试';
+  if (stage === 'ACCEPTED') return '已接收，等待处理';
+  if (stage === 'UNCONFIRMED') return '接收结果未确认';
   if (stage === 'PENDING') return '等待处理';
   if (stage === 'RECEIVING') return '接收文件';
   if (stage === 'VALIDATING') return '校验压缩内容';
@@ -44,7 +53,9 @@ export const stageLabel = (stage: FileRow['stage'], progressPercent?: number) =>
 
 export const stageClass = (stage: FileRow['stage']) => {
   if (stage === 'READY') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700';
-  if (stage === 'FAILED') return 'border-rose-500/40 bg-rose-500/10 text-rose-600';
+  if (stage === 'FAILED' || stage === 'UNCONFIRMED') {
+    return 'border-rose-500/40 bg-rose-500/10 text-rose-600';
+  }
   return 'border-sky-500/40 bg-sky-500/10 text-sky-700';
 };
 
@@ -54,19 +65,9 @@ const getFileLabel = (file: FileNode) =>
 export function buildFileRows(options: {
   bundles: UploadSummary[];
   bundleFiles: Record<string, BundleFileState>;
-  uploadSelection: UploadSelectionItem[];
-  uploading: boolean;
-  uploadFailed: boolean;
-  uploadProgress: number;
+  uploadTasks: readonly UploadTaskSnapshot[];
 }): FileRow[] {
-  const {
-    bundleFiles,
-    bundles,
-    uploadFailed,
-    uploadProgress,
-    uploadSelection,
-    uploading
-  } = options;
+  const { bundleFiles, bundles, uploadTasks } = options;
   const rows = bundles.flatMap<FileRow>((bundle) => {
     const status = bundle.status.upload_status;
     const stage = bundle.stage;
@@ -100,15 +101,6 @@ export function buildFileRows(options: {
       sizeBytes: file.size_bytes
     }));
   });
-  if ((uploading || uploadFailed) && uploadSelection.length > 0) {
-    rows.unshift(
-      ...createOptimisticUploadRows(
-        uploadSelection,
-        uploadProgress,
-        '',
-        uploadFailed ? 'FAILED' : 'UPLOADING'
-      )
-    );
-  }
+  rows.unshift(...createOptimisticUploadRows(uploadTasks, new Set(bundles.map((bundle) => bundle.hash))));
   return rows;
 }

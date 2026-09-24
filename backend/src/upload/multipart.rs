@@ -74,6 +74,14 @@ impl ReceiveReservation {
         }
     }
 
+    /// Adopt bytes already counted by a durable upload session. Dropping the
+    /// returned reservation releases those bytes exactly once.
+    pub fn adopt_persistent(used: Arc<AtomicU64>, max: Arc<AtomicU64>, bytes: u64) -> Self {
+        let reservation = Self::new_with_dynamic_max(used, max);
+        reservation.budget.reserved.store(bytes, Ordering::Release);
+        reservation
+    }
+
     fn reserve(&self, bytes: u64) -> Result<(), AppError> {
         self.budget.reserve(bytes)
     }
@@ -104,6 +112,26 @@ impl TempBudget {
                 return Ok(());
             }
         }
+    }
+
+    /// Reserve bytes whose lifetime is persisted outside the current request.
+    /// The caller must release the same number of bytes when the persisted
+    /// owner reaches a terminal state.
+    pub fn reserve_persistent(
+        used: Arc<AtomicU64>,
+        max: Arc<AtomicU64>,
+        bytes: u64,
+    ) -> Result<(), AppError> {
+        let budget = Self {
+            used,
+            reserved: Arc::new(AtomicU64::new(0)),
+            max,
+        };
+        budget.reserve(bytes)
+    }
+
+    pub fn release_persistent(used: &AtomicU64, bytes: u64) {
+        used.fetch_sub(bytes, Ordering::AcqRel);
     }
 }
 

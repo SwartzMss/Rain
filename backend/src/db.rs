@@ -493,13 +493,13 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
     let result = write::run(pool, "fail stale processing bundles", &(), |conn, _| {
         Box::pin(async move {
             sqlx::query(
-                "UPDATE bundle_search_indexes SET state = 'FAILED', last_error_code = 'PROCESS_INTERRUPTED', updated_at = CURRENT_TIMESTAMP WHERE state = 'BUILDING' AND bundle_id IN (SELECT id FROM bundles WHERE status IN ('PENDING', 'PROCESSING'))",
+                "UPDATE bundle_search_indexes SET state = 'FAILED', last_error_code = 'PROCESS_INTERRUPTED', updated_at = CURRENT_TIMESTAMP WHERE state = 'BUILDING' AND bundle_id IN (SELECT id FROM bundles WHERE status IN ('PENDING', 'PROCESSING') AND id NOT IN (SELECT bundle_id FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') AND bundle_id IS NOT NULL))",
             )
             .execute(&mut *conn)
             .await
             .map_err(AppError::Database)?;
             Ok(sqlx::query(
-                r#"
+            r#"
         UPDATE bundles
         SET failure_stage = process_stage,
             failure_code = 'PROCESS_INTERRUPTED',
@@ -507,6 +507,7 @@ pub async fn fail_stale_processing_bundles(pool: &SqlitePool) -> Result<u64, App
             status = 'FAILED',
             failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
         WHERE status IN ('PENDING', 'PROCESSING')
+          AND id NOT IN (SELECT bundle_id FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') AND bundle_id IS NOT NULL)
         "#,
             )
             .execute(conn)
@@ -531,7 +532,7 @@ pub async fn fail_stale_processing_bundles_before(
         |conn, created_before| {
             Box::pin(async move {
                 sqlx::query(
-                    "UPDATE bundle_search_indexes SET state = 'FAILED', last_error_code = 'PROCESS_INTERRUPTED', updated_at = CURRENT_TIMESTAMP WHERE state = 'BUILDING' AND bundle_id IN (SELECT id FROM bundles WHERE status IN ('PENDING', 'PROCESSING') AND datetime(created_at) <= datetime(?))",
+                    "UPDATE bundle_search_indexes SET state = 'FAILED', last_error_code = 'PROCESS_INTERRUPTED', updated_at = CURRENT_TIMESTAMP WHERE state = 'BUILDING' AND bundle_id IN (SELECT id FROM bundles WHERE status IN ('PENDING', 'PROCESSING') AND datetime(created_at) <= datetime(?) AND id NOT IN (SELECT bundle_id FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') AND bundle_id IS NOT NULL))",
                 )
                 .bind(created_before)
                 .execute(&mut *conn)
@@ -547,6 +548,7 @@ pub async fn fail_stale_processing_bundles_before(
             failure_reason = '服务重启时检测到未完成的上传，请删除后重试'
         WHERE status IN ('PENDING', 'PROCESSING')
           AND datetime(created_at) <= datetime(?)
+          AND id NOT IN (SELECT bundle_id FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') AND bundle_id IS NOT NULL)
         "#,
                 )
                 .bind(created_before)

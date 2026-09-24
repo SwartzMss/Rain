@@ -11,6 +11,7 @@ type UploadFileTableProps = {
   fileRows: FileRow[];
   canWrite: boolean;
   onDeleteRow: (row: FileRow) => void;
+  onRetryUpload: (taskId: string) => void;
 };
 
 export function UploadFileTable({
@@ -19,7 +20,8 @@ export function UploadFileTable({
   deletingKey,
   fileRows,
   canWrite,
-  onDeleteRow
+  onDeleteRow,
+  onRetryUpload
 }: UploadFileTableProps) {
   const auth = useAuth();
   const canDownload = auth.state.status === 'AUTHENTICATED';
@@ -59,6 +61,15 @@ export function UploadFileTable({
                   </td>
                   <td className="px-4 py-3">{formatBytes(row.sizeBytes)}</td>
                   <td className="whitespace-nowrap px-4 py-3">
+                    {row.uploadTaskId && (row.stage === 'FAILED' || row.stage === 'UNCONFIRMED') ? (
+                      <button
+                        type="button"
+                        className="mr-4 text-sky-700 hover:text-sky-800"
+                        onClick={() => onRetryUpload(row.uploadTaskId!)}
+                      >
+                        重试
+                      </button>
+                    ) : null}
                     {canDownload && row.status === 'READY' && row.file ? (
                       <a
                         className="mr-4 text-sky-700 hover:text-sky-800"
@@ -67,10 +78,16 @@ export function UploadFileTable({
                         下载
                       </a>
                     ) : null}
-                    {row.stage === 'UPLOADING' || row.status === 'PROCESSING' || row.status === 'PENDING' ? (
+                    {row.stage === 'QUEUED' ? (
+                      <span role="status" className="mr-4 text-slate-600">等待上传</span>
+                    ) : null}
+                    {row.stage === 'RETRY_WAIT' ? (
+                      <span role="status" className="mr-4 text-amber-700">等待重试</span>
+                    ) : null}
+                    {row.stage === 'UPLOADING' || row.stage === 'ACCEPTED' || row.status === 'PROCESSING' || row.status === 'PENDING' ? (
                       <span role="status" className="mr-4 text-amber-700">处理中，暂不可删除</span>
                     ) : null}
-                    {canWrite && row.stage !== 'UPLOADING' && row.bundleHash && row.status !== 'PROCESSING' && row.status !== 'PENDING' ? (
+                    {canWrite && row.stage !== 'UPLOADING' && row.stage !== 'QUEUED' && row.stage !== 'RETRY_WAIT' && row.stage !== 'ACCEPTED' && row.bundleHash && row.status !== 'PROCESSING' && row.status !== 'PENDING' ? (
                       <button
                         type="button"
                         className="text-rose-600 hover:text-rose-700 disabled:text-slate-600"

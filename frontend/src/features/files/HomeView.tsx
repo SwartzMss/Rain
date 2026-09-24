@@ -47,25 +47,21 @@ export function HomeView() {
     loadBundles: bundles.loadBundles,
     loadIssues: issues.loadIssues
   });
+  const visibleUploadTasks = useMemo(
+    () => upload.tasks.filter(
+      (task) => task.status !== 'ACCEPTED' || !task.response || !bundles.bundles.some((bundle) => bundle.hash === task.response?.bundle_hash)
+    ),
+    [bundles.bundles, upload.tasks]
+  );
 
   const fileRows = useMemo(
     () =>
       buildFileRows({
         bundleFiles: bundles.bundleFiles,
         bundles: bundles.bundles,
-        uploadFailed: upload.uploadFailed,
-        uploadProgress: upload.uploadProgress,
-        uploadSelection: upload.uploadSelection,
-        uploading: upload.uploading
+        uploadTasks: visibleUploadTasks
       }),
-    [
-      bundles.bundleFiles,
-      bundles.bundles,
-      upload.uploadFailed,
-      upload.uploadProgress,
-      upload.uploadSelection,
-      upload.uploading
-    ]
+    [bundles.bundleFiles, bundles.bundles, visibleUploadTasks]
   );
 
   const selectIssue = useCallback(
@@ -226,8 +222,8 @@ export function HomeView() {
               onFilesSelected={(files) => upload.performUpload(files).catch(() => undefined)}
               uploadDisabled={upload.uploadDisabled}
               uploadError={upload.uploadError}
+              uploadTasks={visibleUploadTasks}
               uploading={upload.uploading}
-              uploadingRef={upload.uploadingRef}
             />
           ) : null}
         </div>
@@ -248,6 +244,7 @@ export function HomeView() {
           fileRows={fileRows}
           canWrite={canWrite}
           onDeleteRow={deleteRow}
+          onRetryUpload={upload.retryUpload}
         />
       </section>
 

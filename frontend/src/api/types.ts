@@ -189,6 +189,23 @@ export interface UploadTaskResponse {
   total_bytes: number;
 }
 
+export type UploadSessionStatus = 'OPEN' | 'FINALIZING' | 'DELIVERED' | 'CANCELLED' | 'EXPIRED' | 'FAILED';
+
+export interface UploadSessionResponse {
+  session_id: string;
+  issue_code: string;
+  file_name: string;
+  file_size_bytes: number;
+  chunk_size_bytes: number;
+  committed_offset: number;
+  next_chunk_index: number;
+  status: UploadSessionStatus;
+  bundle_id?: string | null;
+  failure_code?: string | null;
+  failure_reason?: string | null;
+  expires_at: string;
+}
+
 export interface FileContentResponse {
   path: string;
   size_bytes?: number;

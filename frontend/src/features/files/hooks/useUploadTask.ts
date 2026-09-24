@@ -1,50 +1,24 @@
-import { useCallback, useReducer, useRef } from 'react';
-import { normalizeApiError, rainApi } from '../../../api/client';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { normalizeApiError } from '../../../api/client';
+import type { UploadResponse } from '../../../api/types';
+import {
+  createUploadQueue,
+  type UploadQueueTask,
+  type UploadQueueTaskStatus
+} from '../uploadQueue';
 import type { UploadSelectionItem } from '../uploadRows';
+import { uploadFileWithResume } from '../resumableUpload';
 
-type UploadState =
-  | { status: 'idle'; selection: UploadSelectionItem[]; message: string | null; progress: number }
-  | { status: 'uploading'; selection: UploadSelectionItem[]; message: string | null; progress: number }
-  | {
-      status: 'failed';
-      selection: UploadSelectionItem[];
-      message: string;
-      progress: number;
-    };
+const uploadQueue = createUploadQueue<UploadResponse>(uploadFileWithResume);
 
-type UploadAction =
-  | { type: 'reset-selection' }
-  | { type: 'error'; message: string }
-  | { type: 'upload-started'; selection: UploadSelectionItem[] }
-  | { type: 'upload-progress'; progress: number }
-  | { type: 'upload-failed'; message: string }
-  | { type: 'upload-finished' };
+const transportStatuses: UploadQueueTaskStatus[] = ['QUEUED', 'UPLOADING', 'RETRY_WAIT'];
+const failureStatuses: UploadQueueTaskStatus[] = ['FAILED', 'UNCONFIRMED'];
+const refreshedTaskIds = new Set<string>();
 
-const initialUploadState: UploadState = {
-  status: 'idle',
-  selection: [],
-  message: null,
-  progress: 0
-};
+const isTransporting = (task: UploadQueueTask<UploadResponse>) =>
+  transportStatuses.includes(task.status);
 
-function uploadReducer(state: UploadState, action: UploadAction): UploadState {
-  switch (action.type) {
-    case 'reset-selection':
-      return state.status === 'uploading'
-        ? { ...state, selection: [], message: null, progress: 0 }
-        : { status: 'idle', selection: [], message: null, progress: 0 };
-    case 'error':
-      return { ...state, message: action.message };
-    case 'upload-started':
-      return { status: 'uploading', selection: action.selection, message: null, progress: 0 };
-    case 'upload-progress':
-      return { ...state, progress: action.progress };
-    case 'upload-failed':
-      return { status: 'failed', selection: state.selection, message: action.message, progress: 0 };
-    case 'upload-finished':
-      return state.status === 'uploading' ? { ...state, status: 'idle', progress: 0 } : { ...state, progress: 0 };
-  }
-}
+const isFailed = (task: UploadQueueTask<UploadResponse>) => failureStatuses.includes(task.status);
 
 export function useUploadTask(options: {
   currentIssueCode: string;
@@ -52,67 +26,73 @@ export function useUploadTask(options: {
   loadIssues: () => Promise<void>;
 }) {
   const { currentIssueCode, loadBundles, loadIssues } = options;
-  const [state, dispatch] = useReducer(uploadReducer, initialUploadState);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const uploadingRef = useRef(false);
-  const uploadGenerationRef = useRef(0);
+  const allTasks = useSyncExternalStore(
+    uploadQueue.subscribe,
+    uploadQueue.getSnapshot,
+    uploadQueue.getSnapshot
+  );
+  const uploadTasks = useMemo(
+    () => allTasks.filter((task) => task.issueCode === currentIssueCode),
+    [allTasks, currentIssueCode]
+  );
 
-  const uploading = state.status === 'uploading';
-  const uploadFailed = state.status === 'failed';
-  const uploadDisabled = !currentIssueCode || uploading;
+  const uploading = uploadTasks.some(isTransporting);
+  const uploadFailed = uploadTasks.some(isFailed);
+  const uploadError = uploadTasks.find(isFailed)?.message ?? validationError;
+  const uploadDisabled = !currentIssueCode;
+  uploadingRef.current = uploading;
 
-  const resetSelection = useCallback(() => {
-    uploadGenerationRef.current += 1;
-    dispatch({ type: 'reset-selection' });
-  }, []);
+  useEffect(() => {
+    const acceptedTasks = uploadTasks.filter(
+      (task) => task.status === 'ACCEPTED' && !refreshedTaskIds.has(task.id)
+    );
+    acceptedTasks.forEach((task) => {
+      refreshedTaskIds.add(task.id);
+      void Promise.allSettled([loadBundles(task.issueCode), loadIssues()]);
+    });
+  }, [loadBundles, loadIssues, uploadTasks]);
 
   const performUpload = useCallback(
     async (files: File[]) => {
-      if (uploadingRef.current) return;
+      setValidationError(null);
       if (!currentIssueCode) {
-        dispatch({ type: 'error', message: '请先选择或创建 Issue' });
+        setValidationError('请先选择或创建 Issue');
         return;
       }
       if (files.length === 0) {
-        dispatch({ type: 'error', message: '请至少选择一个文件' });
+        setValidationError('请至少选择一个文件');
         return;
       }
-
-      const uploadGeneration = ++uploadGenerationRef.current;
-      uploadingRef.current = true;
-      dispatch({
-        type: 'upload-started',
-        selection: files.map((file) => ({ name: file.name, sizeBytes: file.size }))
-      });
-
-      try {
-        await rainApi.uploadLogs(currentIssueCode, files, (progress) => {
-          dispatch({ type: 'upload-progress', progress });
-        });
-      } catch (error) {
-        uploadingRef.current = false;
-        dispatch(
-          uploadGenerationRef.current === uploadGeneration
-            ? { type: 'upload-failed', message: normalizeApiError(error) }
-            : { type: 'upload-finished' }
-        );
-        return;
-      }
-
-      uploadingRef.current = false;
-      dispatch({ type: 'upload-finished' });
-      await Promise.allSettled([loadBundles(currentIssueCode), loadIssues()]);
+      uploadQueue.enqueue(currentIssueCode, files);
     },
-    [currentIssueCode, loadBundles, loadIssues]
+    [currentIssueCode]
   );
+
+  const resetSelection = useCallback(() => {
+    setValidationError(null);
+  }, []);
+
+  const uploadSelection: UploadSelectionItem[] = uploadTasks
+    .filter((task) => task.status !== 'ACCEPTED')
+    .map((task) => ({
+    name: task.name,
+    sizeBytes: task.sizeBytes
+    }));
+  const activeTask = uploadTasks.find((task) => task.status === 'UPLOADING');
 
   return {
     performUpload,
     resetSelection,
+    retryUpload: uploadQueue.retry,
     uploadDisabled,
-    uploadError: state.message,
+    uploadError: uploadError ? normalizeApiError(uploadError) : null,
     uploadFailed,
-    uploadProgress: state.progress,
-    uploadSelection: state.selection,
+    uploadProgress: activeTask?.progressPercent ?? 0,
+    uploadSelection,
+    tasks: uploadTasks,
+    uploadTasks,
     uploading,
     uploadingRef
   };

@@ -11,6 +11,7 @@ import type {
   TempResultLinesResponse,
   TempResultPreviewResponse,
   UploadResponse,
+  UploadSessionResponse,
   UploadTaskResponse,
   AuthMeResponse,
   Credentials,
@@ -34,7 +35,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status?: number,
-    readonly code?: string
+    readonly code?: string,
+    readonly retryAfterMs?: number
   ) {
     super(message);
     this.name = 'ApiError';
@@ -61,7 +63,19 @@ export function normalizeIssueCode(value: string): string {
 
 const encodePathSegment = (value: string) => encodeURIComponent(value);
 
-function parseErrorResponse(text: string, status: number): ApiError {
+function parseRetryAfterMs(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : undefined;
+}
+
+function parseErrorResponse(
+  text: string,
+  status: number,
+  retryAfterHeader?: string | null
+): ApiError {
   let message = text;
   let code: string | undefined;
   try {
@@ -79,7 +93,12 @@ function parseErrorResponse(text: string, status: number): ApiError {
     // Keep the original response text when it is not JSON.
   }
 
-  return new ApiError(message || `请求失败：${status}`, status, code);
+  return new ApiError(
+    message || `请求失败：${status}`,
+    status,
+    code,
+    parseRetryAfterMs(retryAfterHeader)
+  );
 }
 
 export function shouldRevalidateAuthentication(status: number, text: string): boolean {
@@ -104,7 +123,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set('Accept', 'application/json');
   }
 
-  if (!isFormData && !headers.has('Content-Type')) {
+  const isBinaryBody = typeof Blob !== 'undefined' && init?.body instanceof Blob;
+
+  if (!isFormData && !isBinaryBody && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
@@ -125,7 +146,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (shouldRevalidateAuthentication(response.status, text)) {
       window.dispatchEvent(new Event('rain:authentication-required'));
     }
-    throw parseErrorResponse(text, response.status);
+    throw parseErrorResponse(text, response.status, response.headers.get('Retry-After'));
   }
 
   if (!text) {
@@ -321,7 +342,7 @@ export const rainApi = {
           if (shouldRevalidateAuthentication(xhr.status, xhr.responseText)) {
             window.dispatchEvent(new Event('rain:authentication-required'));
           }
-          reject(parseErrorResponse(xhr.responseText, xhr.status));
+          reject(parseErrorResponse(xhr.responseText, xhr.status, xhr.getResponseHeader('Retry-After')));
           return;
         }
 
@@ -336,5 +357,34 @@ export const rainApi = {
       xhr.onabort = () => reject(new Error('上传已取消'));
       xhr.send(formData);
     });
+  },
+  createUploadSession(issueCode: string, payload: { file_name: string; file_size_bytes: number; last_modified_ms?: number; idempotency_key: string }) {
+    return request<UploadSessionResponse>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/upload-sessions`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  fetchUploadSessions(issueCode: string) {
+    return request<UploadSessionResponse[]>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/upload-sessions`);
+  },
+  fetchUploadSession(sessionId: string) {
+    return request<UploadSessionResponse>(`/api/upload-sessions/${encodePathSegment(sessionId)}`);
+  },
+  deleteUploadSession(sessionId: string) {
+    return request<UploadSessionResponse>(`/api/upload-sessions/${encodePathSegment(sessionId)}`, { method: 'DELETE' });
+  },
+  uploadUploadSessionChunk(sessionId: string, chunkIndex: number, offset: number, chunk: Blob, sha256: string) {
+    return request<UploadSessionResponse>(`/api/upload-sessions/${encodePathSegment(sessionId)}/chunks/${chunkIndex}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Upload-Offset': String(offset),
+        'X-Chunk-SHA256': sha256
+      },
+      body: chunk
+    });
+  },
+  completeUploadSession(sessionId: string) {
+    return request<UploadSessionResponse>(`/api/upload-sessions/${encodePathSegment(sessionId)}/complete`, { method: 'POST' });
   }
 };

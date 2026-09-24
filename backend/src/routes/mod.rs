@@ -19,6 +19,7 @@ pub use issues::resume_manual_issue_deletions;
 mod logs;
 mod saved_searches;
 mod temp_results;
+pub(crate) mod upload_sessions;
 mod uploads;
 
 pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) -> tokio::task::JoinHandle<()> {
@@ -237,7 +238,13 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(temp_results::delete_temp_result)
                 .service(uploads::upload_logs)
                 .service(uploads::get_upload_limits)
-                .service(uploads::get_upload_task),
+                .service(uploads::get_upload_task)
+                .service(upload_sessions::create_upload_session)
+                .service(upload_sessions::list_upload_sessions)
+                .service(upload_sessions::get_upload_session)
+                .service(upload_sessions::delete_upload_session)
+                .service(upload_sessions::upload_session_chunk)
+                .service(upload_sessions::complete_upload_session),
         );
 }
 mod admin;

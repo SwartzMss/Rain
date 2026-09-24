@@ -1,4 +1,5 @@
 import type { FormEvent, RefObject } from 'react';
+import type { UploadTaskSnapshot } from '../uploadRows';
 
 type UploadPanelProps = {
   currentIssueCode: string;
@@ -7,8 +8,8 @@ type UploadPanelProps = {
   onFilesSelected: (files: File[]) => void;
   uploadDisabled: boolean;
   uploadError: string | null;
+  uploadTasks?: readonly UploadTaskSnapshot[];
   uploading: boolean;
-  uploadingRef: RefObject<boolean>;
 };
 
 export function UploadPanel({
@@ -18,9 +19,14 @@ export function UploadPanel({
   onFilesSelected,
   uploadDisabled,
   uploadError,
-  uploading,
-  uploadingRef
+  uploadTasks = [],
+  uploading
 }: UploadPanelProps) {
+  const uploadingCount = uploadTasks.filter((task) => task.status === 'UPLOADING').length;
+  const waitingCount = uploadTasks.filter(
+    (task) => task.status === 'QUEUED' || task.status === 'RETRY_WAIT'
+  ).length;
+  const acceptedCount = uploadTasks.filter((task) => task.status === 'ACCEPTED').length;
   const handleUpload = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
   };
@@ -35,7 +41,7 @@ export function UploadPanel({
         className="hidden"
         disabled={uploadDisabled}
         onChange={(event) => {
-          if (!canWrite || uploadDisabled || uploadingRef.current) return;
+          if (!canWrite || uploadDisabled) return;
           const files = event.target.files;
           if (files?.length) {
             onFilesSelected(Array.from(files));
@@ -49,7 +55,7 @@ export function UploadPanel({
         className="flex min-h-28 items-center justify-between gap-4 rounded-xl border border-dashed border-slate-300 bg-gradient-to-br from-slate-50 to-sky-50/50 px-5 py-4 text-sm transition hover:border-sky-400 hover:shadow-[inset_0_0_0_1px_rgba(6,182,212,0.08)] aria-disabled:opacity-60"
         aria-disabled={uploadDisabled}
         onClick={() => {
-          if (canWrite && !uploadDisabled && !uploadingRef.current) {
+          if (canWrite && !uploadDisabled) {
             fileInputRef.current?.click();
           }
         }}
@@ -60,7 +66,7 @@ export function UploadPanel({
         onDrop={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          if (!canWrite || uploadDisabled || uploadingRef.current) return;
+          if (!canWrite || uploadDisabled) return;
           if (event.dataTransfer.files.length) {
             onFilesSelected(Array.from(event.dataTransfer.files));
           }
@@ -81,6 +87,11 @@ export function UploadPanel({
             <p className="mt-1 text-xs text-slate-500">
               支持 .log、.txt、.zip、.tar.gz、.tgz、.gz。后台会校验文件及解压内容，超出限制的任务将失败。
             </p>
+            {uploadTasks.length ? (
+              <p className="mt-1 text-xs text-slate-500">
+                上传中 {uploadingCount} · 等待 {waitingCount} · 等待处理 {acceptedCount}
+              </p>
+            ) : null}
           </div>
         </div>
         <button

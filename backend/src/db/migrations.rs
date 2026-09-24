@@ -1547,6 +1547,8 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "DROP TABLE IF EXISTS log_segments",
         "DROP TABLE IF EXISTS files",
         "DROP TABLE IF EXISTS blobs",
+        "DROP TABLE IF EXISTS upload_session_chunks",
+        "DROP TABLE IF EXISTS upload_sessions",
         "DROP TABLE IF EXISTS bundles",
         "DROP TABLE IF EXISTS issues",
         "DROP TABLE IF EXISTS _sqlx_migrations",
