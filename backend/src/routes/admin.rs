@@ -494,9 +494,8 @@ async fn settings_response_with_metadata(
             "upload_concurrent_processing_tasks": plan.upload_processing_tasks,
             "search_tantivy_max_writers": plan.tantivy_max_writers,
             "search_tantivy_writer_heap_size": plan.tantivy_writer_heap_size,
-            "search_tantivy_max_concurrent_queries": plan.tantivy_max_concurrent_queries,
             "estimated_bytes": plan.estimated_bytes,
-            "budget_bytes": plan.budget_bytes,
+            "adaptive_memory_target_bytes": plan.adaptive_memory_target_bytes,
             "warnings": plan.warnings,
             "decisions": plan.decisions,
         });

@@ -135,7 +135,7 @@ async fn main() -> std::io::Result<()> {
         tantivy_writer_heap_size = runtime_plan.tantivy_writer_heap_size,
         tantivy_max_concurrent_queries = runtime_plan.tantivy_max_concurrent_queries,
         estimated_bytes = runtime_plan.estimated_bytes,
-        budget_bytes = ?runtime_plan.budget_bytes,
+        adaptive_memory_target_bytes = ?runtime_plan.adaptive_memory_target_bytes,
         warnings = ?runtime_plan.warnings,
         "resolved adaptive runtime plan"
     );

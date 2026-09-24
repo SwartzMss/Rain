@@ -55,6 +55,7 @@ impl ResourceSnapshot {
 
     pub fn probe() -> Self {
         let mut snapshot = Self::conservative();
+        snapshot.warnings.clear();
         if let Ok(parallelism) = std::thread::available_parallelism() {
             snapshot.cpu_cores = parallelism.get().max(1);
             snapshot.cpu_source = ResourceSource::Os;
@@ -73,6 +74,12 @@ impl ResourceSnapshot {
                 snapshot.memory_limit_bytes = Some(memory);
                 snapshot.memory_source = ResourceSource::Os;
             }
+        }
+        if snapshot.cpu_source == ResourceSource::Fallback {
+            snapshot.warnings.push("cpu_probe_fallback".into());
+        }
+        if snapshot.memory_source == ResourceSource::Fallback {
+            snapshot.warnings.push("memory_probe_fallback".into());
         }
         snapshot
     }
@@ -93,7 +100,8 @@ pub struct RuntimePlan {
     pub tantivy_writer_heap_size: u64,
     pub tantivy_max_concurrent_queries: usize,
     pub estimated_bytes: u64,
-    pub budget_bytes: Option<u64>,
+    /// Heuristic planning target, not an RSS or allocation hard limit.
+    pub adaptive_memory_target_bytes: Option<u64>,
     pub warnings: Vec<String>,
     pub decisions: Vec<(String, RuntimeDecision)>,
 }
@@ -138,8 +146,11 @@ pub fn resolve(
     );
     let mut queries = if tantivy_enabled { auto_queries } else { 1 };
     let mut warnings = resources.warnings.clone();
+    warnings.push("adaptive_memory_target_is_heuristic".into());
 
-    let budget = memory.map(|bytes| bytes / 4);
+    // This target reserves a heuristic quarter of the detected memory for the
+    // adaptive runtime. It is not a hard RSS or allocation limit.
+    let adaptive_memory_target_bytes = memory.map(|bytes| bytes / 4);
     let estimated = |p: usize, w: usize, h: u64, q: usize| {
         (p as u64)
             .saturating_mul(RESERVED_PER_TASK)
@@ -154,8 +165,8 @@ pub fn resolve(
         }
     };
 
-    if let Some(budget_bytes) = budget {
-        while estimate_for_runtime(processing, writers, heap, queries) > budget_bytes {
+    if let Some(target_bytes) = adaptive_memory_target_bytes {
+        while estimate_for_runtime(processing, writers, heap, queries) > target_bytes {
             if modes.search_tantivy_writer_heap_size == AdaptiveMode::Auto && heap > MIN_HEAP {
                 heap = heap.saturating_sub(16 * MIB).max(MIN_HEAP);
             } else if modes.search_tantivy_max_writers == AdaptiveMode::Auto && writers > 1 {
@@ -198,19 +209,6 @@ pub fn resolve(
         "search_tantivy_writer_heap_size".into(),
         decision(modes.search_tantivy_writer_heap_size, heap, "memory_budget"),
     ));
-    decisions.push((
-        "search_tantivy_max_concurrent_queries".into(),
-        RuntimeDecision {
-            value: queries as u64,
-            mode: AdaptiveMode::Auto,
-            reason: if tantivy_enabled {
-                "cpu_capacity".into()
-            } else {
-                "tantivy_disabled".into()
-            },
-        },
-    ));
-
     RuntimePlan {
         resources: resources.clone(),
         upload_processing_tasks: processing,
@@ -218,7 +216,7 @@ pub fn resolve(
         tantivy_writer_heap_size: heap,
         tantivy_max_concurrent_queries: queries,
         estimated_bytes: estimate_for_runtime(processing, writers, heap, queries),
-        budget_bytes: budget,
+        adaptive_memory_target_bytes,
         warnings,
         decisions,
     }
@@ -352,6 +350,17 @@ mod tests {
         assert_eq!(plan.tantivy_max_writers, 4);
         assert_eq!(plan.tantivy_writer_heap_size, 256 * MIB);
         assert_eq!(plan.tantivy_max_concurrent_queries, 16);
+        assert!(
+            !plan
+                .decisions
+                .iter()
+                .any(|(key, _)| key == "search_tantivy_max_concurrent_queries")
+        );
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning == "adaptive_memory_target_is_heuristic")
+        );
     }
 
     #[test]
@@ -382,7 +391,7 @@ mod tests {
             warnings: Vec::new(),
         };
         let plan = resolve(&resources, &values(), &AdaptiveModes::auto(), true);
-        assert!(plan.estimated_bytes <= plan.budget_bytes.unwrap());
+        assert!(plan.estimated_bytes <= plan.adaptive_memory_target_bytes.unwrap());
         assert!(plan.tantivy_max_writers >= 1);
     }
 }

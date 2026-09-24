@@ -22,7 +22,7 @@
 | `settings/service.rs` 对 writer、upload processing 等使用 restart-required；保存有 revision 检查和审计 | 新引擎沿用保存事务及审计，不另设一套配置写入入口 |
 | `main.rs` 先 bootstrap initialize、把 configured 应用到 config，构建 AppState 后再次 initialize | 启动必须改为一次解析、一次 runtime 构造、一次实际状态发布，避免第二次 initialize 覆盖有效值 |
 | `lib.rs` 构建 `UploadRuntime`、`SearchRuntime` 和 semaphore | 资源计算必须发生在这些对象构造之前 |
-| `search/resource.rs` 的 writer admission 限制同时运行的 writer 实例，查询并发常量为 4 | 明确 writer 实例数与 writer 内部线程数的区别；查询并发需要成为正式设置 |
+| `search/resource.rs` 的 writer admission 限制同时运行的 writer 实例，查询并发由 runtime 内部控制 | 明确 writer 实例数与 writer 内部线程数的区别；查询并发是资源保护参数，不进入管理员 modes 或 RuntimeDecision |
 | `search/parallel.rs` 单次 Issue 搜索最多并行 2 个 bundle | 保留每请求上限，同时受全局查询额度约束 |
 | `search/tantivy/writer.rs` 使用 `index.writer(heap_size_bytes)` | 当前并未显式指定 writer 内部线程数；不能把 max_writers=4 描述成 4 个线程 |
 | `search/tantivy/pipeline.rs` permit 随 blocking writer 持有；rebuild 也获取 writer 预算 | 保留任务真实生命周期的 admission，不让 HTTP 请求取消提前归还仍在使用的资源 |
@@ -35,11 +35,11 @@
 | `search_tantivy_max_writers` | 进程内同时活跃的 bundle writer 实例上限 | 重启 |
 | `search_tantivy_writer_heap_size` | 每个 writer 的 heap budget，非全进程预算 | 重启 |
 | `upload_concurrent_processing_tasks` | 上传后的处理任务并发，包含归档与索引处理链 | 重启 |
-| 全局 Tantivy 查询并发（由 runtime plan 派生） | 全进程 Tantivy bundle 查询任务并发 | 重启 |
+| 全局 Tantivy 查询并发（由 runtime plan 派生） | 全进程 Tantivy bundle 查询任务并发 | 重启；runtime-only |
 
 不新增“archive workers”线程池：先复用当前 processing admission，避免与上传处理并发相乘。上传接收并发、前端上传队列并发和服务端处理并发是不同参数，本期只调整最后一项。
 
-单次 Issue 的并行度派生为 `min(2, effective_query_limit)`，不是独立用户配置。一个 bundle 查询只获取一次全局 permit，单 bundle 与多 bundle 路径共用同一预算。SQLite FTS 后端不套用 Tantivy 查询预算；API 标注 Tantivy 参数 `applicable=false`，处理并发仍适用。
+单次 Issue 的并行度派生为 `min(2, effective_query_limit)`，不是独立用户配置。一个 bundle 查询只获取一次全局 permit，单 bundle 与多 bundle 路径共用同一预算。SQLite FTS 后端不套用 Tantivy 查询预算；该内部 semaphore 不出现在管理员 modes 或 RuntimeDecision 中，处理并发仍适用。
 
 归档防爆、Issue 配额、行大小、搜索结果窗口、临时文件磁盘额度、认证限制均不参加 Auto。`archive_max_working_size` 不能当作实际 RSS 或可分配内存。
 
@@ -112,11 +112,11 @@ P0 = clamp(ceil(C / 2), 1, 8)       // 上传处理任务
 W0 = clamp(floor(C / 4), 1, 4)      // writer 实例
 H0 = clamp(floor_to_16MiB(M / 64), 16MiB, 256MiB)
 Q0 = clamp(C, 1, 16)               // 全局 Tantivy 查询任务
-B  = M / 4                        // 本期可调资源的规划预算
+B  = M / 4                        // adaptive_memory_target_bytes，启发式规划目标
 E  = P × 32MiB + W × (H + 32MiB) + Q × 32MiB
 ```
 
-E 中的 32MiB 是首轮容量规划占位估算，需要混合负载测量后校准。H 是 writer budget，E 不是 RSS 硬上限；merge、mmap/page cache、数据库、解压缓冲、HTTP 和其他任务仍会消耗资源，余下 75% 不承诺一定足够。Auto 是保守默认值能力，不提供 OOM 保证。
+E 中的 32MiB 是首轮容量规划占位估算，需要混合负载测量后校准。`adaptive_memory_target_bytes` 只是 heuristic，不是实际 RSS、分配上限或硬限制；H 是 writer budget，merge、mmap/page cache、数据库、解压缓冲、HTTP 和其他任务仍会消耗资源，余下 75% 不承诺一定足够。Auto 是保守默认值能力，不提供 OOM 保证。管理员页面必须把它标注为估算目标，不能让用户误解为内存硬限制。
 
 算法顺序：
 
@@ -200,8 +200,8 @@ v1 不新增独立运行监控页面。资源快照只向管理员暴露，与�
 
 - 给 system_settings 增加 `adaptive_modes_json`；查询并发是 runtime plan 的派生值，不增加持久化列。
 - JSON 只存允许的 modes，数值继续使用原有 typed columns；不把整个 settings 改成无约束 JSON。
-- migration 中已有行：现存三个目标字段按 Manual 解释；新增 query 字段为 Manual=4，保持旧常量行为。即便现存值恰好等于旧默认，也不能据此猜测用户没有手工配置。
-- 新安装：四个目标字段默认 Auto；首次初始化显式提供的旧 ENV 对应字段转 Manual。配置解析层需要保留“是否显式设置”的 provenance，不能只看最终数值判断。
+- migration 中已有行：现存三个目标字段按 Manual 解释；查询并发不增加持久化列，也不增加管理员 mode。即便现存值恰好等于旧默认，也不能据此猜测用户没有手工配置。
+- 新安装：三个管理员可配置目标字段默认 Auto；首次初始化显式提供的旧 ENV 对应字段转 Manual。查询并发始终由 runtime 内部派生。配置解析层需要保留“是否显式设置”的 provenance，不能只看最终数值判断。
 - 安装状态依据初始化前的持久化状态，在旧 bootstrap 插入行前识别；不能因先执行 INSERT 而把新安装误判为升级。
 - 数字列与 modes、revision、审计在同一事务更新。Auto 计算结果不写回数字列。
 - 老实例可由管理员一次将四字段切 Auto；升级不能自动替换用户意图。

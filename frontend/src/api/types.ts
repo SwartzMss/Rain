@@ -64,9 +64,8 @@ export interface RegistrationSettings extends RegistrationStatus {
     upload_concurrent_processing_tasks: number;
     search_tantivy_max_writers: number;
     search_tantivy_writer_heap_size: number;
-    search_tantivy_max_concurrent_queries: number;
     estimated_bytes: number;
-    budget_bytes: number | null;
+    adaptive_memory_target_bytes: number | null;
     warnings: string[];
     decisions: Array<[string, { value: number; mode: 'auto' | 'manual'; reason: string }]>
   };
