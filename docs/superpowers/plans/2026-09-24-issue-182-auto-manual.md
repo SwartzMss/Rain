@@ -431,7 +431,7 @@ npx vitest run tests/admin-settings-ux.behavior.test.tsx tests/admin-guard.behav
 
 Expected: all mode, effective-value, protection-status, and admin guard tests pass.
 
-- [ ] Step 5: Commit the settings UI
+- [x] Step 5: Commit the settings UI
 
 ~~~bash
 git add frontend/src/features/admin/AdminPage.tsx frontend/src/features/admin/settingsFields.ts frontend/tests/admin-settings-ux.behavior.test.tsx
@@ -445,11 +445,11 @@ git commit -m "feat: add auto manual settings controls"
 - Modify: docs/superpowers/plans/2026-09-24-issue-182-auto-manual.md
 - Test: all existing backend and frontend suites
 
-- [ ] Step 1: Document the operator contract
+- [x] Step 1: Document the operator contract
 
 Update docs/configuration.md to explain that resource modes default to Manual, Auto uses fixed backend-owned values, configured/effective may differ until restart, Argon2 concurrency is protected, and CPU/memory-aware adaptation and live runtime tuning are not enabled yet.
 
-- [ ] Step 2: Run complete backend verification
+- [x] Step 2: Run complete backend verification
 
 From backend/:
 
@@ -462,7 +462,7 @@ cargo test --locked --quiet
 
 Expected: all tests pass; ignored benchmarks remain ignored.
 
-- [ ] Step 3: Run complete frontend verification
+- [x] Step 3: Run complete frontend verification
 
 From frontend/:
 
@@ -474,7 +474,7 @@ npm test
 
 Expected: TypeScript, production build, Vitest, and Node behavior tests pass.
 
-- [ ] Step 4: Review final diff and plan coverage
+- [x] Step 4: Review final diff and plan coverage
 
 Run:
 
@@ -486,7 +486,7 @@ git diff --stat origin/main..HEAD
 
 Confirm only the second-stage plan/spec, migration, settings service/API changes, frontend mode UI, tests, and configuration documentation are present. Confirm no live semaphore mutation, telemetry, automatic restart, or hard-limit changes slipped into the diff.
 
-- [ ] Step 5: Commit documentation and plan status
+- [x] Step 5: Commit documentation and plan status
 
 ~~~bash
 git add docs/configuration.md docs/superpowers/plans/2026-09-24-issue-182-auto-manual.md
