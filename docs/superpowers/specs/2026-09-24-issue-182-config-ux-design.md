@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved scope: first-stage configuration UX only. This design does not implement adaptive runtime tuning.
+Implemented in branch `fix/issue-182-config-ux`: first-stage configuration UX only. This design does not implement adaptive runtime tuning.
 
 ## Goal
 

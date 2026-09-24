@@ -18,7 +18,7 @@
 - Modify: `backend/src/settings/mod.rs`
 - Test: `backend/tests/settings.rs` existing metadata tests
 
-- [ ] **Step 1: Add the presentation enums and metadata fields**
+- [x] **Step 1: Add the presentation enums and metadata fields**
 
 Add serializable enums for the three categories and visibility modes, then add them to `FieldMetadata` and its serializer:
 
@@ -44,7 +44,7 @@ pub enum SettingVisibility {
 
 Add an exhaustive `SettingKey::ALL` array in `backend/src/settings/model.rs` so coverage tests can compare the metadata table against the supported setting enum without maintaining a second test-only list.
 
-- [ ] **Step 2: Assign every existing `SettingKey` a category, visibility, and recommendation**
+- [x] **Step 2: Assign every existing `SettingKey` a category, visibility, and recommendation**
 
 Update the single metadata table in `backend/src/settings/metadata.rs`. Use these rules:
 
@@ -59,7 +59,7 @@ Expert: Argon2 concurrency, indexing line-size budget, Tantivy writers/heap,
 
 Use `Default` visibility for Common, `Collapsed` for Advanced, and `Expert` for Expert. Only add recommended bounds where the project has a defensible operational recommendation; leave them `None` when no recommendation should be implied.
 
-- [ ] **Step 3: Add a failing metadata invariant test**
+- [x] **Step 3: Add a failing metadata invariant test**
 
 Extend the metadata test module with assertions that:
 
@@ -74,7 +74,7 @@ assert!(metadata::all().iter().all(|field| {
 
 Use the repository’s existing `SettingKey`/metadata coverage pattern rather than introducing a second source of truth. The test must also assert that the serialized response contains the new keys.
 
-- [ ] **Step 4: Run the focused backend tests and observe the expected failure before implementation is complete**
+- [x] **Step 4: Run the focused backend tests and observe the expected failure before implementation is complete**
 
 Run from the backend directory:
 
@@ -84,7 +84,7 @@ cargo test --test settings metadata
 
 Expected: the new assertions initially fail because the metadata contract and assignments are not complete.
 
-- [ ] **Step 5: Implement the minimum metadata changes and make the focused tests pass**
+- [x] **Step 5: Implement the minimum metadata changes and make the focused tests pass**
 
 Complete the enum serialization, all metadata assignments, and invariant checks. Do not alter validation logic or settings persistence.
 
@@ -97,7 +97,7 @@ cargo test --test settings metadata
 
 Expected: formatting passes and all focused metadata tests pass.
 
-- [ ] **Step 6: Commit the backend metadata contract**
+- [x] **Step 6: Commit the backend metadata contract**
 
 ```bash
 git add backend/src/settings/metadata.rs backend/src/settings/model.rs backend/src/settings/mod.rs
@@ -111,7 +111,7 @@ git commit -m "feat: classify admin settings metadata"
 - Create: `frontend/src/features/admin/settingsFields.ts`
 - Test: `frontend/tests/admin-settings-ux.behavior.test.tsx`
 
-- [ ] **Step 1: Extend the API type for metadata presentation fields**
+- [x] **Step 1: Extend the API type for metadata presentation fields**
 
 Extract the inline field type from `RegistrationSettings` and add the exact serialized values:
 
@@ -141,7 +141,7 @@ export interface RegistrationSettingField {
 
 Keep existing optional fields and response properties compatible.
 
-- [ ] **Step 2: Extract deterministic grouping and display helpers**
+- [x] **Step 2: Extract deterministic grouping and display helpers**
 
 Create helpers that group fields using only backend metadata and format guidance without changing values:
 
@@ -162,7 +162,7 @@ export function recommendedRangeLabel(field: RegistrationSettingField): string |
 
 Keep these helpers pure so the frontend behavior tests can exercise them without rendering the whole admin shell.
 
-- [ ] **Step 3: Write failing frontend behavior tests**
+- [x] **Step 3: Write failing frontend behavior tests**
 
 Add tests that prove:
 
@@ -181,7 +181,7 @@ it('formats only advisory recommended ranges', () => {
 });
 ```
 
-- [ ] **Step 4: Run the focused frontend test and verify it fails for the missing helpers**
+- [x] **Step 4: Run the focused frontend test and verify it fails for the missing helpers**
 
 Run from the frontend directory:
 
@@ -191,11 +191,11 @@ npm test -- --run tests/admin-settings-ux.behavior.test.tsx
 
 Expected: FAIL because the grouping helpers do not yet exist.
 
-- [ ] **Step 5: Implement the helpers and make the focused test pass**
+- [x] **Step 5: Implement the helpers and make the focused test pass**
 
 Run the same command and expect all focused tests to pass. Do not add a frontend classification map keyed by setting name.
 
-- [ ] **Step 6: Commit the frontend metadata helpers**
+- [x] **Step 6: Commit the frontend metadata helpers**
 
 ```bash
 git add frontend/src/api/types.ts frontend/src/features/admin/settingsFields.ts frontend/tests/admin-settings-ux.behavior.test.tsx
@@ -209,7 +209,7 @@ git commit -m "feat: add grouped settings metadata helpers"
 - Modify: `frontend/src/features/admin/settingsFields.ts` if display helpers need a shared type
 - Test: `frontend/tests/admin-settings-ux.behavior.test.tsx`
 
-- [ ] **Step 1: Write failing rendered behavior tests**
+- [x] **Step 1: Write failing rendered behavior tests**
 
 Add a settings-page test fixture containing one field per category and assert:
 
@@ -222,7 +222,7 @@ expect(screen.getByRole('button', { name: '显示专家配置' })).toBeVisible()
 
 Also assert that clicking the reveal control renders the expert field, that advanced content is inside a closed `<details>`, and that the field displays its description, unit, hard range, recommendation, and apply mode.
 
-- [ ] **Step 2: Run the rendered test and verify the expected presentation failure**
+- [x] **Step 2: Run the rendered test and verify the expected presentation failure**
 
 Run from the frontend directory:
 
@@ -232,7 +232,7 @@ npm test -- --run tests/admin-settings-ux.behavior.test.tsx
 
 Expected: FAIL because the current page has one undifferentiated advanced section and no expert reveal control.
 
-- [ ] **Step 3: Implement common, advanced, and expert rendering**
+- [x] **Step 3: Implement common, advanced, and expert rendering**
 
 Keep the current dedicated common controls for registration, authentication limits, Issue expiry, and cleanup users. For metadata-driven fields:
 
@@ -246,7 +246,7 @@ Keep the current dedicated common controls for registration, authentication limi
 
 The reveal control changes visibility only; it must not mutate drafts or submit changes.
 
-- [ ] **Step 4: Run the focused rendered tests and the existing admin tests**
+- [x] **Step 4: Run the focused rendered tests and the existing admin tests**
 
 Run from the frontend directory:
 
@@ -256,7 +256,7 @@ npm test -- --run tests/admin-settings-ux.behavior.test.tsx tests/admin-guard.be
 
 Expected: all settings UX and existing admin guard tests pass.
 
-- [ ] **Step 5: Commit the settings page UX**
+- [x] **Step 5: Commit the settings page UX**
 
 ```bash
 git add frontend/src/features/admin/AdminPage.tsx frontend/src/features/admin/settingsFields.ts frontend/tests/admin-settings-ux.behavior.test.tsx
@@ -270,11 +270,11 @@ git commit -m "feat: organize admin settings by visibility"
 - Modify: `frontend/tests/admin-settings-ux.behavior.test.tsx` only if regression coverage is incomplete
 - Modify: `docs/superpowers/specs/2026-09-24-issue-182-config-ux-design.md` only to record implementation status after verification
 
-- [ ] **Step 1: Add or update the backend response compatibility test**
+- [x] **Step 1: Add or update the backend response compatibility test**
 
 Assert that `GET /api/admin/settings` includes the new metadata fields while existing configured values, revision handling, and pending restart fields remain unchanged.
 
-- [ ] **Step 2: Run the complete backend verification suite**
+- [x] **Step 2: Run the complete backend verification suite**
 
 ```bash
 cargo fmt --check
@@ -285,7 +285,7 @@ cargo test --locked
 
 Expected: exit code 0; existing ignored benchmarks may remain ignored.
 
-- [ ] **Step 3: Run the complete frontend verification suite**
+- [x] **Step 3: Run the complete frontend verification suite**
 
 ```bash
 npm run lint
@@ -317,7 +317,7 @@ git commit -m "docs: mark issue 182 configuration UX complete"
 git push -u origin fix/issue-182-config-ux
 gh pr create --base main --head fix/issue-182-config-ux \
   --title "feat: organize administrator settings by audience" \
-  --body "Closes #182"
+  --body "Partially addresses #182. This PR implements the first-stage configuration UX: common settings stay visible, advanced settings are collapsed, expert settings are explicitly revealed, and metadata guidance is rendered consistently. Auto/Manual modes, adaptive runtime tuning, and effective-value status presentation remain deferred to follow-up work."
 ```
 
 After creating the PR, wait for the remote CI checks and report their result before claiming the PR is ready to merge.
