@@ -216,6 +216,7 @@ export function HomeView() {
               onFilesSelected={(files) => upload.performUpload(files).catch(() => undefined)}
               uploadDisabled={upload.uploadDisabled}
               uploadError={upload.uploadError}
+              uploadTasks={upload.uploadTasks}
               uploading={upload.uploading}
             />
           ) : null}
@@ -237,6 +238,7 @@ export function HomeView() {
           fileRows={fileRows}
           canWrite={canWrite}
           onDeleteRow={deleteRow}
+          onRetryUpload={upload.retryUpload}
         />
       </section>
 

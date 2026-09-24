@@ -33,5 +33,6 @@ export const createOptimisticUploadRows = (
       stage: task.status as LocalUploadStage,
       progressPercent: task.progressPercent,
       sizeBytes: task.sizeBytes,
-      failureReason: task.message
+      failureReason: task.message,
+      uploadTaskId: task.id
     }));

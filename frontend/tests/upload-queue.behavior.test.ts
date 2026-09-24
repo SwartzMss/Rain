@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createUploadQueue } from '../src/features/files/uploadQueue';
+import { createOptimisticUploadRows } from '../src/features/files/uploadRows';
+import { stageLabel } from '../src/features/files/homeRows';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -77,5 +79,31 @@ describe('upload queue', () => {
     await settleQueue();
     expect(attempts).toBe(2);
     expect(queue.getTasks('ISSUE-1')[0].status).toBe('ACCEPTED');
+  });
+
+  it('maps queue states to independent file rows with a retry target', () => {
+    const rows = createOptimisticUploadRows([
+      {
+        id: 'task-failed',
+        issueCode: 'ISSUE-1',
+        file: new File(['a'], 'a.log'),
+        name: 'a.log',
+        sizeBytes: 1,
+        status: 'UNCONFIRMED',
+        progressPercent: 100,
+        message: '接收结果未确认',
+        response: null
+      }
+    ], new Set());
+
+    expect(rows[0]).toMatchObject({
+      key: 'task-failed',
+      uploadTaskId: 'task-failed',
+      stage: 'UNCONFIRMED',
+      failureReason: '接收结果未确认'
+    });
+    expect(stageLabel('QUEUED')).toBe('等待上传');
+    expect(stageLabel('RETRY_WAIT')).toBe('等待重试');
+    expect(stageLabel('ACCEPTED')).toBe('已接收，等待处理');
   });
 });

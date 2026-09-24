@@ -1,4 +1,5 @@
 import type { FormEvent, RefObject } from 'react';
+import type { UploadTaskSnapshot } from '../uploadRows';
 
 type UploadPanelProps = {
   currentIssueCode: string;
@@ -7,6 +8,7 @@ type UploadPanelProps = {
   onFilesSelected: (files: File[]) => void;
   uploadDisabled: boolean;
   uploadError: string | null;
+  uploadTasks: readonly UploadTaskSnapshot[];
   uploading: boolean;
 };
 
@@ -17,8 +19,14 @@ export function UploadPanel({
   onFilesSelected,
   uploadDisabled,
   uploadError,
+  uploadTasks,
   uploading
 }: UploadPanelProps) {
+  const uploadingCount = uploadTasks.filter((task) => task.status === 'UPLOADING').length;
+  const waitingCount = uploadTasks.filter(
+    (task) => task.status === 'QUEUED' || task.status === 'RETRY_WAIT'
+  ).length;
+  const acceptedCount = uploadTasks.filter((task) => task.status === 'ACCEPTED').length;
   const handleUpload = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
   };
@@ -79,6 +87,11 @@ export function UploadPanel({
             <p className="mt-1 text-xs text-slate-500">
               支持 .log、.txt、.zip、.tar.gz、.tgz、.gz。后台会校验文件及解压内容，超出限制的任务将失败。
             </p>
+            {uploadTasks.length ? (
+              <p className="mt-1 text-xs text-slate-500">
+                上传中 {uploadingCount} · 等待 {waitingCount} · 等待处理 {acceptedCount}
+              </p>
+            ) : null}
           </div>
         </div>
         <button
