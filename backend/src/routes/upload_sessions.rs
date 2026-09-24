@@ -160,19 +160,17 @@ pub async fn create_upload_session(
         Err(error) => {
             let _ = fs::remove_dir_all(&session_dir).await;
             TempBudget::release_persistent(&state.upload.tmp_bytes, input.file_size_bytes);
-            if matches!(error, AppError::Conflict(_)) {
-                if let Ok(existing) = find_by_idempotency(
+            if matches!(error, AppError::Conflict(_))
+                && let Ok(existing) = find_by_idempotency(
                     &state.db.pool,
                     &input.owner_user_id,
                     &input.issue_code,
                     &input.idempotency_key,
                 )
                 .await
-                {
-                    if same_create_metadata(&existing, &input) {
-                        return Ok(session_response(existing, StatusCode::OK));
-                    }
-                }
+                && same_create_metadata(&existing, &input)
+            {
+                return Ok(session_response(existing, StatusCode::OK));
             }
             return Err(error);
         }
