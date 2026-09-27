@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use tantivy::{Index, IndexSettings, IndexWriter, TantivyDocument, directory::MmapDirectory};
+use tantivy::{
+    Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, TantivyDocument,
+    directory::MmapDirectory,
+};
 
 use crate::error::AppError;
 
@@ -85,14 +88,11 @@ impl BundleIndexWriter {
         self.writer
             .wait_merging_threads()
             .map_err(|error| AppError::Config(format!("merge Tantivy index: {error}")))?;
-        let reader = self
-            .index
-            .reader()
-            .map_err(|error| AppError::Config(format!("open Tantivy reader: {error}")))?;
+        let reader = build_reader(&self.index)?;
         let document_count = reader.searcher().num_docs();
         Ok(CommittedBundleIndex {
-            index: self.index,
             fields: self.fields,
+            reader,
             document_count,
         })
     }
@@ -110,19 +110,26 @@ pub fn open_committed(path: impl AsRef<Path>) -> Result<CommittedBundleIndex, Ap
     index
         .tokenizers()
         .register(TOKENIZER_NAME, tokenizer::analyzer());
-    let reader = index
-        .reader()
-        .map_err(|error| AppError::Config(format!("open committed Tantivy reader: {error}")))?;
+    let reader = build_reader(&index)?;
+    let document_count = reader.searcher().num_docs();
     Ok(CommittedBundleIndex {
-        index,
         fields,
-        document_count: reader.searcher().num_docs(),
+        reader,
+        document_count,
     })
 }
 
+fn build_reader(index: &Index) -> Result<IndexReader, AppError> {
+    index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::Manual)
+        .try_into()
+        .map_err(|error| AppError::Config(format!("open committed Tantivy reader: {error}")))
+}
+
 pub struct CommittedBundleIndex {
-    pub(crate) index: Index,
     pub(crate) fields: BundleSchema,
+    pub(crate) reader: IndexReader,
     pub document_count: u64,
 }
 

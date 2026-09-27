@@ -148,6 +148,16 @@ async fn remove_path_if_present(path: &Path) -> Result<bool, AppError> {
     }
 }
 
+fn invalidate_tantivy_reader(bundle_id: &str, generation: i64) {
+    #[cfg(feature = "tantivy-search")]
+    crate::search::tantivy::reader_cache().invalidate(
+        &crate::search::generation_lease::GenerationLeaseKey::new(bundle_id, generation),
+    );
+
+    #[cfg(not(feature = "tantivy-search"))]
+    let _ = (bundle_id, generation);
+}
+
 /// Remove every on-disk location owned by one unpublished generation.
 /// Missing locations are expected after a crash and therefore are harmless.
 pub(crate) async fn cleanup_generation_artifacts(
@@ -155,6 +165,7 @@ pub(crate) async fn cleanup_generation_artifacts(
     bundle_id: &str,
     generation: i64,
 ) -> Result<bool, AppError> {
+    invalidate_tantivy_reader(bundle_id, generation);
     let artifact = data_root.join(artifact_relative_path(bundle_id, generation)?);
     let staging = data_root
         .join(".search-rebuild")
@@ -188,6 +199,7 @@ async fn cleanup_pending_generation_artifacts(
     bundle_id: &str,
     generation: i64,
 ) -> Result<bool, AppError> {
+    invalidate_tantivy_reader(bundle_id, generation);
     let artifact = data_root.join(artifact_relative_path(bundle_id, generation)?);
     let staging = data_root
         .join(".search-rebuild")
@@ -763,6 +775,7 @@ pub async fn cleanup_publication_artifact(
     bundle_id: &str,
     generation: i64,
 ) -> Result<bool, AppError> {
+    invalidate_tantivy_reader(bundle_id, generation);
     remove_directory_if_present(&data_root.join(artifact_relative_path(bundle_id, generation)?))
         .await
 }
