@@ -45,6 +45,7 @@ describe('application behavior', () => {
     expect(screen.getByRole('link', { name: '联系作者（swartz_lubel@outlook.com）' })).toHaveAttribute('href', 'mailto:swartz_lubel@outlook.com');
     expect(screen.getByRole('link', { name: 'GitHub 仓库（新窗口打开）' })).toHaveAttribute('href', 'https://github.com/SwartzMss/Rain');
     expect(screen.getByRole('link', { name: '报告问题（新窗口打开）' })).toHaveAttribute('href', 'https://github.com/SwartzMss/Rain/issues');
+    expect(screen.queryByText('日志分析工具')).not.toBeInTheDocument();
     expect(screen.getByText('服务正常')).toBeInTheDocument();
   });
 
