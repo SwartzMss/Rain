@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use serde_json::json;
-use sqlx::FromRow;
+use sqlx::{FromRow, QueryBuilder, Sqlite};
 
 use crate::{
     blob_store::BlobStore,
@@ -50,40 +50,53 @@ pub async fn fetch_file(
     .ok_or_else(|| AppError::NotFound(format!("file {file_id}")))
 }
 
+#[derive(Debug, Clone)]
+pub struct FileChildrenCursor {
+    pub is_dir: i64,
+    pub name: String,
+    pub id: i64,
+}
+
 pub async fn fetch_children(
     pool: &sqlx::SqlitePool,
     bundle_id: &str,
     parent_id: Option<i64>,
+    cursor: Option<&FileChildrenCursor>,
+    limit: i64,
 ) -> Result<Vec<FileRow>, AppError> {
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type, \
+                f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state \
+         FROM visible_files f LEFT JOIN blobs b ON b.id = f.blob_id \
+         WHERE f.bundle_id = ",
+    );
+    query.push_bind(bundle_id);
     if let Some(parent) = parent_id {
-        sqlx::query_as::<_, FileRow>(
-            r#"
-            SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
-                   f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
-            FROM visible_files f LEFT JOIN blobs b ON b.id = f.blob_id
-            WHERE f.bundle_id = ? AND f.parent_id = ?
-            ORDER BY is_dir DESC, name ASC
-            "#,
-        )
-        .bind(bundle_id)
-        .bind(parent)
-        .fetch_all(pool)
-        .await
+        query.push(" AND f.parent_id = ");
+        query.push_bind(parent);
     } else {
-        sqlx::query_as::<_, FileRow>(
-            r#"
-            SELECT f.id, f.parent_id, f.name, f.path, f.is_dir, f.size_bytes, f.line_count, f.mime_type,
-                   f.status, f.meta, f.blob_id, b.storage_backend, b.storage_key, b.state AS blob_state
-            FROM visible_files f LEFT JOIN blobs b ON b.id = f.blob_id
-            WHERE f.bundle_id = ? AND f.parent_id IS NULL
-            ORDER BY is_dir DESC, name ASC
-            "#,
-        )
-        .bind(bundle_id)
+        query.push(" AND f.parent_id IS NULL");
+    }
+    if let Some(cursor) = cursor {
+        query.push(" AND (f.is_dir < ");
+        query.push_bind(cursor.is_dir);
+        query.push(" OR (f.is_dir = ");
+        query.push_bind(cursor.is_dir);
+        query.push(" AND (f.name > ");
+        query.push_bind(&cursor.name);
+        query.push(" OR (f.name = ");
+        query.push_bind(&cursor.name);
+        query.push(" AND f.id > ");
+        query.push_bind(cursor.id);
+        query.push("))))");
+    }
+    query.push(" ORDER BY f.is_dir DESC, f.name ASC, f.id ASC LIMIT ");
+    query.push_bind(limit);
+    query
+        .build_query_as::<FileRow>()
         .fetch_all(pool)
         .await
-    }
-    .map_err(AppError::Database)
+        .map_err(AppError::Database)
 }
 
 pub async fn nearest_line_offset(
@@ -206,7 +219,7 @@ pub async fn resolve_file_path(
 mod tests {
     use crate::blob_store::LocalCasBlobStore;
 
-    use super::{FileRow, resolve_file_path};
+    use super::{FileChildrenCursor, FileRow, fetch_children, resolve_file_path};
 
     fn row(path: &str, meta: Option<&str>) -> FileRow {
         FileRow {
@@ -244,5 +257,62 @@ mod tests {
         let error = resolve_file_path(&record, &store).await.unwrap_err();
         assert!(error.to_string().contains("storage backend s3"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn children_cursor_pages_directories_before_files_with_stable_ties() {
+        let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");
+        crate::db::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues(code,name) VALUES('FILES','FILES')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle','FILES','hash','bundle','READY')")
+            .execute(&pool)
+            .await
+            .expect("insert bundle");
+        for (name, is_dir) in [
+            ("dir", 1),
+            ("a.log", 0),
+            ("b.log", 0),
+            ("c.log", 0),
+            ("d.log", 0),
+        ] {
+            sqlx::query("INSERT INTO files(bundle_id,name,path,is_dir) VALUES('bundle',?,?,?)")
+                .bind(name)
+                .bind(format!("/{name}"))
+                .bind(is_dir)
+                .execute(&pool)
+                .await
+                .expect("insert file");
+        }
+
+        let first = fetch_children(&pool, "bundle", None, None, 3)
+            .await
+            .expect("first page");
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dir", "a.log", "b.log"]
+        );
+        let cursor = FileChildrenCursor {
+            is_dir: if first[2].is_dir { 1 } else { 0 },
+            name: first[2].name.clone(),
+            id: first[2].id,
+        };
+        let second = fetch_children(&pool, "bundle", None, Some(&cursor), 3)
+            .await
+            .expect("second page");
+        assert_eq!(
+            second
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c.log", "d.log"]
+        );
     }
 }

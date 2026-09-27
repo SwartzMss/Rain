@@ -252,8 +252,12 @@ export const rainApi = {
   fetchIssueBundles(issueId: string) {
     return request<IssueBundlesResponse>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueId))}`);
   },
-  fetchFileNode(bundleId: string, fileId: string) {
-    return request<FileNodeResponse>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}`);
+  fetchFileNode(bundleId: string, fileId: string, options?: { cursor?: string | null; limit?: number }) {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set('cursor', options.cursor);
+    if (typeof options?.limit === 'number') params.set('limit', String(options.limit));
+    const query = params.toString();
+    return request<FileNodeResponse>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}${query ? `?${query}` : ''}`);
   },
   fetchFileContent(bundleId: string, fileId: string) {
     return request<FileContentResponse>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}/content`);

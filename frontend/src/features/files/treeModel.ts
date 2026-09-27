@@ -8,6 +8,9 @@ export type TreeNode = Omit<FileNode, 'id' | 'children'> & {
   parentId: string | null;
   childrenIds: string[];
   hasLoadedChildren: boolean;
+  hasMoreChildren: boolean;
+  childrenCursor: string | null;
+  childrenSourceId: string;
 };
 
 export const formatSize = (bytes?: number) => {
@@ -59,5 +62,8 @@ export const toTreeNode = (
   status: node.status,
   meta: node.meta,
   childrenIds: [],
-  hasLoadedChildren: false
+  hasLoadedChildren: false,
+  hasMoreChildren: false,
+  childrenCursor: null,
+  childrenSourceId: node.id.toString()
 });

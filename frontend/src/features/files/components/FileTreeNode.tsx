@@ -9,6 +9,8 @@ type FileTreeNodeProps = {
   expandedNodes: Set<string>;
   selectedNodeId: string | null;
   onNodeClick: (nodeId: string) => void;
+  onLoadMore: (node: TreeNode) => void;
+  loading?: boolean;
 };
 
 export function FileTreeNode({
@@ -17,7 +19,9 @@ export function FileTreeNode({
   treeNodes,
   expandedNodes,
   selectedNodeId,
-  onNodeClick
+  onNodeClick,
+  onLoadMore,
+  loading = false
 }: FileTreeNodeProps): JSX.Element | null {
   const node = treeNodes[nodeId];
   if (!node) return null;
@@ -35,6 +39,8 @@ export function FileTreeNode({
             expandedNodes={expandedNodes}
             selectedNodeId={selectedNodeId}
             onNodeClick={onNodeClick}
+            onLoadMore={onLoadMore}
+            loading={loading}
           />
         ))}
       </div>
@@ -86,8 +92,20 @@ export function FileTreeNode({
               expandedNodes={expandedNodes}
               selectedNodeId={selectedNodeId}
               onNodeClick={onNodeClick}
+              onLoadMore={onLoadMore}
+              loading={loading}
             />
           ))}
+          {node.hasMoreChildren ? (
+            <button
+              type="button"
+              className="ml-7 px-2 py-1 text-xs text-sky-700 hover:text-sky-950"
+              disabled={loading}
+              onClick={() => onLoadMore(node)}
+            >
+              {loading ? '加载中…' : '加载更多'}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>

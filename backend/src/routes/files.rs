@@ -1,10 +1,14 @@
 use actix_files::NamedFile;
 use actix_web::{
     HttpResponse, delete, get,
-    http::header::{Charset, ContentDisposition, DispositionParam, DispositionType, ExtendedValue},
+    http::{
+        StatusCode,
+        header::{Charset, ContentDisposition, DispositionParam, DispositionType, ExtendedValue},
+    },
     post, web,
 };
-use serde::Deserialize;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
@@ -13,7 +17,9 @@ use crate::{
     error::AppError,
     file_classification::PreviewKind,
     models::files::{FileNode, FileNodeResponse},
-    repositories::files::{fetch_children, fetch_file, resolve_file_path, to_file_node},
+    repositories::files::{
+        FileChildrenCursor, fetch_children, fetch_file, resolve_file_path, to_file_node,
+    },
     services::{
         file_deletion::{
             FileDeletionBatchItemInput, FileDeletionJobResponse, enqueue_file_deletion,
@@ -37,6 +43,59 @@ struct FilePath {
 struct LinesQuery {
     start: Option<i64>,
     limit: Option<i64>,
+}
+
+const FILE_CHILDREN_DEFAULT_LIMIT: i64 = 100;
+const FILE_CHILDREN_MAX_LIMIT: i64 = 500;
+
+#[derive(Deserialize)]
+struct FileChildrenQuery {
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FileChildrenCursorPayload {
+    is_dir: i64,
+    name: String,
+    id: i64,
+}
+
+fn decode_file_children_cursor(
+    value: Option<&str>,
+) -> Result<Option<FileChildrenCursor>, AppError> {
+    value
+        .map(|value| {
+            let raw = URL_SAFE_NO_PAD.decode(value).map_err(|_| {
+                AppError::api(StatusCode::BAD_REQUEST, "BAD_REQUEST", "文件树游标无效")
+            })?;
+            let payload: FileChildrenCursorPayload =
+                serde_json::from_slice(&raw).map_err(|_| {
+                    AppError::api(StatusCode::BAD_REQUEST, "BAD_REQUEST", "文件树游标无效")
+                })?;
+            if !matches!(payload.is_dir, 0 | 1) || payload.id < 0 {
+                return Err(AppError::api(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "文件树游标无效",
+                ));
+            }
+            Ok(FileChildrenCursor {
+                is_dir: payload.is_dir,
+                name: payload.name,
+                id: payload.id,
+            })
+        })
+        .transpose()
+}
+
+fn encode_file_children_cursor(record: &crate::repositories::files::FileRow) -> String {
+    let payload = FileChildrenCursorPayload {
+        is_dir: if record.is_dir { 1 } else { 0 },
+        name: record.name.clone(),
+        id: record.id,
+    };
+    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("file cursor is serializable"))
 }
 
 #[derive(Deserialize)]
@@ -76,6 +135,7 @@ async fn normalize_file_deletion_batch_items(
 #[get("/files/v1/{bundle_id}/files/{file_id}")]
 pub async fn get_file_node(
     params: web::Path<FilePath>,
+    query: web::Query<FileChildrenQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let FilePath { bundle_id, file_id } = params.into_inner();
@@ -116,10 +176,36 @@ pub async fn get_file_node(
                 .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?,
         )
     };
-    let children_records = fetch_children(&state.db.pool, &bundle.id, parent_id).await?;
+    let limit = query
+        .limit
+        .unwrap_or(FILE_CHILDREN_DEFAULT_LIMIT)
+        .clamp(1, FILE_CHILDREN_MAX_LIMIT);
+    let cursor = decode_file_children_cursor(query.cursor.as_deref())?;
+    let mut children_records = fetch_children(
+        &state.db.pool,
+        &bundle.id,
+        parent_id,
+        cursor.as_ref(),
+        limit + 1,
+    )
+    .await?;
+    let has_more = children_records.len() as i64 > limit;
+    if has_more {
+        children_records.pop();
+    }
+    let next_cursor = if has_more {
+        children_records.last().map(encode_file_children_cursor)
+    } else {
+        None
+    };
     let children = children_records.into_iter().map(to_file_node).collect();
 
-    Ok(HttpResponse::Ok().json(FileNodeResponse { node, children }))
+    Ok(HttpResponse::Ok().json(FileNodeResponse {
+        node,
+        children,
+        has_more,
+        next_cursor,
+    }))
 }
 
 #[get("/files/v1/{bundle_id}/files/{file_id}/content")]
