@@ -169,7 +169,7 @@ it('presents metadata settings by visibility and reveals expert settings explici
   expect(screen.getByText('16 MiB')).toBeInTheDocument();
   expect(screen.getAllByText(/fallback（探测不可用）/)).toHaveLength(2);
   expect(screen.getByText('原因：内存探测不可用')).toBeInTheDocument();
-  expect(screen.getByText(/自适应并发计划使用启发式内存目标/)).toBeInTheDocument();
+  expect(screen.queryByText(/自适应并发计划使用启发式内存目标/)).not.toBeInTheDocument();
   expect(screen.getByText('高级运行参数')).toBeInTheDocument();
   expect(screen.queryByText('专家配置')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '显示专家配置' })).toBeInTheDocument();
