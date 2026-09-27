@@ -7,8 +7,8 @@ use actix_web::{App, HttpServer, middleware::from_fn, web};
 use backend::{
     AppState, RecoveryRuntime,
     blob_store::{
-        BlobStore, LocalCasBlobStore, recover_pending_blobs, spawn_blob_audit, spawn_blob_gc,
-        spawn_blob_recovery,
+        BlobAuditActivity, BlobStore, LocalCasBlobStore, recover_pending_blobs, spawn_blob_audit,
+        spawn_blob_gc, spawn_blob_recovery,
     },
     config::AppConfig,
     db::{
@@ -336,6 +336,14 @@ async fn main() -> std::io::Result<()> {
         spawn_blob_audit(
             shared_state.db.pool.clone(),
             shared_state.storage.blob_store.clone(),
+            BlobAuditActivity::with_capacities(
+                shared_state.upload.processing_permits.clone(),
+                shared_state.upload.receive_permits.clone(),
+                shared_state.search.query_permits.clone(),
+                config.limits.upload.concurrent_processing_tasks,
+                config.limits.upload.concurrent_receive_tasks,
+                runtime_plan.tantivy_max_concurrent_queries,
+            ),
         ),
         spawn_blob_recovery(
             shared_state.db.pool.clone(),

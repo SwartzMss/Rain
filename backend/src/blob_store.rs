@@ -8,7 +8,7 @@ use std::{
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
-use tokio::{fs, io::AsyncReadExt};
+use tokio::{fs, io::AsyncReadExt, sync::Semaphore};
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -20,6 +20,61 @@ pub struct StoredBlob {
     pub size_bytes: u64,
     pub storage_backend: &'static str,
     pub storage_key: String,
+}
+
+/// Shared activity signals used to keep integrity audits behind foreground
+/// upload and search work. A semaphore with fewer than its configured
+/// capacity means that workload is active, so the audit should yield before
+/// issuing more disk I/O.
+#[derive(Clone)]
+pub struct BlobAuditActivity {
+    upload_processing_permits: Arc<Semaphore>,
+    upload_receive_permits: Arc<Semaphore>,
+    search_query_permits: Arc<Semaphore>,
+    upload_processing_capacity: usize,
+    upload_receive_capacity: usize,
+    search_query_capacity: usize,
+}
+
+impl BlobAuditActivity {
+    pub fn new(
+        upload_processing_permits: Arc<Semaphore>,
+        upload_receive_permits: Arc<Semaphore>,
+        search_query_permits: Arc<Semaphore>,
+    ) -> Self {
+        Self::with_capacities(
+            upload_processing_permits.clone(),
+            upload_receive_permits.clone(),
+            search_query_permits.clone(),
+            upload_processing_permits.available_permits().max(1),
+            upload_receive_permits.available_permits().max(1),
+            search_query_permits.available_permits().max(1),
+        )
+    }
+
+    pub fn with_capacities(
+        upload_processing_permits: Arc<Semaphore>,
+        upload_receive_permits: Arc<Semaphore>,
+        search_query_permits: Arc<Semaphore>,
+        upload_processing_capacity: usize,
+        upload_receive_capacity: usize,
+        search_query_capacity: usize,
+    ) -> Self {
+        Self {
+            upload_processing_permits,
+            upload_receive_permits,
+            search_query_permits,
+            upload_processing_capacity: upload_processing_capacity.max(1),
+            upload_receive_capacity: upload_receive_capacity.max(1),
+            search_query_capacity: search_query_capacity.max(1),
+        }
+    }
+
+    fn is_saturated(&self) -> bool {
+        self.upload_processing_permits.available_permits() < self.upload_processing_capacity
+            || self.upload_receive_permits.available_permits() < self.upload_receive_capacity
+            || self.search_query_permits.available_permits() < self.search_query_capacity
+    }
 }
 
 #[async_trait]
@@ -506,9 +561,33 @@ pub fn spawn_blob_recovery(
     )
 }
 
+const AUDIT_BATCH_SIZE: i64 = 100;
+// Keep each hourly pass small enough to be background I/O. A single larger
+// Blob is still audited so it cannot remain unverified forever; hashing yields
+// between chunks and stops at the first sign of saturated foreground work.
+const AUDIT_BYTE_BUDGET: u64 = 512 * 1024 * 1024;
+const AUDIT_CHUNK_PAUSE: std::time::Duration = std::time::Duration::from_millis(1);
+const AUDIT_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const AUDIT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BlobAuditStats {
+    pub unhealthy: u64,
+    pub audited_bytes: u64,
+    pub deferred: bool,
+}
+
 pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Result<u64, AppError> {
-    const AUDIT_BATCH_SIZE: i64 = 100;
-    const AUDIT_BYTE_BUDGET: u64 = 5 * 1024 * 1024 * 1024;
+    Ok(audit_local_blobs_with_activity(pool, store, None)
+        .await?
+        .unhealthy)
+}
+
+pub async fn audit_local_blobs_with_activity(
+    pool: &SqlitePool,
+    store: &dyn BlobStore,
+    activity: Option<&BlobAuditActivity>,
+) -> Result<BlobAuditStats, AppError> {
     let rows: Vec<(i64, String, i64, String)> = sqlx::query_as(
         r#"
         SELECT id, content_hash, size_bytes, storage_key
@@ -523,76 +602,138 @@ pub async fn audit_local_blobs(pool: &SqlitePool, store: &dyn BlobStore) -> Resu
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
-    let mut unhealthy = 0u64;
-    let mut audited_bytes = 0u64;
+    let mut stats = BlobAuditStats::default();
     for (id, expected_hash, expected_size, storage_key) in rows {
-        let expected_size = expected_size.max(0) as u64;
-        if audited_bytes > 0 && audited_bytes.saturating_add(expected_size) > AUDIT_BYTE_BUDGET {
+        if activity.is_some_and(BlobAuditActivity::is_saturated) {
+            stats.deferred = true;
             break;
         }
-        audited_bytes = audited_bytes.saturating_add(expected_size);
-        if store
-            .verify(&storage_key, &expected_hash, expected_size)
+        let expected_size = expected_size.max(0) as u64;
+        if stats.audited_bytes > 0
+            && stats.audited_bytes.saturating_add(expected_size) > AUDIT_BYTE_BUDGET
+        {
+            break;
+        }
+        match verify_blob_for_audit(store, &storage_key, &expected_hash, expected_size, activity)
             .await?
         {
-            crate::db::write::run(pool, "record healthy blob audit", &(id,), |conn, &(id,)| {
-                Box::pin(async move {
-                    sqlx::query(
-                        "UPDATE blobs SET verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'",
-                    )
-                        .bind(id)
-                        .execute(conn)
-                        .await
-                        .map(|_| ())
-                        .map_err(AppError::Database)
-                })
-            })
-            .await?;
-            continue;
-        }
-        let state = if store.exists(&storage_key).await? {
-            "CORRUPTED"
-        } else {
-            "MISSING"
-        };
-        crate::db::write::run(
-            pool,
-            "record unhealthy blob audit",
-            &(id, state),
-            |conn, &(id, state)| {
-                Box::pin(async move {
-                    sqlx::query("UPDATE blobs SET state = ?, verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'")
-                            .bind(state)
+            None => {
+                stats.deferred = true;
+                break;
+            }
+            Some(true) => {
+                crate::db::write::run(pool, "record healthy blob audit", &(id,), |conn, &(id,)| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "UPDATE blobs SET verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'",
+                        )
                             .bind(id)
                             .execute(conn)
                             .await
                             .map(|_| ())
                             .map_err(AppError::Database)
+                    })
                 })
-            },
-        )
-        .await?;
-        unhealthy += 1;
+                .await?;
+            }
+            Some(false) => {
+                let state = if store.exists(&storage_key).await? {
+                    "CORRUPTED"
+                } else {
+                    "MISSING"
+                };
+                crate::db::write::run(
+                    pool,
+                    "record unhealthy blob audit",
+                    &(id, state),
+                    |conn, &(id, state)| {
+                        Box::pin(async move {
+                            sqlx::query("UPDATE blobs SET state = ?, verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'READY'")
+                                .bind(state)
+                                .bind(id)
+                                .execute(conn)
+                                .await
+                                .map(|_| ())
+                                .map_err(AppError::Database)
+                        })
+                    },
+                )
+                .await?;
+                stats.unhealthy += 1;
+            }
+        }
+        stats.audited_bytes = stats.audited_bytes.saturating_add(expected_size);
     }
-    Ok(unhealthy)
+    Ok(stats)
+}
+
+async fn verify_blob_for_audit(
+    store: &dyn BlobStore,
+    storage_key: &str,
+    expected_hash: &str,
+    expected_size: u64,
+    activity: Option<&BlobAuditActivity>,
+) -> Result<Option<bool>, AppError> {
+    if activity.is_some_and(BlobAuditActivity::is_saturated) {
+        return Ok(None);
+    }
+    let mut reader = match store.open(storage_key).await {
+        Ok(reader) => reader,
+        Err(error) => {
+            return if store.exists(storage_key).await? {
+                Err(error)
+            } else {
+                Ok(Some(false))
+            };
+        }
+    };
+    let mut hasher = Sha256::new();
+    let mut size_bytes = 0u64;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        if activity.is_some_and(BlobAuditActivity::is_saturated) {
+            return Ok(None);
+        }
+        let read = reader.read(&mut buffer).await.map_err(AppError::Io)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size_bytes = size_bytes.saturating_add(read as u64);
+        tokio::task::yield_now().await;
+        tokio::time::sleep(AUDIT_CHUNK_PAUSE).await;
+    }
+    if activity.is_some_and(BlobAuditActivity::is_saturated) {
+        return Ok(None);
+    }
+    Ok(Some(
+        size_bytes == expected_size && format!("{:x}", hasher.finalize()) == expected_hash,
+    ))
 }
 
 pub fn spawn_blob_audit(
     pool: SqlitePool,
     store: Arc<dyn BlobStore>,
+    activity: BlobAuditActivity,
 ) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
         "blob-audit",
-        std::time::Duration::from_secs(5),
-        std::time::Duration::from_secs(3600),
+        AUDIT_INITIAL_DELAY,
+        AUDIT_INTERVAL,
         move || {
             let pool = pool.clone();
             let store = store.clone();
+            let activity = activity.clone();
             async move {
-                audit_local_blobs(&pool, store.as_ref())
+                audit_local_blobs_with_activity(&pool, store.as_ref(), Some(&activity))
                     .await
-                    .map(|unhealthy| {
-                        tracing::info!(unhealthy, "blob integrity audit batch completed");
+                    .map(|stats| {
+                        tracing::info!(
+                            unhealthy = stats.unhealthy,
+                            audited_bytes = stats.audited_bytes,
+                            deferred = stats.deferred,
+                            "blob integrity audit batch completed"
+                        );
                     })
                     .map_err(|error| error.to_string())
             }
@@ -856,6 +997,47 @@ mod tests {
                 .await
                 .unwrap()
         );
+        let _ = fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn blob_audit_defers_when_foreground_work_is_saturated() {
+        let root =
+            std::env::temp_dir().join(format!("rain-blob-audit-busy-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.log");
+        fs::write(&source, b"audit activity").await.unwrap();
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        let store = LocalCasBlobStore::new(root.clone());
+        let stored = store.put(&source).await.unwrap();
+        sqlx::query(
+            "INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES (?, ?, 'local', ?, 'READY')",
+        )
+        .bind(&stored.content_hash)
+        .bind(stored.size_bytes as i64)
+        .bind(&stored.storage_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let activity = BlobAuditActivity::new(
+            Arc::new(Semaphore::new(0)),
+            Arc::new(Semaphore::new(1)),
+            Arc::new(Semaphore::new(1)),
+        );
+
+        let stats = audit_local_blobs_with_activity(&pool, &store, Some(&activity))
+            .await
+            .unwrap();
+
+        assert!(stats.deferred);
+        assert_eq!(stats.audited_bytes, 0);
+        let verified_at: Option<String> =
+            sqlx::query_scalar("SELECT verified_at FROM blobs LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(verified_at.is_none());
         let _ = fs::remove_dir_all(root).await;
     }
 
