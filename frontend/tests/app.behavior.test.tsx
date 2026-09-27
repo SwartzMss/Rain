@@ -42,8 +42,9 @@ describe('application behavior', () => {
     await waitFor(() => expect(screen.getByText('访客模式')).toBeInTheDocument());
     expect(screen.getByRole('link', { name: '登录' })).toHaveAttribute('href', '/login');
     expect(screen.getByRole('link', { name: '注册' })).toHaveAttribute('href', '/register');
-    expect(screen.getByRole('link', { name: 'swartz_lubel@outlook.com' })).toHaveAttribute('href', 'mailto:swartz_lubel@outlook.com');
-    expect(screen.getByRole('link', { name: 'GitHub ↗' })).toHaveAttribute('href', 'https://github.com/SwartzMss/Rain');
+    expect(screen.getByRole('link', { name: '联系作者（swartz_lubel@outlook.com）' })).toHaveAttribute('href', 'mailto:swartz_lubel@outlook.com');
+    expect(screen.getByRole('link', { name: 'GitHub 仓库（新窗口打开）' })).toHaveAttribute('href', 'https://github.com/SwartzMss/Rain');
+    expect(screen.getByRole('link', { name: '报告问题（新窗口打开）' })).toHaveAttribute('href', 'https://github.com/SwartzMss/Rain/issues');
     expect(screen.getByText('服务正常')).toBeInTheDocument();
   });
 

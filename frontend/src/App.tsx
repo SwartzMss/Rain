@@ -120,31 +120,85 @@ function App() {
       </main>
 
       <footer className="border-t border-white/10 bg-slate-950 text-slate-300">
-        <div className="mx-auto flex min-h-20 w-full max-w-none flex-wrap items-center justify-between gap-x-8 gap-y-3 px-5 py-4 text-sm">
+        <div className="mx-auto flex w-full max-w-none flex-col gap-5 px-5 py-5 text-sm sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <div className="flex items-center gap-3">
             <span className="font-semibold text-white">Rain</span>
-            <span className="text-slate-500">·</span>
-            <span>日志分析工具</span>
+            <span className="text-slate-600">·</span>
+            <span className="text-slate-400">日志分析工具</span>
           </div>
-          <nav aria-label="联系信息" className="flex flex-wrap items-center gap-x-6 gap-y-2">
+          <div className="flex flex-col gap-2 sm:items-end">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">反馈与支持</span>
+            <nav aria-label="反馈与支持" className="flex flex-wrap items-center gap-1">
             <a
-              className="text-slate-300 no-underline transition hover:text-cyan-200"
+              aria-label="联系作者（swartz_lubel@outlook.com）"
+              className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-slate-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
               href="mailto:swartz_lubel@outlook.com"
+              title="swartz_lubel@outlook.com"
             >
-              swartz_lubel@outlook.com
+              <MailIcon />
+              联系作者
             </a>
             <a
-              className="text-cyan-300 no-underline transition hover:text-cyan-200"
+              aria-label="GitHub 仓库（新窗口打开）"
+              className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-cyan-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
               href="https://github.com/SwartzMss/Rain"
               target="_blank"
               rel="noreferrer"
             >
-              GitHub ↗
+              <GithubIcon />
+              GitHub 仓库
+              <ExternalLinkIcon />
             </a>
-          </nav>
+            <a
+              aria-label="报告问题（新窗口打开）"
+              className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-slate-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
+              href="https://github.com/SwartzMss/Rain/issues"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <IssueIcon />
+              报告问题
+              <ExternalLinkIcon />
+            </a>
+            </nav>
+          </div>
         </div>
       </footer>
     </div>
+  );
+}
+
+function MailIcon() {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5v10.5H3.75z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 7.5 7.5 6 7.5-6" />
+    </svg>
+  );
+}
+
+function GithubIcon() {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
+      <path d="M12 .75a11.25 11.25 0 0 0-3.56 21.92c.56.1.77-.24.77-.54v-2.1c-3.14.68-3.8-1.33-3.8-1.33-.51-1.3-1.25-1.65-1.25-1.65-1.02-.7.08-.69.08-.69 1.13.08 1.73 1.16 1.73 1.16 1 1.72 2.62 1.23 3.26.94.1-.73.39-1.23.71-1.51-2.5-.28-5.13-1.25-5.13-5.56 0-1.23.44-2.23 1.16-3.02-.12-.28-.5-1.43.11-2.98 0 0 .95-.3 3.1 1.15a10.74 10.74 0 0 1 5.64 0c2.15-1.45 3.1-1.15 3.1-1.15.61 1.55.23 2.7.11 2.98.72.79 1.16 1.79 1.16 3.02 0 4.32-2.63 5.27-5.14 5.55.4.35.76 1.04.76 2.1v3.1c0 .3.2.65.78.54A11.25 11.25 0 0 0 12 .75Z" />
+    </svg>
+  );
+}
+
+function IssueIcon() {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 3.75a8.25 8.25 0 1 0 8.25 8.25A8.25 8.25 0 0 0 12 3.75Z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 8.25v4.5m0 3h.008" />
+    </svg>
+  );
+}
+
+function ExternalLinkIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.8">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M14.25 4.5h5.25v5.25M19.25 4.75 12 12m7.5-2.25v6.75a2.25 2.25 0 0 1-2.25 2.25H7.5a2.25 2.25 0 0 1-2.25-2.25V7.5A2.25 2.25 0 0 1 7.5 5.25h6.75" />
+    </svg>
   );
 }
 
