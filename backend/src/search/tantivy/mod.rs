@@ -3,7 +3,11 @@
 //! Every hit is verified against the stored cleaned chunk before it is
 //! returned, so n-gram false positives cannot change search semantics.
 
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -27,10 +31,19 @@ pub mod schema;
 pub mod tokenizer;
 pub mod writer;
 
+mod reader_cache;
+
 pub use query::{CandidateSearch, SearchHit};
 use query::{SearchOptions, SearchPage};
+use reader_cache::GenerationReaderCache;
 pub use schema::{BundleSchema, build_schema};
 pub use writer::{BundleIndexWriter, IndexedChunk};
+
+static READER_CACHE: OnceLock<GenerationReaderCache> = OnceLock::new();
+
+pub(crate) fn reader_cache() -> &'static GenerationReaderCache {
+    READER_CACHE.get_or_init(GenerationReaderCache::default)
+}
 
 pub async fn search_bundle(
     path: PathBuf,
@@ -51,6 +64,8 @@ pub(crate) async fn search_bundle_visible_with_lease_and_permit(
     path: PathBuf,
     request: ContentSearchRequest,
     visible_file_ids: HashSet<i64>,
+    bundle_id: String,
+    generation: i64,
     lease: GenerationLease,
     permit: OwnedSemaphorePermit,
 ) -> Result<ContentSearchResult, AppError> {
@@ -58,6 +73,7 @@ pub(crate) async fn search_bundle_visible_with_lease_and_permit(
         path,
         request,
         Some(visible_file_ids),
+        Some((bundle_id, generation)),
         Some(lease),
         Some(permit),
     )
@@ -70,13 +86,14 @@ async fn search_bundle_inner(
     visible_file_ids: Option<HashSet<i64>>,
     lease: Option<GenerationLease>,
 ) -> Result<ContentSearchResult, AppError> {
-    search_bundle_inner_with_permit(path, request, visible_file_ids, lease, None).await
+    search_bundle_inner_with_permit(path, request, visible_file_ids, None, lease, None).await
 }
 
 async fn search_bundle_inner_with_permit(
     path: PathBuf,
     request: ContentSearchRequest,
     visible_file_ids: Option<HashSet<i64>>,
+    generation: Option<(String, i64)>,
     lease: Option<GenerationLease>,
     permit: Option<OwnedSemaphorePermit>,
 ) -> Result<ContentSearchResult, AppError> {
@@ -94,11 +111,18 @@ async fn search_bundle_inner_with_permit(
     let from = request.from.max(0) as usize;
     let size = request.size.max(0) as usize;
     let query = request.query;
+    let cache = generation.as_ref().map(|_| reader_cache());
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
         let _permit = permit;
-        let committed = writer::open_committed(path)?;
-        let page = CandidateSearch::new(committed).search_page(
+        let committed = match (cache, generation) {
+            (Some(cache), Some((bundle_id, generation))) => cache.get_or_open(
+                crate::search::generation_lease::GenerationLeaseKey::new(&bundle_id, generation),
+                path,
+            )?,
+            _ => Arc::new(writer::open_committed(path)?),
+        };
+        let page = CandidateSearch::from_shared(committed).search_page(
             &query,
             SearchOptions {
                 file_id,
@@ -156,11 +180,7 @@ pub fn rebuild_visible_index(
     heap_size_bytes: usize,
 ) -> Result<u64, AppError> {
     let source = writer::open_committed(source)?;
-    let reader = source
-        .index
-        .reader()
-        .map_err(|error| AppError::Config(format!("open Tantivy rebuild reader: {error}")))?;
-    let searcher = reader.searcher();
+    let searcher = source.reader.searcher();
     let weight = AllQuery
         .weight(EnableScoring::disabled_from_searcher(&searcher))
         .map_err(|error| AppError::Config(format!("prepare Tantivy rebuild scan: {error}")))?;

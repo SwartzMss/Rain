@@ -344,6 +344,8 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
     path: std::path::PathBuf,
     request: ContentSearchRequest,
     visible_file_ids: std::collections::HashSet<i64>,
+    bundle_id: String,
+    generation: i64,
     lease: generation_lease::GenerationLease,
     permit: OwnedSemaphorePermit,
 ) -> Result<ContentSearchResult, AppError> {
@@ -351,6 +353,8 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
         path,
         request,
         visible_file_ids,
+        bundle_id,
+        generation,
         lease,
         permit,
     )
@@ -374,10 +378,20 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
     path: std::path::PathBuf,
     request: ContentSearchRequest,
     visible_file_ids: std::collections::HashSet<i64>,
+    _bundle_id: String,
+    _generation: i64,
     lease: generation_lease::GenerationLease,
     permit: OwnedSemaphorePermit,
 ) -> Result<ContentSearchResult, AppError> {
-    let _ = (path, request, visible_file_ids, lease, permit);
+    let _ = (
+        path,
+        request,
+        visible_file_ids,
+        _bundle_id,
+        _generation,
+        lease,
+        permit,
+    );
     Err(AppError::Config(
         "Tantivy backend requires the tantivy-search feature".into(),
     ))

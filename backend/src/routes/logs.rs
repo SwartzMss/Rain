@@ -154,6 +154,8 @@ async fn search_logs_inner(
                 state.storage.data_root.join(artifact),
                 request,
                 visible_file_ids,
+                bundle.id.clone(),
+                generation,
                 lease,
                 permit,
             )
@@ -462,7 +464,7 @@ async fn search_issue_content_mixed(
                 data_root.join(artifact),
                 ContentSearchRequest {
                     scope: ContentSearchScope::Bundle {
-                        bundle_id,
+                        bundle_id: bundle_id.clone(),
                         timeline: None,
                         file_id: None,
                     },
@@ -472,6 +474,8 @@ async fn search_issue_content_mixed(
                     size: candidate_limit as i64,
                 },
                 visible_file_ids,
+                bundle_id.clone(),
+                generation,
                 lease,
                 permit,
             )

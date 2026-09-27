@@ -120,6 +120,9 @@ impl BundleBuildSession {
             .join(bundle_id)
             .join(generation.to_string());
         let final_path = data_root.join(&relative);
+        super::reader_cache().invalidate(
+            &crate::search::generation_lease::GenerationLeaseKey::new(bundle_id, generation),
+        );
         if fs::try_exists(&staging).await.map_err(AppError::Io)? {
             fs::remove_dir_all(&staging).await.map_err(AppError::Io)?;
         }

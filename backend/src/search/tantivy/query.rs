@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashSet},
+    sync::Arc,
 };
 
 use tantivy::{
@@ -82,11 +83,17 @@ impl Ord for RankedHit {
 }
 
 pub struct CandidateSearch {
-    index: CommittedBundleIndex,
+    index: Arc<CommittedBundleIndex>,
 }
 
 impl CandidateSearch {
     pub fn new(index: CommittedBundleIndex) -> Self {
+        Self {
+            index: Arc::new(index),
+        }
+    }
+
+    pub(crate) fn from_shared(index: Arc<CommittedBundleIndex>) -> Self {
         Self { index }
     }
 
@@ -150,12 +157,7 @@ impl CandidateSearch {
             ));
         }
         let candidate_query = BooleanQuery::from(must);
-        let searcher = self
-            .index
-            .index
-            .reader()
-            .map_err(|error| AppError::Config(format!("open Tantivy searcher: {error}")))?
-            .searcher();
+        let searcher = self.index.reader.searcher();
         let weight = candidate_query
             .weight(EnableScoring::disabled_from_searcher(&searcher))
             .map_err(|error| AppError::Config(format!("prepare Tantivy query: {error}")))?;
