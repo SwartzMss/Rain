@@ -1181,6 +1181,10 @@ mod tests {
             !all_plan_text.contains("USE TEMP B-TREE FOR ORDER BY"),
             "all-Issue plan still sorts into a temporary B-tree: {all_plan_text}"
         );
+        assert!(
+            all_plan_text.contains("idx_bundles_active_issue"),
+            "all-Issue bundle count did not use the active Bundle index: {all_plan_text}"
+        );
 
         let mine_plan = issue_list_query_plan(&pool, true).await;
         let mine_plan_text = mine_plan.join("\n");
