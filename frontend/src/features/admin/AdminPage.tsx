@@ -826,9 +826,8 @@ export function AdminSettingsPage() {
               </div>
             </div>
             <div className="mt-4 rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-3" data-testid="runtime-decisions">
-              <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center justify-between gap-2">
                 <span className="font-medium text-slate-700">当前自适应参数（{runtime.decisions.length} 项）</span>
-                <span className="text-xs text-slate-500">查询并发由系统内部保护，不开放配置</span>
               </div>
               <div className="mt-3 grid gap-2 sm:grid-cols-3">
                 {runtime.decisions.map(([key, decision]) => (
@@ -836,9 +835,6 @@ export function AdminSettingsPage() {
                     <p className="text-xs text-slate-500">{runtimeDecisionLabel(key)}</p>
                     <p className="mt-1 font-medium text-slate-800">
                       {formatRuntimeDecisionValue(key, decision.value)}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {decision.mode === "auto" ? "自适应" : "手动"}
                     </p>
                   </div>
                 ))}
