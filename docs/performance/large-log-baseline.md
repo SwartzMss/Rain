@@ -13,9 +13,9 @@ RAIN_SEARCH_BACKEND=sqlite_fts \
 RAIN_BENCH_BYTES=16384 RAIN_BENCH_CONCURRENCY=2 RAIN_BENCH_QUERIES=2 \
   cargo test --test large_log_benchmark large_log_baseline -- --ignored --exact
 
-# Tantivy resource-budget matrix. v0.1 builds include Tantivy by default;
-# compare one, two, and four concurrent Bundles on the same host.
-for concurrency in 1 2 4; do
+# Tantivy Issue fan-out matrix. v0.1 builds include Tantivy by default;
+# compare 1, 5, 20, and 50 Bundles on the same host.
+for concurrency in 1 5 20 50; do
   RAIN_SEARCH_BACKEND=tantivy \
   RAIN_BENCH_CONCURRENCY=$concurrency \
   RAIN_BENCH_REPORT=/tmp/rain-tantivy-c${concurrency}.jsonl \
@@ -28,7 +28,7 @@ RAIN_SEARCH_BACKEND=sqlite_fts \
 RAIN_BENCH_REPORT=/tmp/rain-baseline.jsonl \
   cargo test --release --test large_log_benchmark large_log_baseline -- --ignored --exact --nocapture
 
-# Example isolated GiB workload; repeat with concurrency 1, 2, and 4.
+# Example isolated GiB workload with four Bundles.
 RAIN_SEARCH_BACKEND=tantivy \
 RAIN_BENCH_BYTES=1073741824 RAIN_BENCH_CONCURRENCY=4 \
   RAIN_BENCH_QUERIES=100 RAIN_BENCH_ITERATIONS=3 \
@@ -47,7 +47,7 @@ compilation when collecting measurements.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `RAIN_BENCH_BYTES` | `104857600` | Minimum uncompressed bytes **per bundle**, rounded up to a complete line |
-| `RAIN_BENCH_CONCURRENCY` | `1` | `1`, `2`, or `4` simultaneous bundles sharing one issue/database |
+| `RAIN_BENCH_CONCURRENCY` | `1` | Positive number of simultaneous bundles sharing one issue/database; use `1`, `5`, `20`, or `50` for the Issue fan-out matrix |
 | `RAIN_BENCH_VARIANT` | `plain` | `plain`, `zip`, or `targz`; archive creation streams from the fixture file |
 | `RAIN_BENCH_WARMUP` | `0` | Unmeasured warmup requests per query/endpoint before samples |
 | `RAIN_BENCH_QUERIES` | `20` | Samples per query and per endpoint |
@@ -128,8 +128,9 @@ Search p95 for the same 100 MiB Bundle was approximately 213 ms for `INFO`,
 628 ms for the rare sentinel, 2.80 s for the UUID, and 195 ms for the Chinese
 term. The corresponding Issue fan-out p95 values were 53.8 ms, 3.21 ms,
 6.51 ms, and 2.08 ms. The Bundle route is expensive even with one Bundle, so
-moving index writes out of SQLite is the first performance priority. The full
-1/2/4 Bundle and 1/5 GiB matrix remains pending. An earlier 1,000-sample run
+moving index writes out of SQLite is the first performance priority. The
+production-sized 1/5 GiB matrix remains pending; a smaller 1/5/20/50 Bundle
+fan-out smoke matrix is recorded below. An earlier 1,000-sample run
 exceeded several hours in the query phase and was terminated; it produced no
 report and is not used for conclusions.
 
@@ -152,8 +153,31 @@ rare sentinel, UUID, and Chinese text); observed query latencies were roughly
 4–73 ms. The improvement comes from removing duplicate SQLite FTS body writes
 and overlapping parsing with the bounded writer. The Tantivy writer heap is
 bounded, but total process RSS still includes parser, SQLite, and test-process
-overhead. Repeat the 1/2/4 Bundle and 1/5 GiB matrix before declaring a
+overhead. Repeat the production-sized 1/5 GiB matrix before declaring a
 production performance baseline. Compare `admission_wait_ms` with
 `build_elapsed_ms`: a higher
 concurrency setting is useful only when it raises throughput without making
 admission wait, RSS, or search p95 grow disproportionately.
+
+## Issue fan-out benchmark (2026-09-27)
+
+The reader-cache baseline and the adaptive fan-out candidate were compared on
+the same Windows x64 host. Each run used a fresh database, Tantivy, 64 KiB per
+Bundle, five warm-up requests, and 30 measured requests per query term. The
+baseline kept the previous two-wide Issue fan-out; the candidate used one,
+two, three, and four Bundle workers for 1, 5, 20, and 50 Bundles respectively.
+
+| Bundles | Fixed 2 INFO p95/p99 (ms) | Adaptive INFO p95/p99 (ms) | Fixed 2 UUID p95/p99 (ms) | Adaptive UUID p95/p99 (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.63 / 0.81 | 0.63 / 0.81 | 0.39 / 0.41 | 0.39 / 0.41 |
+| 5 | 1.25 / 1.28 | 1.05 / 1.06 | 0.95 / 1.06 | 0.82 / 1.28 |
+| 20 | 2.62 / 2.78 | 2.11 / 2.36 | 2.51 / 2.79 | 1.90 / 1.98 |
+| 50 | 5.85 / 5.96 | 6.22 / 6.76 | 8.51 / 9.09 | 2.99 / 3.17 |
+
+The small synthetic workload is directional rather than a production SLO. The
+common-term tail at 50 Bundles was noisy and did not improve in this run, while
+the more expensive UUID query improved substantially. The result supports
+bounded adaptation up to the process query budget of four, but does not support
+raising Issue fan-out to eight or adding a user-facing setting. The scheduler
+therefore uses 1/2/3/4 workers for the 1/5/20/50 Bundle ranges and keeps the
+global query semaphore as the final guard.
