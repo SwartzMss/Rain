@@ -12,8 +12,12 @@ use crate::{
         ContentSearchRequest, ContentSearchResult, ContentSearchScope, FilenameSearchRequest,
         SearchIndex, SearchWindow,
         parallel::run_issue_bundle_searches,
-        publication::{acquire_generation_lease_with_registry, artifact_relative_path},
+        publication::{
+            acquire_generation_lease_with_registry, artifact_relative_path,
+            can_skip_visibility_snapshot,
+        },
         search_tantivy_bundle_visible_with_lease_and_permit,
+        search_tantivy_bundle_with_lease_and_permit,
         sqlite::SqliteFtsSearchIndex,
         validate_search_window,
         visibility::snapshot_file_ids,
@@ -34,12 +38,14 @@ struct LogQuery {
     size: Option<i64>,
 }
 
-type PublicationRow = (String, String, i64, Option<i64>, Option<i64>);
+type PublicationRow = (String, String, i64, Option<i64>, Option<i64>, i64, i64);
 type IssueBundleSearchRow = (
     String,
     String,
     String,
     String,
+    i64,
+    i64,
     i64,
     Option<i64>,
     Option<i64>,
@@ -110,16 +116,22 @@ async fn search_logs_inner(
         size,
     };
     let publication: Option<PublicationRow> = sqlx::query_as(
-        "SELECT backend, state, generation, schema_version, tokenizer_version FROM bundle_search_indexes WHERE bundle_id = ?",
+        "SELECT backend, state, generation, schema_version, tokenizer_version, visibility_revision, compacted_revision FROM bundle_search_indexes WHERE bundle_id = ?",
     )
     .bind(&bundle.id)
     .fetch_optional(&state.db.pool)
     .await
     .map_err(AppError::Database)?;
     let result = match publication {
-        Some((backend, state_name, generation, schema_version, tokenizer_version))
-            if backend == "tantivy" =>
-        {
+        Some((
+            backend,
+            state_name,
+            generation,
+            schema_version,
+            tokenizer_version,
+            visibility_revision,
+            compacted_revision,
+        )) if backend == "tantivy" => {
             if !matches!(state_name.as_str(), "READY" | "NEEDS_REBUILD") {
                 return Err(AppError::Conflict(
                     "Bundle search index is not ready".into(),
@@ -133,7 +145,8 @@ async fn search_logs_inner(
                 ));
             }
             let artifact = artifact_relative_path(&bundle.id, generation)?;
-            let visible_file_ids = snapshot_file_ids(&state.db.pool, &bundle.id).await?;
+            let complete_visibility =
+                can_skip_visibility_snapshot(&state_name, visibility_revision, compacted_revision);
             let permit = state
                 .search
                 .query_permits
@@ -150,16 +163,29 @@ async fn search_logs_inner(
                 generation,
             )
             .await?;
-            let result = search_tantivy_bundle_visible_with_lease_and_permit(
-                state.storage.data_root.join(artifact),
-                request,
-                visible_file_ids,
-                bundle.id.clone(),
-                generation,
-                lease,
-                permit,
-            )
-            .await;
+            let result = if complete_visibility {
+                search_tantivy_bundle_with_lease_and_permit(
+                    state.storage.data_root.join(artifact),
+                    request,
+                    bundle.id.clone(),
+                    generation,
+                    lease,
+                    permit,
+                )
+                .await
+            } else {
+                let visible_file_ids = snapshot_file_ids(&state.db.pool, &bundle.id).await?;
+                search_tantivy_bundle_visible_with_lease_and_permit(
+                    state.storage.data_root.join(artifact),
+                    request,
+                    visible_file_ids,
+                    bundle.id.clone(),
+                    generation,
+                    lease,
+                    permit,
+                )
+                .await
+            };
             result?
         }
         _ => {
@@ -401,13 +427,13 @@ async fn search_issue_content_mixed(
     }
     let mut total = sqlite_result.total;
     let bundles: Vec<IssueBundleSearchRow> = sqlx::query_as(
-        "SELECT b.id, b.hash, COALESCE(si.backend, 'sqlite_fts'), COALESCE(si.state, 'LEGACY'), COALESCE(si.generation, 0), si.schema_version, si.tokenizer_version FROM bundles b LEFT JOIN bundle_search_indexes si ON si.bundle_id = b.id WHERE b.issue_code = ? AND b.status = 'READY' ORDER BY b.id",
+        "SELECT b.id, b.hash, COALESCE(si.backend, 'sqlite_fts'), COALESCE(si.state, 'LEGACY'), COALESCE(si.generation, 0), COALESCE(si.visibility_revision, 0), COALESCE(si.compacted_revision, 0), si.schema_version, si.tokenizer_version FROM bundles b LEFT JOIN bundle_search_indexes si ON si.bundle_id = b.id WHERE b.issue_code = ? AND b.status = 'READY' ORDER BY b.id",
     )
     .bind(issue_code)
     .fetch_all(pool)
     .await
     .map_err(AppError::Database)?;
-    for (bundle_id, _, backend, state, _, schema_version, tokenizer_version) in &bundles {
+    for (bundle_id, _, backend, state, _, _, _, schema_version, tokenizer_version) in &bundles {
         if backend != "tantivy" {
             continue;
         }
@@ -438,8 +464,17 @@ async fn search_issue_content_mixed(
         let registry = registry.clone();
         let request = request_for_jobs.clone();
         async move {
-            let (bundle_id, bundle_hash, _, state, generation, schema_version, tokenizer_version) =
-                bundle;
+            let (
+                bundle_id,
+                bundle_hash,
+                _,
+                state,
+                generation,
+                visibility_revision,
+                compacted_revision,
+                schema_version,
+                tokenizer_version,
+            ) = bundle;
             debug_assert!(matches!(state.as_str(), "READY" | "NEEDS_REBUILD"));
             debug_assert_eq!(
                 schema_version,
@@ -450,30 +485,44 @@ async fn search_issue_content_mixed(
                 Some(crate::search::publication::TANTIVY_TOKENIZER_VERSION)
             );
             let artifact = artifact_relative_path(&bundle_id, generation)?;
-            let visible_file_ids = snapshot_file_ids(&pool, &bundle_id).await?;
             let lease =
                 acquire_generation_lease_with_registry(&registry, &pool, &bundle_id, generation)
                     .await?;
-            let result = search_tantivy_bundle_visible_with_lease_and_permit(
-                data_root.join(artifact),
-                ContentSearchRequest {
-                    scope: ContentSearchScope::Bundle {
-                        bundle_id: bundle_id.clone(),
-                        timeline: None,
-                        file_id: None,
-                    },
-                    query: request.query,
-                    path_like: request.path_like,
-                    from: 0,
-                    size: candidate_limit as i64,
+            let search_request = ContentSearchRequest {
+                scope: ContentSearchScope::Bundle {
+                    bundle_id: bundle_id.clone(),
+                    timeline: None,
+                    file_id: None,
                 },
-                visible_file_ids,
-                bundle_id.clone(),
-                generation,
-                lease,
-                permit,
-            )
-            .await?;
+                query: request.query,
+                path_like: request.path_like,
+                from: 0,
+                size: candidate_limit as i64,
+            };
+            let result =
+                if can_skip_visibility_snapshot(&state, visibility_revision, compacted_revision) {
+                    search_tantivy_bundle_with_lease_and_permit(
+                        data_root.join(artifact),
+                        search_request,
+                        bundle_id.clone(),
+                        generation,
+                        lease,
+                        permit,
+                    )
+                    .await?
+                } else {
+                    let visible_file_ids = snapshot_file_ids(&pool, &bundle_id).await?;
+                    search_tantivy_bundle_visible_with_lease_and_permit(
+                        data_root.join(artifact),
+                        search_request,
+                        visible_file_ids,
+                        bundle_id.clone(),
+                        generation,
+                        lease,
+                        permit,
+                    )
+                    .await?
+                };
             Ok((bundle_hash, result))
         }
     })

@@ -21,6 +21,18 @@ pub const SQLITE_FTS_SCHEMA_VERSION: i64 = 1;
 pub const TANTIVY_SCHEMA_VERSION: i64 = 1;
 pub const TANTIVY_TOKENIZER_VERSION: i64 = 2;
 
+/// A published generation is a complete visibility snapshot once it is READY
+/// and its compacted revision catches up with the current visibility
+/// revision. Searches can use that immutable generation directly in this
+/// state; all other states must keep the live visibility filter.
+pub(crate) fn can_skip_visibility_snapshot(
+    state: &str,
+    visibility_revision: i64,
+    compacted_revision: i64,
+) -> bool {
+    state == "READY" && visibility_revision == compacted_revision
+}
+
 type BundleLifecycleLock = Mutex<()>;
 
 static BUNDLE_LIFECYCLE_LOCKS: OnceLock<StdMutex<HashMap<String, Weak<BundleLifecycleLock>>>> =
@@ -1087,9 +1099,9 @@ pub async fn reset_generation_leases(pool: &SqlitePool) -> Result<(), AppError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        SearchBackendKind, artifact_relative_path, cleanup_deleted_bundle_artifacts,
-        cleanup_retired_artifacts_with_registry, cleanup_unpublished_artifacts,
-        ensure_fresh_tantivy_data,
+        SearchBackendKind, artifact_relative_path, can_skip_visibility_snapshot,
+        cleanup_deleted_bundle_artifacts, cleanup_retired_artifacts_with_registry,
+        cleanup_unpublished_artifacts, ensure_fresh_tantivy_data,
     };
     use crate::search::generation_lease::GenerationLeaseRegistry;
 
@@ -1109,6 +1121,15 @@ mod tests {
             SearchBackendKind::parse(None).unwrap(),
             SearchBackendKind::SqliteFts
         );
+    }
+
+    #[test]
+    fn only_fully_compacted_ready_generations_skip_visibility_snapshot() {
+        assert!(can_skip_visibility_snapshot("READY", 0, 0));
+        assert!(can_skip_visibility_snapshot("READY", 4, 4));
+        assert!(!can_skip_visibility_snapshot("READY", 5, 4));
+        assert!(!can_skip_visibility_snapshot("NEEDS_REBUILD", 4, 4));
+        assert!(!can_skip_visibility_snapshot("BUILDING", 0, 0));
     }
 
     #[tokio::test]

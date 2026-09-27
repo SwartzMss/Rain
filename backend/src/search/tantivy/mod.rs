@@ -91,6 +91,25 @@ pub(crate) async fn search_bundle_visible_with_lease_and_permit(
     .await
 }
 
+pub(crate) async fn search_bundle_with_lease_and_permit(
+    path: PathBuf,
+    request: ContentSearchRequest,
+    bundle_id: String,
+    generation: i64,
+    lease: GenerationLease,
+    permit: OwnedSemaphorePermit,
+) -> Result<ContentSearchResult, AppError> {
+    search_bundle_inner_with_permit(
+        path,
+        request,
+        None,
+        Some((bundle_id, generation)),
+        Some(lease),
+        Some(permit),
+    )
+    .await
+}
+
 async fn search_bundle_inner(
     path: PathBuf,
     request: ContentSearchRequest,
