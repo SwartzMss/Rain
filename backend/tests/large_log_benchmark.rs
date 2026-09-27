@@ -306,7 +306,7 @@ async fn large_log_baseline() {
     };
     let warmup = number("RAIN_BENCH_WARMUP", 0) as usize;
     let queries = number("RAIN_BENCH_QUERIES", 20) as usize;
-    assert!(bytes > 0 && queries > 0 && [1, 2, 4].contains(&concurrency));
+    assert!(bytes > 0 && queries > 0 && concurrency > 0);
     let iterations = number("RAIN_BENCH_ITERATIONS", 1);
     assert!(iterations > 0, "RAIN_BENCH_ITERATIONS must be positive");
     for iteration in 0..iterations {
