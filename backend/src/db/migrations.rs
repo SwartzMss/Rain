@@ -1646,6 +1646,16 @@ mod tests {
         .await
         .expect("inspect search publication table");
         assert!(search_table_exists);
+
+        let bundle_stats_index_sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_bundles_uploader_active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect Admin Users bundle stats index");
+        assert!(bundle_stats_index_sql.contains("uploader_user_id"));
+        assert!(bundle_stats_index_sql.contains("deleted_at IS NULL"));
+        assert!(bundle_stats_index_sql.contains("status IN ('READY', 'PROCESSING')"));
     }
 
     #[tokio::test]
