@@ -2,7 +2,7 @@ import type { RegistrationSettingField, ResourceMode, SettingCategory } from '..
 
 export type SettingFieldGroups = Record<SettingCategory, RegistrationSettingField[]>;
 
-const ISSUE_CONTENT_SIZE_KEY = 'issue_max_content_size';
+
 const BYTE_UNITS = [
   { suffix: 'B', multiplier: 1 },
   { suffix: 'K', multiplier: 1024 },
@@ -15,7 +15,7 @@ function numericValue(value: unknown): number | null {
   return Number.isFinite(number) ? number : null;
 }
 
-function formatIssueContentSize(value: unknown): string {
+function formatByteSize(value: unknown): string {
   const number = numericValue(value);
   if (number == null) return String(value ?? '');
   let unit: (typeof BYTE_UNITS)[number] = BYTE_UNITS[0];
@@ -23,16 +23,13 @@ function formatIssueContentSize(value: unknown): string {
     if (number >= candidate.multiplier) unit = candidate;
   }
   const amount = number / unit.multiplier;
-  const rounded = Number.isInteger(amount)
-    ? amount.toFixed(0)
-    : amount.toFixed(amount >= 10 ? 1 : 2).replace(/0+$/, '').replace(/\.$/, '');
-  return `${rounded}${unit.suffix}`;
+  return `${amount}${unit.suffix}`;
 }
 
-function parseIssueContentSize(value: unknown): number {
+function parseByteSize(value: unknown): number {
   const text = String(value ?? '').trim().toUpperCase();
   const match = /^(\d+(?:\.\d+)?)\s*(B|K|KB|KIB|M|MB|MIB|G|GB|GIB)?$/.exec(text);
-  if (!match) throw new Error('Issue 内容上限请输入例如 8G 的字节大小');
+  if (!match) throw new Error('容量请输入例如 64M 或 1G 的大小');
   const amount = Number(match[1]);
   const suffix = match[2] ?? 'B';
   const multiplier = suffix.startsWith('G') ? 1024 ** 3
@@ -41,7 +38,7 @@ function parseIssueContentSize(value: unknown): number {
         : 1;
   const bytes = amount * multiplier;
   if (!Number.isSafeInteger(bytes) || bytes <= 0) {
-    throw new Error('Issue 内容上限必须是正整数');
+    throw new Error('容量必须是正整数字节数');
   }
   return bytes;
 }
@@ -56,7 +53,8 @@ export function groupSettingFields(fields: RegistrationSettingField[]): SettingF
 
 export function recommendedRangeLabel(field: RegistrationSettingField): string | null {
   if (field.recommended_min == null && field.recommended_max == null) return null;
-  return `推荐 ${field.recommended_min ?? '无下限'}–${field.recommended_max ?? '无上限'}`;
+  const format = (value: number | null | undefined, fallback: string) => value == null ? fallback : field.unit === 'bytes' ? formatByteSize(value) : String(value);
+  return `推荐 ${format(field.recommended_min, '无下限')}–${format(field.recommended_max, '无上限')}`;
 }
 
 export function createSettingDraft(
@@ -72,14 +70,14 @@ export function createSettingDraft(
 }
 
 export function settingInputValue(field: RegistrationSettingField, value: unknown): string | number | boolean {
-  if (field.key === ISSUE_CONTENT_SIZE_KEY) return formatIssueContentSize(value);
+  if (field.unit === 'bytes') return typeof value === 'string' ? value : formatByteSize(value);
   if (field.value_type === 'boolean') return Boolean(value);
   if (field.value_type === 'string_array') return Array.isArray(value) ? value.join(', ') : String(value ?? '');
   return value == null ? '' : (value as string | number);
 }
 
 export function serializeSettingValue(field: RegistrationSettingField, value: unknown): unknown {
-  if (field.key === ISSUE_CONTENT_SIZE_KEY) return parseIssueContentSize(value);
+  if (field.unit === 'bytes') return parseByteSize(value);
   if (field.value_type === 'integer') return Number(value);
   if (field.value_type === 'boolean') return Boolean(value);
   if (field.value_type === 'string_array') {
@@ -89,7 +87,7 @@ export function serializeSettingValue(field: RegistrationSettingField, value: un
 }
 
 export function settingUnitLabel(field: RegistrationSettingField): string | null | undefined {
-  return field.key === ISSUE_CONTENT_SIZE_KEY ? 'G' : field.unit;
+  return field.unit === 'bytes' ? '支持 M / G' : field.unit;
 }
 
 export function effectiveSettingLabel(
@@ -106,4 +104,13 @@ export function serializeResourceModePatch(
   mode: ResourceMode,
 ): Record<string, ResourceMode> {
   return { [key]: mode };
+}
+
+export function settingHelpText(key: string): string | undefined {
+  return {
+    temp_results_max_result_size: '一次搜索生成的全部匹配内容及定位信息的总容量；超出后搜索失败。',
+    temp_results_max_total_size: '所有临时搜索结果共享的存储配额；配额不足时无法生成新结果。不得小于单次结果容量。',
+    temp_results_max_records: '最多保留多少份临时搜索结果，不是匹配行数；达到上限后无法新建结果。',
+    temp_results_max_scan_duration_seconds: '文件列表解析与内容扫描分别使用此超时，整个请求可能更久；超时后搜索失败。',
+  }[key];
 }

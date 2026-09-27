@@ -16,6 +16,7 @@ use super::storage::{
 };
 use super::*;
 use crate::services::temp_results::scan_timeout;
+use futures_util::TryStreamExt;
 
 enum MaterializeMode {
     Full,
@@ -112,7 +113,6 @@ async fn materialize_result_with_timeout(
                 &mut metadata,
                 &mut index,
                 settings.effective.temp_results_max_result_size,
-                settings.effective.temp_results_max_scan_bytes,
             )
             .await
         })
@@ -185,6 +185,18 @@ pub(crate) async fn resolve_sources(
     state: &web::Data<AppState>,
 ) -> Result<ResolvedSources, AppError> {
     let settings = state.settings.snapshot().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(settings.effective.temp_results_max_scan_duration_seconds),
+        resolve_sources_inner(payload, state),
+    )
+    .await
+    .map_err(|_| scan_timeout())?
+}
+
+async fn resolve_sources_inner(
+    payload: &CreateTempResultRequest,
+    state: &web::Data<AppState>,
+) -> Result<ResolvedSources, AppError> {
     if let Some(source_id) = payload.source_temp_id.as_deref() {
         let (source, source_lease) = acquire_active_result(state, source_id).await?;
         let path = checked_temp_path(state, &source.storage_path)?;
@@ -214,16 +226,7 @@ pub(crate) async fn resolve_sources(
     }
     if let Some(issue_code) = payload.issue_code.as_deref() {
         let issue_code = normalize_issue_code(issue_code)?;
-        let max_sources =
-            i64::try_from(settings.effective.temp_results_max_sources).map_err(|_| {
-                AppError::Config(
-                    "RAIN_TEMP_RESULT_MAX_SOURCES cannot be represented on this platform".into(),
-                )
-            })?;
-        let query_limit = max_sources
-            .checked_add(1)
-            .ok_or_else(|| AppError::Config("RAIN_TEMP_RESULT_MAX_SOURCES is too large".into()))?;
-        let rows = sqlx::query_as::<_, IssueSourceRow>(
+        let mut rows = sqlx::query_as::<_, IssueSourceRow>(
             r#"
             SELECT f.id, f.name, f.path, f.size_bytes, f.line_count, f.mime_type,
                    f.status, f.meta, f.blob_id, bl.storage_backend, bl.storage_key,
@@ -236,23 +239,12 @@ pub(crate) async fn resolve_sources(
             WHERE b.issue_code = ? AND i.status = 'ACTIVE' AND b.status = 'READY' AND f.is_dir = 0
               AND EXISTS (SELECT 1 FROM log_segments ls WHERE ls.file_id = f.id)
             ORDER BY b.created_at, f.path
-            LIMIT ?
             "#,
         )
         .bind(&issue_code)
-        .bind(query_limit)
-        .fetch_all(&state.db.pool)
-        .await
-        .map_err(AppError::Database)?;
-        if rows.len() > settings.effective.temp_results_max_sources {
-            return Err(AppError::public(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "TEMP_RESULT_SOURCE_LIMIT",
-                "临时结果源文件数量超过限制",
-            ));
-        }
+        .fetch(&state.db.pool);
         let mut sources = Vec::new();
-        for row in rows {
+        while let Some(row) = rows.try_next().await.map_err(AppError::Database)? {
             let file = FileRow {
                 id: row.id,
                 parent_id: None,
@@ -657,7 +649,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_limit_cleans_staging_record_and_part_files() {
+    async fn output_limit_cleans_staging_record_and_part_files() {
         let root = test_path("scan-limit");
         let source_path = root.join("source.log");
         tokio::fs::create_dir_all(&root).await.unwrap();
@@ -665,7 +657,7 @@ mod tests {
             .await
             .unwrap();
         let mut limits = AppLimits::default();
-        limits.temp_results.max_scan_bytes = 32;
+        limits.temp_results.max_result_size = 32;
         let state = test_state(&root, limits).await;
 
         assert_failed_materialization_is_clean(
@@ -677,7 +669,7 @@ mod tests {
                 bundle_hash: None,
                 file_id: None,
             },
-            "TEMP_RESULT_SCAN_LIMIT",
+            "TEMP_RESULT_TOO_LARGE",
             None,
         )
         .await;
@@ -711,11 +703,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn issue_source_resolution_rejects_more_than_the_configured_limit() {
+    async fn issue_source_resolution_accepts_more_than_ten_thousand_files() {
         let root = test_path("source-limit");
-        let mut limits = AppLimits::default();
-        limits.temp_results.max_sources = 1;
-        let state = test_state(&root, limits).await;
+        let state = test_state(&root, AppLimits::default()).await;
         sqlx::query("INSERT INTO issues(code, name) VALUES('ISSUE', 'Issue')")
             .execute(&state.db.pool)
             .await
@@ -749,6 +739,34 @@ mod tests {
             .unwrap();
         }
 
+        sqlx::query("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 10001) INSERT INTO files(bundle_id, name, path, is_dir) SELECT 'bundle-a', 'extra-' || x || '.log', '/extra-' || x || '.log', 0 FROM n")
+            .execute(&state.db.pool).await.unwrap();
+        sqlx::query("INSERT INTO log_segments(bundle_id, file_id, content) SELECT bundle_id, id, 'ERROR' FROM files WHERE name LIKE 'extra-%'")
+            .execute(&state.db.pool).await.unwrap();
+
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let source_path = root.join("shared.log");
+        tokio::fs::write(&source_path, "ERROR\n").await.unwrap();
+        let blob_id = crate::blob_store::persist_blob(
+            &state.db.pool,
+            state.storage.blob_store.as_ref(),
+            &source_path,
+        )
+        .await
+        .unwrap();
+        crate::blob_store::mark_blob_ready(
+            &state.db.pool,
+            state.storage.blob_store.as_ref(),
+            blob_id,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE files SET blob_id = ?")
+            .bind(blob_id)
+            .execute(&state.db.pool)
+            .await
+            .unwrap();
+
         let payload = CreateTempResultRequest {
             expression: "ERROR".into(),
             bundle_hash: None,
@@ -756,17 +774,29 @@ mod tests {
             issue_code: Some("ISSUE".into()),
             source_temp_id: None,
         };
-        let error = match resolve_sources(&payload, &state).await {
-            Ok(_) => panic!("source resolution must enforce the configured limit"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            AppError::PublicApi {
-                code: "TEMP_RESULT_SOURCE_LIMIT",
-                ..
-            }
-        ));
+        let resolved = resolve_sources(&payload, &state).await.unwrap();
+        assert_eq!(resolved.sources.len(), 10_003);
+        let expression = log_expression::parse("ERROR").unwrap();
+        let outcome = materialize_result(
+            &state,
+            "ERROR",
+            &expression,
+            &resolved.sources,
+            "all files",
+            MaterializeMode::Preview,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.total, 10_003);
+        let record = super::load_active_unexpired_record(&state, &outcome.id)
+            .await
+            .unwrap();
+        let (lines, next) = super::read_result_page(&state, &record, 10_000, 10)
+            .await
+            .unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(next, None);
+
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 

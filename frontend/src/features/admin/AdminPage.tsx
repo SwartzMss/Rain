@@ -27,6 +27,7 @@ import {
   recommendedRangeLabel,
   serializeSettingValue,
   settingUnitLabel,
+  settingHelpText,
   settingInputValue,
 } from "./settingsFields";
 
@@ -424,7 +425,7 @@ function MetadataSettingsGrid({
           : value;
         const inputValue = settingInputValue(field, configuredValue);
         const effectiveValue = effectiveValues[field.key] ?? configuredValue;
-        const isIssueContentSize = field.key === "issue_max_content_size";
+        const isByteSize = field.unit === "bytes";
         const unit = settingUnitLabel(field);
         return (
           <label key={field.key} className="space-y-1 text-sm text-slate-600">
@@ -435,8 +436,8 @@ function MetadataSettingsGrid({
                   {unit ? `（${unit}）` : ""}
                 </span>
                 <span className="mt-1 block text-xs leading-5 text-slate-500">
-                  {isIssueContentSize
-                    ? "以 G 为单位输入；由后端校验配置值"
+                  {isByteSize
+                    ? "支持 64M、1G 等写法；1G = 1024M"
                     : field.min != null || field.max != null
                     ? `允许范围：${field.min ?? "无下限"}–${field.max ?? "无上限"}`
                     : "由后端校验配置值"}
@@ -447,6 +448,7 @@ function MetadataSettingsGrid({
                 {field.apply_mode === "restart_required" ? "重启生效" : "即时生效"}
               </span>
             </span>
+            {settingHelpText(field.key) ? <span className="block text-xs leading-5 text-slate-500">{settingHelpText(field.key)}</span> : null}
             {supportsAuto ? (
               <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
                 <span>资源模式</span>
@@ -473,8 +475,8 @@ function MetadataSettingsGrid({
             ) : (
               <input
                 aria-label={field.key}
-                type={isIssueContentSize ? "text" : field.value_type === "integer" ? "number" : "text"}
-                inputMode={isIssueContentSize ? "decimal" : undefined}
+                type={isByteSize ? "text" : field.value_type === "integer" ? "number" : "text"}
+                inputMode={isByteSize ? "decimal" : undefined}
                 min={field.min ?? undefined}
                 max={field.max ?? undefined}
                 value={inputValue as string | number}
@@ -847,7 +849,7 @@ export function AdminSettingsPage() {
           <SettingsSection
             icon="settings"
             title="常用配置"
-            description="常用业务参数，建议根据实际使用规模调整。"
+            description="业务容量与文件内容搜索限制。增大搜索容量或超时可能增加磁盘和 CPU 开销。"
           >
             <MetadataSettingsGrid
               fields={commonFields}
@@ -874,13 +876,13 @@ export function AdminSettingsPage() {
             <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 px-5 py-4 sm:px-6 [&::-webkit-details-marker]:hidden">
               <span>
                 <span className="block text-lg font-semibold text-slate-950">高级运行参数</span>
-                <span className="mt-1 block text-sm text-slate-500">仅保留搜索结果页的行数上限；其他资源保护参数由系统管理（{advancedFields.length} 项）</span>
+                <span className="mt-1 block text-sm text-slate-500">其他运行参数（{advancedFields.length} 项）</span>
               </span>
               <span className="text-sm font-medium text-cyan-700">点击展开或收起</span>
             </summary>
             <div className="border-t border-slate-100 p-5 sm:p-6">
               <p className="mb-4 text-sm leading-6 text-slate-500">
-                搜索结果上限按行数计算，不是响应字节数；响应大小、扫描资源和并发保护使用系统默认值。
+                标记为重启生效的参数需要重启服务后应用。
               </p>
               <MetadataSettingsGrid
                 fields={advancedFields}

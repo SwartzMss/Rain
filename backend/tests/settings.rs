@@ -17,7 +17,11 @@ fn pool() -> sqlx::SqlitePool {
 #[test]
 fn metadata_covers_every_supported_setting_and_declares_apply_mode() {
     let fields = backend::settings::metadata::all();
-    assert!(fields.len() >= 32);
+    assert_eq!(fields.len(), SettingKey::ALL.len());
+    assert!(fields.iter().all(|field| !matches!(
+        field.env_name,
+        "RAIN_TEMP_RESULT_MAX_SCAN_BYTES" | "RAIN_TEMP_RESULT_MAX_SOURCES"
+    )));
     assert!(fields.iter().any(|field| {
         field.key == SettingKey::IssueMaxContentSize && field.apply_mode == ApplyMode::Hot
     }));
@@ -109,9 +113,9 @@ fn metadata_declares_auto_values_and_protected_settings() {
         .iter()
         .find(|field| field.key == SettingKey::ApiMaxSearchResults)
         .expect("search page limit metadata");
-    assert!(!search_page_limit.protected);
+    assert!(search_page_limit.protected);
     assert!(
-        backend::settings::metadata::admin()
+        !backend::settings::metadata::admin()
             .iter()
             .any(|field| field.key == SettingKey::ApiMaxSearchResults)
     );
@@ -299,25 +303,48 @@ async fn save_requires_revision_and_applies_hot_values_atomically() {
     ));
 
     let mut changes = serde_json::Map::new();
-    changes.insert("api_max_search_results".into(), serde_json::json!(80));
+    changes.insert("temp_results_max_records".into(), serde_json::json!(80));
+    changes.insert(
+        "temp_results_max_result_size".into(),
+        serde_json::json!(128 * 1024 * 1024),
+    );
+    changes.insert(
+        "temp_results_max_total_size".into(),
+        serde_json::json!(2_u64 * 1024 * 1024 * 1024),
+    );
+    changes.insert(
+        "temp_results_max_scan_duration_seconds".into(),
+        serde_json::json!(60),
+    );
     let saved = service
         .save(initial.revision, &changes, None)
         .await
         .expect("save");
-    assert_eq!(saved.snapshot.configured.api_max_search_results, 80);
-    assert_eq!(saved.snapshot.effective.api_max_search_results, 80);
+    assert_eq!(saved.snapshot.configured.temp_results_max_records, 80);
+    assert_eq!(saved.snapshot.effective.temp_results_max_records, 80);
     assert!(
         saved
             .hot_applied_fields
-            .contains(&"api_max_search_results".to_owned())
+            .contains(&"temp_results_max_records".to_owned())
     );
 
     let reloaded = service
         .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
         .await
         .expect("reload");
-    assert_eq!(reloaded.configured.api_max_search_results, 80);
-    assert_eq!(reloaded.effective.api_max_search_results, 80);
+    assert_eq!(reloaded.configured.temp_results_max_records, 80);
+    assert_eq!(reloaded.effective.temp_results_max_records, 80);
+    for (key, value) in &changes {
+        assert_eq!(
+            &serde_json::to_value(&saved.snapshot.effective).unwrap()[key],
+            value
+        );
+        assert_eq!(
+            &serde_json::to_value(&reloaded.effective).unwrap()[key],
+            value
+        );
+        assert!(saved.hot_applied_fields.contains(key));
+    }
 
     let stale = service.save(initial.revision, &changes, None).await;
     assert!(matches!(

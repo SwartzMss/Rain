@@ -73,11 +73,6 @@ pub fn validate(values: &SettingsValues) -> Result<(), Vec<ValidationError>> {
             values.temp_results_concurrent_materializations as u64,
         ),
         (
-            TempResultsMaxSources,
-            values.temp_results_max_sources as u64,
-        ),
-        (TempResultsMaxScanBytes, values.temp_results_max_scan_bytes),
-        (
             TempResultsMaxScanDurationSeconds,
             values.temp_results_max_scan_duration_seconds,
         ),
