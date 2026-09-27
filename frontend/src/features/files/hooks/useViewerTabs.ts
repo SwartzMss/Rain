@@ -1,4 +1,5 @@
-import { useCallback, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { ApiError, rainApi } from '../../../api/client';
 import {
   closeViewerTab,
   openOrActivateTab,
@@ -66,8 +67,25 @@ function viewerTabsReducer(
   }
 }
 
-export function useViewerTabs() {
+export function useViewerTabs(canDeleteResults = false) {
   const [state, dispatch] = useReducer(viewerTabsReducer, initialState);
+  const ownedResults = useRef(new Set<string>());
+  useEffect(() => {
+    for (const tab of state.tabs) {
+      if (tab.kind === 'search') ownedResults.current.add(tab.resultId);
+    }
+    const retained = new Set(state.tabs.flatMap((tab) => tab.kind === 'file' ? [] : [tab.resultId]));
+    const removed = [...ownedResults.current].filter((id) => !retained.has(id));
+    for (const id of removed) ownedResults.current.delete(id);
+    if (!canDeleteResults) return;
+    for (const id of removed) {
+      void rainApi.deleteTempResult(id).catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 404) return;
+        // Closing remains immediate; expiry cleanup recovers failed requests.
+        console.warn('Temporary search result cleanup failed; expiry cleanup will retry', error);
+      });
+    }
+  }, [state.tabs, canDeleteResults]);
   const initializedRef = useRef(false);
   const activeTab = useMemo(
     () => state.tabs.find((tab) => tab.id === state.activeTabId) ?? null,

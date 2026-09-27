@@ -201,7 +201,7 @@ export function BundleView() {
     resetViewerTabs,
     updateViewerTabs,
     togglePinnedViewerTab
-  } = useViewerTabs();
+  } = useViewerTabs(auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER');
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const {
     fileLines,
