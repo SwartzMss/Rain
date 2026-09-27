@@ -361,6 +361,21 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
     .await
 }
 
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn search_tantivy_bundle_with_lease_and_permit(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    bundle_id: String,
+    generation: i64,
+    lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
+) -> Result<ContentSearchResult, AppError> {
+    tantivy::search_bundle_with_lease_and_permit(
+        path, request, bundle_id, generation, lease, permit,
+    )
+    .await
+}
+
 #[cfg(not(feature = "tantivy-search"))]
 pub async fn search_tantivy_bundle_visible(
     path: std::path::PathBuf,
@@ -392,6 +407,21 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
         lease,
         permit,
     );
+    Err(AppError::Config(
+        "Tantivy backend requires the tantivy-search feature".into(),
+    ))
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+pub(crate) async fn search_tantivy_bundle_with_lease_and_permit(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    bundle_id: String,
+    generation: i64,
+    lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
+) -> Result<ContentSearchResult, AppError> {
+    let _ = (path, request, bundle_id, generation, lease, permit);
     Err(AppError::Config(
         "Tantivy backend requires the tantivy-search feature".into(),
     ))
