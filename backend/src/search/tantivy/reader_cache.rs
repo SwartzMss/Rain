@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -15,19 +15,28 @@ const DEFAULT_CAPACITY: usize = 64;
 
 type LoadResult = Result<Arc<CommittedBundleIndex>, String>;
 
-#[derive(Default)]
-struct CacheState {
-    entries: HashMap<GenerationLeaseKey, Arc<CommittedBundleIndex>>,
-    order: VecDeque<GenerationLeaseKey>,
-    loading: HashMap<GenerationLeaseKey, Arc<OnceLock<LoadResult>>>,
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct ReaderCacheKey {
+    generation: GenerationLeaseKey,
+    artifact_path: PathBuf,
 }
 
-/// Process-local cache for immutable Tantivy generations.
+#[derive(Default)]
+struct CacheState {
+    entries: HashMap<ReaderCacheKey, Arc<CommittedBundleIndex>>,
+    order: VecDeque<ReaderCacheKey>,
+    loading: HashMap<ReaderCacheKey, Arc<OnceLock<LoadResult>>>,
+}
+
+/// Process-local cache for immutable Tantivy generations, scoped by the
+/// canonical artifact path as well as the publication generation.
 ///
 /// A generation is immutable after publication, so its reader never needs a
 /// reload. Callers must hold a generation lease while using the returned Arc;
-/// cleanup invalidates the entry after claiming that generation and before
-/// removing its files.
+/// cleanup invalidates all entries for that generation after claiming it and
+/// before removing its files. The path namespace prevents benchmark/test
+/// instances that reuse bundle IDs and generation numbers from sharing a
+/// reader opened from another data root.
 pub(crate) struct GenerationReaderCache {
     capacity: usize,
     state: Mutex<CacheState>,
@@ -57,6 +66,10 @@ impl GenerationReaderCache {
         }
 
         let path = path.as_ref().to_path_buf();
+        let key = ReaderCacheKey {
+            generation: key,
+            artifact_path: std::fs::canonicalize(&path).map_err(AppError::Io)?,
+        };
         let loader = {
             let mut state = self.state.lock().expect("Tantivy reader cache poisoned");
             if let Some(entry) = state.entries.get(&key).cloned() {
@@ -101,8 +114,10 @@ impl GenerationReaderCache {
 
     pub(crate) fn invalidate(&self, key: &GenerationLeaseKey) {
         let mut state = self.state.lock().expect("Tantivy reader cache poisoned");
-        state.entries.remove(key);
-        state.order.retain(|candidate| candidate != key);
+        state
+            .entries
+            .retain(|candidate, _| candidate.generation != *key);
+        state.order.retain(|candidate| candidate.generation != *key);
     }
 
     #[cfg(test)]
@@ -115,7 +130,7 @@ impl GenerationReaderCache {
     }
 }
 
-fn touch(order: &mut VecDeque<GenerationLeaseKey>, key: &GenerationLeaseKey) {
+fn touch(order: &mut VecDeque<ReaderCacheKey>, key: &ReaderCacheKey) {
     order.retain(|candidate| candidate != key);
     order.push_back(key.clone());
 }
@@ -126,7 +141,7 @@ mod tests {
 
     use super::GenerationReaderCache;
     use crate::search::generation_lease::GenerationLeaseKey;
-    use crate::search::tantivy::writer::BundleIndexWriter;
+    use crate::search::tantivy::writer::{BundleIndexWriter, IndexedChunk};
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -181,5 +196,42 @@ mod tests {
         for path in [&path_a, &path_b, &path_c] {
             std::fs::remove_dir_all(path).unwrap();
         }
+    }
+
+    #[test]
+    fn does_not_reuse_a_generation_reader_across_artifact_paths() {
+        let path_a = temp_path("iteration-a");
+        let path_b = temp_path("iteration-b");
+        let mut writer_a = BundleIndexWriter::create(&path_a, 16 * 1024 * 1024).unwrap();
+        writer_a
+            .add_chunk(&IndexedChunk {
+                file_id: 1,
+                chunk_index: 0,
+                line_start: Some(0),
+                line_end: Some(0),
+                event_time_start_ms: None,
+                event_time_end_ms: None,
+                timeline: None,
+                content: "iteration-a".into(),
+                path: "/a.log".into(),
+            })
+            .unwrap();
+        drop(writer_a.commit().unwrap());
+        let writer_b = BundleIndexWriter::create(&path_b, 16 * 1024 * 1024).unwrap();
+        drop(writer_b.commit().unwrap());
+
+        let cache = GenerationReaderCache::new(4);
+        let key = GenerationLeaseKey::new("bench-0", 1);
+        let first = cache.get_or_open(key.clone(), &path_a).unwrap();
+        let second = cache.get_or_open(key, &path_b).unwrap();
+
+        assert_eq!(first.document_count, 1);
+        assert_eq!(second.document_count, 0);
+        assert!(!Arc::ptr_eq(&first, &second));
+
+        drop(first);
+        drop(second);
+        std::fs::remove_dir_all(path_a).unwrap();
+        std::fs::remove_dir_all(path_b).unwrap();
     }
 }
