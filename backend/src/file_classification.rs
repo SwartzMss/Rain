@@ -87,7 +87,8 @@ pub fn effective_mime_type(name: &str, supplied: Option<&str>) -> Option<String>
 
 pub fn is_supported_archive_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.ends_with(".zip")
+    lower.ends_with(".7z")
+        || lower.ends_with(".zip")
         || lower.ends_with(".tar.gz")
         || lower.ends_with(".tgz")
         || (lower.ends_with(".gz") && !lower.ends_with(".tar.gz"))
@@ -283,6 +284,16 @@ mod tests {
         }
         assert_eq!(
             preview_kind_from_metadata("logs.zip", Some("application/zip"), false, None, None),
+            PreviewKind::Archive
+        );
+        assert_eq!(
+            preview_kind_from_metadata(
+                "logs.7z",
+                Some("application/x-7z-compressed"),
+                false,
+                None,
+                None,
+            ),
             PreviewKind::Archive
         );
     }

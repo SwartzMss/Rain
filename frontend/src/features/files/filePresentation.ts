@@ -1,6 +1,6 @@
 import type { FileNode } from '../../api/types';
 
-const supportedArchivePattern = /\.(zip|tar\.gz|tgz|gz)$/i;
+const supportedArchivePattern = /\.(7z|zip|tar\.gz|tgz|gz)$/i;
 
 type FileCapabilities = Pick<FileNode, 'is_dir' | 'name' | 'preview_kind'>;
 
