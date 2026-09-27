@@ -57,6 +57,12 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
         .execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO files (bundle_id, name, path, is_dir, size_bytes, line_count, status) VALUES ('bundle-private', 'private.log', 'private.log', 0, 4, 1, 'READY')")
         .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO log_segments(bundle_id,file_id,content) VALUES('bundle-private',1,'log')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES ('hash-content', 4, 'local', 'blobs/ha/hash-content', 'READY')")
         .execute(&pool).await.unwrap();
     sqlx::query("UPDATE files SET blob_id = 1 WHERE bundle_id = 'bundle-private' AND id = 1")
@@ -71,16 +77,101 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     tokio::fs::write(data_root.join("blobs/ha/hash-content"), b"log\n")
         .await
         .unwrap();
+    let admin_cookie = user_with_session(&pool, "read-admin").await;
+    sqlx::query("UPDATE users SET role='ADMIN' WHERE username='read-admin'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE issues SET last_activity_at=datetime('now','-8 days') WHERE code='PRIVATE'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let stale: String =
+        sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='PRIVATE'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
-                pool,
+                pool.clone(),
                 data_root.clone(),
                 AppLimits::default(),
             )))
             .configure(routes::register),
     )
     .await;
+
+    for cookie in [
+        Some(foreign_cookie.clone()),
+        Some(admin_cookie.clone()),
+        None,
+        Some(owner_cookie.clone()),
+    ] {
+        for uri in [
+            "/api/files/v1/hash-private/files/root",
+            "/api/files/v1/hash-private/files/1/content",
+            "/api/files/v1/hash-private/files/1/lines",
+            "/api/log/v2/hash-private/search?q=log",
+            "/api/issues/PRIVATE/search?q=log&mode=filename",
+            "/api/issues/PRIVATE/search?q=log",
+            "/api/uploads/hash-private",
+        ] {
+            let mut request = test::TestRequest::get().uri(uri);
+            if let Some(cookie) = &cookie {
+                request = request.cookie(cookie.clone());
+            }
+            let response = test::call_service(&app, request.to_request()).await;
+            assert_eq!(response.status(), actix_web::http::StatusCode::OK, "{uri}");
+            let activity: String =
+                sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='PRIVATE'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                activity, stale,
+                "public read must not renew activity: {uri}"
+            );
+        }
+    }
+
+    for cookie in [
+        Some(foreign_cookie.clone()),
+        Some(admin_cookie),
+        None,
+        Some(owner_cookie.clone()),
+    ] {
+        for uri in ["/api/temp-results/preview", "/api/temp-results"] {
+            if cookie.is_none() && uri == "/api/temp-results" {
+                continue;
+            }
+            let mut request = test::TestRequest::post()
+                .uri(uri)
+                .set_json(serde_json::json!({
+                    "issue_code": "PRIVATE", "expression": "log"
+                }));
+            if let Some(cookie) = &cookie {
+                request = request.cookie(cookie.clone());
+            }
+            let response = test::call_service(&app, request.to_request()).await;
+            assert!(
+                response.status().is_success(),
+                "{uri}: {}",
+                response.status()
+            );
+            let activity: String =
+                sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='PRIVATE'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                activity, stale,
+                "materialization must not renew activity: {uri}"
+            );
+        }
+    }
 
     let upload = test::call_service(
         &app,
@@ -112,6 +203,12 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     )
     .await;
     assert_eq!(download.status(), actix_web::http::StatusCode::OK);
+    let activity: String =
+        sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='PRIVATE'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(activity, stale, "foreign downloads must not renew activity");
     let search = test::call_service(
         &app,
         test::TestRequest::get()
@@ -278,6 +375,13 @@ async fn inactivity_expiry_is_an_owner_only_persisted_activity_snapshot() {
     .unwrap();
     assert_eq!(expires_at, expected);
 
+    sqlx::query("UPDATE issues SET last_activity_at=datetime('now','-6 days','-23 hours') WHERE code='EXPIRY'")
+        .execute(&pool).await.unwrap();
+    let stale: String =
+        sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='EXPIRY'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     for cookie in [Some(foreign_cookie), Some(admin_cookie), None] {
         let mut request = test::TestRequest::get().uri("/api/issues/EXPIRY");
         if let Some(cookie) = cookie {
@@ -286,6 +390,15 @@ async fn inactivity_expiry_is_an_owner_only_persisted_activity_snapshot() {
         let response = test::call_service(&app, request.to_request()).await;
         let body: Value = test::read_body_json(response).await;
         assert!(body["inactivity_expiry"].is_null());
+        let activity: String =
+            sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='EXPIRY'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            activity, stale,
+            "non-owner detail reads must not renew expiry"
+        );
     }
 
     let unowned = test::call_service(

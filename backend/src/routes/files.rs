@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::helpers::{ensure_bundle_ready, load_bundle};
-use super::issues::{require_issue_owner, touch_issue_activity_best_effort};
+use super::issues::{require_issue_owner, touch_owned_issue_activity_best_effort};
 use super::temp_results::request_client_key;
 
 #[derive(Deserialize)]
@@ -118,7 +118,6 @@ pub async fn get_file_node(
     };
     let children_records = fetch_children(&state.db.pool, &bundle.id, parent_id).await?;
     let children = children_records.into_iter().map(to_file_node).collect();
-    touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "file tree read").await;
 
     Ok(HttpResponse::Ok().json(FileNodeResponse { node, children }))
 }
@@ -147,7 +146,6 @@ pub async fn get_file_content(
         &runtime_limits.api,
     )
     .await?;
-    touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "file content read").await;
     Ok(HttpResponse::Ok().json(preview))
 }
 
@@ -186,14 +184,13 @@ pub async fn get_file_lines(
         limit,
     )
     .await?;
-    touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "file lines read").await;
 
     Ok(HttpResponse::Ok().json(lines))
 }
 
 #[get("/files/v1/{bundle_id}/files/{file_id}/download")]
 pub async fn download_file(
-    _user: RequireUser,
+    user: RequireUser,
     params: web::Path<FilePath>,
     state: web::Data<AppState>,
 ) -> Result<NamedFile, AppError> {
@@ -224,7 +221,13 @@ pub async fn download_file(
                 DispositionParam::Filename(fallback_name),
             ],
         });
-    touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "file download").await;
+    touch_owned_issue_activity_best_effort(
+        &state.db.pool,
+        &bundle.issue_code,
+        &user.0.id,
+        "file download",
+    )
+    .await;
     Ok(named)
 }
 
@@ -261,7 +264,13 @@ pub async fn delete_file_node(
         .map_err(|_| AppError::BadRequest(format!("invalid file id: {file_id}")))?;
     let job = enqueue_file_deletion(&state.db.pool, &bundle.id, parsed_id, &user.0.id).await?;
     state.file_deletion_notify.notify_one();
-    touch_issue_activity_best_effort(&state.db.pool, &bundle.issue_code, "file deletion").await;
+    touch_owned_issue_activity_best_effort(
+        &state.db.pool,
+        &bundle.issue_code,
+        &user.0.id,
+        "file deletion",
+    )
+    .await;
 
     Ok(HttpResponse::Accepted().json(FileDeletionJobResponse::from(job)))
 }
@@ -287,7 +296,13 @@ pub async fn create_file_deletion_batch(
     let batch = enqueue_file_deletion_batch(&state.db.pool, &user.0.id, &normalized_items).await?;
     state.file_deletion_notify.notify_one();
     for issue_code in issue_codes {
-        touch_issue_activity_best_effort(&state.db.pool, &issue_code, "file deletion batch").await;
+        touch_owned_issue_activity_best_effort(
+            &state.db.pool,
+            &issue_code,
+            &user.0.id,
+            "file deletion batch",
+        )
+        .await;
     }
     Ok(HttpResponse::Accepted().json(batch))
 }

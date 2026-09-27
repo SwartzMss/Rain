@@ -24,7 +24,9 @@ use crate::{
     },
 };
 
-use super::issues::{normalize_issue_code, require_issue_owner, touch_issue_activity_best_effort};
+use super::issues::{
+    normalize_issue_code, require_issue_owner, touch_owned_issue_activity_best_effort,
+};
 
 #[get("/issues/{issue_code}/upload-limits")]
 pub async fn get_upload_limits(
@@ -228,7 +230,13 @@ pub async fn upload_logs(
     );
 
     drop(receive_permit);
-    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "upload accepted").await;
+    touch_owned_issue_activity_best_effort(
+        &state.db.pool,
+        &issue_code,
+        &user.0.id,
+        "upload accepted",
+    )
+    .await;
 
     Ok(
         HttpResponse::build(StatusCode::ACCEPTED).json(UploadResponse {
@@ -281,7 +289,6 @@ pub async fn get_upload_task(
         UploadStatus::Processing => 0,
         UploadStatus::Pending => 0,
     };
-    touch_issue_activity_best_effort(&state.db.pool, &row.issue_code, "upload task read").await;
 
     Ok(HttpResponse::Ok().json(UploadTaskResponse {
         task_id: row.hash.clone(),

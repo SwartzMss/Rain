@@ -23,12 +23,14 @@ const ISSUE_NAME_MAX_LEN: usize = 128;
 const INACTIVE_CLEANUP_LEASE_SECONDS: u64 = 10 * 60;
 const MANUAL_CLEANUP_LEASE_SECONDS: u64 = 10 * 60;
 
-pub(crate) async fn touch_issue_activity(
+pub(crate) async fn touch_owned_issue_activity(
     pool: &sqlx::SqlitePool,
     code: &str,
+    user_id: &str,
 ) -> Result<bool, AppError> {
-    let updated = sqlx::query("UPDATE issues SET last_activity_at = CURRENT_TIMESTAMP WHERE code = ? AND status = 'ACTIVE' AND datetime(last_activity_at) < datetime('now', '-1 hour')")
+    let updated = sqlx::query("UPDATE issues SET last_activity_at = CURRENT_TIMESTAMP WHERE code = ? AND owner_user_id = ? AND status = 'ACTIVE' AND datetime(last_activity_at) < datetime('now', '-1 hour')")
         .bind(code)
+        .bind(user_id)
         .execute(pool)
         .await
         .map_err(AppError::Database)?
@@ -36,12 +38,13 @@ pub(crate) async fn touch_issue_activity(
     Ok(updated == 1)
 }
 
-pub(crate) async fn touch_issue_activity_best_effort(
+pub(crate) async fn touch_owned_issue_activity_best_effort(
     pool: &sqlx::SqlitePool,
     code: &str,
+    user_id: &str,
     operation: &'static str,
 ) -> bool {
-    match touch_issue_activity(pool, code).await {
+    match touch_owned_issue_activity(pool, code, user_id).await {
         Ok(updated) => updated,
         Err(error) => {
             tracing::warn!(issue_code = code, operation, %error, "failed to refresh issue activity after successful operation");
@@ -314,6 +317,17 @@ pub async fn get_issue_bundles(
     let inactive_days = state
         .issue_inactive_days
         .load(std::sync::atomic::Ordering::Acquire);
+    let activity_refreshed = if let Some(actor) = user.0.as_ref().filter(|_| can_write) {
+        touch_owned_issue_activity_best_effort(
+            &state.db.pool,
+            &issue_code,
+            &actor.id,
+            "issue detail read",
+        )
+        .await
+    } else {
+        false
+    };
     let inactivity_expiry = if can_write && !owner_exempt && (7..=30).contains(&inactive_days) {
         let previous_expires_at = sqlx::query_scalar::<_, String>(
             "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', datetime(?, '+' || ? || ' days'))",
@@ -323,9 +337,6 @@ pub async fn get_issue_bundles(
         .fetch_one(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
-        let activity_refreshed =
-            touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue detail read")
-                .await;
         sqlx::query_as::<_, (String, i64)>(
             "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', datetime(last_activity_at, '+' || ? || ' days')), CASE WHEN ? AND datetime(?) <= datetime('now', '+72 hours') THEN 1 ELSE 0 END FROM issues WHERE code = ? AND status = 'ACTIVE'",
         )
@@ -342,7 +353,6 @@ pub async fn get_issue_bundles(
             renewed_from_expiring: renewed_from_expiring != 0,
         })
     } else {
-        touch_issue_activity_best_effort(&state.db.pool, &issue_code, "issue detail read").await;
         None
     };
 
@@ -861,7 +871,13 @@ pub async fn delete_issue_bundle(
 
     // Finish request-scoped writes before the heavyweight cleanup can compete for
     // SQLite's single writer lock.
-    touch_issue_activity_best_effort(&state.db.pool, &issue_code, "bundle deletion").await;
+    touch_owned_issue_activity_best_effort(
+        &state.db.pool,
+        &issue_code,
+        &user.0.id,
+        "bundle deletion",
+    )
+    .await;
 
     let pool = state.db.pool.clone();
     tokio::spawn(async move {
@@ -1113,7 +1129,7 @@ mod tests {
         claim_inactive_issue, claim_inactive_recovery, claim_manual_from_exempt_inactive,
         cleanup_inactive_issues, cleanup_inactive_issues_with_lease,
         normalize_legacy_manual_deletion, require_inactive_lease, require_issue_owner,
-        require_issue_owner_for_delete, resume_manual_issue_deletions, touch_issue_activity,
+        require_issue_owner_for_delete, resume_manual_issue_deletions, touch_owned_issue_activity,
     };
     use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 
@@ -1269,6 +1285,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activity_requires_current_owner_and_active_issue() {
+        let pool = db::init_pool("sqlite::memory:").unwrap();
+        db::prepare_schema(&pool, true).await.unwrap();
+        let owner = match users::create_user(&pool, "activity-owner", "hash")
+            .await
+            .unwrap()
+        {
+            CreateUserOutcome::Created(user) => user,
+            CreateUserOutcome::DuplicateUsername => unreachable!(),
+        };
+        sqlx::query("INSERT INTO issues(code,name,owner_user_id,last_activity_at) VALUES('OWNED','Owned',?,datetime('now','-8 days')),('UNOWNED','Unowned',NULL,datetime('now','-8 days'))")
+            .bind(&owner.id).execute(&pool).await.unwrap();
+        assert!(
+            !touch_owned_issue_activity(&pool, "OWNED", "foreign-user")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !touch_owned_issue_activity(&pool, "UNOWNED", &owner.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !touch_owned_issue_activity(&pool, "MISSING", &owner.id)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE issues SET status='DELETING' WHERE code='OWNED'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !touch_owned_issue_activity(&pool, "OWNED", &owner.id)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE issues SET status='ACTIVE', owner_user_id=NULL WHERE code='OWNED'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !touch_owned_issue_activity(&pool, "OWNED", &owner.id)
+                .await
+                .unwrap()
+        );
+        let stale_count: i64 = sqlx::query_scalar("SELECT count(*) FROM issues WHERE datetime(last_activity_at) < datetime('now','-7 days')")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            stale_count, 2,
+            "unauthorized touches must leave issues eligible for cleanup"
+        );
+    }
+
+    #[tokio::test]
     async fn activity_is_throttled_and_inactive_cleanup_skips_fresh_and_processing_issues() {
         let pool = db::init_pool("sqlite::memory:").unwrap();
         db::prepare_schema(&pool, true).await.unwrap();
@@ -1299,7 +1369,7 @@ mod tests {
             CreateUserOutcome::Created(user) => user,
             CreateUserOutcome::DuplicateUsername => unreachable!(),
         };
-        sqlx::query("UPDATE issues SET owner_user_id=? WHERE code='OLD'")
+        sqlx::query("UPDATE issues SET owner_user_id=? WHERE code IN ('OLD', 'FRESH')")
             .bind(&owner.id)
             .execute(&pool)
             .await
@@ -1311,7 +1381,9 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        touch_issue_activity(&pool, "FRESH").await.unwrap();
+        touch_owned_issue_activity(&pool, "FRESH", &owner.id)
+            .await
+            .unwrap();
         let after: String =
             sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='FRESH'")
                 .fetch_one(&pool)
@@ -1329,7 +1401,9 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        touch_issue_activity(&pool, "FRESH").await.unwrap();
+        touch_owned_issue_activity(&pool, "FRESH", &owner.id)
+            .await
+            .unwrap();
         let refreshed: String =
             sqlx::query_scalar("SELECT last_activity_at FROM issues WHERE code='FRESH'")
                 .fetch_one(&pool)
