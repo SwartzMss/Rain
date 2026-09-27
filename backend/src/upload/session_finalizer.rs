@@ -1,10 +1,6 @@
 use std::{path::Path, time::Instant};
 
-use sha2::{Digest, Sha256};
-use tokio::{
-    fs::{self, File, OpenOptions},
-    io::AsyncReadExt,
-};
+use tokio::fs::{self, OpenOptions};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -20,8 +16,6 @@ use crate::{
         },
     },
 };
-
-const HASH_BUFFER_SIZE: usize = 1024 * 1024;
 
 pub fn spawn(state: actix_web::web::Data<AppState>) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
@@ -128,7 +122,6 @@ async fn finalize_one_locked(state: &AppState, session_id: &str) -> Result<(), A
             )
             .await;
         }
-        let _file_hash = sha256_file(&persistent_path).await?;
         let bundle_id = Uuid::new_v4().simple().to_string();
         let bundle_hash = Uuid::new_v4().simple().to_string();
         session =
@@ -310,22 +303,4 @@ fn deterministic_storage_name(session: &UploadSession) -> String {
         session.id,
         crate::upload::filename::sanitize_filename(&session.file_name)
     )
-}
-
-async fn sha256_file(path: &Path) -> Result<String, AppError> {
-    let mut file = File::open(path).await.map_err(AppError::Io)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; HASH_BUFFER_SIZE];
-    loop {
-        let read = file.read(&mut buffer).await.map_err(AppError::Io)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
 }
