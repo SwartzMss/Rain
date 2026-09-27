@@ -429,14 +429,6 @@ pub(crate) async fn create_preview_result(
             return Err(error);
         }
     };
-    if let Some(issue_code) = payload.issue_code.as_deref() {
-        touch_issue_activity_best_effort(
-            &state.db.pool,
-            &normalize_issue_code(issue_code)?,
-            "preview materialization",
-        )
-        .await;
-    }
     Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
         result_id: outcome.id,
         total: outcome.total,
@@ -478,14 +470,6 @@ pub(crate) async fn create_full_result(
         MaterializeMode::Full,
     )
     .await?;
-    if let Some(issue_code) = payload.issue_code.as_deref() {
-        touch_issue_activity_best_effort(
-            &state.db.pool,
-            &normalize_issue_code(issue_code)?,
-            "full materialization",
-        )
-        .await;
-    }
     let result = load_active_unexpired_record(&state, &outcome.id).await?;
     Ok(HttpResponse::Created().json(to_response(result)))
 }
