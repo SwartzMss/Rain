@@ -1748,7 +1748,7 @@ async fn issue_quota_overflow_fails_and_releases_bundle_content() {
             .to_request(),
     )
     .await;
-    let quota_issue = issues_after_bundle_delete
+    let quota_issue = issues_after_bundle_delete["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -1881,7 +1881,7 @@ async fn issue_creation_and_upload_require_existing_issue() {
             .to_request(),
     )
     .await;
-    let created_issue = issues
+    let created_issue = issues["items"]
         .as_array()
         .expect("issues")
         .iter()

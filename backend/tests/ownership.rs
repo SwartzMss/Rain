@@ -130,14 +130,14 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     )
     .await;
     let issue_list: Value = test::read_body_json(issue_list).await;
-    assert_eq!(issue_list[0]["owner_username"], "owner-http");
+    assert_eq!(issue_list["items"][0]["owner_username"], "owner-http");
     let guest_list = test::call_service(
         &app,
         test::TestRequest::get().uri("/api/issues").to_request(),
     )
     .await;
     let guest_list: Value = test::read_body_json(guest_list).await;
-    assert!(guest_list[0]["owner_username"].is_null());
+    assert!(guest_list["items"][0]["owner_username"].is_null());
     let issue_detail = test::call_service(
         &app,
         test::TestRequest::get()
