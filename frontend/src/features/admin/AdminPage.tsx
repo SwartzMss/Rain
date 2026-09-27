@@ -75,7 +75,6 @@ function runtimeWarningLabel(warning: string): string {
   const labels: Record<string, string> = {
     cpu_probe_fallback: "CPU 资源探测不可用，使用保守 fallback（1 核）",
     memory_probe_fallback: "内存资源探测不可用，使用保守 fallback（512 MiB）",
-    adaptive_memory_target_is_heuristic: "自适应并发计划使用启发式内存目标，不是硬限制",
     estimated_budget_exceeded: "最低合法并发计划仍超过启发式内存目标",
   };
   return labels[warning] ?? warning;
@@ -769,6 +768,11 @@ export function AdminSettingsPage() {
     loading || saving || !hasLoadedSettings || Boolean(loadError);
   const primaryButtonClass =
     "rounded-lg bg-cyan-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-cyan-600/20 transition hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-50";
+  const runtimeWarnings = runtime
+    ? [...new Set([...runtime.resources.warnings, ...runtime.warnings])].filter(
+        (warning) => warning !== "adaptive_memory_target_is_heuristic",
+      )
+    : [];
   return (
     <AdminGuard>
       <div className="space-y-3">
@@ -826,9 +830,8 @@ export function AdminSettingsPage() {
               </div>
             </div>
             <div className="mt-4 rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-3" data-testid="runtime-decisions">
-              <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center justify-between gap-2">
                 <span className="font-medium text-slate-700">当前自适应参数（{runtime.decisions.length} 项）</span>
-                <span className="text-xs text-slate-500">查询并发由系统内部保护，不开放配置</span>
               </div>
               <div className="mt-3 grid gap-2 sm:grid-cols-3">
                 {runtime.decisions.map(([key, decision]) => (
@@ -837,20 +840,15 @@ export function AdminSettingsPage() {
                     <p className="mt-1 font-medium text-slate-800">
                       {formatRuntimeDecisionValue(key, decision.value)}
                     </p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {decision.mode === "auto" ? "自适应" : "手动"}
-                    </p>
                   </div>
                 ))}
               </div>
             </div>
-            {runtime.resources.warnings.length > 0 || runtime.warnings.length > 0 ? (
+            {runtimeWarnings.length > 0 ? (
               <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
                 <p className="font-semibold">资源探测提示</p>
                 <p className="mt-1">
-                  {[...new Set([...runtime.resources.warnings, ...runtime.warnings])]
-                    .map(runtimeWarningLabel)
-                    .join("；")}
+                  {runtimeWarnings.map(runtimeWarningLabel).join("；")}
                 </p>
               </div>
             ) : null}

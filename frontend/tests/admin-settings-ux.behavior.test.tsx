@@ -161,13 +161,15 @@ it('presents metadata settings by visibility and reveals expert settings explici
   expect(screen.queryByText('计划内存预算')).not.toBeInTheDocument();
   expect(screen.queryByText('当前进程 RSS')).not.toBeInTheDocument();
   expect(screen.getByText('当前自适应参数（3 项）')).toBeInTheDocument();
+  expect(screen.queryByText('查询并发由系统内部保护，不开放配置')).not.toBeInTheDocument();
+  expect(screen.queryByText('手动')).not.toBeInTheDocument();
   expect(screen.getByText('上传处理并发')).toBeInTheDocument();
   expect(screen.getByText('Tantivy writer 并发')).toBeInTheDocument();
   expect(screen.getByText('writer 堆大小')).toBeInTheDocument();
   expect(screen.getByText('16 MiB')).toBeInTheDocument();
   expect(screen.getAllByText(/fallback（探测不可用）/)).toHaveLength(2);
   expect(screen.getByText('原因：内存探测不可用')).toBeInTheDocument();
-  expect(screen.getByText(/自适应并发计划使用启发式内存目标/)).toBeInTheDocument();
+  expect(screen.queryByText(/自适应并发计划使用启发式内存目标/)).not.toBeInTheDocument();
   expect(screen.getByText('高级运行参数')).toBeInTheDocument();
   expect(screen.queryByText('专家配置')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '显示专家配置' })).toBeInTheDocument();
