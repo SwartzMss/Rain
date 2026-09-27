@@ -36,6 +36,7 @@ mod reader_cache;
 pub use query::{CandidateSearch, SearchHit};
 use query::{SearchOptions, SearchPage};
 use reader_cache::GenerationReaderCache;
+pub use reader_cache::ReaderCacheStats;
 pub use schema::{BundleSchema, build_schema};
 pub use writer::{BundleIndexWriter, IndexedChunk};
 
@@ -43,6 +44,16 @@ static READER_CACHE: OnceLock<GenerationReaderCache> = OnceLock::new();
 
 pub(crate) fn reader_cache() -> &'static GenerationReaderCache {
     READER_CACHE.get_or_init(GenerationReaderCache::default)
+}
+
+/// Return process-local reader cache counters for diagnostics and benchmarks.
+pub fn reader_cache_stats() -> ReaderCacheStats {
+    reader_cache().stats()
+}
+
+/// Reset process-local reader cache counters without changing cached readers.
+pub fn reset_reader_cache_stats() {
+    reader_cache().reset_stats();
 }
 
 pub async fn search_bundle(

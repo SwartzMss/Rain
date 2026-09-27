@@ -245,6 +245,36 @@ async fn finish_bench_build(build: &BenchBuild) -> Result<(), backend::error::Ap
     let _ = build;
     Ok(())
 }
+
+#[cfg(feature = "tantivy-search")]
+fn reset_reader_cache_metrics(backend: SearchBackendKind) {
+    if backend == SearchBackendKind::Tantivy {
+        backend::search::tantivy::reset_reader_cache_stats();
+    }
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+fn reset_reader_cache_metrics(_backend: SearchBackendKind) {}
+
+#[cfg(feature = "tantivy-search")]
+fn reader_cache_metrics(backend: SearchBackendKind) -> Value {
+    if backend != SearchBackendKind::Tantivy {
+        return Value::Null;
+    }
+    let stats = backend::search::tantivy::reader_cache_stats();
+    json!({
+        "hit": stats.hits,
+        "miss": stats.misses,
+        "open": stats.opens,
+        "eviction": stats.evictions,
+    })
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+fn reader_cache_metrics(_backend: SearchBackendKind) -> Value {
+    Value::Null
+}
+
 struct Sampler {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<Vec<Value>>>,
@@ -400,6 +430,7 @@ async fn large_log_baseline() {
             let ready: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bundles WHERE status = 'READY'").fetch_one(&pool).await.unwrap();
             assert_eq!(ready, concurrency as i64);
             let app = test::init_service(App::new().app_data(web::Data::new(AppState::new(pool.clone(), data_root, limits.clone()))).configure(routes::register)).await;
+            reset_reader_cache_metrics(selected_backend);
             let mut search = Vec::new();
             for (kind, term, encoded) in [
                 ("common", "INFO", "INFO"), ("rare", "RARE_SENTINEL", "RARE_SENTINEL"),
@@ -421,7 +452,7 @@ async fn large_log_baseline() {
                 }
             }
             let sampled_peaks = ["rss_bytes", "db_bytes", "wal_bytes"].into_iter().map(|key| (key.to_owned(), json!(samples.iter().filter_map(|s| s[key].as_u64()).max()))).collect::<serde_json::Map<_, _>>();
-            json!({"schema_version": 1, "iteration": iteration, "timestamp": chrono::Utc::now().to_rfc3339(),
+            json!({"schema_version": 2, "iteration": iteration, "timestamp": chrono::Utc::now().to_rfc3339(),
                 "machine": {"host_notes": std::env::var("RAIN_BENCH_HOST_NOTES").ok(), "filesystem": if cfg!(target_os = "linux") { command("df", &["-T", dir.0.to_str().unwrap()]) } else { None }, "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "clock_ticks_per_second": if cfg!(target_os = "linux") { command("getconf", &["CLK_TCK"]).and_then(|s| s.parse::<u64>().ok()) } else { None }, "logical_cpus": std::thread::available_parallelism().ok().map(|v| v.get()), "uname": command("uname", &["-a"]), "cpu": fs::read_to_string("/proc/cpuinfo").ok().and_then(|s| s.lines().find(|l| l.starts_with("model name")).map(str::to_owned)), "memory": fs::read_to_string("/proc/meminfo").ok().and_then(|s| s.lines().next().map(str::to_owned))},
                 "build": {"git_commit": command("git", &["rev-parse", "HEAD"]), "git_status": command("git", &["status", "--porcelain"]), "rustc": command("rustc", &["-Vv"]), "debug_assertions": cfg!(debug_assertions), "package_version": env!("CARGO_PKG_VERSION")},
                 "config": {"bytes_per_bundle_minimum": bytes, "concurrency": concurrency, "query_samples": queries, "query_warmup": warmup, "tantivy_max_writers": limits.search.tantivy_max_writers, "tantivy_writer_heap_size_bytes": limits.search.tantivy_writer_heap_size, "limits": format!("{limits:?}"), "archive_limits": format!("{:?}", ArchiveConfig::for_content_limit_with_working_size(limits.issue_max_content_size, limits.archive_max_working_size)), "fixture_version": 1, "variant": variant, "sampler_interval_ms": 100},
@@ -429,7 +460,7 @@ async fn large_log_baseline() {
                 "inputs": inputs.iter().map(|(id, _, metadata, uploaded_bytes, uploaded_sha256)| json!({"bundle": id, "fixture": metadata, "uploaded_bytes": uploaded_bytes, "uploaded_sha256": uploaded_sha256})).collect::<Vec<_>>(),
                 "throughput": {"raw_mib_per_second": inputs.iter().map(|i| i.2.bytes).sum::<u64>() as f64 / 1048576.0 / (ingest_ms / 1000.0), "lines_per_second": inputs.iter().map(|i| i.2.lines).sum::<u64>() as f64 / (ingest_ms / 1000.0)},
                 "ingest_sampled_peaks": sampled_peaks,
-                "ingest_to_all_ready_ms": ingest_ms, "bundle_timings": times, "resources_before": before, "resources_after": resources(&db_path), "ingest_resource_samples": samples, "search": search, "stage_metrics": ingest_metrics, "resources_after_ingest": after_ingest})
+                "ingest_to_all_ready_ms": ingest_ms, "bundle_timings": times, "resources_before": before, "resources_after": resources(&db_path), "ingest_resource_samples": samples, "search": search, "reader_cache": reader_cache_metrics(selected_backend), "stage_metrics": ingest_metrics, "resources_after_ingest": after_ingest})
         }.with_subscriber(subscriber)).catch_unwind().await;
         pool.close().await;
         let report = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
