@@ -323,6 +323,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
         "register_ip_limit_per_hour",
         "login_username_failure_limit_per_5_minutes",
         "api_default_search_results",
+        "api_max_search_results",
         "archive_max_working_size",
         "upload_concurrent_processing_tasks",
         "upload_concurrent_receive_tasks",
@@ -338,13 +339,9 @@ async fn registration_settings_are_persistent_and_admin_only() {
         "api_concurrent_line_reads",
         "api_concurrent_line_reads_per_client",
         "api_max_search_window",
-        "temp_results_max_result_size",
-        "temp_results_max_total_size",
-        "temp_results_max_records",
         "temp_results_concurrent_materializations",
         "temp_results_max_sources",
         "temp_results_max_scan_bytes",
-        "temp_results_max_scan_duration_seconds",
     ] {
         assert!(!fields.iter().any(|field| field["key"] == key));
     }
@@ -359,7 +356,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
     assert!(
         fields
             .iter()
-            .any(|field| field["key"] == "api_max_search_results")
+            .any(|field| field["key"] == "temp_results_max_result_size")
     );
     let revision = body["revision"].as_str().expect("settings revision");
     let settings_audits_before: i64 =
@@ -412,7 +409,7 @@ async fn registration_settings_are_persistent_and_admin_only() {
             .uri("/api/admin/settings")
             .cookie(cookie.clone())
             .set_json(serde_json::json!({
-                "changes": {"api_max_search_results": 100}
+                "changes": {"temp_results_max_records": 100}
             }))
             .to_request(),
     )
@@ -440,14 +437,14 @@ async fn registration_settings_are_persistent_and_admin_only() {
             .cookie(cookie.clone())
             .set_json(serde_json::json!({
                 "expected_revision": revision,
-                "changes": {"api_max_search_results": 100}
+                "changes": {"temp_results_max_records": 100}
             }))
             .to_request(),
     )
     .await;
     assert_eq!(versioned_update.status(), StatusCode::OK);
     let body: serde_json::Value = test::read_body_json(versioned_update).await;
-    assert_eq!(body["configured"]["api_max_search_results"], 100);
+    assert_eq!(body["configured"]["temp_results_max_records"], 100);
     assert!(
         body["pending_restart_fields"]
             .as_array()

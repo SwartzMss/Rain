@@ -399,7 +399,6 @@ mod tests {
             &mut result,
             &mut metadata,
             &mut index,
-            usize::MAX as u64,
         )
         .await
         .unwrap();

@@ -51,8 +51,6 @@ pub enum SettingKey {
     TempResultsMaxTotalSize,
     TempResultsMaxRecords,
     TempResultsConcurrentMaterializations,
-    TempResultsMaxSources,
-    TempResultsMaxScanBytes,
     TempResultsMaxScanDurationSeconds,
 }
 
@@ -88,8 +86,6 @@ impl SettingKey {
         Self::TempResultsMaxTotalSize,
         Self::TempResultsMaxRecords,
         Self::TempResultsConcurrentMaterializations,
-        Self::TempResultsMaxSources,
-        Self::TempResultsMaxScanBytes,
         Self::TempResultsMaxScanDurationSeconds,
     ];
 }
@@ -136,8 +132,6 @@ pub struct SettingsValues {
     pub temp_results_max_total_size: u64,
     pub temp_results_max_records: i64,
     pub temp_results_concurrent_materializations: usize,
-    pub temp_results_max_sources: usize,
-    pub temp_results_max_scan_bytes: u64,
     pub temp_results_max_scan_duration_seconds: u64,
 }
 
@@ -177,8 +171,6 @@ impl SettingsValues {
             temp_results_concurrent_materializations: limits
                 .temp_results
                 .concurrent_materializations,
-            temp_results_max_sources: limits.temp_results.max_sources,
-            temp_results_max_scan_bytes: limits.temp_results.max_scan_bytes,
             temp_results_max_scan_duration_seconds: limits.temp_results.max_scan_duration_seconds,
         }
     }
@@ -214,8 +206,6 @@ impl SettingsValues {
         limits.temp_results.max_records = self.temp_results_max_records;
         limits.temp_results.concurrent_materializations =
             self.temp_results_concurrent_materializations;
-        limits.temp_results.max_sources = self.temp_results_max_sources;
-        limits.temp_results.max_scan_bytes = self.temp_results_max_scan_bytes;
         limits.temp_results.max_scan_duration_seconds = self.temp_results_max_scan_duration_seconds;
     }
 

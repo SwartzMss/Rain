@@ -146,8 +146,6 @@ pub struct TempResultConfig {
     pub max_total_size: u64,
     pub max_records: i64,
     pub concurrent_materializations: usize,
-    pub max_sources: usize,
-    pub max_scan_bytes: u64,
     pub max_scan_duration_seconds: u64,
 }
 
@@ -158,8 +156,6 @@ impl Default for TempResultConfig {
             max_total_size: GIB,
             max_records: 1_000,
             concurrent_materializations: 2,
-            max_sources: 10_000,
-            max_scan_bytes: GIB,
             max_scan_duration_seconds: 30,
         }
     }
@@ -451,14 +447,6 @@ impl AppLimits {
                     "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
                     defaults.temp_results.concurrent_materializations,
                 )?,
-                max_sources: env_value(
-                    "RAIN_TEMP_RESULT_MAX_SOURCES",
-                    defaults.temp_results.max_sources,
-                )?,
-                max_scan_bytes: env_size(
-                    "RAIN_TEMP_RESULT_MAX_SCAN_BYTES",
-                    defaults.temp_results.max_scan_bytes,
-                )?,
                 max_scan_duration_seconds: env_value(
                     "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS",
                     defaults.temp_results.max_scan_duration_seconds,
@@ -548,22 +536,9 @@ impl AppLimits {
             "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS"
         );
         positive!(
-            self.temp_results.max_scan_bytes,
-            "RAIN_TEMP_RESULT_MAX_SCAN_BYTES"
-        );
-        positive!(
             self.temp_results.max_scan_duration_seconds,
             "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS"
         );
-        positive!(
-            self.temp_results.max_sources,
-            "RAIN_TEMP_RESULT_MAX_SOURCES"
-        );
-        i64::try_from(self.temp_results.max_sources).map_err(|_| {
-            AppError::Config(
-                "RAIN_TEMP_RESULT_MAX_SOURCES cannot be represented as a database limit".into(),
-            )
-        })?;
         if self.temp_results.max_result_size > self.temp_results.max_total_size {
             return Err(AppError::Config(
                 "RAIN_TEMP_RESULT_MAX_SIZE must not exceed RAIN_TEMP_RESULT_MAX_TOTAL_SIZE".into(),
@@ -600,11 +575,6 @@ impl AppLimits {
         usize::try_from(self.api.max_preview_line_size).map_err(|_| {
             AppError::Config(
                 "RAIN_API_MAX_PREVIEW_LINE_SIZE cannot be represented on this platform".into(),
-            )
-        })?;
-        usize::try_from(self.temp_results.max_scan_bytes).map_err(|_| {
-            AppError::Config(
-                "RAIN_TEMP_RESULT_MAX_SCAN_BYTES cannot be represented on this platform".into(),
             )
         })?;
         Ok(())
@@ -741,6 +711,9 @@ fn parse_issue_inactive_days(value: Option<&str>) -> Result<usize, AppError> {
 #[cfg(test)]
 mod tests {
     use std::{path::Path, sync::Mutex};
+
+    // Environment variables are shared by all tests in this process.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     use super::{
         AppLimits, ArchiveConfig, AuthConfig, dotenv_path_for_executable, parse_byte_size,
@@ -897,7 +870,6 @@ mod tests {
 
     #[test]
     fn archive_working_size_defaults_from_issue_limit_and_can_be_overridden() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let issue_name = "RAIN_ISSUE_MAX_CONTENT_SIZE";
         let working_name = "RAIN_ARCHIVE_MAX_WORKING_SIZE";
@@ -982,7 +954,6 @@ mod tests {
 
     #[test]
     fn environment_values_override_limit_defaults() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let name = "RAIN_API_FILE_PREVIEW_SIZE";
         let previous = std::env::var_os(name);
@@ -1000,7 +971,6 @@ mod tests {
 
     #[test]
     fn environment_values_override_indexed_and_preview_line_limits() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let indexed_name = "RAIN_INDEXING_MAX_INDEXED_LINE_SIZE";
         let preview_name = "RAIN_API_MAX_PREVIEW_LINE_SIZE";
@@ -1027,24 +997,17 @@ mod tests {
 
     #[test]
     fn environment_values_override_temp_result_scan_limits() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
-        let bytes_name = "RAIN_TEMP_RESULT_MAX_SCAN_BYTES";
         let duration_name = "RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS";
-        let sources_name = "RAIN_TEMP_RESULT_MAX_SOURCES";
         let page_bytes_name = "RAIN_API_MAX_LINE_PAGE_BYTES";
         let reads_name = "RAIN_API_CONCURRENT_LINE_READS";
         let client_reads_name = "RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT";
-        let previous_bytes = std::env::var_os(bytes_name);
         let previous_duration = std::env::var_os(duration_name);
-        let previous_sources = std::env::var_os(sources_name);
         let previous_page_bytes = std::env::var_os(page_bytes_name);
         let previous_reads = std::env::var_os(reads_name);
         let previous_client_reads = std::env::var_os(client_reads_name);
         unsafe {
-            std::env::set_var(bytes_name, "2 GiB");
             std::env::set_var(duration_name, "45");
-            std::env::set_var(sources_name, "2048");
             std::env::set_var(page_bytes_name, "4 MiB");
             std::env::set_var(reads_name, "12");
             std::env::set_var(client_reads_name, "3");
@@ -1052,17 +1015,9 @@ mod tests {
 
         let limits = AppLimits::from_env().unwrap();
 
-        match previous_bytes {
-            Some(value) => unsafe { std::env::set_var(bytes_name, value) },
-            None => unsafe { std::env::remove_var(bytes_name) },
-        }
         match previous_duration {
             Some(value) => unsafe { std::env::set_var(duration_name, value) },
             None => unsafe { std::env::remove_var(duration_name) },
-        }
-        match previous_sources {
-            Some(value) => unsafe { std::env::set_var(sources_name, value) },
-            None => unsafe { std::env::remove_var(sources_name) },
         }
         match previous_page_bytes {
             Some(value) => unsafe { std::env::set_var(page_bytes_name, value) },
@@ -1076,9 +1031,7 @@ mod tests {
             Some(value) => unsafe { std::env::set_var(client_reads_name, value) },
             None => unsafe { std::env::remove_var(client_reads_name) },
         }
-        assert_eq!(limits.temp_results.max_scan_bytes, 2 * 1024_u64.pow(3));
         assert_eq!(limits.temp_results.max_scan_duration_seconds, 45);
-        assert_eq!(limits.temp_results.max_sources, 2048);
         assert_eq!(limits.api.max_line_page_bytes, 4 * 1024_u64.pow(2));
         assert_eq!(limits.api.concurrent_line_reads, 12);
         assert_eq!(limits.api.concurrent_line_reads_per_client, 3);
@@ -1104,16 +1057,6 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("RAIN_API_MAX_PREVIEW_LINE_SIZE")
-        );
-
-        let mut limits = AppLimits::default();
-        limits.temp_results.max_sources = 0;
-        assert!(
-            limits
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("RAIN_TEMP_RESULT_MAX_SOURCES")
         );
     }
 
@@ -1162,21 +1105,10 @@ mod tests {
                 .to_string()
                 .contains("RAIN_API_MAX_PREVIEW_LINE_SIZE")
         );
-
-        let mut limits = AppLimits::default();
-        limits.temp_results.max_scan_bytes = u64::MAX;
-        assert!(
-            limits
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("RAIN_TEMP_RESULT_MAX_SCAN_BYTES")
-        );
     }
 
     #[test]
     fn issue_content_limit_environment_value_overrides_default() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap();
         let name = "RAIN_ISSUE_MAX_CONTENT_SIZE";
         let previous = std::env::var_os(name);

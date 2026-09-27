@@ -169,8 +169,6 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_TEMP_RESULT_MAX_TOTAL_SIZE` | `1 GiB` | 临时结果目录的数据库登记总容量上限 |
 | `RAIN_TEMP_RESULT_MAX_RECORDS` | `1000` | 临时结果最多保留的记录数 |
 | `RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS` | `2` | 并发物化临时结果的任务数 |
-| `RAIN_TEMP_RESULT_MAX_SOURCES` | `10000` | Issue 级临时结果最多解析的源文件数 |
-| `RAIN_TEMP_RESULT_MAX_SCAN_BYTES` | `1 GiB` | 单次临时结果物化允许扫描的源文件字节数 |
 | `RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS` | `30` | 单次临时结果物化的扫描超时时间（秒） |
 | — | `8 MiB` | Temp Result 单行物化前缀上限；超出部分继续参与表达式匹配，结果会标记为截断 |
 | `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
@@ -179,6 +177,10 @@ Issue 容量、后台处理并发、索引单行上限、预览单行上限和 A
 | `RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES` | `10` | 同一用户名每 5 分钟失败登录上限 |
 | `RAIN_ISSUE_INACTIVE_DAYS` | `7` | Issue 非活跃自动过期天数；0 关闭，启用范围 7–30 |
 | `RAIN_CLEANUP_EXEMPT_USERS` | 空 | 仅用于首次启动迁移到数据库的逗号分隔白名单；之后请在管理员系统设置中维护，数据库配置优先，支持大小写输入 |
+
+管理员可在“常用配置”调整单次搜索结果容量、搜索超时时长、临时搜索结果总容量和最多保留份数，保存后对后续请求生效。容量支持 `64M`、`1G` 等写法（按 1024 换算）；单次结果容量不能超过总容量。普通搜索的每页结果上限不再提供管理员编辑入口，旧实例配置保留兼容。
+
+文件内容搜索不再限制累计扫描字节数或源文件数量；旧的 `RAIN_TEMP_RESULT_MAX_SCAN_BYTES`、`RAIN_TEMP_RESULT_MAX_SOURCES` 环境变量及对应数据库配置不再生效。单次搜索仍受结果容量和扫描超时约束，并保留全局临时结果配额与并发保护。源文件解析也使用相同的超时时长，分别计时。
 
 登录 Session 有效期和单 IP 每小时注册尝试次数使用系统安全默认值，不在管理员配置页面开放。旧环境变量入口和数据库列仅为升级兼容保留，普通部署无需设置。
 

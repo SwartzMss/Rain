@@ -166,7 +166,7 @@ it('presents metadata settings by visibility and reveals expert settings explici
   expect(screen.getByText('高级运行参数')).toBeInTheDocument();
   expect(screen.queryByText('专家配置')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '显示专家配置' })).toBeInTheDocument();
-  expect(screen.getByText(/推荐 1–32/)).toBeInTheDocument();
+  expect(screen.getByText(/推荐 1B–32B/)).toBeInTheDocument();
   expect(screen.getByLabelText('issue_max_content_size')).toHaveValue('8G');
   expect(screen.getAllByText('即时生效').length).toBeGreaterThan(0);
   expect(screen.getByText('重启生效')).toBeInTheDocument();
@@ -317,4 +317,44 @@ it('renders proc meminfo as the memory source without a fallback reason', async 
   await waitFor(() => expect(screen.getByTestId('runtime-resource-summary')).toBeInTheDocument());
   expect(screen.getByText('来源：/proc/meminfo')).toBeInTheDocument();
   expect(screen.queryByText(/^原因：/)).not.toBeInTheDocument();
+});
+
+
+it('edits search budgets in common settings and submits byte values', async () => {
+  vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: true, user: { id: 'admin', username: 'admin', role: 'ADMIN' } });
+  const configured = {
+    temp_results_max_result_size: 64 * 1024 ** 2,
+    temp_results_max_total_size: 1024 ** 3,
+    temp_results_max_records: 1000,
+    temp_results_max_scan_duration_seconds: 30,
+  };
+  const fields = Object.entries(configured).map(([key, value]) => ({
+    key, category: 'common', visibility: 'default', value_type: 'integer',
+    unit: key.endsWith('size') ? 'bytes' : null, default_value: value, min: 1, apply_mode: 'hot',
+  }));
+  vi.mocked(rainApi.fetchAdminSettings).mockResolvedValueOnce({
+    revision: '9', configured, effective: configured, fields, cleanup_exempt_usernames: [],
+  } as never);
+  render(<MemoryRouter><AuthProvider><AdminSettingsPage /></AuthProvider></MemoryRouter>);
+  const resultSize = await screen.findByLabelText('temp_results_max_result_size');
+  expect(resultSize).toHaveValue('64M');
+  expect(screen.getByLabelText('temp_results_max_total_size')).toHaveValue('1G');
+  expect(screen.queryByText('高级运行参数')).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('api_max_search_results')).not.toBeInTheDocument();
+  expect(screen.getByText(/文件列表解析与内容扫描分别使用此超时/)).toBeInTheDocument();
+  await userEvent.clear(resultSize);
+  await userEvent.type(resultSize, '128M');
+  const changes = { ...configured, temp_results_max_result_size: 128 * 1024 ** 2 };
+  vi.mocked(rainApi.updateAdminSettingsV2).mockResolvedValueOnce({ revision: '10', configured: changes, effective: changes } as never);
+  await userEvent.click(screen.getByRole('button', { name: '保存常用配置' }));
+  await waitFor(() => expect(rainApi.updateAdminSettingsV2).toHaveBeenLastCalledWith('9', changes));
+  expect(await screen.findByText('常用配置已保存')).toBeInTheDocument();
+});
+
+it('round trips non-round byte limits without changing their value', () => {
+  for (const value of [1025, 67108865, 8589934593]) {
+    expect(serializeSettingValue(issueContentSizeField, settingInputValue(issueContentSizeField, value))).toBe(value);
+  }
+  expect(() => serializeSettingValue(issueContentSizeField, 'bad')).toThrow();
+  expect(() => serializeSettingValue(issueContentSizeField, '0G')).toThrow();
 });

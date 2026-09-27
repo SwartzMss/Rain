@@ -272,7 +272,7 @@ const fn presentation(key: SettingKey) -> Presentation {
             true,
         ),
         ApiDefaultSearchResults => (Common, Default, Some(10), Some(100), false, None, true),
-        ApiMaxSearchResults => (Advanced, Collapsed, Some(50), Some(500), false, None, false),
+        ApiMaxSearchResults => (Advanced, Collapsed, Some(50), Some(500), false, None, true),
         ApiMaxSearchWindow => (
             Advanced,
             Collapsed,
@@ -283,32 +283,24 @@ const fn presentation(key: SettingKey) -> Presentation {
             true,
         ),
         TempResultsMaxResultSize => (
-            Advanced,
-            Collapsed,
+            Common,
+            Default,
             Some(16 * MIB),
             Some(256 * MIB),
             false,
             None,
-            true,
+            false,
         ),
         TempResultsMaxTotalSize => (
-            Advanced,
-            Collapsed,
+            Common,
+            Default,
             Some(256 * MIB),
             Some(8 * GIB),
             false,
             None,
-            true,
-        ),
-        TempResultsMaxRecords => (
-            Advanced,
-            Collapsed,
-            Some(100),
-            Some(10_000),
             false,
-            None,
-            true,
         ),
+        TempResultsMaxRecords => (Common, Default, Some(100), Some(10_000), false, None, false),
         TempResultsConcurrentMaterializations => (
             Expert,
             ExpertVisibility,
@@ -318,26 +310,8 @@ const fn presentation(key: SettingKey) -> Presentation {
             Some(2),
             true,
         ),
-        TempResultsMaxSources => (
-            Advanced,
-            Collapsed,
-            Some(1_000),
-            Some(50_000),
-            false,
-            None,
-            true,
-        ),
-        TempResultsMaxScanBytes => (
-            Advanced,
-            Collapsed,
-            Some(256 * MIB),
-            Some(8 * GIB),
-            false,
-            None,
-            true,
-        ),
         TempResultsMaxScanDurationSeconds => {
-            (Advanced, Collapsed, Some(10), Some(300), false, None, true)
+            (Common, Default, Some(10), Some(300), false, None, false)
         }
     }
 }
@@ -492,7 +466,7 @@ fn details(key: SettingKey) -> FieldDetails {
             None,
             Some(1),
             None,
-            "单个临时结果大小上限",
+            "单次搜索结果容量",
         ),
         TempResultsMaxTotalSize => (
             "integer",
@@ -501,23 +475,11 @@ fn details(key: SettingKey) -> FieldDetails {
             None,
             Some(1),
             None,
-            "临时结果总计费大小上限",
+            "临时搜索结果总容量",
         ),
-        TempResultsMaxRecords => integer(1000, 1, None, "临时结果记录数上限"),
+        TempResultsMaxRecords => integer(1000, 1, None, "临时搜索结果最多保留份数"),
         TempResultsConcurrentMaterializations => integer(2, 1, None, "临时结果物化并发数"),
-        TempResultsMaxSources => integer(10000, 1, None, "临时结果来源数上限"),
-        TempResultsMaxScanBytes => (
-            "integer",
-            Some("bytes"),
-            serde_json::json!(GIB),
-            None,
-            Some(1),
-            None,
-            "临时结果扫描字节上限",
-        ),
-        TempResultsMaxScanDurationSeconds => {
-            integer(30, 1, Some(31_536_000), "临时结果扫描超时时间")
-        }
+        TempResultsMaxScanDurationSeconds => integer(30, 1, Some(31_536_000), "搜索超时时长（秒）"),
     }
 }
 
@@ -704,18 +666,6 @@ pub fn all() -> &'static [FieldMetadata] {
             "temp_results_concurrent_materializations",
             "RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS",
             R,
-        ),
-        FieldMetadata::new(
-            TempResultsMaxSources,
-            "temp_results_max_sources",
-            "RAIN_TEMP_RESULT_MAX_SOURCES",
-            H,
-        ),
-        FieldMetadata::new(
-            TempResultsMaxScanBytes,
-            "temp_results_max_scan_bytes",
-            "RAIN_TEMP_RESULT_MAX_SCAN_BYTES",
-            H,
         ),
         FieldMetadata::new(
             TempResultsMaxScanDurationSeconds,
