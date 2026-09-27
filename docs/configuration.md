@@ -4,9 +4,9 @@
 
 Rain 将配置分成三类：
 
-1. `DATABASE_URL`、数据/日志目录、监听地址、`RESET_DB` 和首次管理员配置是启动配置，只能通过环境变量提供。
-2. 上传、搜索、预览、临时结果、认证策略等业务配置保存在 `system_settings`，管理员通过 `/api/admin/settings` 修改。
-3. 搜索后端和索引单行上限是高级启动调优，保留 ENV 兼容入口，不出现在普通设置页。
+1. **启动配置**：`DATABASE_URL`、数据/日志目录、监听地址、`SERVER_PORT`、`RESET_DB` 和首次管理员配置只能通过环境变量提供。默认端口是 `8078`。
+2. **DB 热配置**：上传、搜索、预览、临时结果、认证策略和 Issue 清理策略保存在 `system_settings`，管理员通过 `/api/admin/settings` 修改。旧业务 ENV 只在对应数据库字段尚未初始化时导入一次，已有数据库值始终优先。
+3. **高级启动调优**：`RAIN_SEARCH_BACKEND` 和索引单行上限保留 ENV 兼容入口；普通部署使用默认值即可，`sqlite_fts` 只用于 legacy/诊断场景。
 
 Issue 非活跃自动过期默认启用，阈值为 7 天；设置为 0 可以关闭。已有数据库中的显式配置不会被升级过程覆盖。
 
@@ -20,11 +20,13 @@ Issue 非活跃自动过期默认启用，阈值为 7 天；设置为 0 可以�
 
 ## 资源并发模式
 
-以下资源字段支持 `Manual`/`Auto` 模式：上传处理并发、上传接收并发、Tantivy writer、Tantivy writer heap、全局行读取并发和临时结果物化并发。已有数据库和新安装默认都是 `Manual`。上传处理并发、Tantivy writer 和 writer heap 在重启时由 runtime adaptive engine 根据 CPU/内存资源计算；其他字段继续使用后端固定 Auto 值。管理员不能在 Auto 模式下覆盖该数值。
+管理员页面的运行时资源卡片展示启动探测到的 CPU、内存，以及当前生效的 3 项自适应参数：上传处理并发、Tantivy writer 并发和单个 writer heap。三项参数支持 `Manual`/`Auto`；在 `Auto` 下，runtime adaptive engine 只在进程启动时依据 CPU 与内存快照计算 effective 值，保存配置后需要重启才会应用新的计划。
 
-管理设置会同时返回 `configured` 和 `effective`，并展示本次启动的资源来源、fallback 警告、估算占用和启发式内存目标。重启生效字段在保存后可能出现两者不一致，页面会标记“待重启”；Rain 不会在线调整已创建的并发运行时，也不会自动重启。Argon2id 始终由系统安全策略管理，管理员只能看到“Argon2id 已启用”状态，不能修改或通过管理 API 读取其并发数。query concurrency 是内部 runtime 保护参数，不出现在管理员 resource modes 或 RuntimeDecision 中。
+上传接收、行读取和临时结果物化等其他并发字段仍属于持久化保护参数，不会出现在当前 3 项 RuntimeDecision 中。查询并发由系统内部保护逻辑派生，不开放配置，也不出现在管理员 resource modes 或 RuntimeDecision 中。Argon2id 同样由系统安全策略管理，管理员只能看到“Argon2id 已启用”状态。
 
-Issue 内容搜索会在每个请求内最多并行查询 2 个 Tantivy bundle，进程内最多同时执行 4 个 Tantivy 查询；单 bundle 搜索也计入进程级额度。结果仍按统一排序键合并并分页，搜索取消或索引删除时会保留查询任务和 generation lease 的生命周期保护。
+管理设置会同时返回 `configured`、`effective`、`revision` 和 `pending_restart_fields`；页面只在资源探测失败时显示对应的 fallback 原因。Rain 不会在线调整已经创建的 semaphore 或 writer，也不会自动重启进程。
+
+Issue 内容搜索会按统一排序键合并多个 Bundle 的结果，并受每请求 fan-out 和进程级查询额度保护；具体并发值属于内部 runtime 实现，不是管理员配置项。搜索取消或索引删除时会保留查询任务和 generation lease 的生命周期保护。
 
 ## 管理接口并发
 

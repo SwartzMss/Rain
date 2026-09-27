@@ -1,6 +1,6 @@
 # Rain
 
-Rain 是一个本地日志包浏览与检索工具。当前版本用于把文本日志或 `.zip`、`.tar.gz`、`.tgz`、`.gz` 压缩包上传到一个 Issue 下，浏览递归解压后的文件树，分页查看文本内容，并按关键词搜索日志。
+Rain 是一个本地日志包浏览与检索工具。当前版本用于把文本日志或 `.zip`、`.tar.gz`、`.tgz`、`.gz`、`.7z` 压缩包上传到一个 Issue 下，浏览递归解压后的文件树，分页查看文本内容，并按关键词搜索日志。
 
 当前版本为 `v0.1.0`。默认使用 Tantivy 作为日志搜索后端，SQLite 继续承担本地控制面；本地启动不需要安装 PostgreSQL 或其他数据库服务。v0.1.x 是全新初始版本，不兼容旧的 SQLite 搜索数据目录。
 
@@ -27,7 +27,7 @@ DATABASE_URL=sqlite://./data/rain.db
 RAIN_DATA_ROOT=./data/uploads
 RAIN_LOG_DIR=./log
 SERVER_HOST=0.0.0.0
-SERVER_PORT=8080
+SERVER_PORT=8078
 RESET_DB=false
 ```
 
@@ -50,14 +50,14 @@ cargo run
 
 启动时会先执行 SQLx 数据库 migration，再进行恢复阶段和启动 HTTP 服务。空数据库会创建当前 baseline；已有无 migration metadata 的旧数据库会先验证完整 schema，缺失或被人工改坏的表、索引、约束或 FTS 定义会直接阻止启动。默认 Tantivy 模式还会拒绝包含旧 SQLite 搜索 Bundle 的数据目录，并提示使用新的数据库和数据目录。详细规则见 [`doc/DB.md`](doc/DB.md)。
 
-打开 `http://localhost:8080` 即可使用应用。
+打开 `http://localhost:8078` 即可使用应用。
 
 健康检查：
 
 ```bash
-curl http://localhost:8080/healthz
+curl http://localhost:8078/healthz
 # 检查 SQLite 与数据目录是否已就绪
-curl -i http://localhost:8080/readyz
+curl -i http://localhost:8078/readyz
 ```
 
 ### 开发前端
@@ -70,11 +70,11 @@ npm run dev
 
 开发时也可以继续使用 Vite dev server：`http://localhost:5173`。
 
-Vite 会把浏览器的同源 `/api` 请求代理到默认的 `http://localhost:8080`。如果后端
+Vite 会把浏览器的同源 `/api` 请求代理到默认的 `http://localhost:8078`。如果后端
 开发端口不同，可在 `frontend/.env` 中设置仅供开发服务器使用的代理目标：
 
 ```dotenv
-RAIN_DEV_API_PROXY_TARGET=http://localhost:8080
+RAIN_DEV_API_PROXY_TARGET=http://localhost:8078
 ```
 
 ## 构建发布包
@@ -137,67 +137,51 @@ Linux/macOS:
 
 发布包包含可执行程序、外置 `.env` 配置文件和记录版本的 `VERSION` 文件：Windows 为 ZIP，Linux 为 tar.gz。解压后应保持三个文件位于同一目录；修改 `.env` 后重启 Rain 即可改变端口、数据库和数据目录等设置，不需要重新编译。程序会优先读取可执行文件同目录的 `.env`，因此从其他工作目录启动也能找到配置；已设置的系统环境变量优先级高于 `.env`。
 
-### 可配置限制
+### 配置分层
 
-Issue 容量、后台处理并发、索引单行上限、预览单行上限和 API 限制使用同一个 `.env` 文件；不需要额外的 TOML 配置。程序优先读取可执行文件同目录的 `.env`，找不到时读取当前工作目录的 `.env`，而系统环境变量始终优先。未设置的项目使用下表默认值。压缩条目数、递归深度、路径和压缩比等安全防护采用程序内安全值，不需要部署者逐项配置。
+Rain 不再把所有业务限制当作启动环境变量。程序优先读取可执行文件同目录的 `.env`，找不到时读取当前工作目录的 `.env`，系统环境变量优先级最高。
 
-字节大小可写成纯字节数或二进制单位 `KiB`、`MiB`、`GiB`、`TiB`，单位不区分大小写，例如 `64 KiB`、`8 GiB`。所有大小和数量必须大于零。启动时还会验证 API 默认页大小不大于对应最大值；错误配置会阻止启动并指出变量名称。
+#### 启动配置
 
-搜索接口未传入 `size` 时使用内置的 50 条默认值；旧的 `RAIN_API_DEFAULT_SEARCH_RESULTS` 环境变量仅为兼容保留，管理员无需单独配置。
+下面这些值决定数据库、文件目录和监听服务，放在 `.env` 中并在重启时生效：
 
-| 环境变量 | 默认值 | 用途 |
-| --- | ---: | --- |
-| `RAIN_ISSUE_MAX_CONTENT_SIZE` | `8 GiB` | 每个 Issue 最终可浏览文件总量；压缩包按解压后内容计算 |
-| `RAIN_ARCHIVE_MAX_WORKING_SIZE` | `2 × RAIN_ISSUE_MAX_CONTENT_SIZE` | 单个 Bundle 递归解压过程中累计产生的工作数据上限；用于 archive bomb 防护，不计入 Issue 最终内容配额 |
-| `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` | `4` | 并发后台处理任务 |
-| `RAIN_UPLOAD_CONCURRENT_RECEIVE_TASKS` | `4` | 并发 Multipart 接收任务 |
-| `RAIN_UPLOAD_MAX_TMP_BYTES` | `32 GiB` | 所有上传任务 `.tmp` 工作区的全局字节预算，包含原始接收文件和解压后的 staging 文件 |
-| `RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` | `256 KiB` | 单行进入搜索索引的最大前缀大小 |
-| `RAIN_SEARCH_BACKEND` | `tantivy` | Bundle 内容搜索后端；v0.1.x 默认使用 Tantivy，`sqlite_fts` 仅用于测试和诊断旧数据 |
-| `RAIN_SEARCH_TANTIVY_MAX_WRITERS` | `1` | Tantivy Bundle writer 并发上限 |
-| `RAIN_SEARCH_TANTIVY_WRITER_HEAP` | `64 MiB` | 单个 Tantivy writer heap 上限 |
-| `RAIN_API_FILE_PREVIEW_SIZE` | `64 KiB` | 文件文本预览大小 |
-| `RAIN_API_MAX_PREVIEW_LINE_SIZE` | `8 MiB` | 文件分页接口单行返回的最大前缀大小 |
-| `RAIN_API_DEFAULT_LINE_PAGE_SIZE` | `5000` | 默认行分页大小 |
-| `RAIN_API_MAX_LINE_PAGE_SIZE` | `10000` | 最大行分页大小 |
-| `RAIN_API_MAX_LINE_PAGE_BYTES` | `16 MiB` | 文件和临时结果行分页的近似最大字节数 |
-| `RAIN_API_CONCURRENT_LINE_READS` | `8` | 文件和临时结果行接口的全局并发读取数 |
-| `RAIN_API_CONCURRENT_LINE_READS_PER_CLIENT` | `2` | 每个客户端的并发行读取数 |
-| `RAIN_API_MAX_SEARCH_RESULTS` | `100` | 最大搜索结果数 |
-| `RAIN_API_MAX_SEARCH_WINDOW` | `10000` | 单次搜索允许的最大 `from + size` 窗口（不能超过 100000） |
-| `RAIN_TEMP_RESULT_MAX_SIZE` | `64 MiB` | 单个临时搜索结果的 `.log/.meta/.idx` 总大小上限 |
-| `RAIN_TEMP_RESULT_MAX_TOTAL_SIZE` | `1 GiB` | 临时结果目录的数据库登记总容量上限 |
-| `RAIN_TEMP_RESULT_MAX_RECORDS` | `1000` | 临时结果最多保留的记录数 |
-| `RAIN_TEMP_RESULT_CONCURRENT_MATERIALIZATIONS` | `2` | 并发物化临时结果的任务数 |
-| `RAIN_TEMP_RESULT_MAX_SCAN_DURATION_SECONDS` | `30` | 单次临时结果物化的扫描超时时间（秒） |
-| — | `8 MiB` | Temp Result 单行物化前缀上限；超出部分继续参与表达式匹配，结果会标记为截断 |
-| `RAIN_ALLOW_REGISTRATION` | `true` | 是否开放新用户注册；关闭后已有用户仍可登录 |
-| `RAIN_AUTH_ARGON2_CONCURRENCY` | `5` | Argon2 哈希与校验并发上限 |
-| `RAIN_AUTH_LOGIN_IP_LIMIT_PER_MINUTE` | `20` | 同一 IP 每分钟登录尝试上限 |
-| `RAIN_AUTH_LOGIN_USERNAME_FAILURE_LIMIT_PER_5_MINUTES` | `10` | 同一用户名每 5 分钟失败登录上限 |
-| `RAIN_ISSUE_INACTIVE_DAYS` | `7` | Issue 非活跃自动过期天数；0 关闭，启用范围 7–30 |
-| `RAIN_CLEANUP_EXEMPT_USERS` | 空 | 仅用于首次启动迁移到数据库的逗号分隔白名单；之后请在管理员系统设置中维护，数据库配置优先，支持大小写输入 |
+```dotenv
+DATABASE_URL=sqlite://./data/rain.db
+RAIN_DATA_ROOT=./data/uploads
+RAIN_LOG_DIR=./log
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8078
+RESET_DB=false
+```
 
-管理员可在“常用配置”调整单次搜索结果容量、搜索超时时长、临时搜索结果总容量和最多保留份数，保存后对后续请求生效。容量支持 `64M`、`1G` 等写法（按 1024 换算）；单次结果容量不能超过总容量。普通搜索的每页结果上限不再提供管理员编辑入口，旧实例配置保留兼容。
+首次安装还可以用 `RAIN_BOOTSTRAP_ADMIN_USERNAME` 和 `RAIN_BOOTSTRAP_ADMIN_PASSWORD` 创建管理员；已有管理员不会被它们覆盖。
 
-文件内容搜索不再限制累计扫描字节数或源文件数量；旧的 `RAIN_TEMP_RESULT_MAX_SCAN_BYTES`、`RAIN_TEMP_RESULT_MAX_SOURCES` 环境变量及对应数据库配置不再生效。单次搜索仍受结果容量和扫描超时约束，并保留全局临时结果配额与并发保护。源文件解析也使用相同的超时时长，分别计时。
+#### DB 热配置
 
-登录 Session 有效期和单 IP 每小时注册尝试次数使用系统安全默认值，不在管理员配置页面开放。旧环境变量入口和数据库列仅为升级兼容保留，普通部署无需设置。
+Issue 配额、归档工作区、上传临时空间、文件预览和分页、搜索结果/窗口、临时结果容量与超时、注册与认证限流、Issue 非活跃天数以及自动清理白名单，都保存在 SQLite 的 `system_settings` 中。管理员在 `/admin/settings` 修改，页面会标出即时生效或需要重启的字段；已初始化数据库中的值优先于旧 ENV。
+
+上传处理并发、Tantivy writer 数量和 writer heap 也保存于 `system_settings`。它们可以选择 `Manual` 或 `Auto`，但只有这 3 项会进入启动时的 runtime adaptive engine；运行时查询并发是内部保护参数，不开放配置。
+
+文件内容搜索不再限制累计扫描字节数或源文件数量；旧的 `RAIN_TEMP_RESULT_MAX_SCAN_BYTES`、`RAIN_TEMP_RESULT_MAX_SOURCES` 环境变量及对应数据库配置不再生效。单次搜索仍受结果容量和扫描超时约束，并保留全局临时结果配额与并发保护。
+
+#### 高级启动调优与兼容入口
+
+`RAIN_SEARCH_BACKEND` 默认是 `tantivy`；`sqlite_fts` 只用于 legacy/诊断场景。`RAIN_INDEXING_MAX_INDEXED_LINE_SIZE` 仅保留为高级启动与旧版本迁移入口，普通部署无需设置。旧业务 ENV 只会在对应 `system_settings` 字段尚未初始化时导入一次，之后修改 ENV 不会覆盖数据库值。
 
 默认配置会使用：
 
 - SQLite 数据库：`./data/rain.db`
 - 上传目录：`./data/uploads`
-- 后端端口：`8080`
+- 后端端口：`8078`
 
-启动后访问 `http://localhost:8080`。首次运行后会在工作目录附近生成 `data/` 和 `log/`，这是 SQLite、上传文件和运行日志的正常运行时数据。
+启动后访问 `http://localhost:8078`。首次运行后会在工作目录附近生成 `data/` 和 `log/`，这是 SQLite、上传文件和运行日志的正常运行时数据。
 
 ## 使用流程
 
-1. 打开 `http://localhost:8080`。
+1. 打开 `http://localhost:8078`。
 2. 通过右上角“注册”创建账户；注册成功后使用用户名和密码登录。
 3. 新建或选择一个 Issue，例如 `CN013`。
-4. 在选中的 Issue 下拖拽或点击上传 `.log`、`.txt`、`.zip` 文件。
+4. 在选中的 Issue 下拖拽或点击上传 `.log`、`.txt`、`.zip`、`.7z` 文件。
 5. 点击 Issue 的“查看”打开文件浏览页。
 6. 在左侧文件树选择文件，右侧会显示文本预览。
 7. 在搜索框输入关键词，可搜索当前 Issue 下已索引的文本日志。
@@ -214,14 +198,16 @@ Rain 支持用户名和密码注册、登录、查询当前身份、修改密码
 后端提供的页面同源访问 API，不支持独立部署在其他来源的浏览器前端。
 
 游客可以查看和搜索，但不能下载文件或临时搜索结果；创建 Issue、上传、删除 Issue、删除
-Bundle、删除文件节点以及删除临时搜索结果需要登录。详细搜索会生成可过期清理的临时
+Bundle、删除文件节点以及删除临时搜索结果需要登录。上述业务写入操作只允许 Issue 所有者的
+活跃普通用户执行；管理员账号是独立的运营管理角色，不会自动获得普通用户业务写入权限。
+详细搜索会生成可过期清理的临时
 结果文件，但仍属于游客可用的搜索流程。临时结果物化按 IP 每分钟最多 10 次；单个结果默认最多 64 MiB，
 目录默认最多 1 GiB 或 1000 条记录，并发物化默认最多 2 个任务。Preview 结果默认保留 30 分钟，
 完整结果默认保留 7 天；读取结果不会刷新过期时间。周期清理会原子认领过期记录为 `DELETING`，删除文件和数据库记录；
 服务重启后会继续处理遗留的 `DELETING` 记录，并清理陈旧的 `.part`、`.ready-*` 和无数据库记录的孤儿结果文件。
 物化中的结果先登记为 `STAGING` 并受活动 lease 保护，完成后才转为 `ACTIVE`。
 
-登录用户可以将文件名搜索或详细搜索保存为个人条件，选择全局或当前 Issue 范围，
+活跃普通用户可以将文件名搜索或详细搜索保存为个人条件，选择全局或当前 Issue 范围，
 之后从“我的搜索条件”重新使用或删除。条件只保存查询与稳定选项，不保存会过期的
 临时结果 ID；所有查询、修改和删除均按当前用户隔离。游客点击“保存条件”时会先登录，
 返回原页面后恢复条件并继续保存。
@@ -238,10 +224,10 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 ## 当前支持
 
 - Issue 列表、打开、删除。
-- Issue 列表会加载全部 ACTIVE Issue，不再因超过 200 条而无法从界面发现。
+- Issue 列表通过后端 cursor 分页读取 `ACTIVE` Issue，支持“我的 Issue”和“所有 Issue”范围以及编号/名称筛选，不会一次加载全部记录。
 - 多文件上传。
 - `.log`、`.txt` 等文本文件索引。
-- `.zip`、`.tar.gz`、`.tgz`、`.gz` 后台递归解压并写入文件树，内层日志同样会建立索引和支持分页查看。
+- `.zip`、`.tar.gz`、`.tgz`、`.gz`、`.7z` 后台递归解压并写入文件树，内层日志同样会建立索引和支持分页查看；`.7z` 首期不含加密正文、加密文件名、分卷和自解压 EXE。
 - `.exe`、Office、图片等二进制文件保留在文件树中，显示类型与大小并支持登录后显式下载，但不会文字预览或建立搜索索引。
 - 每个 Issue 默认最多包含 8 GiB 最终可浏览文件；普通文件按实际大小计算，压缩包只计算解压后的最终文件，失败或删除 Bundle 会释放容量。
 - 压缩包仍有固定的条目数量、嵌套深度、路径、压缩比和路径穿越防护，这些安全细节不需要通过 `.env` 调整。
@@ -255,16 +241,16 @@ Bundle、删除文件节点以及删除临时搜索结果需要登录。详细�
 
 ## 当前限制
 
-- 暂不支持 `.rar`、`.7z` 解压。
+- 暂不支持 `.rar` 解压；`.7z` 支持普通非加密归档、目录和 solid/non-solid 内容，但不支持加密、分卷（`.7z.001`）和自解压 EXE。
 - 上传传输有前端进度；后台任务通过 `RECEIVING/EXTRACTING/INDEXING/PUBLISHING` 阶段提供处理状态，暂未提供阶段内百分比。
 - 上传接收阶段按单次请求限制文件总数和字节数，并受并发接收数与 `.tmp` 工作区全局字节预算限制；预算覆盖原始接收文件、递归解压后的 staging 文件和解压过程中的中间输出。接收字节上限为 Issue 最终内容上限的 2 倍，最终可浏览内容仍受 `RAIN_ISSUE_MAX_CONTENT_SIZE` 限制。Multipart 中的每个文件字段都会计入文件数量，即使字段内容为空。
 - 后台处理在 `.tmp/{task_id}/staging` 中完成解压和索引；真实文件同步写入内容寻址 BlobStore，完成或失败后 staging 工作区会被清理。
 - 临时搜索结果受单结果大小、全局总容量、记录数、并发物化数和按 IP 的请求频率共同限制；Preview 结果固定保留 30 分钟，完整结果固定保留 7 天，读取不会滑动续期；达到上限时不会继续创建结果文件。
 - 文件和临时结果行分页同时受近似字节预算、全局并发读取数和单客户端并发读取数限制，避免少数超大分页请求占满内存或 I/O；当单行的 JSON 编码结果仍超过分页预算时，服务端会返回带 `[response truncated]` 标记的有界前缀，并继续推进分页游标。
 - 搜索关键词少于 3 个字符会被拒绝，以避免公开接口执行无界的全文扫描。
-- SQLite 使用 WAL 和 30 秒 busy timeout；上传写库、Blob 维护和清理通过进程内共享写入队列按事务排队。Tantivy 索引在独立 Bundle writer 中构建，不占用 SQLite writer admission；后台解压/索引任务默认最多 4 个并发，可通过 `RAIN_UPLOAD_CONCURRENT_PROCESSING_TASKS` 调整。
+- SQLite 使用 WAL 和 30 秒 busy timeout；上传写库、Blob 维护和清理通过进程内共享写入队列按事务排队。Tantivy 索引在独立 Bundle writer 中构建，不占用 SQLite writer admission；后台解压/索引任务的有效并发由管理员的 `Manual/Auto` 设置和启动时 runtime adaptive engine 决定。
 - Bundle 清理默认每批 100 行，每批提交后重新排队，避免一次清理长期占用写入队列。此队列不能协调其他进程；同一数据库应由一个 Rain 实例使用，并放在本地文件系统上。
-- `.zip`、`.tar.gz`、`.tgz`、`.gz` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。
+- `.zip`、`.tar.gz`、`.tgz`、`.gz`、`.7z` 会在同一 staging bundle 内递归处理并共享安全限额；暂不支持后台任务超时/取消。
 - 搜索使用 Tantivy trigram 索引；日志 chunk 正文由 Bundle Tantivy artifact 持有，SQLite 只保存行定位和生命周期元数据。
 - 服务状态分为进程存活检查 `/healthz` 和依赖就绪检查 `/readyz`；页面顶部显示的是后者，检查 SQLite 和数据目录是否可用。`/readyz` 保留数据库写入后回滚的探测，结果缓存 5 秒，并发请求共享一次探测。
 - 真实文件使用 SHA-256 内容寻址 Blob 存储，保存到数据根目录下的 `blobs/<hash前两位>/<完整hash>`；多个 Bundle 中的相同内容只保存一份。
@@ -391,4 +377,14 @@ RAIN_BOOTSTRAP_ADMIN_USERNAME=admin
 RAIN_BOOTSTRAP_ADMIN_PASSWORD=<至少 8 个字符的强密码>
 ```
 
-启动会在 Schema migration 完成后原子创建唯一的 `ACTIVE + ADMIN` 运营账户和审计记录。后续启动只验证数据库中恰好存在一个有效管理员，`.env` 不会覆盖密码或创建第二个管理员；管理员不能被提升、降级、停用、转让或强制注销。普通用户和游客可读取共享数据，只有管理员能新建 Issue、上传或删除共享数据；管理员可在 `/admin` 管理普通用户状态、Session 和审计日志。已有数据库必须通过当前 baseline compatibility validation；不兼容的旧 schema 会 fail fast，不会自动删除数据。
+启动会在 Schema migration 完成后原子创建唯一的 `ACTIVE + ADMIN` 运营账户和审计记录。后续启动只验证数据库中恰好存在一个有效管理员，`.env` 不会覆盖密码或创建第二个管理员；管理员不能被提升、降级、停用、转让或强制注销。
+
+权限按角色划分如下：
+
+| 角色 | 读取/搜索 | 下载或查看临时结果 | 创建 Issue、上传、删除自己的资源 | 用户、Session、审计、系统设置 |
+| --- | --- | --- | --- | --- |
+| 游客 | 可以 | 不可以 | 不可以 | 不可以 |
+| 活跃普通用户（`USER`） | 可以 | 可以 | 可以，但仅限自己拥有的 Issue | 不可以 |
+| 活跃管理员（`ADMIN`） | 可以 | 可以 | 不可以使用普通用户业务写入路由 | 可以，在 `/admin` 中管理 |
+
+已有数据库必须通过当前 baseline compatibility validation；不兼容的旧 schema 会 fail fast，不会自动删除数据。

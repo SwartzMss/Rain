@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
   const apiProxyTarget =
-    loadEnv(mode, '.', 'RAIN_').RAIN_DEV_API_PROXY_TARGET || 'http://localhost:8080';
+    loadEnv(mode, '.', 'RAIN_').RAIN_DEV_API_PROXY_TARGET || 'http://localhost:8078';
 
   return {
     plugins: [react()],

@@ -8,11 +8,12 @@
 
 - SQLite 适合当前本地 MVP：部署简单、无需单独数据库服务、方便重新启动项目。
 - SQLite 连接启用 WAL、`synchronous=NORMAL` 和 30 秒 `busy_timeout`，降低读写互相阻塞的概率。
-- 当前搜索使用 SQLite FTS5 trigram external-content 索引。文本日志按 chunk 建索引，正文仅存于 `log_segments.content`。
-- 上传请求只负责接收文件；解压、内容寻址 Blob 写入、行偏移和 FTS 在 `.tmp/{task_id}/staging` 后台执行。
+- 当前默认搜索使用 Tantivy trigram。每个 READY Bundle 的不可变 generation artifact 存在数据目录中，`bundle_search_indexes` 和 `bundle_search_artifacts` 只保存后端、generation、发布状态和清理租约等控制面元数据；搜索正文由 Tantivy artifact 持有。
+- `log_segments` 仍保存 chunk 的行定位和兼容元数据；显式选择 legacy `sqlite_fts` 时才使用其正文与 FTS5 倒排索引。新安装和默认 Tantivy 路径不会把 SQLite FTS5 当作当前搜索后端。
+- 上传请求只负责接收文件；解压、内容寻址 Blob 写入、行偏移和搜索 artifact/legacy FTS 构建在 `.tmp/{task_id}/staging` 后台执行。
 - 后台任务完成 Blob 发布与索引后标记 `READY` 并清理 staging；失败时清理半成品 file/index 记录，并保留带结构化失败信息的 Bundle 状态。
 - 后台解析使用流式读取，在获取连接与写入许可前完成当前批次解析。日志索引每 5000 行或约 1 MiB 正文提交一次，行偏移随批次写入，最后更新文件总行数；批次缓冲仅在提交成功后清空。
-- 上传元数据、索引、Blob 维护、Bundle 清理和 Skill Run 过期清理共享按数据库文件定位的进程内 FIFO 写入许可。先排队再取连接，每个事务结束后释放；其他尚未接入队列的短 API 写入仍由 SQLite 锁协调。纯数据库操作遇到 `SQLITE_BUSY`（含扩展 BUSY 错误码）时回滚后重新排队重试，最多 3 次尝试，退避为 100/200 毫秒加随机抖动；约束或 I/O 错误不自动重试。
+- 上传元数据、索引、Blob 维护、Bundle 清理和 legacy Skill Run 过期清理共享按数据库文件定位的进程内 FIFO 写入许可。先排队再取连接，每个事务结束后释放；其他尚未接入队列的短 API 写入仍由 SQLite 锁协调。纯数据库操作遇到 `SQLITE_BUSY`（含扩展 BUSY 错误码）时回滚后重新排队重试，最多 3 次尝试，退避为 100/200 毫秒加随机抖动；约束或 I/O 错误不自动重试。
 - Bundle 清理默认每批 100 行；删除仍通过触发器维护 FTS 索引。Blob GC 的文件删除继续保留原有数据库事务保护，不重放文件系统副作用。`/readyz` 的写入/回滚探测也参与排队，缓存和并发探测合并按 AppState 隔离。
 - 写入日志包含操作名、尝试次数、排队耗时与事务阶段耗时；索引批次失败还包含 Bundle、文件与 chunk 信息。该机制不协调外部进程，也不能消除磁盘或 FTS 运算本身的耗时。
 - 当前 `meta` 以 JSON 字符串存储在 TEXT 列中；后续如要对象存储或多节点部署，关键存储路径应提升为明确列。
@@ -28,7 +29,7 @@
 - `code` TEXT PK：Issue 编号（上传归属键）。
 - `name` TEXT：显示名称（默认与 `code` 相同）。
 - `description` TEXT：描述。
-- `owner_user_id` TEXT：创建该 Issue 的用户，引用 `users.id`；管理员创建的 Issue 可为空。
+- `owner_user_id` TEXT：创建该 Issue 的用户，引用 `users.id`；历史管理员创建的 Issue 可为空。当前业务写入路由要求活跃的 `USER`，`ADMIN` 通过独立的管理路由操作。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 
 ## 表：bundles
@@ -46,6 +47,12 @@
 - `content_size_bytes` INTEGER：计入 Issue 配额的最终可浏览文件总字节数；压缩包和目录本身不重复计入。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
 - 索引：`idx_bundles_issue (issue_code, created_at DESC)`。
+
+## 表：bundle_search_indexes 与 bundle_search_artifacts
+
+- `bundle_search_indexes` 是每个 Bundle 的搜索发布控制记录，当前 v0.1 默认运行时选择 `tantivy`；`sqlite_fts` 仅用于 legacy/诊断。记录 schema/tokenizer 版本、当前 `generation`、artifact key、READY/BUILDING/FAILED/NEEDS_REBUILD 状态和可见性重建 revision。
+- `bundle_search_artifacts` 为 Tantivy generation 建立生命周期记录。generation 发布后不可变；`ACTIVE/RETIRED` 状态、读者计数和清理认领时间用于 generation lease 与后台删除恢复。
+- Tantivy artifact 的物理路径由数据根目录、Bundle 内部 ID 和 generation 组成，不写入 `files.path`。同一进程的 reader cache 以规范 artifact 路径和 `(bundle_id, generation)` 共同隔离，避免不同数据目录复用 reader。
 
 ## 表：files
 
@@ -74,12 +81,12 @@
 - `event_time_start_ms` INTEGER NULL：chunk 中可解析 wall-clock 事件时间的最早比较键。`_ms` 是兼容性列名，不表示 Unix epoch、UTC 或真实经过的毫秒数。
 - `event_time_end_ms` INTEGER NULL：chunk 中可解析 wall-clock 事件时间的最晚比较键；无法从日志日期时间建立比较键时保持 NULL。支持普通 `YYYY-MM-DD HH:mm:ss[.fraction]`、`[日期时间]` 和 `[E][日期时间][...]` 行首格式；只有 `HH:mm:ss` 时不推断日期。
 - `event_time_indexed` INTEGER NOT NULL DEFAULT 0：事件时间索引处理状态。新写入的 chunk 在完成时间范围提取后为 `1`；历史回填即使无法解析时间也会置为 `1`，因此 `NULL` 边界表示“没有可比较的 wall-clock 时间”，不表示尚未尝试。
-- `content` TEXT：日志 chunk 内容，通常最多 200 行，已去空行和空字节。
+- `content` TEXT：legacy `sqlite_fts` 路径的日志 chunk 正文；默认 Tantivy 路径置为空，搜索正文由 generation artifact 保存。
 - `line_offset` INTEGER：chunk 起始原始行号，从 0 开始。
 - `line_end` INTEGER：chunk 结束原始行号，从 0 开始。
 - `chunk_index` INTEGER：文件内 chunk 序号，从 0 开始。
 - `created_at` TEXT：创建时间，默认 `CURRENT_TIMESTAMP`。
-- 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`、`idx_logs_file_event_time`、`idx_logs_event_time_indexed (event_time_indexed, id)`；全文检索走 `log_segments_fts`。带时间范围的 Skill Run 仅选择两个 wall-clock 事件时间边界均已知且与主窗口相交的 chunk。
+- 索引：`idx_logs_bundle_timeline`、`idx_logs_file_chunk`、`idx_logs_file_event_time`、`idx_logs_event_time_indexed (event_time_indexed, id)`；显式使用 legacy `sqlite_fts` 时全文检索走 `log_segments_fts`。默认 Tantivy 搜索通过 Bundle generation artifact 返回结果。
 - `0001_initial.sql` 固化了这些事件时间列和索引的 schema 定义；迁移不会覆盖正文或业务数据。未知或只有部分升级痕迹的旧数据库不会通过补列继续运行，而是要求先恢复到受支持的完整 baseline。
 
 ## 表：log_line_offsets
@@ -90,12 +97,12 @@
 - 主键：`(file_id, line_number)`。
 - 用途：分页读取时先跳到最近采样点，再顺序读取目标页，避免每次从文件开头数行。
 
-## 表：log_segments_fts
+## 表：log_segments_fts（legacy / diagnostic）
 
-- SQLite FTS5 虚表。
+- SQLite FTS5 虚表，仅为旧数据兼容、测试和诊断保留，不是 v0.1 默认搜索路径。
 - 使用 `content='log_segments'` 与 `content_rowid='id'` 的 external-content 模式，FTS 仅维护倒排索引，不保存日志正文副本。
 - 唯一索引列为 `content`；FTS `rowid` 对应 `log_segments.id`。
-- bundle、Issue、文件与 timeline 范围过滤通过 `rowid` 关联 `log_segments`、`bundles` 和 `files` 完成；Skill Run 的事件时间过滤也通过 `log_segments` 的标准化边界完成。
+- bundle、Issue、文件与 timeline 范围过滤通过 `rowid` 关联 `log_segments`、`bundles` 和 `files` 完成；使用 legacy backend 时，事件时间过滤也通过 `log_segments` 的标准化边界完成。
 - `log_segments` 的插入、更新与删除触发器负责同步维护索引。
 
 ## 表：blobs
@@ -121,7 +128,7 @@
 - Bundle 删除完成时会将 `content_size_bytes` 清零；删除和 STAGING Blob 恢复任务在启动恢复后仍由后台定时重试。
 - 后台 Blob GC 每小时扫描一次，始终使用 `NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)` 确认无引用，不维护易失真的引用计数。
 - 无引用的 `MISSING` Blob 直接删除数据库记录；无引用的 `CORRUPTED` Blob 删除物理对象后再删除记录，两者不永久滞留。
-- `verified_at` 记录最近一次完整 SHA-256 审计时间。全量审计不阻塞 HTTP 启动；后台每小时按最久未校验优先处理，单批最多 100 个 Blob 或 5 GiB。
+- `verified_at` 记录最近一次完整 SHA-256 审计时间。全量审计不阻塞 HTTP 启动；后台首次启动延迟 60 秒，之后每小时按最久未校验优先处理，单批最多 100 个 Blob 或 512 MiB，并在前台 ingest/search 活跃时主动让步。
 - 首次发现无引用时写入 `unreferenced_at`；默认宽限 24 小时。宽限期内重新出现引用会清除该时间，超过宽限期才进入 `PENDING_DELETE` 并删除物理对象。
 
 ## Bundle 处理状态机
@@ -131,11 +138,13 @@
 - 失败后仅将 `status` 设为 `FAILED`，`process_stage` 保留最后操作，并额外记录 `failure_stage`、`failure_code`、`failure_reason` 和 `retryable`。
 - 服务启动时发现未完成任务，会记录 `PROCESS_INTERRUPTED`，保留中断阶段并标记为可重试。
 
-## Skills、模型配置与临时诊断
+## Legacy compatibility tables：Skills、模型配置与临时诊断
 
-- `user_skills` 保存用户私有的名称、描述、`SKILL.md`、内容哈希、版本和启用状态；`UNIQUE(owner_user_id, name)` 配合仓储层的大小写归一化检查隔离命名空间。创建语句原子限制每用户最多 50 条，系统没有内置 Skill 记录。
+以下表来自早期原型，当前 v0.1 不发布对应的 AI/Skill API、管理页面或执行器。它们仅为升级、迁移和诊断保留，不属于当前业务数据模型；新功能不应依赖这些表。
+
+- `user_skills`（legacy）保存用户私有的名称、描述、`SKILL.md`、内容哈希、版本和启用状态；`UNIQUE(owner_user_id, name)` 配合仓储层的大小写归一化检查隔离命名空间。当前发行版不会创建或执行 Skill。
 - `skill_reviews` 以 `skill_id` 为主键，只保存当前版本的一次质量评估。重新评估使用 upsert 覆盖；正文变更会在同一事务中删除旧评估。
-- `ai_provider_settings` 是单例管理员配置。Base URL、模型和超时为普通字段，API Key 是带版本与随机 nonce 的 AES-256-GCM 密文；主密钥只来自 `RAIN_AI_MASTER_KEY`，不进入数据库。有效数据库配置优先于环境变量配置。
+- `ai_provider_settings`（legacy）是早期单例模型配置。当前发行版不提供 AI Provider API；历史密文仍按旧 schema 保存，主密钥只来自 `RAIN_AI_MASTER_KEY`，不进入数据库。
 - 修改数据库 Provider 的 Base URL 时必须同时替换 API Key；候选配置测试也必须提交完整配置，空请求才会测试当前生效配置。
 - `skill_runs` 保存发起用户、Issue、Skill 身份、版本和临时正文快照，以及状态、计数器、取消标记、最终 JSON 和净化后的错误。可选的 `analysis_start_time`/`analysis_end_time` 保存无时区 wall-clock 文本；内部 `*_ms` 边界只是同一 wall-clock 编码的比较键，用于恢复 Runner 的不可变分析范围。输入支持空格或 `T` 分隔、可选小数秒和 `datetime-local` 分钟精度；要求 `start < end`，范围最大 24 小时。未设置范围的 Run 保持兼容。`skill_id` 不设外键，因此删除源 Skill 不会破坏已开始的任务；用户和 Issue 删除会级联删除任务。
 - `search_logs` 的 `context_expansion_minutes` 只能在 `0..=15` 内扩展已保存的主窗口；它不能替换 Run 范围，也不能让没有 wall-clock 事件时间索引的 chunk 进入有范围搜索。服务端响应保留 applied scope 与 coverage 信息，区分没有命中和命中但因未建立时间索引而被排除。
@@ -147,8 +156,8 @@
 ## 关系与典型上传
 
 - Issue -> 多个 Bundle：同一个 Issue 可多次上传，每次形成一个 Bundle。
-- Bundle -> Files：单文件上传会形成一个顶层 file 节点；每一层 `.zip`、`.tar.gz`、`.tgz`、`.gz` 都保留原始压缩包节点，并在其下挂载一个 `{archive_name}_extracted` 解压目录。
-- Files -> Log Segments：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会流式读取并按 chunk 写入 `log_segments` 供搜索；非文本文件仅保留 `files` 记录。
+- Bundle -> Files：单文件上传会形成一个顶层 file 节点；每一层 `.zip`、`.tar.gz`、`.tgz`、`.gz`、`.7z` 都保留原始压缩包节点，并在其下挂载一个 `{archive_name}_extracted` 解压目录。
+- Files -> Log Segments / Search artifact：文本类文件（扩展名 log/txt 等或 content-type `text/*`）会流式读取并按 chunk 写入行定位元数据；默认 Tantivy 后端同时构建 Bundle generation artifact，legacy `sqlite_fts` 才把正文写入 FTS5。非文本文件仅保留 `files` 记录。
 - Files -> Line Offsets：文本类文件会每 1000 行记录一次 byte offset，用于 `/lines` 分页读取。
 - 单行默认读取上限为 8 MiB，超过后会丢弃到下一个换行符，并在索引/分页内容中追加 `[line truncated]` 标记。
 
@@ -174,12 +183,12 @@ flowchart TD
     L --> M{文本类?}
     M -->|是| N[流式读取并写 line offsets]
     M -->|否| O[仅 files 记录]
-    N --> P[按 chunk 写完整 log_segments/FTS]
+    N --> P[按 chunk 写行定位并构建 Tantivy artifact]
     P --> Q[BlobStore 发布 CAS Blob]
     Q --> R[Bundle 标记 READY]
 ```
 
-递归解压、文本扫描和索引全部在 `.tmp/{task_id}/staging/{bundle_hash}` 中完成。嵌套深度、条目总数和 Issue 内容容量由同一 bundle 共享预算；任一层损坏或超过安全限制时，任务标记为 `FAILED`，并删除 staging 文件及该 bundle 的 `files`、行偏移和 FTS 半成品记录。
+递归解压、文本扫描和搜索 artifact 全部在 `.tmp/{task_id}/staging/{bundle_hash}` 中完成。嵌套深度、条目总数和 Issue 内容容量由同一 bundle 共享预算；任一层损坏或超过安全限制时，任务标记为 `FAILED`，并删除 staging 文件及该 bundle 的 `files`、行偏移和搜索索引半成品记录。
 # 管理员数据模型
 
 `users.role` 仅允许 `USER`/`ADMIN`，`users.status` 仅允许 `ACTIVE`/`DISABLED`。部分唯一索引保证数据库最多只有一个 `ADMIN`，跨字段 CHECK 保证管理员只能为 `ACTIVE`；启动检查进一步要求管理员数量恰好为一个。Session 不缓存角色或状态，每个认证请求都联表读取用户当前值。
