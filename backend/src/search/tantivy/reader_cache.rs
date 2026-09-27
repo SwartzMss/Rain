@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use crate::{error::AppError, search::generation_lease::GenerationLeaseKey};
@@ -14,6 +17,40 @@ use super::writer::{CommittedBundleIndex, open_committed};
 const DEFAULT_CAPACITY: usize = 64;
 
 type LoadResult = Result<Arc<CommittedBundleIndex>, String>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReaderCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub opens: u64,
+    pub evictions: u64,
+}
+
+#[derive(Default)]
+struct CacheStats {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    opens: AtomicU64,
+    evictions: AtomicU64,
+}
+
+impl CacheStats {
+    fn snapshot(&self) -> ReaderCacheStats {
+        ReaderCacheStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            opens: self.opens.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.opens.store(0, Ordering::Relaxed);
+        self.evictions.store(0, Ordering::Relaxed);
+    }
+}
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct ReaderCacheKey {
@@ -40,6 +77,7 @@ struct CacheState {
 pub(crate) struct GenerationReaderCache {
     capacity: usize,
     state: Mutex<CacheState>,
+    stats: CacheStats,
 }
 
 impl Default for GenerationReaderCache {
@@ -53,6 +91,7 @@ impl GenerationReaderCache {
         Self {
             capacity,
             state: Mutex::new(CacheState::default()),
+            stats: CacheStats::default(),
         }
     }
 
@@ -62,6 +101,8 @@ impl GenerationReaderCache {
         path: impl AsRef<Path>,
     ) -> Result<Arc<CommittedBundleIndex>, AppError> {
         if self.capacity == 0 {
+            self.stats.misses.fetch_add(1, Ordering::Relaxed);
+            self.stats.opens.fetch_add(1, Ordering::Relaxed);
             return open_committed(path).map(Arc::new);
         }
 
@@ -73,9 +114,11 @@ impl GenerationReaderCache {
         let loader = {
             let mut state = self.state.lock().expect("Tantivy reader cache poisoned");
             if let Some(entry) = state.entries.get(&key).cloned() {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
                 touch(&mut state.order, &key);
                 return Ok(entry);
             }
+            self.stats.misses.fetch_add(1, Ordering::Relaxed);
             state
                 .loading
                 .entry(key.clone())
@@ -84,6 +127,7 @@ impl GenerationReaderCache {
         };
 
         let result = loader.get_or_init(|| {
+            self.stats.opens.fetch_add(1, Ordering::Relaxed);
             open_committed(&path)
                 .map(Arc::new)
                 .map_err(|error| error.to_string())
@@ -107,6 +151,7 @@ impl GenerationReaderCache {
                     break;
                 };
                 state.entries.remove(&evicted);
+                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
         result
@@ -118,6 +163,14 @@ impl GenerationReaderCache {
             .entries
             .retain(|candidate, _| candidate.generation != *key);
         state.order.retain(|candidate| candidate.generation != *key);
+    }
+
+    pub(crate) fn stats(&self) -> ReaderCacheStats {
+        self.stats.snapshot()
+    }
+
+    pub(crate) fn reset_stats(&self) {
+        self.stats.reset();
     }
 
     #[cfg(test)]
@@ -139,7 +192,7 @@ fn touch(order: &mut VecDeque<ReaderCacheKey>, key: &ReaderCacheKey) {
 mod tests {
     use std::{path::PathBuf, sync::Arc};
 
-    use super::GenerationReaderCache;
+    use super::{GenerationReaderCache, ReaderCacheStats};
     use crate::search::generation_lease::GenerationLeaseKey;
     use crate::search::tantivy::writer::{BundleIndexWriter, IndexedChunk};
 
@@ -167,6 +220,17 @@ mod tests {
         cache.invalidate(&key);
         let reopened = cache.get_or_open(key, &path).unwrap();
         assert!(!Arc::ptr_eq(&first, &reopened));
+        assert_eq!(
+            cache.stats(),
+            ReaderCacheStats {
+                hits: 1,
+                misses: 2,
+                opens: 2,
+                evictions: 0,
+            }
+        );
+        cache.reset_stats();
+        assert_eq!(cache.stats(), ReaderCacheStats::default());
 
         drop(first);
         drop(second);
@@ -192,6 +256,15 @@ mod tests {
         let _b = cache.get_or_open(key_b, &path_b).unwrap();
         let _c = cache.get_or_open(key_c, &path_c).unwrap();
         assert_eq!(cache.len(), 2);
+        assert_eq!(
+            cache.stats(),
+            ReaderCacheStats {
+                hits: 0,
+                misses: 3,
+                opens: 3,
+                evictions: 1,
+            }
+        );
 
         for path in [&path_a, &path_b, &path_c] {
             std::fs::remove_dir_all(path).unwrap();
