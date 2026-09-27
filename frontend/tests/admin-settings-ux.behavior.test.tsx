@@ -18,6 +18,7 @@ vi.mock('../src/api/client', () => ({
   normalizeApiError: (error: unknown) => error instanceof Error ? error.message : String(error),
   rainApi: {
     me: vi.fn(),
+    fetchAdminUsers: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
     fetchAdminSettings: vi.fn(),
     updateAdminSettings: vi.fn(),
     updateAdminSettingsV2: vi.fn(),
@@ -89,7 +90,7 @@ it('presents metadata settings by visibility and reveals expert settings explici
     login_ip_limit_per_minute: 20,
     login_username_failure_limit_per_5_minutes: 10,
     issue_inactive_days: 0,
-    cleanup_exempt_usernames: [],
+    cleanup_exempt_usernames: ['alice'],
     revision: '7',
     configured: {
       issue_max_content_size: 8 * 1024 * 1024 * 1024,
@@ -149,6 +150,13 @@ it('presents metadata settings by visibility and reveals expert settings explici
       ],
     },
   } as never);
+  vi.mocked(rainApi.fetchAdminUsers).mockResolvedValueOnce({
+    items: [
+      { id: 'user-alice', username: 'alice', status: 'ACTIVE', created_at: '', updated_at: '', last_login_at: null, active_session_count: 0, issue_count: 2, storage_bytes: 0 },
+      { id: 'user-bob', username: 'bob', status: 'DISABLED', created_at: '', updated_at: '', last_login_at: null, active_session_count: 0, issue_count: 0, storage_bytes: 0 },
+    ],
+    next_cursor: null,
+  });
 
   render(
     <MemoryRouter initialEntries={['/admin/settings']}>
@@ -167,6 +175,10 @@ it('presents metadata settings by visibility and reveals expert settings explici
   expect(screen.getByText('Tantivy writer 并发')).toBeInTheDocument();
   expect(screen.getByText('writer 堆大小')).toBeInTheDocument();
   expect(screen.getByText('16 MiB')).toBeInTheDocument();
+  expect(screen.getByLabelText('免于自动清理：alice')).toBeChecked();
+  expect(screen.getByLabelText('免于自动清理：bob')).not.toBeChecked();
+  await userEvent.click(screen.getByLabelText('免于自动清理：bob'));
+  expect(screen.getByLabelText('免于自动清理：bob')).toBeChecked();
   expect(screen.getAllByText(/fallback（探测不可用）/)).toHaveLength(2);
   expect(screen.getByText('原因：内存探测不可用')).toBeInTheDocument();
   expect(screen.queryByText(/自适应并发计划使用启发式内存目标/)).not.toBeInTheDocument();

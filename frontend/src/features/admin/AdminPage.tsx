@@ -524,7 +524,10 @@ export function AdminSettingsPage() {
   const [usernameLimit, setUsernameLimit] = useState(10);
   const [issueInactiveDays, setIssueInactiveDays] = useState<number | "">(7);
   const [cleanupExemptUsernames, setCleanupExemptUsernames] = useState<string[]>([]);
-  const [cleanupInput, setCleanupInput] = useState("");
+  const [cleanupUsers, setCleanupUsers] = useState<AdminUser[]>([]);
+  const [cleanupUserQuery, setCleanupUserQuery] = useState("");
+  const [cleanupUsersLoading, setCleanupUsersLoading] = useState(true);
+  const [cleanupUsersError, setCleanupUsersError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [hasLoadedSettings, setHasLoadedSettings] = useState(false);
@@ -580,9 +583,32 @@ export function AdminSettingsPage() {
       setLoading(false);
     }
   }, []);
+  const loadCleanupUsers = useCallback(async () => {
+    setCleanupUsersLoading(true);
+    setCleanupUsersError(null);
+    try {
+      const users: AdminUser[] = [];
+      let cursor: string | undefined;
+      const seenCursors = new Set<string>();
+      do {
+        const page = await rainApi.fetchAdminUsers({ limit: 100, cursor });
+        users.push(...page.items);
+        const nextCursor = page.next_cursor ?? undefined;
+        if (!nextCursor || seenCursors.has(nextCursor)) break;
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      } while (cursor);
+      setCleanupUsers(users);
+    } catch (e) {
+      setCleanupUsersError(normalizeApiError(e));
+    } finally {
+      setCleanupUsersLoading(false);
+    }
+  }, []);
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadCleanupUsers();
+  }, [load, loadCleanupUsers]);
   const save = async (value?: boolean, thresholds = false) => {
     setFeedbackSection(thresholds ? "rate-limits" : "registration");
     setSaving(true);
@@ -641,14 +667,15 @@ export function AdminSettingsPage() {
       setSaving(false);
     }
   };
-  const addCleanupUser = () => {
-    const username = cleanupInput.trim().toLowerCase();
-    if (!username || cleanupExemptUsernames.some((item) => item.toLowerCase() === username)) {
-      setCleanupInput("");
-      return;
-    }
-    setCleanupExemptUsernames((current) => [...current, username]);
-    setCleanupInput("");
+  const toggleCleanupUser = (username: string, checked: boolean) => {
+    const normalized = username.toLowerCase();
+    setCleanupExemptUsernames((current) => {
+      const existing = current.findIndex((item) => item.toLowerCase() === normalized);
+      if (checked) {
+        return existing >= 0 ? current : [...current, normalized];
+      }
+      return existing >= 0 ? current.filter((_, index) => index !== existing) : current;
+    });
   };
   const saveCleanupUsers = async () => {
     setFeedbackSection("cleanup-exempt-users");
@@ -773,6 +800,11 @@ export function AdminSettingsPage() {
         (warning) => warning !== "adaptive_memory_target_is_heuristic",
       )
     : [];
+  const normalizedCleanupQuery = cleanupUserQuery.trim().toLowerCase();
+  const visibleCleanupUsers = cleanupUsers.filter((user) =>
+    !normalizedCleanupQuery || user.username.toLowerCase().includes(normalizedCleanupQuery),
+  );
+  const selectedCleanupUsers = new Set(cleanupExemptUsernames.map((username) => username.toLowerCase()));
   return (
     <AdminGuard>
       <div className="space-y-3">
@@ -1112,49 +1144,72 @@ export function AdminSettingsPage() {
         <SettingsSection
           icon="users"
           title="自动清理白名单"
-          description="白名单用户拥有的 Issue 不会被后台非活跃自动清理；修改保存后立即对后续清理批次生效。"
+          description="从已注册的普通用户中勾选白名单；这些用户拥有的 Issue 不会被后台非活跃自动清理。修改保存后立即对后续清理批次生效。"
         >
-          <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
             <div className="min-w-0 flex-1">
-              <label className="text-sm font-medium text-slate-700" htmlFor="cleanup-exempt-user">
-                添加用户名
+              <label className="text-sm font-medium text-slate-700" htmlFor="cleanup-user-search">
+                选择已注册用户
               </label>
               <input
-                id="cleanup-exempt-user"
-                value={cleanupInput}
-                disabled={controlsDisabled}
-                onChange={(event) => setCleanupInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    addCleanupUser();
-                  }
-                }}
-                placeholder="输入用户名后按 Enter"
+                id="cleanup-user-search"
+                value={cleanupUserQuery}
+                disabled={controlsDisabled || cleanupUsersLoading}
+                onChange={(event) => setCleanupUserQuery(event.target.value)}
+                placeholder="筛选用户名"
                 className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:bg-slate-50"
               />
             </div>
-            <button type="button" disabled={controlsDisabled || !cleanupInput.trim()} onClick={addCleanupUser} className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-cyan-300 hover:text-cyan-700 disabled:cursor-not-allowed disabled:opacity-50">
-              添加
+            <button
+              type="button"
+              disabled={controlsDisabled || cleanupUsersLoading}
+              onClick={() => void loadCleanupUsers()}
+              className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-cyan-300 hover:text-cyan-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              刷新用户
             </button>
           </div>
-          <div className="mt-4 flex flex-wrap gap-2" aria-label="自动清理白名单">
-            {cleanupExemptUsernames.length === 0 ? (
-              <p className="text-sm text-slate-500">当前没有白名单用户。</p>
-            ) : cleanupExemptUsernames.map((username) => (
-              <span key={username} className="inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-sm text-cyan-800">
-                {username}
-                <button type="button" disabled={controlsDisabled} onClick={() => setCleanupExemptUsernames((current) => current.filter((item) => item !== username))} className="text-cyan-600 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50" aria-label={`移除 ${username}`}>
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
+          {cleanupUsersError ? (
+            <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              用户列表加载失败：{cleanupUsersError}
+            </p>
+          ) : cleanupUsersLoading ? (
+            <p className="mt-3 text-sm text-slate-500">用户列表加载中…</p>
+          ) : visibleCleanupUsers.length === 0 ? (
+            <p className="mt-3 text-sm text-slate-500">
+              {cleanupUsers.length === 0 ? "当前没有已注册的普通用户。" : "没有匹配的用户名。"}
+            </p>
+          ) : (
+            <div className="mt-4 grid max-h-64 gap-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/60 p-2 sm:grid-cols-2" aria-label="已注册用户列表">
+              {visibleCleanupUsers.map((user) => {
+                const normalizedUsername = user.username.toLowerCase();
+                return (
+                  <label key={user.id} className="flex cursor-pointer items-center gap-3 rounded-lg border border-transparent bg-white px-3 py-2.5 text-sm shadow-sm transition hover:border-cyan-200 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-cyan-200">
+                    <input
+                      type="checkbox"
+                      checked={selectedCleanupUsers.has(normalizedUsername)}
+                      disabled={controlsDisabled}
+                      onChange={(event) => toggleCleanupUser(user.username, event.target.checked)}
+                      aria-label={`免于自动清理：${user.username}`}
+                      className="h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-slate-800">{user.username}</span>
+                    {user.status === "DISABLED" ? (
+                      <span className="shrink-0 text-xs text-slate-400">已停用</span>
+                    ) : null}
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <p className="mt-3 text-xs text-slate-500">
+            已选择 {cleanupExemptUsernames.length} 位用户；停用用户仍可保留在白名单中。
+          </p>
           <div className="mt-4 flex flex-wrap justify-end gap-2">
             <button type="button" disabled={controlsDisabled || cleanupExemptUsernames.length === 0} onClick={() => setCleanupExemptUsernames([])} className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-rose-300 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-50">
               清空
             </button>
-            <button type="button" disabled={controlsDisabled} onClick={() => void saveCleanupUsers()} className={primaryButtonClass}>
+            <button type="button" disabled={controlsDisabled || cleanupUsersLoading} onClick={() => void saveCleanupUsers()} className={primaryButtonClass}>
               保存白名单
             </button>
           </div>

@@ -159,7 +159,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const rainApi = {
-  fetchAdminUsers(params: { query?: string; status?: UserStatus; cursor?: string } = {}) {
+  fetchAdminUsers(params: { query?: string; status?: UserStatus; cursor?: string; limit?: number } = {}) {
     const query = new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => Boolean(entry[1])));
     return request<AdminUserPage>(`/api/admin/users?${query}`);
   },
