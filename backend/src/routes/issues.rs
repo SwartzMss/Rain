@@ -1100,7 +1100,7 @@ fn is_processing_bundle_status(status: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use actix_web::web;
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::{Row, sqlite::SqlitePoolOptions};
 
     use crate::{
         AppState,
@@ -1116,6 +1116,67 @@ mod tests {
         require_issue_owner_for_delete, resume_manual_issue_deletions, touch_issue_activity,
     };
     use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
+
+    async fn issue_list_query_plan(pool: &sqlx::SqlitePool, mine: bool) -> Vec<String> {
+        let owner_filter = if mine {
+            " AND issues.owner_user_id = 'owner'"
+        } else {
+            ""
+        };
+        let rows = sqlx::query(&format!(
+            "EXPLAIN QUERY PLAN
+             SELECT issues.code, issues.name,
+                    (SELECT COUNT(*) FROM bundles b
+                     WHERE b.issue_code = issues.code AND b.deleted_at IS NULL) AS bundle_count,
+                    CASE WHEN issues.owner_user_id = 'owner' THEN 1 ELSE 0 END AS can_write,
+                    issue_owner.username AS owner_username, issues.created_at
+             FROM issues
+             LEFT JOIN users issue_owner ON issue_owner.id = issues.owner_user_id
+             WHERE issues.status = 'ACTIVE'{owner_filter}
+               AND (issues.created_at < '2026-01-01T00:00:00Z'
+                    OR (issues.created_at = '2026-01-01T00:00:00Z'
+                        AND issues.code < 'CURSOR'))
+             ORDER BY issues.created_at DESC, issues.code DESC
+             LIMIT 101"
+        ))
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        rows.into_iter()
+            .map(|row| row.try_get::<String, _>("detail").unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn issue_list_cursor_queries_use_ordered_active_indexes() {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, true).await.unwrap();
+
+        let all_plan = issue_list_query_plan(&pool, false).await;
+        let all_plan_text = all_plan.join("\n");
+        assert!(
+            all_plan_text.contains("idx_issues_active_created_code"),
+            "all-Issue plan did not use the ordered active index: {all_plan_text}"
+        );
+        assert!(
+            !all_plan_text.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "all-Issue plan still sorts into a temporary B-tree: {all_plan_text}"
+        );
+
+        let mine_plan = issue_list_query_plan(&pool, true).await;
+        let mine_plan_text = mine_plan.join("\n");
+        assert!(
+            mine_plan_text.contains("idx_issues_active_owner_created_code"),
+            "owned-Issue plan did not use the owner ordered index: {mine_plan_text}"
+        );
+        assert!(
+            !mine_plan_text.contains("USE TEMP B-TREE FOR ORDER BY"),
+            "owned-Issue plan still sorts into a temporary B-tree: {mine_plan_text}"
+        );
+    }
 
     #[tokio::test]
     async fn manual_recovery_rejects_processing_bundle_and_backs_off() {
