@@ -5,6 +5,7 @@ use crate::error::AppError;
 mod budget;
 mod gzip;
 pub(crate) mod path_policy;
+mod seven_z;
 mod tar_gz;
 mod zip;
 
@@ -24,6 +25,8 @@ pub(crate) async fn extract_archive(
     crate::ingest::metrics::measure("archive_extract", async {
         if is_zip_file(name) {
             zip::extract_zip_archive(src, dest, archive_budget).await
+        } else if is_seven_z_file(name) {
+            seven_z::extract_seven_z_archive(src, dest, archive_budget).await
         } else if is_tar_gz_file(name) {
             tar_gz::extract_tar_gz_archive(src, dest, archive_budget).await
         } else if is_gzip_file(name) {
@@ -42,6 +45,14 @@ fn is_zip_file(name: &str) -> bool {
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false)
+}
+
+fn is_seven_z_file(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("7z"))
         .unwrap_or(false)
 }
 

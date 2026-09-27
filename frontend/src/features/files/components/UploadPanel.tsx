@@ -85,7 +85,7 @@ export function UploadPanel({
                   : '拖拽日志文件到这里，或点击选择文件'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              支持 .log、.txt、.zip、.tar.gz、.tgz、.gz。后台会校验文件及解压内容，超出限制的任务将失败。
+              支持 .log、.txt、.7z（不含加密和分卷）、.zip、.tar.gz、.tgz、.gz。后台会校验文件及解压内容，超出限制的任务将失败。
             </p>
             {uploadTasks.length ? (
               <p className="mt-1 text-xs text-slate-500">

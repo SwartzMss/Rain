@@ -15,6 +15,10 @@ try {
   const { FileTreeNode } = await server.ssrLoadModule(
     '/src/features/files/components/FileTreeNode.tsx'
   );
+  const { isArchiveNode } = await server.ssrLoadModule(
+    '/src/features/files/filePresentation.ts'
+  );
+  assert.equal(isArchiveNode({ name: 'diagnostic.7z' }), true);
 
   const archiveId = 'bundle:archive';
   const fileId = 'bundle:file';
