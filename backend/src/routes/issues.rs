@@ -1,6 +1,7 @@
 use actix_web::{HttpResponse, delete, get, http::header::CACHE_CONTROL, post, web};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
-use sqlx::FromRow;
+use sqlx::{FromRow, QueryBuilder, Sqlite};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -11,8 +12,8 @@ use crate::{
     db::finish_bundle_deletion_with_inactive_lease,
     error::AppError,
     models::issues::{
-        IssueBundlesResponse, IssueInactivityExpiry, IssueSummary, UploadStage, UploadStatus,
-        UploadStatusWrapper,
+        IssueBundlesResponse, IssueInactivityExpiry, IssueListResponse, IssueSummary, UploadStage,
+        UploadStatus, UploadStatusWrapper,
     },
     services::issue_cleanup_policy::IssueCleanupPolicy,
 };
@@ -72,25 +73,77 @@ pub fn normalize_issue_code(value: &str) -> Result<String, AppError> {
 pub async fn list_issues(
     user: OptionalUser,
     state: web::Data<AppState>,
+    query: web::Query<IssueListQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let rows = sqlx::query_as::<_, IssueSummary>(
-        r#"
-        SELECT
-            issues.code,
-            issues.name,
-            (SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code AND b.deleted_at IS NULL) AS bundle_count,
-            CASE WHEN issues.owner_user_id = ? THEN 1 ELSE 0 END AS can_write,
-            issue_owner.username AS owner_username
-        FROM issues
-        LEFT JOIN users issue_owner ON issue_owner.id = issues.owner_user_id
-        WHERE issues.status = 'ACTIVE'
-        ORDER BY issues.code DESC
-        "#,
-    )
-    .bind(user.0.as_ref().map(|user| user.id.as_str()).unwrap_or(""))
-    .fetch_all(&state.db.pool)
-    .await
-    .map_err(AppError::Database)?;
+    if query
+        .scope
+        .as_deref()
+        .is_some_and(|scope| !matches!(scope, "mine" | "all"))
+    {
+        return Err(AppError::api(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Issue 范围无效",
+        ));
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let owner_id = user.0.as_ref().map(|value| value.id.as_str()).unwrap_or("");
+    let mut statement = QueryBuilder::<Sqlite>::new("SELECT issues.code, issues.name, ");
+    statement.push(
+        "(SELECT COUNT(*) FROM bundles b WHERE b.issue_code = issues.code AND b.deleted_at IS NULL) AS bundle_count, \
+         CASE WHEN issues.owner_user_id = ",
+    );
+    statement.push_bind(owner_id);
+    statement.push(
+        " THEN 1 ELSE 0 END AS can_write, issue_owner.username AS owner_username, issues.created_at \
+         FROM issues LEFT JOIN users issue_owner ON issue_owner.id = issues.owner_user_id \
+         WHERE issues.status = 'ACTIVE'",
+    );
+    if query.scope.as_deref() == Some("mine") {
+        statement.push(" AND issues.owner_user_id = ");
+        statement.push_bind(owner_id);
+    }
+    if let Some(search) = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let pattern = format!("%{}%", search);
+        statement.push(" AND (issues.code LIKE ");
+        statement.push_bind(pattern.clone());
+        statement.push(" COLLATE NOCASE OR COALESCE(issues.name, '') LIKE ");
+        statement.push_bind(pattern);
+        statement.push(" COLLATE NOCASE)");
+    }
+    if let Some(cursor) = query.cursor.as_deref() {
+        let (created_at, code) = decode_issue_cursor(cursor)?;
+        statement.push(" AND (issues.created_at < ");
+        statement.push_bind(created_at.clone());
+        statement.push(" OR (issues.created_at = ");
+        statement.push_bind(created_at);
+        statement.push(" AND issues.code < ");
+        statement.push_bind(code);
+        statement.push("))");
+    }
+    statement.push(" ORDER BY issues.created_at DESC, issues.code DESC LIMIT ");
+    statement.push_bind(limit + 1);
+    let mut rows = statement
+        .build_query_as::<IssueListRow>()
+        .fetch_all(&state.db.pool)
+        .await
+        .map_err(AppError::Database)?;
+    let next_cursor = if rows.len() as i64 > limit {
+        rows.pop();
+        rows.last()
+            .map(|row| encode_issue_cursor(&row.created_at, &row.code))
+    } else {
+        None
+    };
+    let rows = rows
+        .into_iter()
+        .map(IssueListRow::into_summary)
+        .collect::<Vec<_>>();
     let authenticated = user.0.is_some();
     let rows = rows
         .into_iter()
@@ -102,7 +155,70 @@ pub async fn list_issues(
         })
         .collect::<Vec<_>>();
 
-    Ok(HttpResponse::Ok().json(rows))
+    Ok(HttpResponse::Ok().json(IssueListResponse {
+        items: rows,
+        next_cursor,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IssueListQuery {
+    pub scope: Option<String>,
+    pub q: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct IssueListRow {
+    code: String,
+    name: String,
+    bundle_count: i64,
+    can_write: bool,
+    owner_username: Option<String>,
+    created_at: String,
+}
+
+impl IssueListRow {
+    fn into_summary(self) -> IssueSummary {
+        IssueSummary {
+            code: self.code,
+            name: self.name,
+            bundle_count: self.bundle_count,
+            can_write: self.can_write,
+            owner_username: self.owner_username,
+        }
+    }
+}
+
+fn encode_issue_cursor(created_at: &str, code: &str) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{created_at}|{code}"))
+}
+
+fn decode_issue_cursor(value: &str) -> Result<(String, String), AppError> {
+    let raw = URL_SAFE_NO_PAD.decode(value).map_err(|_| {
+        AppError::api(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Issue 游标无效",
+        )
+    })?;
+    let raw = String::from_utf8(raw).map_err(|_| {
+        AppError::api(
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Issue 游标无效",
+        )
+    })?;
+    raw.split_once('|')
+        .map(|(created_at, code)| (created_at.to_owned(), code.to_owned()))
+        .ok_or_else(|| {
+            AppError::api(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Issue 游标无效",
+            )
+        })
 }
 
 #[derive(Debug, Deserialize)]

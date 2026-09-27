@@ -154,6 +154,11 @@ export interface IssueSummary {
   owner_username: string | null;
 }
 
+export interface IssueListResponse {
+  items: IssueSummary[];
+  next_cursor: string | null;
+}
+
 export interface CreateIssueRequest {
   code: string;
   name?: string;
