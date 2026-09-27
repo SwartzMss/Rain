@@ -44,10 +44,11 @@ function parseByteSize(value: unknown): number {
 }
 
 export function groupSettingFields(fields: RegistrationSettingField[]): SettingFieldGroups {
+  const visibleFields = fields.filter((field) => field.key !== 'temp_results_max_scan_duration_seconds');
   return {
-    common: fields.filter((field) => field.category === 'common'),
-    advanced: fields.filter((field) => field.category === 'advanced'),
-    expert: fields.filter((field) => field.category === 'expert'),
+    common: visibleFields.filter((field) => field.category === 'common'),
+    advanced: visibleFields.filter((field) => field.category === 'advanced'),
+    expert: visibleFields.filter((field) => field.category === 'expert'),
   };
 }
 
@@ -110,7 +111,6 @@ export function settingHelpText(key: string): string | undefined {
   return {
     temp_results_max_result_size: '一次搜索生成的全部匹配内容及定位信息的总容量；超出后搜索失败。',
     temp_results_max_total_size: '所有临时搜索结果共享的存储配额；配额不足时无法生成新结果。不得小于单次结果容量。',
-    temp_results_max_records: '最多保留多少份临时搜索结果，不是匹配行数；达到上限后无法新建结果。',
-    temp_results_max_scan_duration_seconds: '文件列表解析与内容扫描分别使用此超时，整个请求可能更久；超时后搜索失败。',
+    temp_results_max_records: '所有用户共享的后台临时结果记录上限（含生成中和待清理记录），不是 Tab 数或匹配行数。登录的普通用户关闭搜索 Tab 后会请求清理；访客、异常退出或清理失败由过期清理兜底。达到上限后无法新建结果。',
   }[key];
 }

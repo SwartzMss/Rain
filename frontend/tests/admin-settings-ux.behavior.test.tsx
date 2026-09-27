@@ -142,7 +142,11 @@ it('presents metadata settings by visibility and reveals expert settings explici
       current_process_rss_bytes: 80 * 1024 * 1024,
       adaptive_memory_target_bytes: 128 * 1024 * 1024,
       warnings: ['adaptive_memory_target_is_heuristic'],
-      decisions: [],
+      decisions: [
+        ['upload_concurrent_processing_tasks', { value: 1, mode: 'auto', reason: 'cpu_capacity' }],
+        ['search_tantivy_max_writers', { value: 1, mode: 'auto', reason: 'cpu_capacity_and_memory_budget' }],
+        ['search_tantivy_writer_heap_size', { value: 16 * 1024 * 1024, mode: 'auto', reason: 'memory_budget' }],
+      ],
     },
   } as never);
 
@@ -154,15 +158,16 @@ it('presents metadata settings by visibility and reveals expert settings explici
 
   await waitFor(() => expect(screen.getByText('常用配置')).toBeInTheDocument());
   expect(screen.getByTestId('runtime-resource-summary')).toBeInTheDocument();
-  expect(screen.getByText('计划内存预算')).toBeInTheDocument();
-  expect(screen.getByText('当前进程 RSS')).toBeInTheDocument();
-  expect(screen.getByText('80 MiB')).toBeInTheDocument();
-  expect(screen.getByText(/上传 32 MiB/)).toBeInTheDocument();
-  expect(screen.getByText(/writer 48 MiB/)).toBeInTheDocument();
-  expect(screen.getByText(/查询 32 MiB/)).toBeInTheDocument();
+  expect(screen.queryByText('计划内存预算')).not.toBeInTheDocument();
+  expect(screen.queryByText('当前进程 RSS')).not.toBeInTheDocument();
+  expect(screen.getByText('当前自适应参数（3 项）')).toBeInTheDocument();
+  expect(screen.getByText('上传处理并发')).toBeInTheDocument();
+  expect(screen.getByText('Tantivy writer 并发')).toBeInTheDocument();
+  expect(screen.getByText('writer 堆大小')).toBeInTheDocument();
+  expect(screen.getByText('16 MiB')).toBeInTheDocument();
   expect(screen.getAllByText(/fallback（探测不可用）/)).toHaveLength(2);
   expect(screen.getByText('原因：内存探测不可用')).toBeInTheDocument();
-  expect(screen.getByText(/自适应内存目标是启发式估算/)).toBeInTheDocument();
+  expect(screen.getByText(/自适应并发计划使用启发式内存目标/)).toBeInTheDocument();
   expect(screen.getByText('高级运行参数')).toBeInTheDocument();
   expect(screen.queryByText('专家配置')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '显示专家配置' })).toBeInTheDocument();
@@ -341,13 +346,17 @@ it('edits search budgets in common settings and submits byte values', async () =
   expect(screen.getByLabelText('temp_results_max_total_size')).toHaveValue('1G');
   expect(screen.queryByText('高级运行参数')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('api_max_search_results')).not.toBeInTheDocument();
-  expect(screen.getByText(/文件列表解析与内容扫描分别使用此超时/)).toBeInTheDocument();
+  expect(screen.queryByLabelText('temp_results_max_scan_duration_seconds')).not.toBeInTheDocument();
   await userEvent.clear(resultSize);
   await userEvent.type(resultSize, '128M');
   const changes = { ...configured, temp_results_max_result_size: 128 * 1024 ** 2 };
   vi.mocked(rainApi.updateAdminSettingsV2).mockResolvedValueOnce({ revision: '10', configured: changes, effective: changes } as never);
   await userEvent.click(screen.getByRole('button', { name: '保存常用配置' }));
-  await waitFor(() => expect(rainApi.updateAdminSettingsV2).toHaveBeenLastCalledWith('9', changes));
+  await waitFor(() => expect(rainApi.updateAdminSettingsV2).toHaveBeenLastCalledWith('9', {
+    temp_results_max_result_size: 128 * 1024 ** 2,
+    temp_results_max_total_size: configured.temp_results_max_total_size,
+    temp_results_max_records: configured.temp_results_max_records,
+  }));
   expect(await screen.findByText('常用配置已保存')).toBeInTheDocument();
 });
 

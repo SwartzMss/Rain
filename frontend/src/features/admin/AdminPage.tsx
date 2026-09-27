@@ -55,11 +55,27 @@ function memoryFallbackReasonLabel(reason: string): string {
   return reason;
 }
 
+const runtimeDecisionLabels: Record<string, string> = {
+  upload_concurrent_processing_tasks: "上传处理并发",
+  search_tantivy_max_writers: "Tantivy writer 并发",
+  search_tantivy_writer_heap_size: "writer 堆大小",
+};
+
+function runtimeDecisionLabel(key: string): string {
+  return runtimeDecisionLabels[key] ?? key;
+}
+
+function formatRuntimeDecisionValue(key: string, value: number): string {
+  return key === "search_tantivy_writer_heap_size"
+    ? formatRuntimeBytes(value)
+    : `${value}`;
+}
+
 function runtimeWarningLabel(warning: string): string {
   const labels: Record<string, string> = {
     cpu_probe_fallback: "CPU 资源探测不可用，使用保守 fallback（1 核）",
     memory_probe_fallback: "内存资源探测不可用，使用保守 fallback（512 MiB）",
-    adaptive_memory_target_is_heuristic: "自适应内存目标是启发式估算，不是硬限制",
+    adaptive_memory_target_is_heuristic: "自适应并发计划使用启发式内存目标，不是硬限制",
     estimated_budget_exceeded: "最低合法并发计划仍超过启发式内存目标",
   };
   return labels[warning] ?? warning;
@@ -787,7 +803,7 @@ export function AdminSettingsPage() {
           <SettingsSection
             icon="settings"
             title="运行时资源探测"
-            description="展示启动资源来源、运行时预算和当前进程 RSS。预算用于并发规划，RSS 是当前观测值，两者不是同一个指标。"
+            description="展示启动时探测到的 CPU、内存，以及当前生效的自适应参数。"
           >
             <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2" data-testid="runtime-resource-summary">
               <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
@@ -808,28 +824,24 @@ export function AdminSettingsPage() {
                   </p>
                 ) : null}
               </div>
-              <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
-                <span className="text-slate-500">自适应内存目标</span>
-                <p className="mt-1 font-medium text-slate-800">{formatRuntimeBytes(runtime.adaptive_memory_target_bytes)}</p>
+            </div>
+            <div className="mt-4 rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-3" data-testid="runtime-decisions">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium text-slate-700">当前自适应参数（{runtime.decisions.length} 项）</span>
+                <span className="text-xs text-slate-500">查询并发由系统内部保护，不开放配置</span>
               </div>
-              <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
-                <span className="text-slate-500">计划内存预算</span>
-                <p className="mt-1 font-medium text-slate-800">
-                  {formatRuntimeBytes(runtime.memory_estimate?.total_bytes ?? runtime.estimated_bytes)}
-                </p>
-                {runtime.memory_estimate ? (
-                  <p className="mt-1 text-xs leading-5 text-slate-500">
-                    上传 {formatRuntimeBytes(runtime.memory_estimate.upload_processing_bytes)}；
-                    writer {formatRuntimeBytes(runtime.memory_estimate.tantivy_writer_bytes)}；
-                    查询 {formatRuntimeBytes(runtime.memory_estimate.tantivy_query_bytes)}
-                  </p>
-                ) : null}
-              </div>
-              <div className="rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
-                <span className="text-slate-500">当前进程 RSS</span>
-                <p className="mt-1 font-medium text-slate-800">
-                  {formatRuntimeBytes(runtime.current_process_rss_bytes ?? null)}
-                </p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                {runtime.decisions.map(([key, decision]) => (
+                  <div key={key} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                    <p className="text-xs text-slate-500">{runtimeDecisionLabel(key)}</p>
+                    <p className="mt-1 font-medium text-slate-800">
+                      {formatRuntimeDecisionValue(key, decision.value)}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {decision.mode === "auto" ? "自适应" : "手动"}
+                    </p>
+                  </div>
+                ))}
               </div>
             </div>
             {runtime.resources.warnings.length > 0 || runtime.warnings.length > 0 ? (
@@ -849,7 +861,7 @@ export function AdminSettingsPage() {
           <SettingsSection
             icon="settings"
             title="常用配置"
-            description="业务容量与文件内容搜索限制。增大搜索容量或超时可能增加磁盘和 CPU 开销。"
+            description="业务容量与文件内容搜索限制。增大搜索结果容量可能增加存储开销。"
           >
             <MetadataSettingsGrid
               fields={commonFields}
