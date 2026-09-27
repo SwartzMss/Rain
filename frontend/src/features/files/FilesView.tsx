@@ -58,6 +58,8 @@ const bundleStatusLabel = (bundle: UploadSummary) => {
   return bundle.status.upload_status;
 };
 
+const FILE_TREE_PAGE_SIZE = 100;
+
 function highlightText(text: string, keyword: string): React.ReactNode {
   const normalizedKeyword = keyword.trim();
   if (!normalizedKeyword) return text;
@@ -382,13 +384,15 @@ export function BundleView() {
       setTreeLoading(true);
       setTreeError(null);
       try {
-        const response = await rainApi.fetchFileNode(bundle, nodeId);
+        const response = await rainApi.fetchFileNode(bundle, nodeId, {
+          limit: FILE_TREE_PAGE_SIZE
+        });
         let normalized: TreeNode | null = null;
         const childrenNodes: TreeNode[] = [];
-        const key = response.node.id.toString();
         const inferredParent = parentId ?? null;
         const base = toTreeNode(bundle, response.node, inferredParent);
         base.hasLoadedChildren = true;
+        base.childrenSourceId = nodeId;
 
         // flatten extraction folders under archives
         for (const child of response.children ?? []) {
@@ -396,11 +400,18 @@ export function BundleView() {
           const parentForChild = base;
           if (isExtractionFolder(childNode, parentForChild)) {
             try {
-              const extracted = await rainApi.fetchFileNode(bundle, child.id.toString());
+              const extracted = await rainApi.fetchFileNode(bundle, child.id.toString(), {
+                limit: FILE_TREE_PAGE_SIZE
+              });
               (extracted.children ?? []).forEach((grand) => {
                 const grandNode = toTreeNode(bundle, grand, base.id);
                 childrenNodes.push(grandNode);
               });
+              if (extracted.has_more && extracted.next_cursor) {
+                base.hasMoreChildren = true;
+                base.childrenCursor = extracted.next_cursor;
+                base.childrenSourceId = child.id.toString();
+              }
             } catch {
               // ignore extraction load errors
             }
@@ -410,6 +421,10 @@ export function BundleView() {
         }
 
         base.childrenIds = childrenNodes.map((child) => child.id);
+        if (base.childrenSourceId === nodeId) {
+          base.hasMoreChildren = response.has_more === true;
+          base.childrenCursor = response.next_cursor ?? null;
+        }
         normalized = base;
 
         setTreeNodes((prev) => {
@@ -425,6 +440,43 @@ export function BundleView() {
       } catch (error) {
         setTreeError(normalizeApiError(error));
         throw error;
+      } finally {
+        setTreeLoading(false);
+      }
+    },
+    []
+  );
+
+  const loadMoreNode = useCallback(
+    async (node: TreeNode) => {
+      if (!node.hasMoreChildren || !node.childrenCursor) return;
+      setTreeLoading(true);
+      setTreeError(null);
+      try {
+        const response = await rainApi.fetchFileNode(node.bundleId, node.childrenSourceId, {
+          cursor: node.childrenCursor,
+          limit: FILE_TREE_PAGE_SIZE
+        });
+        const childrenNodes = (response.children ?? []).map((child) =>
+          toTreeNode(node.bundleId, child, node.id)
+        );
+        setTreeNodes((prev) => {
+          const current = prev[node.id];
+          if (!current) return prev;
+          const next = { ...prev };
+          next[node.id] = {
+            ...current,
+            childrenIds: [...new Set([...current.childrenIds, ...childrenNodes.map((child) => child.id)])],
+            hasMoreChildren: response.has_more === true,
+            childrenCursor: response.next_cursor ?? null
+          };
+          childrenNodes.forEach((child) => {
+            next[child.id] = child;
+          });
+          return next;
+        });
+      } catch (error) {
+        setTreeError(normalizeApiError(error));
       } finally {
         setTreeLoading(false);
       }
@@ -1499,7 +1551,10 @@ export function BundleView() {
               )
             ) : rootIds.length > 0 ? (
               <div className="min-w-max space-y-2 text-sm text-slate-700">
-                {rootIds.some((rootId) => (treeNodes[rootId]?.childrenIds.length ?? 0) > 0) ? (
+                {rootIds.some((rootId) => {
+                  const root = treeNodes[rootId];
+                  return (root?.childrenIds.length ?? 0) > 0 || root?.hasMoreChildren;
+                }) ? (
                   rootIds.map((rootId) => (
                     <div key={rootId} className="space-y-1">
                       {(treeNodes[rootId]?.childrenIds ?? []).map((childId) => {
@@ -1515,9 +1570,26 @@ export function BundleView() {
                             onNodeClick={(nodeId) => {
                               handleNodeClick(nodeId).catch(() => undefined);
                             }}
+                            loading={treeLoading}
+                            onLoadMore={(node) => {
+                              loadMoreNode(node).catch(() => undefined);
+                            }}
                           />
                         );
                       })}
+                      {treeNodes[rootId]?.hasMoreChildren ? (
+                        <button
+                          type="button"
+                          className="px-2 py-1 text-xs text-sky-700 hover:text-sky-950"
+                          disabled={treeLoading}
+                          onClick={() => {
+                            const root = treeNodes[rootId];
+                            if (root) loadMoreNode(root).catch(() => undefined);
+                          }}
+                        >
+                          {treeLoading ? '加载中…' : '加载更多'}
+                        </button>
+                      ) : null}
                     </div>
                   ))
                 ) : (

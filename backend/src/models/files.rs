@@ -21,4 +21,6 @@ pub struct FileNode {
 pub struct FileNodeResponse {
     pub node: FileNode,
     pub children: Vec<FileNode>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
 }

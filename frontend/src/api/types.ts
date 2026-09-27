@@ -216,6 +216,8 @@ export interface FileDeletionBatchResponse {
 export interface FileNodeResponse {
   node: FileNode;
   children?: FileNode[];
+  has_more?: boolean;
+  next_cursor?: string | null;
 }
 
 export interface LogSearchHit {
