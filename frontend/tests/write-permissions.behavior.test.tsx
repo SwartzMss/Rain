@@ -19,8 +19,9 @@ const row = {
 
 const issueProps = (canWrite: boolean) => ({
   currentIssueCode: '', filteredIssues: [], issueError: null, issueSearchText: '',
-  issuesError: null, issuesLoading: false, canWrite, canCreateIssue: canWrite, onCreateClick: vi.fn(),
-  onIssueSearchTextChange: vi.fn(), onRefreshIssues: vi.fn(), onSelectIssue: vi.fn(), onViewIssue: vi.fn()
+  issueScope: 'all' as const, issuesError: null, issuesLoading: false, issuesLoadingMore: false,
+  hasMoreIssues: false, canChooseScope: false, canWrite, canCreateIssue: canWrite, onCreateClick: vi.fn(),
+  onIssueScopeChange: vi.fn(), onIssueSearchTextChange: vi.fn(), onRefreshIssues: vi.fn(), onLoadMoreIssues: vi.fn(), onSelectIssue: vi.fn(), onViewIssue: vi.fn()
 });
 
 describe('write permission behavior', () => {
@@ -31,13 +32,22 @@ describe('write permission behavior', () => {
     expect(screen.getByRole('button', { name: /新建 Issue/ })).toBeInTheDocument();
   });
 
-  it('keeps the double-click hint in the Issue list', () => {
+  it('switches between my Issues and all Issues', () => {
+    const onIssueScopeChange = vi.fn();
+    render(<IssueSelector {...issueProps(false)} canChooseScope issueScope="mine" onIssueScopeChange={onIssueScopeChange} />);
+    expect(screen.getByRole('tab', { name: '我的' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(screen.getByRole('tab', { name: '全部' }));
+    expect(onIssueScopeChange).toHaveBeenCalledWith('all');
+  });
+
+  it('shows Issue names and owners in the Issue list', () => {
     const props = { ...issueProps(false), filteredIssues: [
       { code: 'OWNED', name: 'Owned', bundle_count: 0, can_write: false, owner_username: 'owner' },
       { code: 'UNKNOWN', name: 'Unknown', bundle_count: 0, can_write: false, owner_username: null }
     ] };
     render(<IssueSelector {...props} />);
-    expect(screen.getAllByText('双击查看日志')).toHaveLength(2);
+    expect(screen.getByText('Owned')).toBeInTheDocument();
+    expect(screen.getByText('所有者：owner')).toBeInTheDocument();
   });
 
   it('keeps double-click navigation for an Issue', () => {

@@ -76,7 +76,7 @@ export function HomeView() {
   }, [issues.clearSelectedIssue, navigate]);
 
   const bundles = useIssueBundles(issues.currentIssueCode, handleIssueMissing);
-  const canWrite = Boolean(selectedIssue?.can_write && bundles.canWrite);
+  const canWrite = Boolean(bundles.canWrite && (selectedIssue ? selectedIssue.can_write : true));
   const ownerUsername = bundles.ownerUsername ?? selectedIssue?.owner_username ?? null;
   const upload = useUploadTask({
     currentIssueCode: issues.currentIssueCode,
@@ -320,13 +320,19 @@ export function HomeView() {
         filteredIssues={issues.filteredIssues}
         issueError={issues.issueError}
         issueSearchText={issues.issueSearchText}
+        issueScope={issues.issueScope}
         issuesError={issues.issuesError}
         issuesLoading={issues.issuesLoading}
+        issuesLoadingMore={issues.issuesLoadingMore}
+        hasMoreIssues={issues.hasMoreIssues}
+        canChooseScope={issues.canChooseScope}
         canWrite={canWrite}
         canCreateIssue={canCreateIssue}
         onCreateClick={() => setCreateDialogOpen(true)}
+        onIssueScopeChange={issues.changeIssueScope}
         onIssueSearchTextChange={issues.setIssueSearchText}
         onRefreshIssues={() => issues.loadIssues().catch(() => undefined)}
+        onLoadMoreIssues={() => issues.loadMoreIssues().catch(() => undefined)}
         onSelectIssue={selectIssue}
         onViewIssue={(issueCode) => navigate(`/issue/${encodeURIComponent(issueCode)}`)}
       />

@@ -1,17 +1,24 @@
 import type { IssueSummary } from '../../../api/types';
+import type { IssueListScope } from '../hooks/useIssues';
 
 type IssueSelectorProps = {
   currentIssueCode: string;
   filteredIssues: IssueSummary[];
+  issueScope: IssueListScope;
   issueError: string | null;
   issueSearchText: string;
   issuesError: string | null;
   issuesLoading: boolean;
+  issuesLoadingMore: boolean;
+  hasMoreIssues: boolean;
+  canChooseScope: boolean;
   canWrite: boolean;
   canCreateIssue: boolean;
   onCreateClick: () => void;
+  onIssueScopeChange: (scope: IssueListScope) => void;
   onIssueSearchTextChange: (value: string) => void;
   onRefreshIssues: () => void;
+  onLoadMoreIssues: () => void;
   onSelectIssue: (value: string) => void;
   onViewIssue: (issueCode: string) => void;
 };
@@ -19,15 +26,21 @@ type IssueSelectorProps = {
 export function IssueSelector({
   currentIssueCode,
   filteredIssues,
+  issueScope,
   issueError,
   issueSearchText,
   issuesError,
   issuesLoading,
+  issuesLoadingMore,
+  hasMoreIssues,
+  canChooseScope,
   canWrite,
   canCreateIssue,
   onCreateClick,
+  onIssueScopeChange,
   onIssueSearchTextChange,
   onRefreshIssues,
+  onLoadMoreIssues,
   onSelectIssue,
   onViewIssue
 }: IssueSelectorProps) {
@@ -49,7 +62,7 @@ export function IssueSelector({
       <div className="relative">
         <input
           className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 pr-10 text-sm text-slate-950 outline-none transition focus:border-sky-400 focus:bg-white focus:shadow-[0_0_0_3px_rgba(6,182,212,0.12)]"
-          placeholder="搜索 Issue ID..."
+          placeholder="搜索 Issue ID 或名称..."
           value={issueSearchText}
           onChange={(event) => onIssueSearchTextChange(event.target.value)}
           onKeyDown={(event) => {
@@ -61,6 +74,28 @@ export function IssueSelector({
         />
         <span className="absolute right-3 top-2.5 text-slate-500">⌕</span>
       </div>
+
+      {canChooseScope ? (
+        <div className="mt-3 grid grid-cols-2 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="Issue 范围">
+          {(['mine', 'all'] as const).map((scope) => (
+            <button
+              key={scope}
+              type="button"
+              role="tab"
+              aria-selected={issueScope === scope}
+              className={[
+                'rounded-lg px-3 py-2 text-sm font-semibold transition',
+                issueScope === scope
+                  ? 'bg-white text-cyan-700 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-800'
+              ].join(' ')}
+              onClick={() => onIssueScopeChange(scope)}
+            >
+              {scope === 'mine' ? '我的' : '全部'}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {issueError ? <p className="mt-2 text-xs text-rose-600">{issueError}</p> : null}
       {issuesError ? (
@@ -94,16 +129,31 @@ export function IssueSelector({
             >
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-semibold">{issue.code}</span>
-                <span className="block text-[10px] font-normal text-slate-500">双击查看日志</span>
+                {issue.name && issue.name !== issue.code ? (
+                  <span className="block truncate text-[10px] font-normal text-slate-500">{issue.name}</span>
+                ) : null}
+                {issueScope === 'all' && issue.owner_username ? (
+                  <span className="block truncate text-[10px] font-normal text-slate-500">所有者：{issue.owner_username}</span>
+                ) : null}
               </span>
             </button>
           );
         })}
         {!filteredIssues.length ? (
           <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
-            暂无 Issue
+            {issuesLoading ? 'Issue 加载中…' : issueSearchText.trim() ? '未找到匹配的 Issue' : issueScope === 'mine' ? '你还没有创建 Issue' : '暂无 Issue'}
           </p>
         ) : null}
+        {hasMoreIssues && !issuesLoading && !issuesLoadingMore ? (
+          <button
+            type="button"
+            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-cyan-300 hover:text-cyan-700 disabled:opacity-60"
+            onClick={onLoadMoreIssues}
+          >
+            加载更多
+          </button>
+        ) : null}
+        {issuesLoadingMore ? <p className="py-2 text-center text-xs text-slate-500">正在加载更多…</p> : null}
       </div>
     </aside>
   );

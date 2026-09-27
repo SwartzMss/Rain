@@ -67,6 +67,12 @@ pub struct IssueSummary {
     pub owner_username: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueListResponse {
+    pub items: Vec<IssueSummary>,
+    pub next_cursor: Option<String>,
+}
+
 impl UploadStatus {
     pub fn from_db_value(value: &str) -> Self {
         if value.eq_ignore_ascii_case("READY") {

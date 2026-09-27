@@ -5,6 +5,7 @@ import type {
   CreateIssueRequest,
   IssueBundlesResponse,
   IssueLogSearchResponse,
+  IssueListResponse,
   IssueSummary,
   LogSearchResponse,
   TempResultInfo,
@@ -230,8 +231,14 @@ export const rainApi = {
   markSavedSearchUsed(id: string) {
     return request<void>(`/api/me/saved-searches/${encodePathSegment(id)}/use`, { method: 'POST' });
   },
-  fetchIssues() {
-    return request<IssueSummary[]>(`/api/issues`);
+  fetchIssues(options: { scope?: 'mine' | 'all'; query?: string; cursor?: string; limit?: number } = {}) {
+    const params = new URLSearchParams();
+    if (options.scope) params.set('scope', options.scope);
+    if (options.query?.trim()) params.set('q', options.query.trim());
+    if (options.cursor) params.set('cursor', options.cursor);
+    if (options.limit) params.set('limit', String(options.limit));
+    const query = params.toString();
+    return request<IssueListResponse>(`/api/issues${query ? `?${query}` : ''}`);
   },
   createIssue(payload: CreateIssueRequest) {
     return request<IssueSummary>('/api/issues', {
