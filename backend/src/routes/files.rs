@@ -44,6 +44,34 @@ struct FileDeletionBatchRequest {
     items: Vec<FileDeletionBatchItemInput>,
 }
 
+async fn normalize_file_deletion_batch_items(
+    pool: &sqlx::SqlitePool,
+    user_id: &str,
+    items: &[FileDeletionBatchItemInput],
+) -> Result<
+    (
+        Vec<FileDeletionBatchItemInput>,
+        std::collections::HashSet<String>,
+    ),
+    AppError,
+> {
+    let mut normalized_items = Vec::with_capacity(items.len());
+    let mut issue_codes = std::collections::HashSet::new();
+    for item in items {
+        // The public file APIs address bundles by hash, while the deletion
+        // service stores the internal bundle id in file_deletion_batch_items.
+        let bundle = load_bundle(pool, &item.bundle_id).await?;
+        require_issue_owner(pool, &bundle.issue_code, user_id).await?;
+        ensure_bundle_ready(&bundle)?;
+        issue_codes.insert(bundle.issue_code);
+        normalized_items.push(FileDeletionBatchItemInput {
+            bundle_id: bundle.id,
+            file_id: item.file_id.clone(),
+        });
+    }
+    Ok((normalized_items, issue_codes))
+}
+
 // scoped under /api in routes::register
 #[get("/files/v1/{bundle_id}/files/{file_id}")]
 pub async fn get_file_node(
@@ -254,14 +282,9 @@ pub async fn create_file_deletion_batch(
     payload: web::Json<FileDeletionBatchRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    let mut issue_codes = std::collections::HashSet::new();
-    for item in &payload.items {
-        let bundle = load_bundle(&state.db.pool, &item.bundle_id).await?;
-        require_issue_owner(&state.db.pool, &bundle.issue_code, &user.0.id).await?;
-        ensure_bundle_ready(&bundle)?;
-        issue_codes.insert(bundle.issue_code);
-    }
-    let batch = enqueue_file_deletion_batch(&state.db.pool, &user.0.id, &payload.items).await?;
+    let (normalized_items, issue_codes) =
+        normalize_file_deletion_batch_items(&state.db.pool, &user.0.id, &payload.items).await?;
+    let batch = enqueue_file_deletion_batch(&state.db.pool, &user.0.id, &normalized_items).await?;
     state.file_deletion_notify.notify_one();
     for issue_code in issue_codes {
         touch_issue_activity_best_effort(&state.db.pool, &issue_code, "file deletion batch").await;
@@ -277,4 +300,49 @@ pub async fn get_file_deletion_batch(
 ) -> Result<HttpResponse, AppError> {
     let batch = load_file_deletion_batch(&state.db.pool, &batch_id, &user.0.id).await?;
     Ok(HttpResponse::Ok().json(batch))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_file_deletion_batch_items;
+    use crate::services::file_deletion::FileDeletionBatchItemInput;
+
+    #[tokio::test]
+    async fn batch_deletion_resolves_public_bundle_hash_to_internal_id() {
+        let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");
+        crate::db::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query(
+            "INSERT INTO users(id,username,username_normalized,password_hash) VALUES('owner','owner','owner','hash')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert owner");
+        sqlx::query("INSERT INTO issues(code,name,owner_user_id) VALUES('FILES','FILES','owner')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query(
+            "INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-internal-id','FILES','bundle-public-hash','bundle','READY')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+
+        let (items, issue_codes) = normalize_file_deletion_batch_items(
+            &pool,
+            "owner",
+            &[FileDeletionBatchItemInput {
+                bundle_id: "bundle-public-hash".into(),
+                file_id: "42".into(),
+            }],
+        )
+        .await
+        .expect("normalize batch items");
+
+        assert_eq!(items[0].bundle_id, "bundle-internal-id");
+        assert_eq!(items[0].file_id, "42");
+        assert!(issue_codes.contains("FILES"));
+    }
 }

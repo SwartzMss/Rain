@@ -92,6 +92,14 @@ struct FileDeletionBatchItem {
     root_file_id: i64,
     state: String,
     job_id: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct FileDeletionBatchItemView {
+    id: String,
+    bundle_id: String,
+    root_file_id: i64,
+    state: String,
     error_code: Option<String>,
 }
 
@@ -344,8 +352,8 @@ pub async fn load_file_deletion_batch(
     .await
     .map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("file deletion batch {batch_id}")))?;
-    let items = sqlx::query_as::<_, FileDeletionBatchItem>(
-        "SELECT id,bundle_id,root_file_id,state,job_id,error_code FROM file_deletion_batch_items WHERE batch_id=? ORDER BY created_at,id",
+    let items = sqlx::query_as::<_, FileDeletionBatchItemView>(
+        "SELECT bi.id,COALESCE(b.hash, bi.bundle_id) AS bundle_id,bi.root_file_id,bi.state,bi.error_code FROM file_deletion_batch_items bi LEFT JOIN bundles b ON b.id=bi.bundle_id WHERE bi.batch_id=? ORDER BY bi.created_at,bi.id",
     )
     .bind(batch_id)
     .fetch_all(pool)
@@ -353,11 +361,11 @@ pub async fn load_file_deletion_batch(
     .map_err(AppError::Database)?
     .into_iter()
     .map(|item| FileDeletionBatchItemResponse {
-        item_id: item.id,
-        bundle_id: item.bundle_id,
-        file_id: item.root_file_id,
-        status: item.state,
-        error_code: item.error_code,
+            item_id: item.id,
+            bundle_id: item.bundle_id,
+            file_id: item.root_file_id,
+            status: item.state,
+            error_code: item.error_code,
     })
     .collect();
     Ok(FileDeletionBatchResponse {
@@ -388,7 +396,7 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
             .await
             .map_err(AppError::Database)?;
         let items = sqlx::query_as::<_, FileDeletionBatchItem>(
-            "SELECT id,bundle_id,root_file_id,state,job_id,error_code FROM file_deletion_batch_items WHERE batch_id=? AND state IN ('QUEUED','RUNNING') ORDER BY created_at,id",
+            "SELECT id,bundle_id,root_file_id,state,job_id FROM file_deletion_batch_items WHERE batch_id=? AND state IN ('QUEUED','RUNNING') ORDER BY created_at,id",
         )
         .bind(&batch_id)
         .fetch_all(pool)
@@ -1051,6 +1059,14 @@ mod tests {
         )
         .await
         .expect("enqueue batch");
+        assert_eq!(
+            batch
+                .items
+                .iter()
+                .map(|item| item.bundle_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["batch-hash", "batch-hash"]
+        );
         for _ in 0..20 {
             process_file_deletion_batches(&pool)
                 .await

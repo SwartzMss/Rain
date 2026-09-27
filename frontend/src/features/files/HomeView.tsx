@@ -178,17 +178,17 @@ export function HomeView() {
       setDeletionBatch({ total: rows.length, completed: 0, failed: [], current: null });
 
       if (rows.length > 1 && rows.every((row) => row.file)) {
-        const labels = new Map(rows.map((row) => [`${row.bundleHash}:${row.file?.id ?? ''}`, row.name]));
+        const labels = new Map(rows.map((row) => [String(row.file?.id ?? ''), row.name]));
         const updateBatchView = (batch: FileDeletionBatchResponse) => {
           const failed = batch.items
             .filter((item) => item.status === 'FAILED')
-            .map((item) => `${labels.get(`${item.bundle_id}:${item.file_id}`) ?? item.file_id}：${item.error_code ?? '删除失败'}`);
+            .map((item) => `${labels.get(String(item.file_id)) ?? item.file_id}：${item.error_code ?? '删除失败'}`);
           const active = batch.items.find((item) => item.status === 'RUNNING' || item.status === 'QUEUED');
           setDeletionBatch({
             total: batch.total_items,
             completed: batch.completed_items,
             failed,
-            current: active ? labels.get(`${active.bundle_id}:${active.file_id}`) ?? null : null
+            current: active ? labels.get(String(active.file_id)) ?? null : null
           });
         };
         try {
@@ -380,7 +380,12 @@ export function HomeView() {
                 </span>
                 {deletionBatch.current ? `：${deletionBatch.current}` : null}
                 {deletionBatch.failed.length ? (
-                  <span className="ml-2 text-rose-700">失败 {deletionBatch.failed.length} 项</span>
+                  <>
+                    <span className="ml-2 text-rose-700">失败 {deletionBatch.failed.length} 项</span>
+                    <ul className="mt-2 space-y-1 text-xs text-rose-700">
+                      {deletionBatch.failed.map((message) => <li key={message}>{message}</li>)}
+                    </ul>
+                  </>
                 ) : null}
               </>
             ) : (
