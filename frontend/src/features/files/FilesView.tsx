@@ -29,6 +29,7 @@ import {
   formatHitPath,
   hydrateTreeNode,
   isExtractionFolder,
+  mergeFlattenedExtractionChildren,
   toTreeNode,
   type TreeNode
 } from './treeModel';
@@ -858,7 +859,7 @@ export function BundleView() {
   const handleNodeClick = async (
     nodeId: string,
     line?: number | null,
-    options?: { preserveSearch?: boolean }
+    options?: { preserveSearch?: boolean; node?: TreeNode | null }
   ) => {
     pendingFilePageRef.current = null;
     if (typeof line === 'number' && line >= 0) {
@@ -875,7 +876,7 @@ export function BundleView() {
       setResultFilterTokens([]);
       setResultFilterDraft('');
     }
-    let node: TreeNode | null = treeNodes[nodeId] ?? null;
+    let node: TreeNode | null = options?.node ?? treeNodes[nodeId] ?? null;
     const [prefBundle, rawFromId] = nodeId.includes(':') ? nodeId.split(/:(.+)/) : [bundleId, nodeId];
     const bundleForNode = node?.bundleId || prefBundle || bundleId;
     if (!bundleForNode) return;
@@ -921,7 +922,7 @@ export function BundleView() {
   };
 
   const revealSourceNode = async (source: ReturnType<typeof getSearchHitSource>) => {
-    if (!source) return;
+    if (!source) return null;
 
     const knownNodes = new Map(Object.entries(treeNodesRef.current));
     const remember = (node: TreeNode, children: TreeNode[]) => {
@@ -939,26 +940,59 @@ export function BundleView() {
     if (!current) {
       current = await loadKnownNode(source.fileId, null);
     }
-    if (!current) return;
+    if (!current) return null;
+
+    const sourceNode = current;
 
     const ancestors: string[] = [];
     const visited = new Set<string>();
     while (true) {
-      const parentId: string | null = current ? current.parentId : null;
+      const activeNode: TreeNode | null = current;
+      const parentId: string | null = activeNode ? activeNode.parentId : null;
       if (!parentId || visited.has(parentId)) break;
       visited.add(parentId);
       ancestors.push(parentId);
       let parent: TreeNode | null = knownNodes.get(parentId) ?? null;
-      if (!parent || !parent.hasLoadedChildren || !parent.childrenIds.includes(current.id)) {
+      const isFlattenedExtraction = (candidate: TreeNode) =>
+        activeNode !== null &&
+        candidate.childrenSourceId === activeNode.rawId &&
+        isExtractionFolder(activeNode, candidate);
+      if (
+        !parent ||
+        !parent.hasLoadedChildren ||
+        (activeNode !== null &&
+          !parent.childrenIds.includes(activeNode.id) &&
+          !isFlattenedExtraction(parent))
+      ) {
         const rawParentId = parentId.split(/:(.+)/)[1] ?? '';
         parent = await loadKnownNode(rawParentId, parent?.parentId ?? null);
       }
-      if (parent) {
-        while (!parent.childrenIds.includes(current.id) && parent.hasMoreChildren && parent.childrenCursor) {
-          const nextPage = await loadMoreNode(parent);
-          if (!nextPage) break;
-          parent = nextPage.node;
-          remember(parent, nextPage.children);
+      if (parent && activeNode) {
+        const flattened = mergeFlattenedExtractionChildren(parent, activeNode);
+        if (flattened !== parent) {
+          const flattenedParent: TreeNode = flattened;
+          parent = flattenedParent;
+          knownNodes.set(flattenedParent.id, flattenedParent);
+          setTreeNodes((prev) => {
+            const stored = prev[flattenedParent.id];
+            if (!stored) return prev;
+            return {
+              ...prev,
+              [flattenedParent.id]: {
+                ...stored,
+                childrenIds: flattenedParent.childrenIds,
+                hasMoreChildren: flattenedParent.hasMoreChildren,
+                childrenCursor: flattenedParent.childrenCursor
+              }
+            };
+          });
+        } else {
+          while (!parent.childrenIds.includes(activeNode.id) && parent.hasMoreChildren && parent.childrenCursor) {
+            const nextPage = await loadMoreNode(parent);
+            if (!nextPage) break;
+            parent = nextPage.node;
+            remember(parent, nextPage.children);
+          }
         }
       }
       if (!parent) break;
@@ -968,6 +1002,7 @@ export function BundleView() {
     if (ancestors.length > 0) {
       setExpandedNodes((prev) => new Set([...prev, ...ancestors]));
     }
+    return sourceNode;
   };
 
   const openSearchHitSource = async (hit: IssueLogSearchHit) => {
@@ -977,8 +1012,11 @@ export function BundleView() {
       return;
     }
     try {
-      await revealSourceNode(source);
-      await handleNodeClick(source.nodeId, source.line, { preserveSearch: true });
+      const revealedNode = await revealSourceNode(source);
+      await handleNodeClick(source.nodeId, source.line, {
+        preserveSearch: true,
+        node: revealedNode
+      });
       setSourceActionMessage(
         source.line === null ? '已打开文件，原始行号不可用' : null
       );

@@ -18,10 +18,50 @@ try {
   const { isArchiveNode } = await server.ssrLoadModule(
     '/src/features/files/filePresentation.ts'
   );
+  const { mergeFlattenedExtractionChildren } = await server.ssrLoadModule(
+    '/src/features/files/treeModel.ts'
+  );
   assert.equal(isArchiveNode({ name: 'diagnostic.7z' }), true);
 
   const archiveId = 'bundle:archive';
   const fileId = 'bundle:file';
+  const mergedArchive = mergeFlattenedExtractionChildren(
+    {
+      id: archiveId,
+      rawId: 'archive',
+      bundleId: 'bundle',
+      parentId: null,
+      name: 'diagnostic.zip',
+      path: '/diagnostic.zip',
+      is_dir: false,
+      preview_kind: 'archive',
+      childrenIds: ['bundle:file-1'],
+      hasLoadedChildren: true,
+      hasMoreChildren: true,
+      childrenCursor: 'after-file-1',
+      childrenSourceId: 'extracted',
+      childrenLoadError: null
+    },
+    {
+      id: 'bundle:extracted',
+      rawId: 'extracted',
+      bundleId: 'bundle',
+      parentId: archiveId,
+      name: 'diagnostic_extracted',
+      path: '/diagnostic_extracted',
+      is_dir: true,
+      preview_kind: 'directory',
+      childrenIds: ['bundle:file-1', 'bundle:file-2'],
+      hasLoadedChildren: true,
+      hasMoreChildren: false,
+      childrenCursor: null,
+      childrenSourceId: 'extracted',
+      childrenLoadError: null
+    }
+  );
+  assert.deepEqual(mergedArchive.childrenIds, ['bundle:file-1', 'bundle:file-2']);
+  assert.equal(mergedArchive.hasMoreChildren, false);
+  assert.equal(mergedArchive.childrenCursor, null);
   const treeNodes = {
     [archiveId]: {
       id: archiveId,
