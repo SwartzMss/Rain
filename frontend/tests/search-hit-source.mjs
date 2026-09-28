@@ -151,6 +151,14 @@ try {
   assert.match(filesView, /const openSearchHitSource = async/);
   assert.match(filesView, /getSearchHitSource\(hit\)/);
   assert.match(filesView, /handleNodeClick\(source\.nodeId, source\.line, \{ preserveSearch: true \}\)/);
+  assert.match(filesView, /fileTreeContainerRef/);
+  assert.match(filesView, /scrollIntoView\(\{ block: 'nearest', inline: 'nearest' \}\)/);
+  const revealSourceImplementation = filesView.slice(
+    filesView.indexOf('const revealSourceNode'),
+    filesView.indexOf('const openSearchHitSource')
+  );
+  assert.match(revealSourceImplementation, /!parent\.hasLoadedChildren/);
+  assert.match(revealSourceImplementation, /loadMoreNode\(parent/);
   assert.doesNotMatch(filesView, /navigator\.clipboard\.writeText\(hit\.path\)/);
   assert.match(
     filesView,
