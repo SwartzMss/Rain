@@ -341,12 +341,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let reserved_name: String = sqlx::query_scalar(
-            "SELECT name FROM bundles WHERE id='upload-reservation'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let reserved_name: String =
+            sqlx::query_scalar("SELECT name FROM bundles WHERE id='upload-reservation'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(reserved_name, "car-log.zip");
         let state = web::Data::new(AppState::new(
             pool.clone(),
