@@ -431,9 +431,30 @@ pub(crate) async fn claim_expired_active(
     id: &str,
     expires_at: &str,
 ) -> Result<TransitionResult<String>, AppError> {
-    let value: Option<String> = sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
-        .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Active.as_str()).bind(expires_at).fetch_optional(&state.db.pool).await.map_err(AppError::Database)
-        ?;
+    let input = (
+        id.to_owned(),
+        expires_at.to_owned(),
+        TempResultStatus::Deleting.as_str(),
+        TempResultStatus::Active.as_str(),
+    );
+    let value: Option<String> = crate::db::write::run(
+        &state.db.pool,
+        "claim expired temp result",
+        &input,
+        |conn, (id, expires_at, deleting, active)| {
+            Box::pin(async move {
+                sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
+                    .bind(deleting)
+                    .bind(id)
+                    .bind(active)
+                    .bind(expires_at)
+                    .fetch_optional(conn)
+                    .await
+                    .map_err(AppError::Database)
+            })
+        },
+    )
+    .await?;
     match value {
         Some(path) => Ok(TransitionResult::Applied(path)),
         None => match classify_transition_failure(state, id).await? {
@@ -454,9 +475,30 @@ pub(crate) async fn claim_stale_staging(
     id: &str,
     created_at: &str,
 ) -> Result<TransitionResult<String>, AppError> {
-    let value: Option<String> = sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? RETURNING storage_path")
-        .bind(TempResultStatus::Deleting.as_str()).bind(id).bind(TempResultStatus::Staging.as_str()).bind(created_at).fetch_optional(&state.db.pool).await.map_err(AppError::Database)
-        ?;
+    let input = (
+        id.to_owned(),
+        created_at.to_owned(),
+        TempResultStatus::Deleting.as_str(),
+        TempResultStatus::Staging.as_str(),
+    );
+    let value: Option<String> = crate::db::write::run(
+        &state.db.pool,
+        "claim stale staging temp result",
+        &input,
+        |conn, (id, created_at, deleting, staging)| {
+            Box::pin(async move {
+                sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? RETURNING storage_path")
+                    .bind(deleting)
+                    .bind(id)
+                    .bind(staging)
+                    .bind(created_at)
+                    .fetch_optional(conn)
+                    .await
+                    .map_err(AppError::Database)
+            })
+        },
+    )
+    .await?;
     match value {
         Some(path) => Ok(TransitionResult::Applied(path)),
         None => match classify_transition_failure(state, id).await? {

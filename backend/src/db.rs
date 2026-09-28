@@ -619,6 +619,7 @@ pub async fn load_or_initialize_system_settings(
         i64::try_from(username).map_err(|_| AppError::Config("用户名限流阈值过大".into()))?;
     let issue_inactive_days = i64::try_from(issue_inactive_days)
         .map_err(|_| AppError::Config("Issue 非活跃天数过大".into()))?;
+    // audit-exception: startup initialization runs before normal runtime writers.
     sqlx::query("INSERT OR IGNORE INTO system_settings(id, allow_registration, login_ip_limit_per_minute, login_username_failure_limit_per_5_minutes, issue_inactive_days) VALUES(1, ?, ?, ?, ?)")
         .bind(allow_registration as i64).bind(ip).bind(username).bind(issue_inactive_days)
         .execute(pool).await.map_err(AppError::Database)?;

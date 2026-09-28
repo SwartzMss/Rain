@@ -47,6 +47,9 @@ jobs:
         working-directory: backend
         run: cargo fmt --check
 
+      - name: Audit runtime SQLite writers
+        run: bash scripts/audit-runtime-sqlite-writers.sh
+
       - name: Check
         working-directory: backend
         run: cargo check --locked

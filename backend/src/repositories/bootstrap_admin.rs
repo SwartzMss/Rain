@@ -11,6 +11,7 @@ pub async fn bootstrap_admin(
     username: &str,
     password: &str,
 ) -> Result<(), AppError> {
+    // audit-exception: bootstrap runs during startup before normal runtime traffic.
     let mut tx = pool.begin().await.map_err(AppError::Database)?;
     let (administrators, active_administrators, users): (i64, i64, i64) = sqlx::query_as(
         "SELECT COUNT(*) FILTER (WHERE role = 'ADMIN'), COUNT(*) FILTER (WHERE role = 'ADMIN' AND status = 'ACTIVE'), COUNT(*) FROM users",

@@ -159,9 +159,33 @@ async fn clear_auth_bucket(
     } else {
         "AUTH_RATE_LIMIT_IP_CLEARED"
     };
-    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,client_ip,user_agent) VALUES(?,'USER',?,?,?, ?, ?)")
-        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(action).bind(format!("{key}:count={count}"))
-        .bind(req.peer_addr().map(|a| a.ip().to_string())).bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok())).execute(&state.db.pool).await.map_err(AppError::Database)?;
+    let input = (
+        Uuid::new_v4().to_string(),
+        admin.0.id.clone(),
+        action.to_owned(),
+        format!("{key}:count={count}"),
+        req.peer_addr().map(|a| a.ip().to_string()),
+        req.headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+    );
+    crate::db::write::run(&state.db.pool, "clear auth rate limit", &input, |conn, input| {
+        Box::pin(async move {
+            sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,client_ip,user_agent) VALUES(?,'USER',?,?,?, ?, ?)")
+                .bind(&input.0)
+                .bind(&input.1)
+                .bind(&input.2)
+                .bind(&input.3)
+                .bind(input.4.as_deref())
+                .bind(input.5.as_deref())
+                .execute(conn)
+                .await
+                .map(|_| ())
+                .map_err(AppError::Database)
+        })
+    })
+    .await?;
     let mut limits = state
         .auth_runtime
         .rate_limits
@@ -245,11 +269,34 @@ async fn clear_all_auth_limits(
     } else {
         "AUTH_RATE_LIMIT_IPS_CLEARED"
     };
-    let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
-    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,client_ip,user_agent) VALUES(?,'USER',?,?,?, ?, ?)")
-        .bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(action).bind(format!("keys={key_count};count={event_count}"))
-        .bind(req.peer_addr().map(|a| a.ip().to_string())).bind(req.headers().get("user-agent").and_then(|v| v.to_str().ok())).execute(&mut *tx).await.map_err(AppError::Database)?;
-    tx.commit().await.map_err(AppError::Database)?;
+    let input = (
+        Uuid::new_v4().to_string(),
+        admin.0.id.clone(),
+        action.to_owned(),
+        format!("keys={key_count};count={event_count}"),
+        req.peer_addr().map(|a| a.ip().to_string()),
+        req.headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+    );
+    crate::db::write::transaction(&state.db.pool, "clear all auth rate limits", move |conn| {
+        let input = input.clone();
+        Box::pin(async move {
+            sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,client_ip,user_agent) VALUES(?,'USER',?,?,?, ?, ?)")
+                .bind(&input.0)
+                .bind(&input.1)
+                .bind(&input.2)
+                .bind(&input.3)
+                .bind(input.4.as_deref())
+                .bind(input.5.as_deref())
+                .execute(conn)
+                .await
+                .map(|_| ())
+                .map_err(AppError::Database)
+        })
+    })
+    .await?;
     let mut limits = state
         .auth_runtime
         .rate_limits
@@ -624,35 +671,71 @@ async fn mutate_user_status(
     new_status: UserStatus,
     req: &HttpRequest,
 ) -> Result<(UserStatus, u64), AppError> {
-    let mut conn = state.db.pool.acquire().await.map_err(AppError::Database)?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *conn)
-        .await
-        .map_err(AppError::Database)?;
-    let result=async {
-        let current: Option<(UserRole,UserStatus)>=sqlx::query_as("SELECT role,status FROM users WHERE id=?").bind(target).fetch_optional(&mut *conn).await.map_err(AppError::Database)?;
-        let (role,old_status)=current.ok_or_else(|| AppError::api(StatusCode::NOT_FOUND,"ADMIN_USER_NOT_FOUND","用户不存在"))?;
-        if role == UserRole::Admin { return Err(AppError::api(StatusCode::CONFLICT,"IMMUTABLE_ADMIN_ACCOUNT","管理员账户不可修改")); }
-        if old_status == new_status { return Ok((old_status, 0)); }
-        sqlx::query("UPDATE users SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(new_status.to_string()).bind(target).execute(&mut *conn).await.map_err(AppError::Database)?;
-        let revoked=if old_status!=new_status && new_status==UserStatus::Disabled { sqlx::query("UPDATE user_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL").bind(target).execute(&mut *conn).await.map_err(AppError::Database)?.rows_affected() } else { 0 };
-        sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,target_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?,?,?,?,?,?,?)")
-            .bind(Uuid::new_v4().to_string()).bind(&actor.0.id).bind(target).bind("USER_STATUS_CHANGED").bind(old_status.to_string()).bind(new_status.to_string()).bind(req.peer_addr().map(|a|a.ip().to_string())).bind(req.headers().get("user-agent").and_then(|v|v.to_str().ok())).execute(&mut *conn).await.map_err(AppError::Database)?;
-        Ok((new_status,revoked))
-    }.await;
-    match result {
-        Ok(v) => {
-            sqlx::query("COMMIT")
+    let input = (
+        target.to_owned(),
+        actor.0.id.clone(),
+        Uuid::new_v4().to_string(),
+        new_status,
+        req.peer_addr().map(|a| a.ip().to_string()),
+        req.headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+    );
+    return crate::db::write::transaction(&state.db.pool, "mutate user status", move |conn| {
+        let input = input.clone();
+        Box::pin(async move {
+            let current: Option<(UserRole, UserStatus)> =
+                sqlx::query_as("SELECT role,status FROM users WHERE id=?")
+                    .bind(&input.0)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+            let (role, old_status) = current.ok_or_else(|| {
+                AppError::api(StatusCode::NOT_FOUND, "ADMIN_USER_NOT_FOUND", "用户不存在")
+            })?;
+            if role == UserRole::Admin {
+                return Err(AppError::api(
+                    StatusCode::CONFLICT,
+                    "IMMUTABLE_ADMIN_ACCOUNT",
+                    "管理员账户不可修改",
+                ));
+            }
+            if old_status == input.3 {
+                return Ok((old_status, 0));
+            }
+            sqlx::query("UPDATE users SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?")
+                .bind(input.3.to_string())
+                .bind(&input.0)
                 .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?;
-            Ok(v)
-        }
-        Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            Err(e)
-        }
-    }
+            let revoked = if input.3 == UserStatus::Disabled {
+                sqlx::query("UPDATE user_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL")
+                    .bind(&input.0)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?
+                    .rows_affected()
+            } else {
+                0
+            };
+            sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,target_user_id,action,old_value,new_value,client_ip,user_agent) VALUES(?,'USER',?,?,?,?,?,?,?)")
+                .bind(&input.2)
+                .bind(&input.1)
+                .bind(&input.0)
+                .bind("USER_STATUS_CHANGED")
+                .bind(old_status.to_string())
+                .bind(input.3.to_string())
+                .bind(input.4.as_deref())
+                .bind(input.5.as_deref())
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+            Ok((input.3, revoked))
+        })
+    })
+    .await;
 }
 
 #[patch("/admin/users/{user_id}/status")]
@@ -691,10 +774,43 @@ pub async fn revoke_sessions(
             "管理员账户不可修改",
         ));
     }
-    let mut tx = state.db.pool.begin().await.map_err(AppError::Database)?;
-    let revoked=sqlx::query("UPDATE user_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL").bind(&target).execute(&mut *tx).await.map_err(AppError::Database)?.rows_affected();
-    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,target_user_id,action,new_value,client_ip,user_agent) VALUES(?,'USER',?,?,'USER_SESSIONS_REVOKED',?,?,?)").bind(Uuid::new_v4().to_string()).bind(&admin.0.id).bind(&target).bind(revoked.to_string()).bind(req.peer_addr().map(|a|a.ip().to_string())).bind(req.headers().get("user-agent").and_then(|v|v.to_str().ok())).execute(&mut *tx).await.map_err(AppError::Database)?;
-    tx.commit().await.map_err(AppError::Database)?;
+    let input = (
+        target,
+        admin.0.id.clone(),
+        Uuid::new_v4().to_string(),
+        req.peer_addr().map(|a| a.ip().to_string()),
+        req.headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+    );
+    let revoked = crate::db::write::transaction(
+        &state.db.pool,
+        "revoke admin user sessions",
+        move |conn| {
+            let input = input.clone();
+            Box::pin(async move {
+                let revoked = sqlx::query("UPDATE user_sessions SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL")
+                    .bind(&input.0)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?
+                    .rows_affected();
+                sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,target_user_id,action,new_value,client_ip,user_agent) VALUES(?,'USER',?,?,'USER_SESSIONS_REVOKED',?,?,?)")
+                    .bind(&input.2)
+                    .bind(&input.1)
+                    .bind(&input.0)
+                    .bind(revoked.to_string())
+                    .bind(input.3.as_deref())
+                    .bind(input.4.as_deref())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                Ok(revoked)
+            })
+        },
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(RevokedSessions {
         revoked_sessions: revoked,
     }))

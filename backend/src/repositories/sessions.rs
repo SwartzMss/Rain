@@ -43,18 +43,32 @@ pub async fn create_session(
     client_ip: Option<&str>,
 ) -> Result<String, AppError> {
     let id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent, client_ip) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(user_id)
-    .bind(token_hash)
-    .bind(expires_at.to_rfc3339())
-    .bind(user_agent)
-    .bind(client_ip)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
+    let input = (
+        id.clone(),
+        user_id.to_owned(),
+        token_hash.to_owned(),
+        expires_at.to_rfc3339(),
+        user_agent.map(str::to_owned),
+        client_ip.map(str::to_owned),
+    );
+    crate::db::write::run(pool, "create session", &input, |conn, input| {
+        Box::pin(async move {
+            sqlx::query(
+                "INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent, client_ip) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&input.0)
+            .bind(&input.1)
+            .bind(&input.2)
+            .bind(&input.3)
+            .bind(input.4.as_deref())
+            .bind(input.5.as_deref())
+            .execute(conn)
+            .await
+            .map(|_| ())
+            .map_err(AppError::Database)
+        })
+    })
+    .await?;
     Ok(id)
 }
 
@@ -68,45 +82,58 @@ pub async fn create_session_if_password_unchanged(
     client_ip: Option<&str>,
 ) -> Result<bool, AppError> {
     let id = Uuid::new_v4().to_string();
-    let mut transaction = pool.begin().await.map_err(AppError::Database)?;
-    sqlx::query(
-        r#"
-        DELETE FROM user_sessions
-        WHERE user_id = ?
-          AND (
-            revoked_at IS NOT NULL
-            OR datetime(expires_at) <= CURRENT_TIMESTAMP
-          )
-        "#,
-    )
-    .bind(user_id)
-    .execute(&mut *transaction)
-    .await
-    .map_err(AppError::Database)?;
-    let result = sqlx::query(
-        r#"
+    let input = (
+        id,
+        user_id.to_owned(),
+        expected_password_hash.to_owned(),
+        token_hash.to_owned(),
+        expires_at.to_rfc3339(),
+        user_agent.map(str::to_owned),
+        client_ip.map(str::to_owned),
+    );
+    crate::db::write::run(
+        pool,
+        "create session if password unchanged",
+        &input,
+        |conn, input| {
+            Box::pin(async move {
+                let result = sqlx::query(
+                    r#"
         INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent, client_ip)
         SELECT ?, id, ?, ?, ?, ?
         FROM users
         WHERE id = ? AND password_hash = ? AND status = 'ACTIVE'
         "#,
-    )
-    .bind(id)
-    .bind(token_hash)
-    .bind(expires_at.to_rfc3339())
-    .bind(user_agent)
-    .bind(client_ip)
-    .bind(user_id)
-    .bind(expected_password_hash)
-    .execute(&mut *transaction)
-    .await
-    .map_err(AppError::Database)?;
-    if result.rows_affected() != 1 {
-        transaction.rollback().await.map_err(AppError::Database)?;
-        return Ok(false);
-    }
-    sqlx::query(
-        r#"
+                )
+                .bind(&input.0)
+                .bind(&input.3)
+                .bind(&input.4)
+                .bind(input.5.as_deref())
+                .bind(input.6.as_deref())
+                .bind(&input.1)
+                .bind(&input.2)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                if result.rows_affected() != 1 {
+                    return Ok(false);
+                }
+                sqlx::query(
+                    r#"
+        DELETE FROM user_sessions
+        WHERE user_id = ?
+          AND (
+            revoked_at IS NOT NULL
+            OR datetime(expires_at) <= CURRENT_TIMESTAMP
+        )
+        "#,
+                )
+                .bind(&input.1)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                sqlx::query(
+                    r#"
         DELETE FROM user_sessions
         WHERE id IN (
             SELECT id
@@ -118,31 +145,33 @@ pub async fn create_session_if_password_unchanged(
             LIMIT -1 OFFSET ?
         )
         "#,
-    )
-    .bind(user_id)
-    .bind(MAX_ACTIVE_SESSIONS_PER_USER)
-    .execute(&mut *transaction)
-    .await
-    .map_err(AppError::Database)?;
-    let metadata_updated = sqlx::query(
-        r#"
+                )
+                .bind(&input.1)
+                .bind(MAX_ACTIVE_SESSIONS_PER_USER)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                let metadata_updated = sqlx::query(
+                    r#"
         UPDATE users
         SET last_login_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         "#,
+                )
+                .bind(&input.1)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?
+                .rows_affected();
+                if metadata_updated != 1 {
+                    return Err(AppError::Database(sqlx::Error::RowNotFound));
+                }
+                Ok(true)
+            })
+        },
     )
-    .bind(user_id)
-    .execute(&mut *transaction)
     .await
-    .map_err(AppError::Database)?
-    .rows_affected();
-    if metadata_updated != 1 {
-        transaction.rollback().await.map_err(AppError::Database)?;
-        return Err(AppError::Database(sqlx::Error::RowNotFound));
-    }
-    transaction.commit().await.map_err(AppError::Database)?;
-    Ok(true)
 }
 
 pub async fn change_password_and_replace_sessions(
@@ -153,9 +182,22 @@ pub async fn change_password_and_replace_sessions(
     new_password_hash: &str,
     replacement: ReplacementSession<'_>,
 ) -> Result<bool, AppError> {
-    let mut transaction = pool.begin().await.map_err(AppError::Database)?;
-    let updated = sqlx::query(
-        r#"
+    let input = (
+        user_id.to_owned(),
+        expected_password_hash.to_owned(),
+        current_token_hash.to_owned(),
+        new_password_hash.to_owned(),
+        Uuid::new_v4().to_string(),
+        replacement.token_hash.to_owned(),
+        replacement.expires_at.to_rfc3339(),
+        replacement.user_agent.map(str::to_owned),
+        replacement.client_ip.map(str::to_owned),
+    );
+    crate::db::write::transaction(pool, "change password and replace sessions", move |conn| {
+        let input = input.clone();
+        Box::pin(async move {
+            let updated = sqlx::query(
+                r#"
         UPDATE users
         SET password_hash = ?, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
@@ -170,40 +212,41 @@ pub async fn change_password_and_replace_sessions(
                 AND datetime(user_sessions.expires_at) > CURRENT_TIMESTAMP
           )
         "#,
-    )
-    .bind(new_password_hash)
-    .bind(user_id)
-    .bind(expected_password_hash)
-    .bind(current_token_hash)
-    .execute(&mut *transaction)
+            )
+            .bind(&input.3)
+            .bind(&input.0)
+            .bind(&input.1)
+            .bind(&input.2)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected();
+            if updated != 1 {
+                return Ok(false);
+            }
+            sqlx::query(
+                "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
+            )
+            .bind(&input.0)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            sqlx::query(
+                "INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent, client_ip) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&input.4)
+            .bind(&input.0)
+            .bind(&input.5)
+            .bind(&input.6)
+            .bind(input.7.as_deref())
+            .bind(input.8.as_deref())
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            Ok(true)
+        })
+    })
     .await
-    .map_err(AppError::Database)?
-    .rows_affected();
-    if updated != 1 {
-        transaction.rollback().await.map_err(AppError::Database)?;
-        return Ok(false);
-    }
-    sqlx::query(
-        "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
-    )
-    .bind(user_id)
-    .execute(&mut *transaction)
-    .await
-    .map_err(AppError::Database)?;
-    sqlx::query(
-        "INSERT INTO user_sessions (id, user_id, token_hash, expires_at, user_agent, client_ip) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(user_id)
-    .bind(replacement.token_hash)
-    .bind(replacement.expires_at.to_rfc3339())
-    .bind(replacement.user_agent)
-    .bind(replacement.client_ip)
-    .execute(&mut *transaction)
-    .await
-    .map_err(AppError::Database)?;
-    transaction.commit().await.map_err(AppError::Database)?;
-    Ok(true)
 }
 
 pub async fn resolve_active_user(
@@ -238,8 +281,18 @@ pub async fn resolve_session_user(
     if resolved.as_ref().is_some_and(|(_, _, _, _, last_seen_at)| {
         last_seen_needs_update(last_seen_at.as_deref(), Utc::now())
     }) {
-        let _ = sqlx::query(
-            r#"
+        let input = (
+            token_hash.to_owned(),
+            format!("-{LAST_SEEN_UPDATE_INTERVAL_SECONDS} seconds"),
+        );
+        if let Err(error) = crate::db::write::run(
+            pool,
+            "update session last seen",
+            &input,
+            |conn, (token_hash, interval)| {
+                Box::pin(async move {
+                    sqlx::query(
+                        r#"
             UPDATE user_sessions
             SET last_seen_at = CURRENT_TIMESTAMP
             WHERE token_hash = ?
@@ -248,15 +301,20 @@ pub async fn resolve_session_user(
                 OR datetime(last_seen_at) <= datetime(CURRENT_TIMESTAMP, ?)
               )
             "#,
+                    )
+                    .bind(token_hash)
+                    .bind(interval)
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(AppError::Database)
+                })
+            },
         )
-        .bind(token_hash)
-        .bind(format!("-{LAST_SEEN_UPDATE_INTERVAL_SECONDS} seconds"))
-        .execute(pool)
         .await
-        .map_err(|error| {
+        {
             tracing::warn!(%error, "failed to update session last_seen_at");
-            error
-        });
+        }
     }
     Ok(
         resolved.map(|(id, username, role, status, _)| ResolvedSessionUser {
@@ -267,13 +325,20 @@ pub async fn resolve_session_user(
 }
 
 pub async fn revoke_by_token_hash(pool: &SqlitePool, token_hash: &str) -> Result<(), AppError> {
-    sqlx::query(
-        "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ? AND revoked_at IS NULL",
-    )
-    .bind(token_hash)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?;
+    let token_hash = token_hash.to_owned();
+    crate::db::write::run(pool, "revoke session", &token_hash, |conn, token_hash| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ? AND revoked_at IS NULL",
+            )
+            .bind(token_hash)
+            .execute(conn)
+            .await
+            .map(|_| ())
+            .map_err(AppError::Database)
+        })
+    })
+    .await?;
     Ok(())
 }
 
@@ -282,15 +347,21 @@ pub async fn revoke_others_for_user(
     user_id: &str,
     current_token_hash: &str,
 ) -> Result<u64, AppError> {
-    Ok(sqlx::query(
-        "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL",
-    )
-    .bind(user_id)
-    .bind(current_token_hash)
-    .execute(pool)
+    let input = (user_id.to_owned(), current_token_hash.to_owned());
+    crate::db::write::run(pool, "revoke other sessions", &input, |conn, input| {
+        Box::pin(async move {
+            Ok(sqlx::query(
+                "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL",
+            )
+            .bind(&input.0)
+            .bind(&input.1)
+            .execute(conn)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected())
+        })
+    })
     .await
-    .map_err(AppError::Database)?
-    .rows_affected())
 }
 
 pub async fn cleanup_expired_or_revoked(pool: &SqlitePool) -> Result<u64, AppError> {

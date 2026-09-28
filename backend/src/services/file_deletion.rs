@@ -411,11 +411,23 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
     .map_err(AppError::Database)?;
     let mut changed = 0;
     for (batch_id, requested_by_user_id) in batches {
-        sqlx::query("UPDATE file_deletion_batches SET state='RUNNING', updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
-            .bind(&batch_id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+        let input = batch_id.clone();
+        crate::db::write::run(
+            pool,
+            "start file deletion batch",
+            &input,
+            |conn, batch_id| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE file_deletion_batches SET state='RUNNING', updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
+                        .bind(batch_id)
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(AppError::Database)
+                })
+            },
+        )
+        .await?;
         let items = sqlx::query_as::<_, FileDeletionBatchItem>(
             "SELECT id,bundle_id,root_file_id,state,job_id FROM file_deletion_batch_items WHERE batch_id=? AND state IN ('QUEUED','RUNNING') ORDER BY created_at,id",
         )
@@ -434,22 +446,46 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
                 .await
                 {
                     Ok(job) => {
-                        sqlx::query("UPDATE file_deletion_batch_items SET state='RUNNING', job_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
-                            .bind(job.id)
-                            .bind(&item.id)
-                            .execute(pool)
-                            .await
-                            .map_err(AppError::Database)?;
+                        let input = (job.id, item.id.clone());
+                        crate::db::write::run(
+                            pool,
+                            "start file deletion batch item",
+                            &input,
+                            |conn, (job_id, item_id)| {
+                                Box::pin(async move {
+                                    sqlx::query("UPDATE file_deletion_batch_items SET state='RUNNING', job_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
+                                        .bind(job_id)
+                                        .bind(item_id)
+                                        .execute(conn)
+                                        .await
+                                        .map(|_| ())
+                                        .map_err(AppError::Database)
+                                })
+                            },
+                        )
+                        .await?;
                         changed += 1;
                     }
                     Err(AppError::Conflict(_)) => {}
                     Err(error) => {
-                        sqlx::query("UPDATE file_deletion_batch_items SET state='FAILED', error_code=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
-                            .bind(error_code(&error))
-                            .bind(&item.id)
-                            .execute(pool)
-                            .await
-                            .map_err(AppError::Database)?;
+                        let input = (error_code(&error), item.id.clone());
+                        crate::db::write::run(
+                            pool,
+                            "fail file deletion batch item",
+                            &input,
+                            |conn, (error_code, item_id)| {
+                                Box::pin(async move {
+                                    sqlx::query("UPDATE file_deletion_batch_items SET state='FAILED', error_code=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
+                                        .bind(error_code)
+                                        .bind(item_id)
+                                        .execute(conn)
+                                        .await
+                                        .map(|_| ())
+                                        .map_err(AppError::Database)
+                                })
+                            },
+                        )
+                        .await?;
                         changed += 1;
                     }
                 }
@@ -466,20 +502,44 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
                     .map_err(AppError::Database)?;
             match state.as_deref() {
                 Some("SUCCEEDED") | Some("SUPERSEDED") => {
-                    sqlx::query("UPDATE file_deletion_batch_items SET state='SUCCEEDED', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='RUNNING'")
-                        .bind(&item.id)
-                        .execute(pool)
-                        .await
-                        .map_err(AppError::Database)?;
+                    let input = item.id.clone();
+                    crate::db::write::run(
+                        pool,
+                        "complete file deletion batch item",
+                        &input,
+                        |conn, item_id| {
+                            Box::pin(async move {
+                                sqlx::query("UPDATE file_deletion_batch_items SET state='SUCCEEDED', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='RUNNING'")
+                                    .bind(item_id)
+                                    .execute(conn)
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(AppError::Database)
+                            })
+                        },
+                    )
+                    .await?;
                     changed += 1;
                 }
                 Some("QUEUED") | Some("RUNNING") | Some("RETRY_WAIT") => {}
                 Some(_) | None => {
-                    sqlx::query("UPDATE file_deletion_batch_items SET state='FAILED', error_code='JOB_LOST', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='RUNNING'")
-                        .bind(&item.id)
-                        .execute(pool)
-                        .await
-                        .map_err(AppError::Database)?;
+                    let input = item.id.clone();
+                    crate::db::write::run(
+                        pool,
+                        "lose file deletion batch item",
+                        &input,
+                        |conn, item_id| {
+                            Box::pin(async move {
+                                sqlx::query("UPDATE file_deletion_batch_items SET state='FAILED', error_code='JOB_LOST', finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='RUNNING'")
+                                    .bind(item_id)
+                                    .execute(conn)
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(AppError::Database)
+                            })
+                        },
+                    )
+                    .await?;
                     changed += 1;
                 }
             }
@@ -502,22 +562,46 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
             } else {
                 "PARTIAL"
             };
-            sqlx::query("UPDATE file_deletion_batches SET state=?, completed_items=?, failed_items=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?")
-                .bind(state)
-                .bind(completed)
-                .bind(failed)
-                .bind(&batch_id)
-                .execute(pool)
-                .await
-                .map_err(AppError::Database)?;
+            let input = (state, completed, failed, batch_id.clone());
+            crate::db::write::run(
+                pool,
+                "finish file deletion batch",
+                &input,
+                |conn, (state, completed, failed, batch_id)| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE file_deletion_batches SET state=?, completed_items=?, failed_items=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?")
+                            .bind(state)
+                            .bind(completed)
+                            .bind(failed)
+                            .bind(batch_id)
+                            .execute(conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(AppError::Database)
+                    })
+                },
+            )
+            .await?;
         } else {
-            sqlx::query("UPDATE file_deletion_batches SET state='RUNNING', completed_items=?, failed_items=?, updated_at=CURRENT_TIMESTAMP WHERE id=?")
-                .bind(completed)
-                .bind(failed)
-                .bind(&batch_id)
-                .execute(pool)
-                .await
-                .map_err(AppError::Database)?;
+            let input = (completed, failed, batch_id.clone());
+            crate::db::write::run(
+                pool,
+                "update file deletion batch",
+                &input,
+                |conn, (completed, failed, batch_id)| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE file_deletion_batches SET state='RUNNING', completed_items=?, failed_items=?, updated_at=CURRENT_TIMESTAMP WHERE id=?")
+                            .bind(completed)
+                            .bind(failed)
+                            .bind(batch_id)
+                            .execute(conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(AppError::Database)
+                    })
+                },
+            )
+            .await?;
         }
     }
     Ok(changed)

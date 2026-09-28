@@ -812,7 +812,7 @@ pub async fn garbage_collect_unreferenced_blobs_with_grace(
         // I/O would allow publication/reference creation to race with removal.
         // This operation must not be replayed by the DB-only retry helper.
         let _write_guard = crate::db::write::acquire(pool).await;
-        let mut delete_tx = pool.begin().await.map_err(AppError::Database)?;
+        let mut delete_tx = crate::db::write::begin_immediate(pool).await?;
         let claimed = sqlx::query(
             r#"
             UPDATE blobs SET state = 'PENDING_DELETE'
@@ -901,7 +901,7 @@ pub async fn garbage_collect_unreferenced_blobs_with_grace(
         // As above, retain the reference check and filesystem deletion in the
         // same manually coordinated transaction; never retry the filesystem I/O.
         let _write_guard = crate::db::write::acquire(pool).await;
-        let mut delete_tx = pool.begin().await.map_err(AppError::Database)?;
+        let mut delete_tx = crate::db::write::begin_immediate(pool).await?;
         let claimed = sqlx::query(
             r#"
             UPDATE blobs SET state = 'PENDING_DELETE'

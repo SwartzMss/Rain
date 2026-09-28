@@ -250,9 +250,12 @@ mod tests {
         .unwrap();
         assert_eq!(budget.active_writers(), 1);
         drop(pipeline);
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while budget.active_writers() != 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                if budget.active_writers() == 0 && !path.exists() {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
         })
         .await
