@@ -79,11 +79,11 @@ describe('write permission behavior', () => {
     expect(screen.queryByRole('button', { name: '删除' })).not.toBeInTheDocument();
   });
 
-  it('disables Issue deletion while upload processing and restores it afterward', () => {
+  it('keeps Issue deletion disabled without exposing a processing message', () => {
     const onDelete = vi.fn();
     const { rerender } = render(<IssueDeleteButton issueCode="ISSUE" canWrite blocked deleting={false} onDelete={onDelete} />);
     expect(screen.getByRole('button', { name: '删除 Issue' })).toBeDisabled();
-    expect(screen.getByRole('status')).toHaveTextContent('处理中，暂不可删除');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '删除 Issue' }));
     expect(onDelete).not.toHaveBeenCalled();
 
