@@ -3,7 +3,7 @@ use actix_web::{
     http::{StatusCode, header::CONTENT_LENGTH},
     post, web,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::info;
 use uuid::Uuid;
@@ -111,11 +111,13 @@ pub async fn upload_logs(
     let upload_id = Uuid::new_v4().simple().to_string();
     let bundle_id = Uuid::new_v4().simple().to_string();
     let bundle_hash = Uuid::new_v4().simple().to_string();
+    let receiving_name = initial_receiving_name(req.query_string());
     reserve_upload_bundle(
         &state.db.pool,
         &bundle_id,
         &issue_code,
         &bundle_hash,
+        &receiving_name,
         &user.0.id,
     )
     .await?;
@@ -251,6 +253,23 @@ pub async fn upload_logs(
     )
 }
 
+#[derive(Deserialize)]
+struct UploadQuery {
+    file_name: Option<String>,
+}
+
+fn initial_receiving_name(query_string: &str) -> String {
+    web::Query::<UploadQuery>::from_query(query_string)
+        .ok()
+        .and_then(|query| {
+            query
+                .file_name
+                .as_deref()
+                .map(crate::upload::filename::sanitize_filename)
+        })
+        .unwrap_or_else(|| "正在接收上传".to_string())
+}
+
 #[derive(Serialize)]
 struct UploadResponse {
     task_id: String,
@@ -335,4 +354,22 @@ struct UploadTaskResponse {
     retryable: Option<bool>,
     progress_percent: u8,
     total_bytes: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initial_receiving_name;
+
+    #[test]
+    fn uses_sanitized_original_filename_for_receiving_bundle() {
+        assert_eq!(
+            initial_receiving_name("file_name=%E8%BD%A6%E8%BE%86%E6%97%A5%E5%BF%97.zip"),
+            "车辆日志.zip"
+        );
+    }
+
+    #[test]
+    fn keeps_placeholder_for_clients_without_filename_metadata() {
+        assert_eq!(initial_receiving_name(""), "正在接收上传");
+    }
 }

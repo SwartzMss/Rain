@@ -5,24 +5,26 @@ pub async fn reserve_upload_bundle(
     bundle_id: &str,
     issue_code: &str,
     bundle_hash: &str,
+    bundle_name: &str,
     uploader_user_id: &str,
 ) -> Result<(), AppError> {
     crate::db::write::run(
         pool,
         "reserve upload bundle",
-        &(bundle_id, issue_code, bundle_hash, uploader_user_id),
-        |conn, &(bundle_id, issue_code, bundle_hash, uploader_user_id)| {
+        &(bundle_id, issue_code, bundle_hash, bundle_name, uploader_user_id),
+        |conn, &(bundle_id, issue_code, bundle_hash, bundle_name, uploader_user_id)| {
             Box::pin(async move {
                 let result = sqlx::query(
                     r#"
                     INSERT INTO bundles (id, issue_code, hash, name, status, process_stage, uploader_user_id, size_bytes)
-                    SELECT ?, code, ?, '正在接收上传', 'PENDING', 'RECEIVING', ?, 0
+                    SELECT ?, code, ?, ?, 'PENDING', 'RECEIVING', ?, 0
                     FROM issues
                     WHERE code = ? AND status = 'ACTIVE' AND owner_user_id = ?
                     "#,
                 )
                 .bind(bundle_id)
                 .bind(bundle_hash)
+                .bind(bundle_name)
                 .bind(uploader_user_id)
                 .bind(issue_code)
                 .bind(uploader_user_id)
@@ -334,10 +336,18 @@ mod tests {
             "upload-reservation",
             "UPLOAD_ACTIVE",
             "upload-reservation-hash",
+            "car-log.zip",
             &owner.id,
         )
         .await
         .unwrap();
+        let reserved_name: String = sqlx::query_scalar(
+            "SELECT name FROM bundles WHERE id='upload-reservation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reserved_name, "car-log.zip");
         let state = web::Data::new(AppState::new(
             pool.clone(),
             "data".into(),
