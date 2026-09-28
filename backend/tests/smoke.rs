@@ -13,6 +13,7 @@ use backend::{
     repositories::{sessions, users},
     routes,
     services::file_deletion::process_file_deletion_jobs,
+    upload::session::{CHUNK_SIZE_BYTES, CreateSessionRow, create_session},
 };
 use chrono::{Duration, Utc};
 use flate2::{Compression, write::GzEncoder};
@@ -2488,6 +2489,110 @@ async fn processing_bundles_cannot_be_deleted() {
     )
     .await;
     assert_eq!(delete_issue.status(), StatusCode::CONFLICT);
+}
+
+#[actix_web::test]
+async fn rejected_issue_delete_preserves_open_resumable_session() {
+    let test_dir = TestDir::new("rain-rejected-issue-delete");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let data_root = test_dir.path.join("uploads");
+    fs::create_dir_all(&data_root).expect("create data root");
+
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query("INSERT INTO issues (code, name) VALUES ('PRESERVE', 'PRESERVE')")
+        .execute(&pool)
+        .await
+        .expect("insert issue");
+    sqlx::query(
+        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('processing-bundle', 'PRESERVE', 'processing-hash', 'processing bundle', 'PROCESSING')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert processing bundle");
+
+    let auth_cookie = test_auth_cookie(&pool).await;
+    let owner_user_id: String =
+        sqlx::query_scalar("SELECT owner_user_id FROM issues WHERE code = 'PRESERVE'")
+            .fetch_one(&pool)
+            .await
+            .expect("load issue owner");
+
+    let session_id = "preserved-session";
+    let input_path = data_root
+        .join(".uploads")
+        .join(session_id)
+        .join("input.part");
+    fs::create_dir_all(input_path.parent().expect("input parent"))
+        .expect("create session directory");
+    let partial_content = b"partial resumable upload";
+    fs::write(&input_path, partial_content).expect("write partial upload");
+    create_session(
+        &pool,
+        CreateSessionRow {
+            id: session_id.into(),
+            issue_code: "PRESERVE".into(),
+            owner_user_id,
+            idempotency_key: "preserve-key".into(),
+            file_name: "large.log".into(),
+            file_size_bytes: 64 * 1024 * 1024,
+            last_modified_ms: None,
+            chunk_size_bytes: CHUNK_SIZE_BYTES,
+            input_path: format!(".uploads/{session_id}/input.part"),
+            expires_at: "2099-01-01 00:00:00".into(),
+        },
+    )
+    .await
+    .expect("create resumable session");
+    sqlx::query(
+        "UPDATE upload_sessions SET committed_offset = ?, next_chunk_index = 1 WHERE id = ?",
+    )
+    .bind(CHUNK_SIZE_BYTES as i64)
+    .bind(session_id)
+    .execute(&pool)
+    .await
+    .expect("set committed upload offset");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                data_root,
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+    let delete_issue = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri("/api/issues/PRESERVE")
+            .cookie(auth_cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delete_issue.status(), StatusCode::CONFLICT);
+
+    let issue_state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, deletion_reason FROM issues WHERE code = 'PRESERVE'")
+            .fetch_one(&pool)
+            .await
+            .expect("load restored issue state");
+    assert_eq!(issue_state, ("ACTIVE".into(), None));
+
+    let session_state: (String, i64) =
+        sqlx::query_as("SELECT status, committed_offset FROM upload_sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load preserved session state");
+    assert_eq!(session_state, ("OPEN".into(), CHUNK_SIZE_BYTES as i64));
+    assert_eq!(
+        fs::read(&input_path).expect("read preserved partial upload"),
+        partial_content
+    );
 }
 
 async fn wait_for_issue_ready(pool: &sqlx::SqlitePool, issue_code: &str) {

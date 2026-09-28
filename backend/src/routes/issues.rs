@@ -941,8 +941,6 @@ pub async fn delete_issue(
         }
     }
 
-    super::upload_sessions::cancel_issue_sessions(&state, &issue_code, &user.0.id).await?;
-
     let bundles: Vec<BundleIdRow> = sqlx::query_as(
         r#"
         SELECT id, issue_code, status
@@ -970,6 +968,8 @@ pub async fn delete_issue(
         }
         return Err(error);
     }
+
+    super::upload_sessions::cancel_issue_sessions(&state, &issue_code, &user.0.id).await?;
 
     let pool = state.db.pool.clone();
     let cleanup_issue_code = issue_code.clone();
