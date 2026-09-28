@@ -49,10 +49,6 @@ impl PreviewSearchPlan {
             _ => "mixed",
         }
     }
-
-    pub(crate) fn fallback_reason(&self) -> Option<&'static str> {
-        self.fallback_reasons.first().copied()
-    }
 }
 
 type PublicationRow = (String, String, i64, Option<i64>, Option<i64>, i64, i64);
@@ -263,6 +259,16 @@ pub(crate) fn classify_expression(expression: &Expression) -> SearchPlanKind {
     if !term.is_ascii() {
         return SearchPlanKind::RawFallback("term_not_ascii");
     }
+    // The raw matcher uses full Unicode case folding while Tantivy's
+    // LowerCaser only performs lowercasing. Compatibility characters can
+    // fold into ASCII variants or sequences that the index cannot produce
+    // as a candidate (for example, U+017F -> "s" and U+FB03 -> "ffi").
+    if ["k", "s", "ff", "fi", "fl"]
+        .iter()
+        .any(|fragment| term.contains(fragment))
+    {
+        return SearchPlanKind::RawFallback("term_has_unicode_casefold_variant");
+    }
     SearchPlanKind::IndexedTerm
 }
 
@@ -296,7 +302,11 @@ mod tests {
             SearchPlanKind::IndexedTerm
         );
         assert_eq!(
-            classify_expression(&parse(r#""ERROR smoke""#).unwrap()),
+            classify_expression(&parse(r#""ERROR log""#).unwrap()),
+            SearchPlanKind::IndexedTerm
+        );
+        assert_eq!(
+            classify_expression(&parse("RARE_VALUE").unwrap()),
             SearchPlanKind::IndexedTerm
         );
         assert_eq!(
@@ -310,6 +320,14 @@ mod tests {
         assert_eq!(
             classify_expression(&parse("错误标记").unwrap()),
             SearchPlanKind::RawFallback("term_not_ascii")
+        );
+        assert_eq!(
+            classify_expression(&parse("office").unwrap()),
+            SearchPlanKind::RawFallback("term_has_unicode_casefold_variant")
+        );
+        assert_eq!(
+            classify_expression(&parse("sab").unwrap()),
+            SearchPlanKind::RawFallback("term_has_unicode_casefold_variant")
         );
     }
 
@@ -382,6 +400,6 @@ mod tests {
         };
 
         assert_eq!(plan.backend_label(), "mixed");
-        assert_eq!(plan.fallback_reason(), Some("source_identity_missing"));
+        assert_eq!(plan.fallback_reasons, vec!["source_identity_missing"]);
     }
 }

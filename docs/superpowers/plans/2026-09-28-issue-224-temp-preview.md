@@ -4,7 +4,7 @@
 
 **Goal:** Reuse READY Tantivy Bundle indexes for safe temporary-preview keyword searches while preserving exact raw-line matching and fallback behavior.
 
-**Architecture:** Classify only simple ASCII `Expression::Term` values as index-compatible. For eligible Bundle/File sources, query the existing Tantivy publication with its query permit, visibility snapshot, and generation lease to obtain candidate chunk line ranges. Materialize results by seeking near those ranges and verifying each raw line with the existing matcher; unsupported expressions and unavailable indexes use the existing full raw scan.
+**Architecture:** Classify only simple ASCII `Expression::Term` values whose Unicode case-fold variants are equivalent to the Tantivy tokenizer as index-compatible. For eligible Bundle/File sources, query the existing Tantivy publication with its query permit, visibility snapshot, and generation lease to obtain candidate chunk line ranges. Materialize results by seeking near those ranges and verifying each raw line with the existing matcher; unsupported expressions and unavailable indexes use the existing full raw scan.
 
 **Tech Stack:** Rust, Tokio, Actix Web, SQLx/SQLite, Tantivy, tracing, Cargo integration tests.
 
@@ -41,7 +41,7 @@ fn only_safe_ascii_terms_use_tantivy_candidates() {
 }
 ```
 
-The classifier must inspect the normalized `Expression::Term` value, require at least three characters, reject NUL bytes and leading/trailing whitespace, and return a stable fallback reason for every rejected category.
+The classifier must inspect the normalized `Expression::Term` value, require at least three characters, reject NUL bytes and leading/trailing whitespace, reject ASCII terms whose full Unicode case folding can diverge from Tantivy's lowercasing candidate tokenizer, and return a stable fallback reason for every rejected category.
 
 - [ ] **Step 2: Run the focused test to verify it fails for the missing API.**
 

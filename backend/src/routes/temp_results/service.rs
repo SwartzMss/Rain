@@ -131,7 +131,7 @@ async fn materialize_result_with_timeout(
                     candidate_count = plan.candidate_count,
                     verified_match_count = preview.total,
                     query_elapsed_ms = plan.query_elapsed_ms.min(u64::MAX as u128) as u64,
-                    fallback_reason = ?plan.fallback_reason(),
+                    fallback_reasons = ?plan.fallback_reasons,
                     "completed temporary result preview"
                 );
                 Ok::<i64, AppError>(preview.total)

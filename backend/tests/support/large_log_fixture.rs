@@ -20,7 +20,7 @@ pub fn generate(path: &Path, minimum_bytes: u64, stream: usize) -> Fixture {
     let (mut bytes, mut lines) = (0, 0);
     while bytes < minimum_bytes {
         let marker = if lines % 10007 == 0 {
-            "RARE_SENTINEL requestId=550e8400-e29b-41d4-a716-446655440000 中文连续文本"
+            "RARE_SENTINEL RARE_VALUE requestId=550e8400-e29b-41d4-a716-446655440000 中文连续文本"
         } else {
             "routine request completed"
         };
