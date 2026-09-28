@@ -383,7 +383,9 @@ export const rainApi = {
     const formData = new FormData();
     formData.append('issue_code', normalizedIssueCode);
     files.forEach((file) => formData.append('files', file, file.name));
-    const path = `/api/issues/${encodePathSegment(normalizedIssueCode)}/uploads`;
+    const fileNameQuery =
+      files.length === 1 ? `?file_name=${encodeURIComponent(files[0].name)}` : '';
+    const path = `/api/issues/${encodePathSegment(normalizedIssueCode)}/uploads${fileNameQuery}`;
 
     if (!onProgress) {
       return request<UploadResponse>(path, {
