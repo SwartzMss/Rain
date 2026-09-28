@@ -87,6 +87,127 @@ async fn session_schema_tracks_committed_offset_and_idempotency() {
 }
 
 #[actix_web::test]
+async fn handed_off_finalizing_session_cannot_be_cancelled() {
+    let pool = SqlitePoolOptions::new()
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::prepare_schema(&pool, false).await.unwrap();
+    let user = match users::create_user(&pool, "session-handoff-owner", "hash")
+        .await
+        .unwrap()
+    {
+        CreateUserOutcome::Created(user) => user,
+        CreateUserOutcome::DuplicateUsername => panic!("duplicate test user"),
+    };
+    sqlx::query("INSERT INTO issues (code, name, owner_user_id) VALUES ('SESSIONHANDOFF', 'Session Handoff', ?)")
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('handoff-bundle', 'SESSIONHANDOFF', 'handoff-hash', 'handoff.log', 'PROCESSING')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let session_id = "handoff-session";
+    let data_root = std::env::temp_dir().join(format!("rain-upload-handoff-{}", Uuid::new_v4()));
+    let input_path = data_root
+        .join(".uploads")
+        .join(session_id)
+        .join("input.part");
+    tokio::fs::create_dir_all(input_path.parent().unwrap())
+        .await
+        .unwrap();
+    let partial_content = b"handoff must not be deleted";
+    tokio::fs::write(&input_path, partial_content)
+        .await
+        .unwrap();
+    create_session(
+        &pool,
+        CreateSessionRow {
+            id: session_id.into(),
+            issue_code: "SESSIONHANDOFF".into(),
+            owner_user_id: user.id.clone(),
+            idempotency_key: "handoff-key".into(),
+            file_name: "handoff.log".into(),
+            file_size_bytes: 64 * 1024 * 1024,
+            last_modified_ms: None,
+            chunk_size_bytes: CHUNK_SIZE_BYTES,
+            input_path: format!(".uploads/{session_id}/input.part"),
+            expires_at: "2099-01-01 00:00:00".into(),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE upload_sessions SET status='FINALIZING', bundle_id=?, committed_offset=? WHERE id=?",
+    )
+    .bind("handoff-bundle")
+    .bind(CHUNK_SIZE_BYTES as i64)
+    .bind(session_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let token = generate_session_token();
+    sessions::create_session(
+        &pool,
+        &user.id,
+        &hash_session_token(&token),
+        Utc::now() + Duration::hours(1),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                data_root.clone(),
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+
+    let response = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::delete()
+            .uri(&format!("/api/upload-sessions/{session_id}"))
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), actix_web::http::StatusCode::CONFLICT);
+    let error: serde_json::Value = actix_test::read_body_json(response).await;
+    assert_eq!(error["code"], "UPLOAD_SESSION_HANDOFF");
+
+    let session_state: (String, String) =
+        sqlx::query_as("SELECT status, bundle_id FROM upload_sessions WHERE id=?")
+            .bind(session_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        session_state,
+        ("FINALIZING".into(), "handoff-bundle".into())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM bundles WHERE id='handoff-bundle'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "PROCESSING"
+    );
+    assert_eq!(tokio::fs::read(&input_path).await.unwrap(), partial_content);
+    let _ = tokio::fs::remove_dir_all(data_root).await;
+}
+
+#[actix_web::test]
 async fn create_session_is_idempotent_and_rejects_key_reuse_with_different_metadata() {
     let pool = SqlitePoolOptions::new()
         .connect("sqlite::memory:")
