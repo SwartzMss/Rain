@@ -24,6 +24,7 @@ pub struct FieldMetadata {
     pub db_column: &'static str,
     pub env_name: &'static str,
     pub apply_mode: ApplyMode,
+    pub sensitive: bool,
     pub category: SettingCategory,
     pub visibility: SettingVisibility,
     pub recommended_min: Option<u64>,
@@ -54,6 +55,7 @@ impl FieldMetadata {
             db_column,
             env_name,
             apply_mode,
+            sensitive: false,
             category,
             visibility,
             recommended_min,
@@ -62,6 +64,17 @@ impl FieldMetadata {
             auto_value,
             protected,
         }
+    }
+
+    pub const fn new_sensitive(
+        key: SettingKey,
+        db_column: &'static str,
+        env_name: &'static str,
+        apply_mode: ApplyMode,
+    ) -> Self {
+        let mut field = Self::new(key, db_column, env_name, apply_mode);
+        field.sensitive = true;
+        field
     }
 }
 
@@ -88,7 +101,7 @@ impl Serialize for FieldMetadata {
             "pending_restart",
             &matches!(self.apply_mode, ApplyMode::RestartRequired),
         )?;
-        output.serialize_field("sensitive", &false)?;
+        output.serialize_field("sensitive", &self.sensitive)?;
         output.serialize_field("category", &self.category)?;
         output.serialize_field("visibility", &self.visibility)?;
         output.serialize_field("recommended_min", &self.recommended_min)?;

@@ -13,6 +13,7 @@ import type {
 } from "../../api/types";
 import { useAuth } from "../../auth/AuthContext";
 import { isAdmin } from "../../auth/permissions";
+import { auditActionLabel, formatAuditSummary } from "./auditSummary";
 import {
   advanceCursor,
   currentCursor,
@@ -1797,13 +1798,7 @@ export function AuditLogsPage() {
                     </td>
                     <td className="px-4 py-3.5">
                       <span className="inline-flex rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-200">
-                        {log.action === "ADMIN_BOOTSTRAPPED"
-                          ? "初始化管理员"
-                          : log.action === "USER_STATUS_CHANGED"
-                            ? "变更用户状态"
-                            : log.action === "USER_SESSIONS_REVOKED"
-                              ? "注销用户 Session"
-                              : log.action}
+                        {auditActionLabel(log.action)}
                       </span>
                     </td>
                     <td className="px-4 py-3.5">
@@ -1823,9 +1818,7 @@ export function AuditLogsPage() {
                       )}
                     </td>
                     <td className="px-4 py-3.5 text-slate-600">
-                      {log.old_value || log.new_value
-                        ? `${log.old_value ?? "—"} → ${log.new_value ?? "—"}`
-                        : "—"}
+                      <AuditSummaryCell log={log} />
                     </td>
                     <td className="px-4 py-3.5 font-mono text-xs text-slate-600">
                       {log.client_ip || "—"}
@@ -1866,6 +1859,29 @@ export function AuditLogsPage() {
         </div>
       </AdminContentCard>
     </AdminGuard>
+  );
+}
+
+export function AuditSummaryCell({ log }: { log: AuditLog }) {
+  const [expanded, setExpanded] = useState(false);
+  const formatted = formatAuditSummary(log);
+  const changes = expanded ? formatted.allChanges : formatted.changes;
+  return (
+    <div className="max-w-xl space-y-1 text-xs leading-5">
+      {formatted.summary ? <div>{formatted.summary}</div> : null}
+      {changes.map((change, index) => (
+        <div key={`${index}-${change}`}>{change}</div>
+      ))}
+      {formatted.hiddenCount > 0 ? (
+        <button
+          className="font-medium text-cyan-700 hover:text-cyan-900"
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起变更" : `查看全部（+${formatted.hiddenCount} 项）`}
+        </button>
+      ) : null}
+    </div>
   );
 }
 

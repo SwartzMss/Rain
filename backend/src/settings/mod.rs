@@ -8,3 +8,4 @@ pub use model::{
     SettingsValues, ValidationError,
 };
 pub use service::SettingsService;
+pub(crate) use service::is_sensitive_audit_field;

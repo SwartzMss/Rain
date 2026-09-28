@@ -98,6 +98,7 @@ pub struct AuditLog {
     pub action: String,
     pub old_value: Option<String>,
     pub new_value: Option<String>,
+    pub details_json: Option<String>,
     pub client_ip: Option<String>,
     pub user_agent: Option<String>,
     pub created_at: String,

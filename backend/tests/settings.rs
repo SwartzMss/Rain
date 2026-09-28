@@ -49,8 +49,18 @@ fn metadata_exposes_presentation_contract_and_covers_supported_keys() {
     let serialized = serde_json::to_value(issue_size).expect("serializable metadata");
     assert_eq!(serialized["category"], "common");
     assert_eq!(serialized["visibility"], "default");
+    assert_eq!(serialized["sensitive"], false);
     assert!(serialized.get("recommended_min").is_some());
     assert!(serialized.get("recommended_max").is_some());
+
+    let sensitive_issue_size = backend::settings::metadata::FieldMetadata::new_sensitive(
+        SettingKey::IssueMaxContentSize,
+        "issue_max_content_size",
+        "RAIN_ISSUE_MAX_CONTENT_SIZE",
+        ApplyMode::Hot,
+    );
+    let serialized = serde_json::to_value(sensitive_issue_size).expect("sensitive metadata");
+    assert_eq!(serialized["sensitive"], true);
 }
 
 #[test]
@@ -202,6 +212,13 @@ async fn resource_modes_default_to_manual_and_round_trip() {
         .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
         .await
         .expect("initialize");
+    let initialized_value: String = sqlx::query_scalar(
+        "SELECT new_value FROM admin_audit_logs WHERE action='SYSTEM_SETTINGS_INITIALIZED'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("initialization audit summary");
+    assert_eq!(initialized_value, "系统配置已初始化");
 
     assert_eq!(
         initial.resource_modes["upload_concurrent_processing_tasks"],
@@ -226,6 +243,21 @@ async fn resource_modes_default_to_manual_and_round_trip() {
         saved.snapshot.configured.upload_concurrent_processing_tasks,
         4
     );
+    let details: String = sqlx::query_scalar(
+        "SELECT details_json FROM admin_audit_logs WHERE action='SETTINGS_UPDATED' ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("resource mode audit details");
+    let details: serde_json::Value = serde_json::from_str(&details).unwrap();
+    assert_eq!(details["revision_before"], initial.revision);
+    assert_eq!(details["revision_after"], initial.revision + 1);
+    assert_eq!(details["changes"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        details["changes"][0]["resource_mode"]["old_value"],
+        "manual"
+    );
+    assert_eq!(details["changes"][0]["resource_mode"]["new_value"], "auto");
 
     let reloaded = SettingsService::new(pool)
         .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
@@ -235,6 +267,76 @@ async fn resource_modes_default_to_manual_and_round_trip() {
         reloaded.resource_modes["upload_concurrent_processing_tasks"],
         ResourceMode::Auto
     );
+}
+
+#[tokio::test]
+async fn settings_audit_records_only_changed_fields_with_values_and_apply_modes() {
+    let pool = pool();
+    db::prepare_schema(&pool, true).await.expect("schema");
+    let service = SettingsService::new(pool.clone());
+    let initial = service
+        .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
+        .await
+        .expect("initialize");
+
+    let mut changes = serde_json::Map::new();
+    changes.insert("issue_inactive_days".into(), serde_json::json!(14));
+    changes.insert(
+        "temp_results_max_total_size".into(),
+        serde_json::json!(2_u64 * 1024 * 1024 * 1024),
+    );
+    changes.insert(
+        "login_ip_limit_per_minute".into(),
+        serde_json::json!(initial.configured.login_ip_limit_per_minute),
+    );
+    service
+        .save(initial.revision, &changes, None)
+        .await
+        .expect("save settings");
+
+    let audit: (String, String, String) = sqlx::query_as(
+        "SELECT old_value,new_value,details_json FROM admin_audit_logs WHERE action='SETTINGS_UPDATED' ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("settings update audit");
+    let old_value: serde_json::Value = serde_json::from_str(&audit.0).unwrap();
+    let new_value: serde_json::Value = serde_json::from_str(&audit.1).unwrap();
+    let details: serde_json::Value = serde_json::from_str(&audit.2).unwrap();
+
+    assert_eq!(old_value.as_object().unwrap().len(), 2);
+    assert_eq!(new_value.as_object().unwrap().len(), 2);
+    assert!(
+        !old_value
+            .as_object()
+            .unwrap()
+            .contains_key("login_ip_limit_per_minute")
+    );
+    assert_eq!(details["changed_fields"].as_array().unwrap().len(), 2);
+    assert_eq!(details["changes"].as_array().unwrap().len(), 2);
+    assert_eq!(details["revision_before"], initial.revision);
+    assert_eq!(details["revision_after"], initial.revision + 1);
+    let changes = details["changes"].as_array().unwrap();
+    let issue_days = changes
+        .iter()
+        .find(|change| change["field"] == "issue_inactive_days")
+        .expect("issue days change");
+    assert_eq!(
+        issue_days["old_value"],
+        initial.configured.issue_inactive_days
+    );
+    assert_eq!(issue_days["new_value"], 14);
+    assert_eq!(issue_days["apply_mode"], "hot");
+    let total_size = changes
+        .iter()
+        .find(|change| change["field"] == "temp_results_max_total_size")
+        .expect("result size change");
+    assert_eq!(
+        total_size["old_value"],
+        initial.configured.temp_results_max_total_size
+    );
+    assert_eq!(total_size["new_value"], 2_u64 * 1024 * 1024 * 1024);
+    assert_eq!(total_size["apply_mode"], "hot");
 }
 
 #[tokio::test]

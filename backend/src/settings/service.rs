@@ -360,10 +360,13 @@ impl SettingsService {
             .validate()
             .map_err(|errors| AppError::Config(format!("effective settings: {errors:?}")))?;
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let old_json = serde_json::to_string(&current.configured)
-            .map_err(|error| AppError::Config(error.to_string()))?;
-        let new_json = serde_json::to_string(&candidate)
-            .map_err(|error| AppError::Config(error.to_string()))?;
+        let (old_json, new_json, audit_changes) = settings_audit_diff(
+            current_map,
+            &candidate_json,
+            &current.resource_modes,
+            &next_resource_modes,
+            &changed_fields,
+        );
         let actor = actor_user_id.map(str::to_owned);
         let input = (
             expected_revision,
@@ -377,22 +380,18 @@ impl SettingsService {
         let pool = self.pool.clone();
         let update_values = candidate.clone();
         let old_values = current.configured.clone();
-        let mut changed_for_audit = changes.clone();
-        for (key, mode) in resource_modes {
-            if current.resource_modes.get(key) != Some(mode) {
-                changed_for_audit.insert(
-                    key.clone(),
-                    serde_json::to_value(mode)
-                        .map_err(|error| AppError::Config(error.to_string()))?,
-                );
-            }
-        }
         let resource_modes_json = serde_json::to_string(&next_resource_modes)
             .map_err(|error| AppError::Config(error.to_string()))?;
+        let audit_changed_fields = changed_fields.clone();
+        let audit_hot_applied_fields = hot_applied_fields.clone();
+        let changed_side_effect_fields = changed_fields.clone();
         db::write::run(&pool, "save system settings", &input, move |conn, input| {
             let values = update_values.clone();
             let old_values = old_values.clone();
-            let changes = changed_for_audit.clone();
+            let audit_changes = audit_changes.clone();
+            let audit_changed_fields = audit_changed_fields.clone();
+            let audit_hot_applied_fields = audit_hot_applied_fields.clone();
+            let changed_side_effect_fields = changed_side_effect_fields.clone();
             let resource_modes_json = resource_modes_json.clone();
             Box::pin(async move {
                 let updated = sqlx::query(
@@ -407,12 +406,17 @@ impl SettingsService {
                 let details = serde_json::json!({
                     "revision_before": input.0,
                     "revision_after": input.0 + 1,
-                    "changed_fields": changes.keys().collect::<Vec<_>>(),
-                    "hot_applied_fields": changed_fields_for_audit(&changes),
+                    "changed_fields": audit_changed_fields,
+                    "changes": audit_changes,
+                    "hot_applied_fields": audit_hot_applied_fields,
                 }).to_string();
                 sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,operation_id,details_json,client_ip,user_agent) VALUES(?,'USER',?,'SETTINGS_UPDATED',?,?,?,?,?,?)")
                     .bind(uuid::Uuid::new_v4().to_string()).bind(input.1.as_deref()).bind(&input.3).bind(&input.4).bind(&input.2).bind(&details).bind(input.5.as_deref()).bind(input.6.as_deref()).execute(&mut *conn).await.map_err(AppError::Database)?;
-                let changed = |field: &str| changes.contains_key(field);
+                let changed = |field: &str| {
+                    changed_side_effect_fields
+                        .iter()
+                        .any(|changed_field| changed_field == field)
+                };
                 if changed("allow_registration") || changed("login_ip_limit_per_minute") || changed("login_username_failure_limit_per_5_minutes") {
                     sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent,operation_id,details_json) VALUES(?,'USER',?,'AUTH_SETTINGS_UPDATED',?,?,?,?,?,?)")
                         .bind(uuid::Uuid::new_v4().to_string()).bind(input.1.as_deref())
@@ -561,7 +565,7 @@ impl SettingsService {
                 if needs_initialization != 0 {
                     sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,action,new_value,operation_id,details_json) VALUES(?,'SYSTEM','SYSTEM_SETTINGS_INITIALIZED',?,?,?)")
                         .bind(uuid::Uuid::new_v4().to_string())
-                        .bind(serde_json::to_string(&values).map_err(|error| AppError::Config(error.to_string()))?)
+                        .bind("系统配置已初始化")
                         .bind(uuid::Uuid::new_v4().to_string())
                         .bind(serde_json::json!({"source": "legacy_env_or_defaults", "revision": 0}).to_string())
                         .execute(&mut *conn)
@@ -759,9 +763,210 @@ fn merge_effective(
         .map_err(|error| AppError::Config(format!("effective settings: {error}")))
 }
 
-fn changed_fields_for_audit(changes: &serde_json::Map<String, serde_json::Value>) -> Vec<&str> {
-    changes
-        .keys()
-        .filter_map(|field| (!is_restart_required(field)).then_some(field.as_str()))
-        .collect()
+fn settings_audit_diff(
+    old_values: &serde_json::Map<String, serde_json::Value>,
+    new_values: &serde_json::Map<String, serde_json::Value>,
+    old_resource_modes: &ResourceModes,
+    new_resource_modes: &ResourceModes,
+    changed_fields: &[String],
+) -> (String, String, Vec<serde_json::Value>) {
+    let mut old_diff = serde_json::Map::new();
+    let mut new_diff = serde_json::Map::new();
+    let mut changes = Vec::new();
+
+    for field in changed_fields {
+        let old_value = old_values.get(field);
+        let new_value = new_values.get(field);
+        let value_changed = old_value != new_value;
+        let old_mode = old_resource_modes.get(field);
+        let new_mode = new_resource_modes.get(field);
+        let mode_changed = old_mode != new_mode;
+        if !value_changed && !mode_changed {
+            continue;
+        }
+
+        let sensitive = is_sensitive_audit_field(field);
+        let mut change = serde_json::json!({
+            "field": field,
+            "apply_mode": if is_restart_required(field) { "restart_required" } else { "hot" },
+        });
+        if sensitive {
+            if value_changed {
+                change["redacted"] = serde_json::Value::Bool(true);
+            }
+        } else {
+            change["old_value"] = old_value.cloned().unwrap_or(serde_json::Value::Null);
+            change["new_value"] = new_value.cloned().unwrap_or(serde_json::Value::Null);
+            if value_changed {
+                old_diff.insert(
+                    field.clone(),
+                    old_value.cloned().unwrap_or(serde_json::Value::Null),
+                );
+                new_diff.insert(
+                    field.clone(),
+                    new_value.cloned().unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+        if mode_changed {
+            change["resource_mode"] = serde_json::json!({
+                "old_value": old_mode,
+                "new_value": new_mode,
+            });
+        }
+        changes.push(change);
+    }
+
+    (
+        serde_json::Value::Object(old_diff).to_string(),
+        serde_json::Value::Object(new_diff).to_string(),
+        changes,
+    )
+}
+
+pub(crate) fn is_sensitive_audit_field(field: &str) -> bool {
+    let normalized = field
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let name_suggests_secret = [
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "privatekey",
+        "accesskey",
+        "credential",
+    ]
+    .iter()
+    .any(|part| normalized.contains(part));
+
+    name_suggests_secret
+        || metadata::all().iter().any(|metadata| {
+            metadata.sensitive
+                && serde_json::to_value(metadata.key)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .as_deref()
+                    == Some(field)
+        })
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::{ResourceMode, ResourceModes, is_sensitive_audit_field, settings_audit_diff};
+
+    fn object(raw: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(raw)
+            .expect("valid JSON")
+            .as_object()
+            .expect("JSON object")
+            .clone()
+    }
+
+    #[test]
+    fn one_setting_change_produces_one_audit_change() {
+        let old_values = object(r#"{"issue_inactive_days":7}"#);
+        let new_values = object(r#"{"issue_inactive_days":14}"#);
+        let fields = ["issue_inactive_days".to_owned()];
+
+        let (_, _, changes) = settings_audit_diff(
+            &old_values,
+            &new_values,
+            &ResourceModes::new(),
+            &ResourceModes::new(),
+            &fields,
+        );
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["field"], "issue_inactive_days");
+        assert_eq!(changes[0]["old_value"], 7);
+        assert_eq!(changes[0]["new_value"], 14);
+        assert_eq!(changes[0]["apply_mode"], "hot");
+    }
+
+    #[test]
+    fn settings_audit_diff_records_only_actual_changes_and_redacts_secrets() {
+        let old_values = object(
+            r#"{
+                "issue_inactive_days": 7,
+                "upload_concurrent_processing_tasks": 4,
+                "temp_results_concurrent_materializations": 2,
+                "provider_api_key": "old-secret",
+                "allow_registration": true
+            }"#,
+        );
+        let new_values = object(
+            r#"{
+                "issue_inactive_days": 30,
+                "upload_concurrent_processing_tasks": 8,
+                "temp_results_concurrent_materializations": 2,
+                "provider_api_key": "new-secret",
+                "allow_registration": true
+            }"#,
+        );
+        let old_modes = ResourceModes::from([(
+            "temp_results_concurrent_materializations".into(),
+            ResourceMode::Auto,
+        )]);
+        let new_modes = ResourceModes::from([(
+            "temp_results_concurrent_materializations".into(),
+            ResourceMode::Manual,
+        )]);
+        let fields = [
+            "issue_inactive_days",
+            "upload_concurrent_processing_tasks",
+            "temp_results_concurrent_materializations",
+            "provider_api_key",
+            "allow_registration",
+        ]
+        .map(str::to_owned);
+
+        let (old_snapshot, new_snapshot, changes) =
+            settings_audit_diff(&old_values, &new_values, &old_modes, &new_modes, &fields);
+        let old_snapshot: serde_json::Value = serde_json::from_str(&old_snapshot).unwrap();
+        let new_snapshot: serde_json::Value = serde_json::from_str(&new_snapshot).unwrap();
+
+        assert_eq!(
+            old_snapshot,
+            serde_json::json!({
+                "issue_inactive_days": 7,
+                "upload_concurrent_processing_tasks": 4,
+            })
+        );
+        assert_eq!(
+            new_snapshot,
+            serde_json::json!({
+                "issue_inactive_days": 30,
+                "upload_concurrent_processing_tasks": 8,
+            })
+        );
+        assert_eq!(changes.len(), 4);
+        assert_eq!(changes[0]["apply_mode"], "hot");
+        assert_eq!(changes[0]["old_value"], 7);
+        assert_eq!(changes[0]["new_value"], 30);
+        assert_eq!(changes[1]["apply_mode"], "restart_required");
+        assert_eq!(changes[1]["old_value"], 4);
+        assert_eq!(changes[1]["new_value"], 8);
+        assert_eq!(changes[2]["resource_mode"]["old_value"], "auto");
+        assert_eq!(changes[2]["resource_mode"]["new_value"], "manual");
+        assert_eq!(changes[2]["old_value"], 2);
+        assert_eq!(changes[2]["new_value"], 2);
+        assert_eq!(changes[3]["redacted"], true);
+        assert!(changes[3].get("old_value").is_none());
+        assert!(changes[3].get("new_value").is_none());
+        let serialized = serde_json::json!({
+            "old_snapshot": old_snapshot,
+            "new_snapshot": new_snapshot,
+            "changes": changes,
+        })
+        .to_string();
+        assert!(!serialized.contains("old-secret"));
+        assert!(!serialized.contains("new-secret"));
+        assert!(is_sensitive_audit_field("provider_api_key"));
+        assert!(is_sensitive_audit_field("access-token"));
+        assert!(!is_sensitive_audit_field("login_ip_limit_per_minute"));
+    }
 }

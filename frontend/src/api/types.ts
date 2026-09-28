@@ -12,7 +12,7 @@ export interface User {
 }
 export interface AdminUser { id: string; username: string; status: UserStatus; created_at: string; updated_at: string; last_login_at: string | null; active_session_count: number; issue_count: number; storage_bytes: number; }
 export interface AdminUserPage { items: AdminUser[]; next_cursor: string | null; }
-export interface AuditLog { id: string; actor_type: 'USER' | 'SYSTEM'; actor_user_id: string | null; target_user_id: string | null; target_username: string | null; action: string; old_value: string | null; new_value: string | null; client_ip: string | null; user_agent?: string | null; created_at: string; }
+export interface AuditLog { id: string; actor_type: 'USER' | 'SYSTEM'; actor_user_id: string | null; target_user_id: string | null; target_username: string | null; action: string; old_value: string | null; new_value: string | null; details_json?: string | null; client_ip: string | null; user_agent?: string | null; created_at: string; }
 export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }
 export interface RegistrationStatus { allow_registration: boolean; }
 export type SettingCategory = 'common' | 'advanced' | 'expert';
