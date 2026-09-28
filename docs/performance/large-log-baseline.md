@@ -14,8 +14,8 @@ RAIN_BENCH_BYTES=16384 RAIN_BENCH_CONCURRENCY=2 RAIN_BENCH_QUERIES=2 \
   cargo test --test large_log_benchmark large_log_baseline -- --ignored --exact
 
 # Tantivy Issue fan-out matrix. v0.1 builds include Tantivy by default;
-# compare the existing fan-out points and the 64-entry reader-cache cliff.
-for concurrency in 1 5 20 50 64 65 80 100 200; do
+# compare the old 64-entry boundary and the current 256-entry cache boundary.
+for concurrency in 1 5 20 50 64 65 80 100 200 256 257; do
   RAIN_SEARCH_BACKEND=tantivy \
   RAIN_BENCH_CONCURRENCY=$concurrency \
   RAIN_BENCH_REPORT=/tmp/rain-tantivy-c${concurrency}.jsonl \
@@ -47,7 +47,7 @@ compilation when collecting measurements.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `RAIN_BENCH_BYTES` | `104857600` | Minimum uncompressed bytes **per bundle**, rounded up to a complete line |
-| `RAIN_BENCH_CONCURRENCY` | `1` | Positive number of simultaneous bundles sharing one issue/database; use `1`, `5`, `20`, `50`, `64`, `65`, `80`, `100`, or `200` for the Issue fan-out and reader-cache boundary matrix |
+| `RAIN_BENCH_CONCURRENCY` | `1` | Positive number of simultaneous bundles sharing one issue/database; use `1`, `5`, `20`, `50`, `64`, `65`, `80`, `100`, `200`, `256`, or `257` for the Issue fan-out and reader-cache boundary matrix |
 | `RAIN_BENCH_VARIANT` | `plain` | `plain`, `zip`, or `targz`; archive creation streams from the fixture file |
 | `RAIN_BENCH_WARMUP` | `0` | Unmeasured warmup requests per query/endpoint before samples |
 | `RAIN_BENCH_QUERIES` | `20` | Samples per query and per endpoint |
@@ -91,7 +91,11 @@ For Tantivy runs, each JSON report also records `reader_cache.hit`,
 search phase. Counters are reset immediately before the first search, while
 the cache contents remain intact. `open` counts actual reader opens (including
 reopens after eviction), so a sequential scan over more Bundles than the
-64-entry default can be distinguished from ordinary search latency noise.
+256-entry default can be distinguished from ordinary search latency noise.
+The default cache capacity is 256 after the 64-entry sequential-scan cliff was
+reproduced in the boundary benchmark. Runs at 256 and 257 Bundles characterize
+the new boundary; the cache remains LRU-bounded rather than growing with the
+number of Bundles.
 
 A 100 ms sampler records DB/WAL file sizes, process RSS, CPU user/system ticks, and cumulative process
 read/write byte counters throughout ingest. Linux uses `/proc/self/status` and

@@ -12,9 +12,10 @@ use crate::{error::AppError, search::generation_lease::GenerationLeaseKey};
 use super::writer::{CommittedBundleIndex, open_committed};
 
 /// Keep the cache bounded because every entry owns Tantivy's mmap directory
-/// and reader. The value is intentionally internal: this is a process-local
-/// resource optimization, not a deployment setting.
-const DEFAULT_CAPACITY: usize = 64;
+/// and reader. The measured Issue benchmark reaches 200 Bundles; 256 entries
+/// keeps that working set warm while retaining a finite process-local bound.
+/// This is intentionally internal, not a deployment setting.
+const DEFAULT_CAPACITY: usize = 256;
 
 type LoadResult = Result<Arc<CommittedBundleIndex>, String>;
 
@@ -202,6 +203,11 @@ mod tests {
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ))
+    }
+
+    #[test]
+    fn default_capacity_covers_the_measured_issue_working_set() {
+        assert_eq!(GenerationReaderCache::default().capacity, 256);
     }
 
     #[test]
