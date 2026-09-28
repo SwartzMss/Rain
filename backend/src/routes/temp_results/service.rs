@@ -1,5 +1,7 @@
 use super::common::checked_page_end;
-use super::lifecycle::{abort_staging_result, acquire_materialization_lease};
+use super::lifecycle::{
+    abort_staging_result, acquire_materialization_lease, acquire_materialization_lease_for_client,
+};
 use super::lifecycle::{
     acquire_active_result, finish_deleting_temp_result, load_active_unexpired_record, load_record,
 };
@@ -50,6 +52,24 @@ struct SearchExecutionGuard {
     token: crate::services::search_execution::CancellationToken,
 }
 
+struct SearchExecutionHandlerGuard {
+    token: crate::services::search_execution::CancellationToken,
+}
+
+impl SearchExecutionHandlerGuard {
+    fn new(context: &SearchExecutionContext) -> Self {
+        Self {
+            token: context.cancellation_token(),
+        }
+    }
+}
+
+impl Drop for SearchExecutionHandlerGuard {
+    fn drop(&mut self) {
+        self.token.cancel();
+    }
+}
+
 impl SearchExecutionGuard {
     fn new(registry: SearchExecutionRegistry, context: SearchExecutionContext) -> Self {
         let search_id = context.search_id.clone();
@@ -69,6 +89,7 @@ impl Drop for SearchExecutionGuard {
         } else {
             TerminalStatus::Failed
         };
+        self.token.cancel();
         self.registry.finish(&self.search_id, status);
     }
 }
@@ -534,6 +555,8 @@ pub(crate) async fn create_preview_result(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let settings = state.settings.snapshot().await;
+    let client_key = request_client_key(&request);
+    let payload = payload.into_inner();
     let context = if let Some(search_id) = payload.search_id.as_deref() {
         let Some(cancel_token) = request
             .headers()
@@ -570,36 +593,54 @@ pub(crate) async fn create_preview_result(
         check_temp_result_rate_limit(&state, &request)?;
         None
     };
-    let _execution_guard = context.as_ref().map(|context| {
-        SearchExecutionGuard::new(
-            state.temp_results.search_executions.clone(),
-            context.clone(),
+    let Some(context) = context else {
+        return create_preview_result_inner(&client_key, &payload, &state, None)
+            .await
+            .map(|response| HttpResponse::Ok().json(response));
+    };
+
+    let _handler_guard = SearchExecutionHandlerGuard::new(&context);
+    let worker_state = state.clone();
+    let worker_registry = state.temp_results.search_executions.clone();
+    let worker_client_key = client_key.clone();
+    let worker = tokio::spawn(async move {
+        let _execution_guard = SearchExecutionGuard::new(worker_registry.clone(), context.clone());
+        let result = create_preview_result_inner(
+            &worker_client_key,
+            &payload,
+            &worker_state,
+            Some(&context),
         )
-    });
-    let result = create_preview_result_inner(&request, &payload, &state, context.as_ref()).await;
-    if let Some(context) = context {
+        .await;
         let status = match &result {
             Ok(_) => TerminalStatus::Completed,
             Err(error) if is_search_cancelled(error) => TerminalStatus::Cancelled,
             Err(error) if is_scan_timeout(error) => TerminalStatus::TimedOut,
             Err(_) => TerminalStatus::Failed,
         };
-        state
-            .temp_results
-            .search_executions
-            .finish(&context.search_id, status);
+        worker_registry.finish(&context.search_id, status);
+        result
+    });
+    match worker.await {
+        Ok(Ok(response)) => Ok(HttpResponse::Ok().json(response)),
+        Ok(Err(error)) => Err(error),
+        Err(error) => {
+            tracing::error!(%error, "interactive search worker terminated unexpectedly");
+            Err(AppError::Config(
+                "interactive search worker terminated".into(),
+            ))
+        }
     }
-    result
 }
 
 async fn create_preview_result_inner(
-    request: &HttpRequest,
+    client_key: &str,
     payload: &PreviewTempResultRequest,
     state: &web::Data<AppState>,
     context: Option<&SearchExecutionContext>,
-) -> Result<HttpResponse, AppError> {
+) -> Result<MaterializedPreviewResponse, AppError> {
     let settings = state.settings.snapshot().await;
-    let _client_lease = acquire_materialization_lease(state, request)?;
+    let _client_lease = acquire_materialization_lease_for_client(state, client_key)?;
     let _permit = state
         .temp_results
         .permits
@@ -659,12 +700,12 @@ async fn create_preview_result_inner(
             return Err(error);
         }
     };
-    Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
+    Ok(MaterializedPreviewResponse {
         result_id: outcome.id,
         total: outcome.total,
         next_start,
         lines,
-    }))
+    })
 }
 
 pub(crate) async fn create_full_result(
@@ -1023,11 +1064,13 @@ mod tests {
         let context = state
             .start(&reservation.search_id, &reservation.cancel_token, None)
             .unwrap();
+        let token = context.cancellation_token();
 
         {
             let _guard = super::SearchExecutionGuard::new(state.clone(), context);
         }
 
+        assert!(token.is_cancelled());
         assert_eq!(state.active_count(), 0);
     }
 

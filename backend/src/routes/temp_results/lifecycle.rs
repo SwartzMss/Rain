@@ -31,7 +31,14 @@ pub(crate) fn acquire_materialization_lease(
     state: &web::Data<AppState>,
     request: &HttpRequest,
 ) -> Result<MaterializationLease, AppError> {
-    let key = super::request_client_key(request);
+    acquire_materialization_lease_for_client(state, &super::request_client_key(request))
+}
+
+pub(crate) fn acquire_materialization_lease_for_client(
+    state: &web::Data<AppState>,
+    key: &str,
+) -> Result<MaterializationLease, AppError> {
+    let key = key.to_owned();
     let mut clients = state.temp_results.materializations.lock().map_err(|_| {
         AppError::api(
             StatusCode::SERVICE_UNAVAILABLE,

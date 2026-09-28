@@ -38,6 +38,31 @@ describe('interactive search execution', () => {
       .rejects.toBeInstanceOf(RequestCancelledError);
   });
 
+  it('uses a valid UUID fallback when randomUUID is unavailable', async () => {
+    let requestBody: { search_id?: string } | undefined;
+    vi.stubGlobal('crypto', {});
+    const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit = {}) => {
+      if (url.endsWith('/api/search-requests') && init.method === 'POST') {
+        requestBody = JSON.parse(String(init.body)) as { search_id?: string };
+        return Promise.resolve(new Response(JSON.stringify({
+          search_id: '00000000-0000-4000-8000-000000000001',
+          cancel_token: 'token',
+          expires_in_ms: 60_000
+        }), { status: 201 }));
+      }
+      if (url.endsWith('/api/temp-results/preview')) {
+        return Promise.resolve(new Response(JSON.stringify(previewResponse('result')), { status: 200 }));
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<ExecutionProbe />);
+    await waitFor(() => expect(requestBody?.search_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    ));
+  });
+
   it('cancels the preview with an independent DELETE request', async () => {
     let previewSignal: AbortSignal | undefined;
     const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit = {}) => {
@@ -119,6 +144,9 @@ describe('interactive search execution', () => {
         }
         return new Promise((resolve) => { resolveSecond = resolve; });
       }
+      if (url.includes('/api/search-requests/') && init.method === 'DELETE') {
+        return Promise.resolve(new Response(JSON.stringify({ status: 'cancelled' }), { status: 200 }));
+      }
       throw new Error(`unexpected request ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -151,6 +179,80 @@ describe('interactive search execution', () => {
     await waitFor(() => expect(previewCalls).toBe(2));
     expect(screen.getByTestId('loading')).toHaveTextContent('true');
     await act(async () => resolveSecond(new Response(JSON.stringify(previewResponse('new')), { status: 200 })));
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('SUCCEEDED'));
+  });
+
+  it('waits for the previous cancellation before reserving a replacement execution', async () => {
+    let resolveFirstReservation!: (response: Response) => void;
+    let resolveCancellation!: (response: Response) => void;
+    let resolveSecondPreview!: (response: Response) => void;
+    let reservationCalls = 0;
+    let deleteCalls = 0;
+    let previewCalls = 0;
+    const firstReservation = new Promise<Response>((resolve) => {
+      resolveFirstReservation = resolve;
+    });
+    const cancellation = new Promise<Response>((resolve) => {
+      resolveCancellation = resolve;
+    });
+    const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit = {}) => {
+      if (url.endsWith('/api/search-requests') && init.method === 'POST') {
+        reservationCalls += 1;
+        if (reservationCalls === 1) return firstReservation;
+        return Promise.resolve(new Response(JSON.stringify({
+          search_id: '00000000-0000-4000-8000-000000000002',
+          cancel_token: 'token-b',
+          expires_in_ms: 60_000
+        }), { status: 201 }));
+      }
+      if (url.includes('/api/search-requests/') && init.method === 'DELETE') {
+        deleteCalls += 1;
+        return cancellation;
+      }
+      if (url.endsWith('/api/temp-results/preview')) {
+        previewCalls += 1;
+        return new Promise((resolve) => { resolveSecondPreview = resolve; });
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    function ReplaceProbe() {
+      const { snapshot, execute } = useSearchExecution();
+      return (
+        <>
+          <output data-testid="status">{snapshot.status}</output>
+          <button type="button" onClick={() => { void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' }); }}>new</button>
+        </>
+      );
+    }
+
+    render(<ReplaceProbe />);
+    fireEvent.click(screen.getByRole('button', { name: 'new' }));
+    await waitFor(() => expect(reservationCalls).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'new' }));
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    expect(deleteCalls).toBe(0);
+    expect(reservationCalls).toBe(1);
+
+    await act(async () => {
+      resolveFirstReservation(new Response(JSON.stringify({
+        search_id: '00000000-0000-4000-8000-000000000001',
+        cancel_token: 'token-a',
+        expires_in_ms: 60_000
+      }), { status: 201 }));
+    });
+    await waitFor(() => expect(deleteCalls).toBe(1));
+    expect(reservationCalls).toBe(1);
+
+    await act(async () => {
+      resolveCancellation(new Response(JSON.stringify({ status: 'cancelled' }), { status: 200 }));
+    });
+    await waitFor(() => expect(reservationCalls).toBe(2));
+    await waitFor(() => expect(previewCalls).toBe(1));
+    await act(async () => resolveSecondPreview(new Response(JSON.stringify(previewResponse('replacement')), { status: 200 })));
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('SUCCEEDED'));
   });
 

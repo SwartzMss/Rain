@@ -28,6 +28,8 @@ interface ActiveExecution {
   cancelRequested: boolean;
   settleCancellationUi: boolean;
   finished: boolean;
+  finishedPromise: Promise<void>;
+  resolveFinished: (() => void) | null;
 }
 
 const initialSnapshot: SearchExecutionSnapshot = {
@@ -40,10 +42,25 @@ const initialSnapshot: SearchExecutionSnapshot = {
 };
 
 function newSearchId(): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
   }
-  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function finishExecution(active: ActiveExecution): void {
+  if (active.finished) return;
+  active.finished = true;
+  active.resolveFinished?.();
+  active.resolveFinished = null;
 }
 
 function elapsedSince(startedAt: number): number {
@@ -105,20 +122,24 @@ export function useSearchExecution() {
         : current);
     }
 
-    if (!active.cancelToken) return;
     const updateCancellationUi = invalidate || active.settleCancellationUi;
-    active.cancelController?.abort();
-    active.cancelController = new AbortController();
+    if (!active.cancelToken) return;
     try {
-      const response = await rainApi.cancelSearchRequest(active.searchId, active.cancelToken, active.cancelController.signal);
-      if (!response || response.status === 'cancelled' || response.status === 'timeout') {
-        active.finished = true;
-        if (updateCancellationUi) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
-      } else if (response.status === 'completed' || response.status === 'failed') {
-        active.finished = true;
-        if (updateCancellationUi) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
-      } else if (updateCancellationUi) {
-        setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true } : current);
+      while (!active.finished) {
+        active.cancelController?.abort();
+        active.cancelController = new AbortController();
+        const response = await rainApi.cancelSearchRequest(active.searchId, active.cancelToken, active.cancelController.signal);
+        if (!response || response.status === 'cancelled' || response.status === 'timeout') {
+          finishExecution(active);
+          if (updateCancellationUi) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
+        } else if (response.status === 'completed' || response.status === 'failed') {
+          finishExecution(active);
+          if (updateCancellationUi) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
+        } else if (updateCancellationUi) {
+          setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true } : current);
+        }
+        if (active.finished) return;
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
       }
     } catch (error) {
       if (error instanceof RequestCancelledError || !updateCancellationUi) return;
@@ -139,8 +160,15 @@ export function useSearchExecution() {
     options: SearchExecutionOptions
   ): Promise<TempResultPreviewResponse | undefined> => {
     const previous = activeRef.current;
-    if (previous && !previous.finished) void requestCancellation(previous, false);
+    if (previous && !previous.finished) {
+      await requestCancellation(previous, false);
+      await previous.finishedPromise;
+    }
     const generation = ++generationRef.current;
+    let resolveFinished!: () => void;
+    const finishedPromise = new Promise<void>((resolve) => {
+      resolveFinished = resolve;
+    });
     const active: ActiveExecution = {
       generation,
       searchId: newSearchId(),
@@ -152,7 +180,9 @@ export function useSearchExecution() {
       cancelToken: null,
       cancelRequested: false,
       settleCancellationUi: false,
-      finished: false
+      finished: false,
+      finishedPromise,
+      resolveFinished
     };
     activeRef.current = active;
     setSnapshot({ status: 'RUNNING', searchId: active.searchId, scopeKey: active.scopeKey, elapsedMs: 0, errorMessage: null, cancelUnconfirmed: false });
@@ -175,7 +205,7 @@ export function useSearchExecution() {
         signal: active.executionController.signal
       });
       if (!isCurrent() || active.cancelRequested) return undefined;
-      active.finished = true;
+      finishExecution(active);
       setSnapshot({ status: 'SUCCEEDED', searchId: active.searchId, scopeKey: active.scopeKey, elapsedMs: elapsedSince(active.startedAt), errorMessage: null, cancelUnconfirmed: false });
       options.onSuccess?.(result);
       return result;
@@ -183,7 +213,7 @@ export function useSearchExecution() {
       if (active.finished) return undefined;
       if (active.cancelRequested) {
         if (!active.cancelToken) {
-          active.finished = true;
+          finishExecution(active);
           if (active.settleCancellationUi) {
             setSnapshot((current) => current.searchId === active.searchId
               ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false, elapsedMs: elapsedSince(active.startedAt) }
@@ -205,7 +235,7 @@ export function useSearchExecution() {
         ? '搜索达到系统安全时限，已停止。建议缩小搜索范围或调整搜索条件'
         : normalizeApiError(error);
       setSnapshot({ status: 'FAILED', searchId: active.searchId, scopeKey: active.scopeKey, elapsedMs: elapsedSince(active.startedAt), errorMessage: message, cancelUnconfirmed: false });
-      active.finished = true;
+      finishExecution(active);
       return undefined;
     }
   }, [cancel, requestCancellation]);
