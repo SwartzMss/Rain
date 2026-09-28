@@ -42,6 +42,20 @@ describe('upload queue', () => {
     await settleQueue();
     expect([...requests.keys()]).toEqual(['a.log', 'b.log', 'c.log']);
     expect(queue.getTasks('ISSUE-1').find((task) => task.name === 'a.log')?.status).toBe('ACCEPTED');
+
+    const acceptedTask = queue.getTasks('ISSUE-1').find((task) => task.name === 'a.log')!;
+    expect(queue.markHandedOff(acceptedTask.id)).toBe(true);
+    expect(queue.getTasks('ISSUE-1').find((task) => task.name === 'a.log')?.status).toBe('HANDED_OFF');
+    expect(queue.markHandedOff(acceptedTask.id)).toBe(false);
+    expect(queue.getTasks('ISSUE-1').find((task) => task.name === 'a.log')?.response).toEqual({
+      bundle_hash: 'bundle-a'
+    });
+  });
+
+  it('only hands off an accepted task with a response', () => {
+    const queue = createUploadQueue(async () => ({ bundle_hash: 'unused' }));
+
+    expect(queue.markHandedOff('missing-task')).toBe(false);
   });
 
   it('marks one file failed without blocking the remaining queue', async () => {
