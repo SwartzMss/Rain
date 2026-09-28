@@ -12,7 +12,7 @@ This change also stabilizes two existing unit tests that fail only under the def
 
 The resulting read-then-write upgrade can fail with `SQLITE_BUSY_SNAPSHOT`: an admitted transaction reads an old snapshot, an unadmitted writer commits, and the first transaction later attempts to become a writer. Large deletion jobs amplify the timing window because they execute many short batches.
 
-The baseline readiness timeout has a separate test-isolation cause. `acquire` keys every pool whose filename is `:memory:` to the same writer mutex even though `db::init_pool` deliberately creates private in-memory databases. Parallel tests therefore queue unrelated pools behind one another. The test passes when focused or run serially.
+The baseline readiness timeout is scheduler-sensitive: the focused test and the serial full suite pass, while the initial default-parallel run timed out during cancellation recovery. SQLx gives independently-created private in-memory pools distinct internal filenames, so the writer-key implementation must preserve its existing file-key behavior rather than inventing a separate memory-pool identity scheme. The test will use a unique file-backed fixture to remove unrelated scheduler and pool setup variables.
 
 The baseline Tantivy timeout is scheduler-sensitive: a dropped pipeline signals a `spawn_blocking` worker and the worker owns the resource permit until it exits. Under the full parallel suite, the worker can wait behind other blocking jobs longer than the test's fixed ten-second guard. Focused and serial runs pass, and the production lifetime rule must remain unchanged.
 
@@ -44,7 +44,7 @@ Pure SELECT paths continue to use the pool directly. Migrations, startup initial
 
 ### 3. Admission key correctness
 
-File-backed SQLite pools continue to share a writer mutex by canonical database path. Private `:memory:` pools use the stable address of their connection-options `Arc` as the admission key, so clones of one pool share admission while independently-created private pools do not. This matches SQLx's pool semantics and prevents unrelated tests from queueing behind one another.
+File-backed SQLite pools continue to share a writer mutex by canonical database path. SQLx assigns independently-created private in-memory pools distinct internal filenames, while clones of one pool retain the same connection options; a regression test will preserve and document those semantics. No separate memory-only keying rule is needed.
 
 ### 4. Runtime writer audit
 

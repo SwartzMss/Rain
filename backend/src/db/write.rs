@@ -8,7 +8,7 @@ use std::{
 
 use futures_util::future::BoxFuture;
 use once_cell::sync::Lazy;
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::{SqliteConnection, SqlitePool, pool::PoolConnection};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::{error::AppError, ingest::metrics::micros};
@@ -81,6 +81,43 @@ pub async fn run<I: Sync + ?Sized, T, F>(
     pool: &SqlitePool,
     operation: &str,
     input: &I,
+    execute: F,
+) -> Result<T, AppError>
+where
+    F: for<'c> FnMut(&'c mut SqliteConnection, &'c I) -> BoxFuture<'c, Result<T, AppError>>,
+{
+    execute_with_retry(pool, operation, input, execute).await
+}
+
+/// Starts a transaction that reserves SQLite's writer slot before any reads.
+/// The caller owns admission and must commit or roll back before dropping it.
+pub async fn begin_immediate(pool: &SqlitePool) -> Result<PoolConnection<sqlx::Sqlite>, AppError> {
+    let mut connection = pool.acquire().await.map_err(AppError::Database)?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(connection)
+}
+
+/// Executes a replayable multi-statement write transaction through the same
+/// admission, transaction policy, telemetry, and retry path as [`run`].
+pub async fn transaction<T, F>(
+    pool: &SqlitePool,
+    operation: &str,
+    mut execute: F,
+) -> Result<T, AppError>
+where
+    F: for<'c> FnMut(&'c mut SqliteConnection) -> BoxFuture<'c, Result<T, AppError>>,
+{
+    let unit = ();
+    execute_with_retry(pool, operation, &unit, |connection, _| execute(connection)).await
+}
+
+async fn execute_with_retry<I: Sync + ?Sized, T, F>(
+    pool: &SqlitePool,
+    operation: &str,
+    input: &I,
     mut execute: F,
 ) -> Result<T, AppError>
 where
@@ -93,25 +130,28 @@ where
         let queue_ms = queue_elapsed.as_millis() as u64;
         let queue_us = micros(queue_elapsed);
         let started = Instant::now();
-        let begin_result = pool.begin().await;
+        let begin_result = begin_immediate(pool).await;
         let begin_us = micros(started.elapsed());
         let mut execute_us = 0;
         let mut finish_us = 0;
         let mut rollback_failed = false;
         let result = match begin_result {
-            Ok(mut tx) => {
+            Ok(mut connection) => {
                 let execute_started = Instant::now();
-                let executed = execute(&mut tx, input).await;
+                let executed = execute(&mut *connection, input).await;
                 execute_us = micros(execute_started.elapsed());
                 let finish_started = Instant::now();
                 let result = match executed {
-                    Ok(value) => tx
-                        .commit()
+                    Ok(value) => sqlx::query("COMMIT")
+                        .execute(&mut *connection)
                         .await
-                        .map(|()| value)
+                        .map(|_| value)
                         .map_err(AppError::Database),
-                    Err(error) => match tx.rollback().await {
-                        Ok(()) => Err(error),
+                    Err(error) => match sqlx::query("ROLLBACK")
+                        .execute(&mut *connection)
+                        .await
+                    {
+                        Ok(_) => Err(error),
                         Err(rollback_error) => {
                             rollback_failed = true;
                             Err(AppError::Database(rollback_error))
@@ -121,7 +161,7 @@ where
                 finish_us = micros(finish_started.elapsed());
                 result
             }
-            Err(error) => Err(AppError::Database(error)),
+            Err(error) => Err(error),
         };
         drop(permit);
         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -174,8 +214,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     async fn fixture() -> (PathBuf, SqlitePool, SqlitePool) {
         let root = std::env::temp_dir().join(format!("rain-write-{}", uuid::Uuid::new_v4()));
@@ -342,6 +383,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_uses_begin_immediate_before_closure_reads() {
+        let (root, pool, external) = fixture().await;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered_for_run = entered.clone();
+        let release_for_run = release.clone();
+        let attempts_for_run = attempts.clone();
+        let run_pool = pool.clone();
+        let task = tokio::spawn(async move {
+            run(&run_pool, "immediate-test", &(), move |conn, _| {
+                let entered = entered_for_run.clone();
+                let release = release_for_run.clone();
+                let attempts = attempts_for_run.clone();
+                Box::pin(async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    sqlx::query_scalar::<_, i64>("SELECT value FROM counter")
+                        .fetch_one(&mut *conn)
+                        .await?;
+                    entered.notify_one();
+                    release.notified().await;
+                    sqlx::query("UPDATE counter SET value=value+1")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+        });
+        entered.notified().await;
+        let external_error = sqlx::query("UPDATE counter SET value=value+1")
+            .execute(&external)
+            .await
+            .expect_err("BEGIN IMMEDIATE must reserve the writer before the SELECT");
+        assert!(matches!(external_error, sqlx::Error::Database(_)));
+        let _ = sqlx::query("ROLLBACK").execute(&external).await;
+        release.notify_one();
+        task.await.unwrap().unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT value FROM counter")
+                .fetch_one(&external)
+                .await
+                .unwrap(),
+            1
+        );
+        cleanup_fixture(root, pool, external).await;
+    }
+
+    #[tokio::test]
+    async fn private_memory_pools_do_not_share_admission() {
+        let first = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        let first_clone = first.clone();
+        let second = SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        let permit = acquire(&first).await;
+
+        let mut same_pool = Box::pin(acquire(&first_clone));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut same_pool)
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(1), acquire(&second))
+            .await
+            .unwrap();
+        drop(permit);
+        drop(
+            tokio::time::timeout(Duration::from_secs(1), same_pool)
+                .await
+                .unwrap(),
+        );
+    }
+
+    #[tokio::test]
     async fn constraint_failure_rolls_back_without_retry() {
         let (root, pool, external) = fixture().await;
         let attempts = AtomicUsize::new(0);
@@ -394,7 +509,11 @@ mod tests {
         .await
         .unwrap();
         assert!(busy(&result.unwrap_err()));
-        assert_eq!(attempts.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "BEGIN IMMEDIATE rejects the persistent lock before the closure runs"
+        );
         blocker.rollback().await.unwrap();
         run(&pool, "after-exhaustion", &(), |conn, _| {
             Box::pin(async move {

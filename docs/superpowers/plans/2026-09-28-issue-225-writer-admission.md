@@ -67,21 +67,13 @@ Run: cargo test --locked --lib db::write::tests::run_uses_begin_immediate_before
 
 Expected: FAIL because the external update commits while the deferred transaction only holds a read snapshot.
 
-- [ ] Step 3: Add a failing admission-key test for private in-memory pools.
+- [ ] Step 3: Add an admission-key regression test for private in-memory pools.
 
-Create first and second with SqlitePool::connect_lazy("sqlite::memory:"), clone first, hold acquire(&first), and assert acquire(&first_clone) times out while acquire(&second) completes. This proves clones share a key and independent private memory pools do not.
+Create first and second with SqlitePool::connect_lazy("sqlite::memory:"), clone first, hold acquire(&first), and assert acquire(&first_clone) times out while acquire(&second) completes. This is a characterization test: SQLx gives the independently-created private pools distinct internal filenames, so no writer-key production change is required for this case.
 
-- [ ] Step 4: Refactor WRITERS keys.
+- [ ] Step 4: Confirm file-backed key behavior remains canonical.
 
-Replace HashMap<PathBuf, Weak<Mutex<()>>> with:
-
-    #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-    enum WriterKey {
-        File(PathBuf),
-        PrivateMemory(usize),
-    }
-
-For :memory:, use Arc::as_ptr(&pool.connect_options()) as usize. For file-backed databases preserve canonicalization and the relative-path fallback. Keep weak-entry cleanup.
+Keep HashMap<PathBuf, Weak<Mutex<()>>> and the existing canonicalization fallback. The existing concurrent-pools test is the regression for two pools pointing to one file; do not add pointer-based memory keying because SQLx already assigns private memory pools distinct internal filenames.
 
 - [ ] Step 5: Add begin_immediate and make run use it.
 
