@@ -1,6 +1,7 @@
 use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
 
 use actix_web::{HttpResponse, get, web};
+use futures_util::StreamExt;
 use serde::Deserialize;
 
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
     search::generation_lease::GenerationLeaseRegistry,
     search::{
         ContentSearchRequest, ContentSearchResult, ContentSearchScope, SearchIndex, SearchWindow,
-        parallel::run_issue_bundle_searches,
+        parallel::stream_issue_bundle_searches,
         publication::{
             acquire_generation_lease_with_registry, artifact_relative_path,
             can_skip_visibility_snapshot,
@@ -434,7 +435,7 @@ async fn search_issue_content_mixed(
     let data_root = data_root.to_path_buf();
     let registry = registry.clone();
     let request_for_jobs = request.clone();
-    let results = run_issue_bundle_searches(jobs, query_permits, move |bundle, permit| {
+    let mut results = stream_issue_bundle_searches(jobs, query_permits, move |bundle, permit| {
         let pool = pool_for_jobs.clone();
         let data_root = data_root.clone();
         let registry = registry.clone();
@@ -501,9 +502,8 @@ async fn search_issue_content_mixed(
                 };
             Ok((bundle_hash, result))
         }
-    })
-    .await;
-    for result in results {
+    });
+    while let Some((_index, result)) = results.next().await {
         let (bundle_hash, result) = result?;
         total = total.saturating_add(result.total);
         for mut row in result.rows {

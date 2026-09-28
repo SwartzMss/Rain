@@ -24,11 +24,11 @@ pub(crate) fn issue_search_parallelism(bundle_count: usize) -> usize {
     }
 }
 
-pub(crate) async fn run_issue_bundle_searches<I, F, Fut, T>(
+pub(crate) fn stream_issue_bundle_searches<I, F, Fut, T>(
     jobs: I,
     global_permits: Arc<Semaphore>,
     operation: F,
-) -> Vec<Result<T, AppError>>
+) -> impl futures_util::Stream<Item = (usize, Result<T, AppError>)>
 where
     I: IntoIterator,
     I::Item: Send + 'static,
@@ -39,7 +39,7 @@ where
     let operation = Arc::new(operation);
     let jobs = jobs.into_iter().collect::<Vec<_>>();
     let parallelism = issue_search_parallelism(jobs.len());
-    let mut results: Vec<(usize, Result<T, AppError>)> = stream::iter(jobs.into_iter().enumerate())
+    stream::iter(jobs.into_iter().enumerate())
         .map(move |(index, job)| {
             let operation = operation.clone();
             let global_permits = global_permits.clone();
@@ -54,10 +54,6 @@ where
             }
         })
         .buffer_unordered(parallelism)
-        .collect()
-        .await;
-    results.sort_by_key(|(index, _)| *index);
-    results.into_iter().map(|(_, result)| result).collect()
 }
 
 #[cfg(test)]
@@ -68,7 +64,9 @@ mod tests {
     };
     use std::time::Duration;
 
-    use super::{issue_search_parallelism, run_issue_bundle_searches};
+    use futures_util::StreamExt;
+
+    use super::{issue_search_parallelism, stream_issue_bundle_searches};
 
     #[test]
     fn issue_search_parallelism_scales_only_with_bundle_count() {
@@ -86,7 +84,7 @@ mod tests {
         let peak = Arc::new(AtomicUsize::new(0));
         let permits = Arc::new(tokio::sync::Semaphore::new(4));
         let jobs = (0..50).collect::<Vec<_>>();
-        let results = run_issue_bundle_searches(jobs, permits, {
+        let mut results = stream_issue_bundle_searches(jobs, permits, {
             let active = active.clone();
             let peak = peak.clone();
             move |job, _permit| {
@@ -102,7 +100,14 @@ mod tests {
                 }
             }
         })
+        .collect::<Vec<_>>()
         .await;
+
+        results.sort_by_key(|(index, _)| *index);
+        let results = results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect::<Vec<_>>();
 
         assert_eq!(results.len(), 50);
         assert_eq!(
