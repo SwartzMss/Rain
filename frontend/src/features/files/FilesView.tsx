@@ -27,6 +27,7 @@ import {
 } from './viewerTabs';
 import {
   formatHitPath,
+  hydrateTreeNode,
   isExtractionFolder,
   toTreeNode,
   type TreeNode
@@ -427,59 +428,28 @@ export function BundleView() {
       setTreeLoading(true);
       setTreeError(null);
       try {
-        const response = await rainApi.fetchFileNode(bundle, nodeId, {
-          limit: FILE_TREE_PAGE_SIZE
-        });
-        let normalized: TreeNode | null = null;
-        const childrenNodes: TreeNode[] = [];
-        const inferredParent = parentId ?? null;
-        const base = toTreeNode(bundle, response.node, inferredParent);
-        base.hasLoadedChildren = true;
-        base.childrenSourceId = nodeId;
-
-        // flatten extraction folders under archives
-        for (const child of response.children ?? []) {
-          const childNode = toTreeNode(bundle, child, base.id);
-          const parentForChild = base;
-          if (isExtractionFolder(childNode, parentForChild)) {
-            try {
-              const extracted = await rainApi.fetchFileNode(bundle, child.id.toString(), {
-                limit: FILE_TREE_PAGE_SIZE
-              });
-              (extracted.children ?? []).forEach((grand) => {
-                const grandNode = toTreeNode(bundle, grand, base.id);
-                childrenNodes.push(grandNode);
-              });
-              if (extracted.has_more && extracted.next_cursor) {
-                base.hasMoreChildren = true;
-                base.childrenCursor = extracted.next_cursor;
-                base.childrenSourceId = child.id.toString();
-              }
-            } catch {
-              // ignore extraction load errors
-            }
-          } else {
-            childrenNodes.push(childNode);
-          }
+        const result = await hydrateTreeNode(
+          bundle,
+          nodeId,
+          parentId ?? null,
+          (childId, options) => rainApi.fetchFileNode(bundle, childId, options),
+          FILE_TREE_PAGE_SIZE
+        );
+        const { node: normalized, children: childrenNodes } = result;
+        if (normalized.childrenLoadError) {
+          setTreeError(normalized.childrenLoadError);
         }
-
-        base.childrenIds = childrenNodes.map((child) => child.id);
-        if (base.childrenSourceId === nodeId) {
-          base.hasMoreChildren = response.has_more === true;
-          base.childrenCursor = response.next_cursor ?? null;
-        }
-        normalized = base;
 
         setTreeNodes((prev) => {
           const next = { ...prev };
-          next[base.id] = base;
+          next[normalized.id] = normalized;
           childrenNodes.forEach((child) => {
             next[child.id] = child;
           });
           return next;
         });
 
-        return normalized ? { node: normalized, children: childrenNodes } : null;
+        return { node: normalized, children: childrenNodes };
       } catch (error) {
         setTreeError(normalizeApiError(error));
         throw error;
@@ -1326,7 +1296,7 @@ export function BundleView() {
   useEffect(() => {
     if (!selectedNode) return;
     if (!selectedNode.is_dir && !isArchiveNode(selectedNode)) return;
-    if (selectedNode.hasLoadedChildren) return;
+    if (selectedNode.hasLoadedChildren || selectedNode.childrenLoadError) return;
     loadNode(selectedNode.bundleId || bundleId, selectedNode.rawId, selectedNode.parentId).catch(() => undefined);
   }, [
     bundleId,
@@ -1641,6 +1611,9 @@ export function BundleView() {
                               handleNodeClick(nodeId).catch(() => undefined);
                             }}
                             loading={treeLoading}
+                            onRetryLoad={(node) => {
+                              loadNode(node.bundleId, node.rawId, node.parentId).catch(() => undefined);
+                            }}
                             onLoadMore={(node) => {
                               loadMoreNode(node).catch(() => undefined);
                             }}

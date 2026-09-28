@@ -256,6 +256,61 @@ describe('interactive search execution', () => {
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('SUCCEEDED'));
   });
 
+  it('settles a replacement request when cancellation fails before confirmation', async () => {
+    let previewCalls = 0;
+    let deleteCalls = 0;
+    let replacementDone = false;
+    const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit = {}) => {
+      if (url.endsWith('/api/search-requests') && init.method === 'POST') {
+        return Promise.resolve(new Response(JSON.stringify({
+          search_id: previewCalls === 0
+            ? '00000000-0000-4000-8000-000000000001'
+            : '00000000-0000-4000-8000-000000000002',
+          cancel_token: 'token',
+          expires_in_ms: 60_000
+        }), { status: 201 }));
+      }
+      if (url.endsWith('/api/temp-results/preview')) {
+        previewCalls += 1;
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      }
+      if (url.includes('/api/search-requests/') && init.method === 'DELETE') {
+        deleteCalls += 1;
+        return Promise.reject(new Error('network down'));
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    function ReplaceProbe() {
+      const { snapshot, execute, cancel } = useSearchExecution();
+      const run = () => {
+        void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' })
+          .then(() => { replacementDone = true; });
+      };
+      return (
+        <>
+          <output data-testid="status">{snapshot.status}</output>
+          <SearchExecutionStatus snapshot={snapshot} onCancel={() => { void cancel(); }} />
+          <button type="button" onClick={run}>new</button>
+        </>
+      );
+    }
+
+    render(<ReplaceProbe />);
+    fireEvent.click(screen.getByRole('button', { name: 'new' }));
+    await waitFor(() => expect(previewCalls).toBe(1));
+    fireEvent.click(screen.getByRole('button', { name: 'new' }));
+
+    await waitFor(() => expect(replacementDone).toBe(true));
+    expect(deleteCalls).toBe(1);
+    expect(previewCalls).toBe(1);
+    expect(screen.getByTestId('status')).toHaveTextContent('CANCELLING');
+    expect(screen.getByRole('button', { name: '重试取消' })).toBeInTheDocument();
+  });
+
   it('renders indeterminate progress without a fake percentage', () => {
     render(<SearchExecutionStatus snapshot={{ status: 'RUNNING', searchId: 'id', scopeKey: 'issue:X', elapsedMs: 1_250, errorMessage: null, cancelUnconfirmed: false }} onCancel={() => undefined} />);
     expect(screen.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');

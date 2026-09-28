@@ -1,4 +1,4 @@
-import type { FileNode } from '../../api/types';
+import type { FileNode, FileNodeResponse } from '../../api/types';
 import { isArchiveNode } from './filePresentation';
 
 export type TreeNode = Omit<FileNode, 'id' | 'children'> & {
@@ -11,7 +11,13 @@ export type TreeNode = Omit<FileNode, 'id' | 'children'> & {
   hasMoreChildren: boolean;
   childrenCursor: string | null;
   childrenSourceId: string;
+  childrenLoadError: string | null;
 };
+
+export type TreeNodeFetcher = (
+  nodeId: string,
+  options?: { cursor?: string | null; limit?: number }
+) => Promise<FileNodeResponse>;
 
 export const formatSize = (bytes?: number) => {
   if (bytes === undefined || bytes === null) return '--';
@@ -65,5 +71,51 @@ export const toTreeNode = (
   hasLoadedChildren: false,
   hasMoreChildren: false,
   childrenCursor: null,
-  childrenSourceId: node.id.toString()
+  childrenSourceId: node.id.toString(),
+  childrenLoadError: null
 });
+
+export async function hydrateTreeNode(
+  bundleId: string,
+  nodeId: string,
+  parentId: string | null,
+  fetchNode: TreeNodeFetcher,
+  limit = 100
+): Promise<{ node: TreeNode; children: TreeNode[] }> {
+  const response = await fetchNode(nodeId, { limit });
+  const base = toTreeNode(bundleId, response.node, parentId);
+  const childrenNodes: TreeNode[] = [];
+  base.hasLoadedChildren = true;
+  base.childrenSourceId = nodeId;
+
+  for (const child of response.children ?? []) {
+    const childNode = toTreeNode(bundleId, child, base.id);
+    if (!isExtractionFolder(childNode, base)) {
+      childrenNodes.push(childNode);
+      continue;
+    }
+
+    try {
+      const extracted = await fetchNode(child.id.toString(), { limit });
+      (extracted.children ?? []).forEach((grand) => {
+        childrenNodes.push(toTreeNode(bundleId, grand, base.id));
+      });
+      if (extracted.has_more && extracted.next_cursor) {
+        base.hasMoreChildren = true;
+        base.childrenCursor = extracted.next_cursor;
+        base.childrenSourceId = child.id.toString();
+      }
+    } catch (error) {
+      base.hasLoadedChildren = false;
+      base.childrenLoadError = error instanceof Error ? error.message : '解压目录加载失败';
+    }
+  }
+
+  base.childrenIds = childrenNodes.map((child) => child.id);
+  if (!base.childrenLoadError && base.childrenSourceId === nodeId) {
+    base.hasMoreChildren = response.has_more === true;
+    base.childrenCursor = response.next_cursor ?? null;
+  }
+
+  return { node: base, children: childrenNodes };
+}

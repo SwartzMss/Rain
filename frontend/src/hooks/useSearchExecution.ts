@@ -25,12 +25,19 @@ interface ActiveExecution {
   executionController: AbortController;
   cancelController: AbortController | null;
   cancelToken: string | null;
+  cancellationPromise: Promise<CancellationResult> | null;
   cancelRequested: boolean;
   settleCancellationUi: boolean;
   finished: boolean;
   finishedPromise: Promise<void>;
   resolveFinished: (() => void) | null;
 }
+
+type CancellationResult = 'finished' | 'waiting-for-token' | 'unconfirmed';
+
+const CANCEL_REQUEST_TIMEOUT_MS = 5_000;
+const CANCELLATION_CONFIRMATION_TIMEOUT_MS = 10_000;
+const REPLACEMENT_CANCEL_WAIT_MS = 6_000;
 
 const initialSnapshot: SearchExecutionSnapshot = {
   status: 'IDLE',
@@ -86,6 +93,24 @@ function withTimeout<T>(promise: Promise<T>, controller: AbortController, timeou
   });
 }
 
+function waitForFinished(active: ActiveExecution, timeoutMs: number): Promise<boolean> {
+  if (active.finished) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(active.finished);
+    }, timeoutMs);
+    active.finishedPromise.then(() => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      resolve(true);
+    });
+  });
+}
+
 export function useSearchExecution() {
   const [snapshot, setSnapshot] = useState<SearchExecutionSnapshot>(initialSnapshot);
   const generationRef = useRef(0);
@@ -108,8 +133,9 @@ export function useSearchExecution() {
     return () => window.clearInterval(timer);
   }, [snapshot.status, updateElapsed]);
 
-  const requestCancellation = useCallback(async (active: ActiveExecution, invalidate: boolean) => {
-    if (active.finished) return;
+  const requestCancellation = useCallback((active: ActiveExecution, invalidate: boolean): Promise<CancellationResult> => {
+    if (active.finished) return Promise.resolve('finished');
+    const existingCancellation = active.cancellationPromise;
     active.cancelRequested = true;
     if (invalidate) {
       active.settleCancellationUi = true;
@@ -122,31 +148,61 @@ export function useSearchExecution() {
         : current);
     }
 
-    const updateCancellationUi = invalidate || active.settleCancellationUi;
-    if (!active.cancelToken) return;
-    try {
-      while (!active.finished) {
-        active.cancelController?.abort();
-        active.cancelController = new AbortController();
-        const response = await rainApi.cancelSearchRequest(active.searchId, active.cancelToken, active.cancelController.signal);
-        if (!response || response.status === 'cancelled' || response.status === 'timeout') {
-          finishExecution(active);
-          if (updateCancellationUi) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
-        } else if (response.status === 'completed' || response.status === 'failed') {
-          finishExecution(active);
-          if (updateCancellationUi) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
-        } else if (updateCancellationUi) {
-          setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true } : current);
+    if (existingCancellation) return existingCancellation;
+    const updateCancellationUi = () => invalidate || active.settleCancellationUi;
+    const cancelToken = active.cancelToken;
+    if (!cancelToken) return Promise.resolve('waiting-for-token');
+    const cancellationPromise = (async (): Promise<CancellationResult> => {
+      const deadline = performance.now() + CANCELLATION_CONFIRMATION_TIMEOUT_MS;
+      const markUnconfirmed = () => {
+        if (updateCancellationUi()) {
+          setSnapshot((current) => current.searchId === active.searchId
+            ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true, errorMessage: '取消请求未确认，可重试；服务器安全时限仍生效' }
+            : current);
         }
-        if (active.finished) return;
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000));
+      };
+      try {
+        while (!active.finished) {
+          const remainingMs = deadline - performance.now();
+          if (remainingMs <= 0) {
+            markUnconfirmed();
+            return 'unconfirmed';
+          }
+          active.cancelController?.abort();
+          active.cancelController = new AbortController();
+          const response = await withTimeout(
+            rainApi.cancelSearchRequest(active.searchId, cancelToken, active.cancelController.signal),
+            active.cancelController,
+            Math.min(CANCEL_REQUEST_TIMEOUT_MS, remainingMs)
+          );
+          if (!response || response.status === 'cancelled' || response.status === 'timeout') {
+            finishExecution(active);
+            if (updateCancellationUi()) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
+          } else if (response.status === 'completed' || response.status === 'failed') {
+            finishExecution(active);
+            if (updateCancellationUi()) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
+          } else if (updateCancellationUi()) {
+            setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true } : current);
+          }
+          if (active.finished) return 'finished';
+          const waitMs = Math.min(1_000, deadline - performance.now());
+          if (waitMs <= 0) {
+            markUnconfirmed();
+            return 'unconfirmed';
+          }
+          await new Promise<void>((resolve) => window.setTimeout(resolve, waitMs));
+        }
+        return 'finished';
+      } catch (error) {
+        if (error instanceof RequestCancelledError || !updateCancellationUi()) return 'unconfirmed';
+        markUnconfirmed();
+        return 'unconfirmed';
+      } finally {
+        active.cancellationPromise = null;
       }
-    } catch (error) {
-      if (error instanceof RequestCancelledError || !updateCancellationUi) return;
-      setSnapshot((current) => current.searchId === active.searchId
-        ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true, errorMessage: '取消请求未确认，可重试；服务器安全时限仍生效' }
-        : current);
-    }
+    })();
+    active.cancellationPromise = cancellationPromise;
+    return cancellationPromise;
   }, []);
 
   const cancel = useCallback(async () => {
@@ -161,8 +217,17 @@ export function useSearchExecution() {
   ): Promise<TempResultPreviewResponse | undefined> => {
     const previous = activeRef.current;
     if (previous && !previous.finished) {
-      await requestCancellation(previous, false);
-      await previous.finishedPromise;
+      const cancellation = await requestCancellation(previous, false);
+      if (cancellation === 'waiting-for-token') {
+        await waitForFinished(previous, REPLACEMENT_CANCEL_WAIT_MS);
+      }
+      if (!previous.finished) {
+        previous.settleCancellationUi = true;
+        setSnapshot((current) => current.searchId === previous.searchId
+          ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true, errorMessage: '旧搜索尚未确认停止，请重试取消后再搜索' }
+          : current);
+        return undefined;
+      }
     }
     const generation = ++generationRef.current;
     let resolveFinished!: () => void;
@@ -178,6 +243,7 @@ export function useSearchExecution() {
       executionController: new AbortController(),
       cancelController: null,
       cancelToken: null,
+      cancellationPromise: null,
       cancelRequested: false,
       settleCancellationUi: false,
       finished: false,
