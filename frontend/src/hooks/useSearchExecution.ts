@@ -114,6 +114,7 @@ function waitForFinished(active: ActiveExecution, timeoutMs: number): Promise<bo
 export function useSearchExecution() {
   const [snapshot, setSnapshot] = useState<SearchExecutionSnapshot>(initialSnapshot);
   const generationRef = useRef(0);
+  const requestSequenceRef = useRef(0);
   const activeRef = useRef<ActiveExecution | null>(null);
 
   const updateElapsed = useCallback(() => {
@@ -215,6 +216,7 @@ export function useSearchExecution() {
     payload: Parameters<typeof rainApi.previewTempResult>[0],
     options: SearchExecutionOptions
   ): Promise<TempResultPreviewResponse | undefined> => {
+    const requestSequence = ++requestSequenceRef.current;
     const previous = activeRef.current;
     if (previous && !previous.finished) {
       const cancellation = await requestCancellation(previous, false);
@@ -222,6 +224,7 @@ export function useSearchExecution() {
         await waitForFinished(previous, REPLACEMENT_CANCEL_WAIT_MS);
       }
       if (!previous.finished) {
+        if (requestSequence !== requestSequenceRef.current) return undefined;
         previous.settleCancellationUi = true;
         setSnapshot((current) => current.searchId === previous.searchId
           ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true, errorMessage: '旧搜索尚未确认停止，请重试取消后再搜索' }
@@ -229,6 +232,7 @@ export function useSearchExecution() {
         return undefined;
       }
     }
+    if (requestSequence !== requestSequenceRef.current) return undefined;
     const generation = ++generationRef.current;
     let resolveFinished!: () => void;
     const finishedPromise = new Promise<void>((resolve) => {

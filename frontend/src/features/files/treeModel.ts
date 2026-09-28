@@ -1,4 +1,5 @@
 import type { FileNode, FileNodeResponse } from '../../api/types';
+import { normalizeApiError } from '../../api/client';
 import { isArchiveNode } from './filePresentation';
 
 export type TreeNode = Omit<FileNode, 'id' | 'children'> & {
@@ -107,7 +108,7 @@ export async function hydrateTreeNode(
       }
     } catch (error) {
       base.hasLoadedChildren = false;
-      base.childrenLoadError = error instanceof Error ? error.message : '解压目录加载失败';
+      base.childrenLoadError = normalizeApiError(error);
     }
   }
 
