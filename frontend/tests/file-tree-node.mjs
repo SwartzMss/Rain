@@ -79,6 +79,26 @@ try {
   assert.doesNotMatch(markup, /4\.0 KB/);
   assert.doesNotMatch(markup, /展开|收起|暂无子节点/);
 
+  const retryMarkup = renderToStaticMarkup(
+    React.createElement(FileTreeNode, {
+      nodeId: archiveId,
+      treeNodes: {
+        [archiveId]: {
+          ...treeNodes[archiveId],
+          childrenIds: [],
+          childrenLoadError: 'temporary extraction failure'
+        }
+      },
+      expandedNodes: new Set([archiveId]),
+      selectedNodeId: null,
+      onNodeClick: () => undefined,
+      onLoadMore: () => undefined,
+      onRetryLoad: () => undefined
+    })
+  );
+  assert.match(retryMarkup, /temporary extraction failure/);
+  assert.match(retryMarkup, />重试<\/button>/);
+
   const filesView = await readFile(
     new URL('../src/features/files/FilesView.tsx', import.meta.url),
     'utf8'

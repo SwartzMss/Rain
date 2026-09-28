@@ -10,6 +10,7 @@ type FileTreeNodeProps = {
   selectedNodeId: string | null;
   onNodeClick: (nodeId: string) => void;
   onLoadMore: (node: TreeNode) => void;
+  onRetryLoad: (node: TreeNode) => void;
   loading?: boolean;
 };
 
@@ -21,6 +22,7 @@ export function FileTreeNode({
   selectedNodeId,
   onNodeClick,
   onLoadMore,
+  onRetryLoad,
   loading = false
 }: FileTreeNodeProps): JSX.Element | null {
   const node = treeNodes[nodeId];
@@ -40,6 +42,7 @@ export function FileTreeNode({
             selectedNodeId={selectedNodeId}
             onNodeClick={onNodeClick}
             onLoadMore={onLoadMore}
+            onRetryLoad={onRetryLoad}
             loading={loading}
           />
         ))}
@@ -83,6 +86,22 @@ export function FileTreeNode({
       </button>
       {canExpand && isExpanded ? (
         <div className="ml-4 border-l border-slate-200">
+          {node.childrenLoadError ? (
+            <div className="ml-7 flex items-center gap-2 px-2 py-1 text-xs text-rose-600">
+              <span>{node.childrenLoadError}</span>
+              <button
+                type="button"
+                className="font-semibold text-sky-700 hover:text-sky-950"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onRetryLoad(node);
+                }}
+                disabled={loading}
+              >
+                重试
+              </button>
+            </div>
+          ) : null}
           {node.childrenIds.map((childId) => (
             <FileTreeNode
               key={childId}
@@ -93,6 +112,7 @@ export function FileTreeNode({
               selectedNodeId={selectedNodeId}
               onNodeClick={onNodeClick}
               onLoadMore={onLoadMore}
+              onRetryLoad={onRetryLoad}
               loading={loading}
             />
           ))}
