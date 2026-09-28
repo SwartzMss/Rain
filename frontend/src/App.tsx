@@ -122,37 +122,37 @@ function App() {
       <footer className="border-t border-white/10 bg-slate-950 text-slate-300">
         <div className="mx-auto flex w-full max-w-none flex-col items-center px-5 py-2 text-center text-sm sm:px-6">
           <nav aria-label="页脚导航" className="flex flex-wrap items-center justify-center gap-1">
-              <a
-                aria-label="联系作者（swartz_lubel@outlook.com）"
-                className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-slate-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
-                href="mailto:swartz_lubel@outlook.com"
-                title="swartz_lubel@outlook.com"
-              >
-                <MailIcon />
-                联系作者
-              </a>
-              <a
-                aria-label="GitHub 仓库（新窗口打开）"
-                className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-cyan-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
-                href="https://github.com/SwartzMss/Rain"
-                target="_blank"
-                rel="noreferrer"
-              >
-                <GithubIcon />
-                GitHub 仓库
-                <ExternalLinkIcon />
-              </a>
-              <a
-                aria-label="报告问题（新窗口打开）"
-                className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-slate-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
-                href="https://github.com/SwartzMss/Rain/issues"
-                target="_blank"
-                rel="noreferrer"
-              >
-                <IssueIcon />
-                报告问题
-                <ExternalLinkIcon />
-              </a>
+            <a
+              aria-label="联系作者（swartz_lubel@outlook.com）"
+              className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-slate-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
+              href="mailto:swartz_lubel@outlook.com"
+              title="swartz_lubel@outlook.com"
+            >
+              <MailIcon />
+              联系作者
+            </a>
+            <a
+              aria-label="GitHub 仓库（新窗口打开）"
+              className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-cyan-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
+              href="https://github.com/SwartzMss/Rain"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <GithubIcon />
+              GitHub 仓库
+              <ExternalLinkIcon />
+            </a>
+            <a
+              aria-label="报告问题（新窗口打开）"
+              className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-slate-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
+              href="https://github.com/SwartzMss/Rain/issues"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <IssueIcon />
+              报告问题
+              <ExternalLinkIcon />
+            </a>
           </nav>
         </div>
       </footer>
