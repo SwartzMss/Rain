@@ -590,7 +590,7 @@ async fn complete_handoff_creates_one_bundle_and_startup_reconciles_tail_bytes()
         &app,
         actix_test::TestRequest::post()
             .uri(&format!("/api/upload-sessions/{session_id}/complete"))
-            .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token.clone()))
             .to_request(),
     )
     .await;
@@ -612,6 +612,25 @@ async fn complete_handoff_creates_one_bundle_and_startup_reconciles_tail_bytes()
         .await
         .unwrap();
     assert_eq!(bundle_count, 1);
+    let bundle_hash: String = sqlx::query_scalar("SELECT hash FROM bundles WHERE id=?")
+        .bind(&delivered.1)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(delivered.1, bundle_hash);
+
+    let delivered_response = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::get()
+            .uri(&format!("/api/upload-sessions/{session_id}"))
+            .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(delivered_response.status(), actix_web::http::StatusCode::OK);
+    let delivered_body: serde_json::Value = actix_test::read_body_json(delivered_response).await;
+    assert_eq!(delivered_body["bundle_id"], delivered.1);
+    assert_eq!(delivered_body["bundle_hash"], bundle_hash);
 
     for _ in 0..200 {
         let status: String = sqlx::query_scalar("SELECT status FROM bundles WHERE id=?")

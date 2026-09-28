@@ -65,6 +65,7 @@ pub struct UploadSession {
     pub status: SessionStatus,
     pub input_path: String,
     pub bundle_id: Option<String>,
+    pub bundle_hash: Option<String>,
     pub failure_code: Option<String>,
     pub failure_reason: Option<String>,
     pub created_at: String,
@@ -110,6 +111,7 @@ struct UploadSessionRow {
     status: String,
     input_path: String,
     bundle_id: Option<String>,
+    bundle_hash: Option<String>,
     failure_code: Option<String>,
     failure_reason: Option<String>,
     created_at: String,
@@ -139,6 +141,7 @@ impl TryFrom<UploadSessionRow> for UploadSession {
             status: SessionStatus::try_from(row.status.as_str())?,
             input_path: row.input_path,
             bundle_id: row.bundle_id,
+            bundle_hash: row.bundle_hash,
             failure_code: row.failure_code,
             failure_reason: row.failure_reason,
             created_at: row.created_at,
@@ -210,7 +213,7 @@ pub async fn create_session(
 
 pub async fn get_session(pool: &SqlitePool, session_id: &str) -> Result<UploadSession, AppError> {
     let row = sqlx::query_as::<_, UploadSessionRow>(
-        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE id = ?",
+        "SELECT upload_sessions.id, upload_sessions.issue_code, upload_sessions.owner_user_id, upload_sessions.idempotency_key, upload_sessions.file_name, upload_sessions.file_size_bytes, upload_sessions.last_modified_ms, upload_sessions.chunk_size_bytes, upload_sessions.committed_offset, upload_sessions.next_chunk_index, upload_sessions.status, upload_sessions.input_path, upload_sessions.bundle_id, bundles.hash AS bundle_hash, upload_sessions.failure_code, upload_sessions.failure_reason, upload_sessions.created_at, upload_sessions.updated_at, upload_sessions.expires_at FROM upload_sessions LEFT JOIN bundles ON bundles.id = upload_sessions.bundle_id WHERE upload_sessions.id = ?",
     )
     .bind(session_id)
     .fetch_optional(pool)
@@ -227,7 +230,7 @@ pub async fn find_by_idempotency(
     idempotency_key: &str,
 ) -> Result<UploadSession, AppError> {
     let row = sqlx::query_as::<_, UploadSessionRow>(
-        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE owner_user_id = ? AND issue_code = ? AND idempotency_key = ?",
+        "SELECT upload_sessions.id, upload_sessions.issue_code, upload_sessions.owner_user_id, upload_sessions.idempotency_key, upload_sessions.file_name, upload_sessions.file_size_bytes, upload_sessions.last_modified_ms, upload_sessions.chunk_size_bytes, upload_sessions.committed_offset, upload_sessions.next_chunk_index, upload_sessions.status, upload_sessions.input_path, upload_sessions.bundle_id, bundles.hash AS bundle_hash, upload_sessions.failure_code, upload_sessions.failure_reason, upload_sessions.created_at, upload_sessions.updated_at, upload_sessions.expires_at FROM upload_sessions LEFT JOIN bundles ON bundles.id = upload_sessions.bundle_id WHERE upload_sessions.owner_user_id = ? AND upload_sessions.issue_code = ? AND upload_sessions.idempotency_key = ?",
     )
     .bind(owner_user_id)
     .bind(issue_code)
@@ -245,7 +248,7 @@ pub async fn list_sessions(
     issue_code: &str,
 ) -> Result<Vec<UploadSession>, AppError> {
     let rows = sqlx::query_as::<_, UploadSessionRow>(
-        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE owner_user_id = ? AND issue_code = ? AND status IN ('OPEN', 'FINALIZING') ORDER BY updated_at DESC",
+        "SELECT upload_sessions.id, upload_sessions.issue_code, upload_sessions.owner_user_id, upload_sessions.idempotency_key, upload_sessions.file_name, upload_sessions.file_size_bytes, upload_sessions.last_modified_ms, upload_sessions.chunk_size_bytes, upload_sessions.committed_offset, upload_sessions.next_chunk_index, upload_sessions.status, upload_sessions.input_path, upload_sessions.bundle_id, bundles.hash AS bundle_hash, upload_sessions.failure_code, upload_sessions.failure_reason, upload_sessions.created_at, upload_sessions.updated_at, upload_sessions.expires_at FROM upload_sessions LEFT JOIN bundles ON bundles.id = upload_sessions.bundle_id WHERE upload_sessions.owner_user_id = ? AND upload_sessions.issue_code = ? AND upload_sessions.status IN ('OPEN', 'FINALIZING') ORDER BY upload_sessions.updated_at DESC",
     )
     .bind(owner_user_id)
     .bind(issue_code)
@@ -261,7 +264,7 @@ pub async fn list_issue_sessions(
     issue_code: &str,
 ) -> Result<Vec<UploadSession>, AppError> {
     let rows = sqlx::query_as::<_, UploadSessionRow>(
-        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE owner_user_id = ? AND issue_code = ? AND status IN ('OPEN', 'FINALIZING') ORDER BY updated_at ASC",
+        "SELECT upload_sessions.id, upload_sessions.issue_code, upload_sessions.owner_user_id, upload_sessions.idempotency_key, upload_sessions.file_name, upload_sessions.file_size_bytes, upload_sessions.last_modified_ms, upload_sessions.chunk_size_bytes, upload_sessions.committed_offset, upload_sessions.next_chunk_index, upload_sessions.status, upload_sessions.input_path, upload_sessions.bundle_id, bundles.hash AS bundle_hash, upload_sessions.failure_code, upload_sessions.failure_reason, upload_sessions.created_at, upload_sessions.updated_at, upload_sessions.expires_at FROM upload_sessions LEFT JOIN bundles ON bundles.id = upload_sessions.bundle_id WHERE upload_sessions.owner_user_id = ? AND upload_sessions.issue_code = ? AND upload_sessions.status IN ('OPEN', 'FINALIZING') ORDER BY upload_sessions.updated_at ASC",
     )
     .bind(owner_user_id)
     .bind(issue_code)
@@ -415,7 +418,7 @@ pub async fn record_chunk(
 
 pub async fn list_finalizing(pool: &SqlitePool) -> Result<Vec<UploadSession>, AppError> {
     let rows = sqlx::query_as::<_, UploadSessionRow>(
-        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE status='FINALIZING' ORDER BY updated_at ASC",
+        "SELECT upload_sessions.id, upload_sessions.issue_code, upload_sessions.owner_user_id, upload_sessions.idempotency_key, upload_sessions.file_name, upload_sessions.file_size_bytes, upload_sessions.last_modified_ms, upload_sessions.chunk_size_bytes, upload_sessions.committed_offset, upload_sessions.next_chunk_index, upload_sessions.status, upload_sessions.input_path, upload_sessions.bundle_id, bundles.hash AS bundle_hash, upload_sessions.failure_code, upload_sessions.failure_reason, upload_sessions.created_at, upload_sessions.updated_at, upload_sessions.expires_at FROM upload_sessions LEFT JOIN bundles ON bundles.id = upload_sessions.bundle_id WHERE upload_sessions.status='FINALIZING' ORDER BY upload_sessions.updated_at ASC",
     )
     .fetch_all(pool)
     .await
@@ -425,7 +428,7 @@ pub async fn list_finalizing(pool: &SqlitePool) -> Result<Vec<UploadSession>, Ap
 
 pub async fn list_recoverable(pool: &SqlitePool) -> Result<Vec<UploadSession>, AppError> {
     let rows = sqlx::query_as::<_, UploadSessionRow>(
-        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') ORDER BY updated_at ASC",
+        "SELECT upload_sessions.id, upload_sessions.issue_code, upload_sessions.owner_user_id, upload_sessions.idempotency_key, upload_sessions.file_name, upload_sessions.file_size_bytes, upload_sessions.last_modified_ms, upload_sessions.chunk_size_bytes, upload_sessions.committed_offset, upload_sessions.next_chunk_index, upload_sessions.status, upload_sessions.input_path, upload_sessions.bundle_id, bundles.hash AS bundle_hash, upload_sessions.failure_code, upload_sessions.failure_reason, upload_sessions.created_at, upload_sessions.updated_at, upload_sessions.expires_at FROM upload_sessions LEFT JOIN bundles ON bundles.id = upload_sessions.bundle_id WHERE upload_sessions.status IN ('OPEN', 'FINALIZING') ORDER BY upload_sessions.updated_at ASC",
     )
     .fetch_all(pool)
     .await
@@ -435,7 +438,7 @@ pub async fn list_recoverable(pool: &SqlitePool) -> Result<Vec<UploadSession>, A
 
 pub async fn list_expired(pool: &SqlitePool) -> Result<Vec<UploadSession>, AppError> {
     let rows = sqlx::query_as::<_, UploadSessionRow>(
-        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE status IN ('OPEN', 'FINALIZING') AND (datetime(expires_at) <= CURRENT_TIMESTAMP OR datetime(updated_at) <= datetime('now', '-24 hours'))",
+        "SELECT upload_sessions.id, upload_sessions.issue_code, upload_sessions.owner_user_id, upload_sessions.idempotency_key, upload_sessions.file_name, upload_sessions.file_size_bytes, upload_sessions.last_modified_ms, upload_sessions.chunk_size_bytes, upload_sessions.committed_offset, upload_sessions.next_chunk_index, upload_sessions.status, upload_sessions.input_path, upload_sessions.bundle_id, bundles.hash AS bundle_hash, upload_sessions.failure_code, upload_sessions.failure_reason, upload_sessions.created_at, upload_sessions.updated_at, upload_sessions.expires_at FROM upload_sessions LEFT JOIN bundles ON bundles.id = upload_sessions.bundle_id WHERE upload_sessions.status IN ('OPEN', 'FINALIZING') AND (datetime(upload_sessions.expires_at) <= CURRENT_TIMESTAMP OR datetime(upload_sessions.updated_at) <= datetime('now', '-24 hours'))",
     )
     .fetch_all(pool)
     .await
@@ -620,7 +623,7 @@ async fn load_by_id(
     session_id: &str,
 ) -> Result<UploadSession, AppError> {
     let row = sqlx::query_as::<_, UploadSessionRow>(
-        "SELECT id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, last_modified_ms, chunk_size_bytes, committed_offset, next_chunk_index, status, input_path, bundle_id, failure_code, failure_reason, created_at, updated_at, expires_at FROM upload_sessions WHERE id = ?",
+        "SELECT upload_sessions.id, upload_sessions.issue_code, upload_sessions.owner_user_id, upload_sessions.idempotency_key, upload_sessions.file_name, upload_sessions.file_size_bytes, upload_sessions.last_modified_ms, upload_sessions.chunk_size_bytes, upload_sessions.committed_offset, upload_sessions.next_chunk_index, upload_sessions.status, upload_sessions.input_path, upload_sessions.bundle_id, bundles.hash AS bundle_hash, upload_sessions.failure_code, upload_sessions.failure_reason, upload_sessions.created_at, upload_sessions.updated_at, upload_sessions.expires_at FROM upload_sessions LEFT JOIN bundles ON bundles.id = upload_sessions.bundle_id WHERE upload_sessions.id = ?",
     )
     .bind(session_id)
     .fetch_one(&mut *conn)

@@ -273,6 +273,7 @@ export interface UploadSessionResponse {
   next_chunk_index: number;
   status: UploadSessionStatus;
   bundle_id?: string | null;
+  bundle_hash?: string | null;
   failure_code?: string | null;
   failure_reason?: string | null;
   expires_at: string;
