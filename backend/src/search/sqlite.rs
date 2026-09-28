@@ -90,26 +90,22 @@ async fn search_bundle(
     file_id: Option<i64>,
 ) -> Result<ContentSearchResult, AppError> {
     let query_chars = request.query.chars().count();
-    let path_pattern = request
-        .path_like
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .map(|v| format!("%{v}%"));
+    let path_like = request.path_like.as_deref().filter(|v| !v.is_empty());
     if query_chars < 3 {
         return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
     let fts = build_fts_query(&request.query);
     let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM log_segments ls JOIN log_segments_fts ON log_segments_fts.rowid=ls.id JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND ls.bundle_id=? AND (? IS NULL OR ls.timeline=?) AND (? IS NULL OR f.path LIKE ?) AND (? IS NULL OR ls.file_id=?)",
+        "SELECT COUNT(*) FROM log_segments ls JOIN log_segments_fts ON log_segments_fts.rowid=ls.id JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND ls.bundle_id=? AND (? IS NULL OR ls.timeline=?) AND (? IS NULL OR instr(f.path, ?) > 0) AND (? IS NULL OR ls.file_id=?)",
     )
     .bind(&fts).bind(bundle_id).bind(timeline).bind(timeline)
-    .bind(&path_pattern).bind(&path_pattern).bind(file_id).bind(file_id)
+    .bind(path_like).bind(path_like).bind(file_id).bind(file_id)
     .fetch_one(pool).await.map_err(AppError::Database)?;
     let rows = sqlx::query_as::<_, BundleRow>(
-        "SELECT ls.file_id,f.path,ls.timeline,ls.line_offset AS offset,ls.line_end,ls.chunk_index,ls.content FROM log_segments ls JOIN log_segments_fts ON log_segments_fts.rowid=ls.id JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND ls.bundle_id=? AND (? IS NULL OR ls.timeline=?) AND (? IS NULL OR f.path LIKE ?) AND (? IS NULL OR ls.file_id=?) ORDER BY ls.line_offset NULLS FIRST,ls.id LIMIT ? OFFSET ?",
+        "SELECT ls.file_id,f.path,ls.timeline,ls.line_offset AS offset,ls.line_end,ls.chunk_index,ls.content FROM log_segments ls JOIN log_segments_fts ON log_segments_fts.rowid=ls.id JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND ls.bundle_id=? AND (? IS NULL OR ls.timeline=?) AND (? IS NULL OR instr(f.path, ?) > 0) AND (? IS NULL OR ls.file_id=?) ORDER BY ls.line_offset NULLS FIRST,ls.id LIMIT ? OFFSET ?",
     )
     .bind(&fts).bind(bundle_id).bind(timeline).bind(timeline)
-    .bind(&path_pattern).bind(&path_pattern).bind(file_id).bind(file_id)
+    .bind(path_like).bind(path_like).bind(file_id).bind(file_id)
     .bind(request.size).bind(request.from).fetch_all(pool).await.map_err(AppError::Database)?;
     Ok(ContentSearchResult {
         total,
@@ -138,16 +134,12 @@ async fn search_issue(
     if request.query.chars().count() < 3 {
         return Err(AppError::BadRequest("搜索关键词至少需要 3 个字符".into()));
     }
-    let path_pattern = request
-        .path_like
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .map(|v| format!("%{v}%"));
+    let path_like = request.path_like.as_deref().filter(|v| !v.is_empty());
     let fts = build_fts_query(&request.query);
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM log_segments ls JOIN log_segments_fts ON log_segments_fts.rowid=ls.id JOIN bundles b ON b.id=ls.bundle_id JOIN issues i ON i.code=b.issue_code JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND i.status='ACTIVE' AND b.status='READY' AND (? IS NULL OR f.path LIKE ?)")
-        .bind(&fts).bind(issue_code).bind(&path_pattern).bind(&path_pattern).fetch_one(pool).await.map_err(AppError::Database)?;
-    let rows = sqlx::query_as::<_, IssueRow>("SELECT ls.file_id,f.path,ls.line_offset AS offset,ls.line_end,ls.chunk_index,ls.content,b.hash AS bundle_hash FROM log_segments ls JOIN log_segments_fts ON log_segments_fts.rowid=ls.id JOIN bundles b ON b.id=ls.bundle_id JOIN issues i ON i.code=b.issue_code JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND i.status='ACTIVE' AND b.status='READY' AND (? IS NULL OR f.path LIKE ?) ORDER BY ls.line_offset NULLS FIRST,ls.id LIMIT ? OFFSET ?")
-        .bind(&fts).bind(issue_code).bind(&path_pattern).bind(&path_pattern).bind(request.size).bind(request.from).fetch_all(pool).await.map_err(AppError::Database)?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM log_segments ls JOIN log_segments_fts ON log_segments_fts.rowid=ls.id JOIN bundles b ON b.id=ls.bundle_id JOIN issues i ON i.code=b.issue_code JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND i.status='ACTIVE' AND b.status='READY' AND (? IS NULL OR instr(f.path, ?) > 0)")
+        .bind(&fts).bind(issue_code).bind(path_like).bind(path_like).fetch_one(pool).await.map_err(AppError::Database)?;
+    let rows = sqlx::query_as::<_, IssueRow>("SELECT ls.file_id,f.path,ls.line_offset AS offset,ls.line_end,ls.chunk_index,ls.content,b.hash AS bundle_hash FROM log_segments ls JOIN log_segments_fts ON log_segments_fts.rowid=ls.id JOIN bundles b ON b.id=ls.bundle_id JOIN issues i ON i.code=b.issue_code JOIN visible_files f ON f.id=ls.file_id WHERE log_segments_fts MATCH ? AND b.issue_code=? AND i.status='ACTIVE' AND b.status='READY' AND (? IS NULL OR instr(f.path, ?) > 0) ORDER BY ls.line_offset NULLS FIRST,b.hash,ls.file_id,ls.chunk_index,ls.id LIMIT ? OFFSET ?")
+        .bind(&fts).bind(issue_code).bind(path_like).bind(path_like).bind(request.size).bind(request.from).fetch_all(pool).await.map_err(AppError::Database)?;
     Ok(ContentSearchResult {
         total,
         truncated: false,
@@ -531,6 +523,172 @@ mod tests {
         }
         pool.close().await;
     }
+    #[tokio::test]
+    async fn path_filter_treats_like_wildcards_as_literals() {
+        let (pool, first_file) = fixture().await;
+        sqlx::query("UPDATE files SET path=? WHERE id=?")
+            .bind("/literal%_\\path.log")
+            .bind(first_file)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let second_file = sqlx::query_scalar(
+            "INSERT INTO files(bundle_id,name,path,is_dir) VALUES('bundle','other.log','/literalXXpath.log',0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let third_file = sqlx::query_scalar(
+            "INSERT INTO files(bundle_id,name,path,is_dir) VALUES('bundle','upper.log','/LITERAL%_\\path.log',0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let index = SqliteFtsSearchIndex::new(pool.clone());
+        index.commit_batch(batch(first_file)).await.unwrap();
+        index
+            .commit_batch(IndexBatch {
+                bundle_id: "bundle".into(),
+                file_id: second_file,
+                path: "/literalXXpath.log".into(),
+                chunks: vec![IndexChunk {
+                    chunk_index: 0,
+                    line_start: Some(0),
+                    line_end: Some(1),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    content: "marker other path".into(),
+                }],
+                offsets: vec![(0, 0)],
+                final_line_count: Some(1),
+            })
+            .await
+            .unwrap();
+        index
+            .commit_batch(IndexBatch {
+                bundle_id: "bundle".into(),
+                file_id: third_file,
+                path: "/LITERAL%_\\path.log".into(),
+                chunks: vec![IndexChunk {
+                    chunk_index: 0,
+                    line_start: Some(0),
+                    line_end: Some(1),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    content: "marker upper path".into(),
+                }],
+                offsets: vec![(0, 0)],
+                final_line_count: Some(1),
+            })
+            .await
+            .unwrap();
+
+        let result = index
+            .search_content(ContentSearchRequest {
+                scope: ContentSearchScope::Issue {
+                    issue_code: "SEARCH".into(),
+                },
+                query: "marker".into(),
+                path_like: Some("literal%_\\path".into()),
+                from: 0,
+                size: 10,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total, 1);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].file_id, first_file);
+        assert_eq!(result.rows[0].path, "/literal%_\\path.log");
+
+        let bundle_result = index
+            .search_content(ContentSearchRequest {
+                scope: ContentSearchScope::Bundle {
+                    bundle_id: "bundle".into(),
+                    timeline: None,
+                    file_id: None,
+                },
+                query: "marker".into(),
+                path_like: Some("literal%_\\path".into()),
+                from: 0,
+                size: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(bundle_result.total, 1);
+        assert_eq!(bundle_result.rows.len(), 1);
+        assert_eq!(bundle_result.rows[0].file_id, first_file);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn issue_content_pagination_uses_bundle_hash_order_for_ties() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, false).await.unwrap();
+        sqlx::query("INSERT INTO issues(code,name) VALUES('SEARCH','Search')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bundles(id,issue_code,hash,name,status) VALUES('bundle-z','SEARCH','z-hash','Z','READY'),('bundle-a','SEARCH','a-hash','A','READY')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let z_file = sqlx::query_scalar(
+            "INSERT INTO files(bundle_id,name,path,is_dir) VALUES('bundle-z','z.log','/z.log',0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let a_file = sqlx::query_scalar(
+            "INSERT INTO files(bundle_id,name,path,is_dir) VALUES('bundle-a','a.log','/a.log',0) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let index = SqliteFtsSearchIndex::new(pool.clone());
+        for (bundle_id, file_id, path) in [
+            ("bundle-z", z_file, "/z.log"),
+            ("bundle-a", a_file, "/a.log"),
+        ] {
+            index
+                .commit_batch(IndexBatch {
+                    bundle_id: bundle_id.into(),
+                    file_id,
+                    path: path.into(),
+                    chunks: vec![IndexChunk {
+                        chunk_index: 0,
+                        line_start: Some(0),
+                        line_end: Some(1),
+                        event_time_start_ms: None,
+                        event_time_end_ms: None,
+                        content: "marker".into(),
+                    }],
+                    offsets: vec![(0, 0)],
+                    final_line_count: Some(1),
+                })
+                .await
+                .unwrap();
+        }
+
+        let result = index
+            .search_content(ContentSearchRequest {
+                scope: ContentSearchScope::Issue {
+                    issue_code: "SEARCH".into(),
+                },
+                query: "marker".into(),
+                path_like: None,
+                from: 0,
+                size: 1,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.total, 2);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].bundle_hash.as_deref(), Some("a-hash"));
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn ignored_chunk_insert_rolls_back_the_whole_batch() {
         let (pool, file) = fixture().await;
