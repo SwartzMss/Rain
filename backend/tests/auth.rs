@@ -666,6 +666,22 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
     let created: Value = test::read_body_json(create).await;
     let id = created["id"].as_str().expect("id");
 
+    let retired_filename_search = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/me/saved-searches")
+            .cookie(alice.clone())
+            .set_json(json!({
+                "name": "Retired filename search",
+                "search_type": "FILENAME",
+                "query_text": "app.log",
+                "options": {}
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(retired_filename_search.status(), StatusCode::BAD_REQUEST);
+
     let bob_list = test::call_service(
         &app,
         test::TestRequest::get()
@@ -697,7 +713,7 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
             .cookie(bob)
             .set_json(json!({
                 "name": "Stolen",
-                "search_type": "FILENAME",
+                "search_type": "DETAIL",
                 "query_text": "secret",
                 "scope_type": "GLOBAL",
                 "scope_key": null,
@@ -717,7 +733,7 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
             .cookie(alice.clone())
             .set_json(json!({
                 "name": "Warnings",
-                "search_type": "FILENAME",
+                "search_type": "DETAIL",
                 "query_text": "warn",
                 "scope_type": "ISSUE",
                 "scope_key": "cn013",
@@ -731,7 +747,7 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
     assert_eq!(alice_update.status(), StatusCode::OK);
     let updated: Value = test::read_body_json(alice_update).await;
     assert_eq!(updated["name"], "Warnings");
-    assert_eq!(updated["search_type"], "FILENAME");
+    assert_eq!(updated["search_type"], "DETAIL");
     assert_eq!(updated["query_text"], "warn");
     assert_eq!(updated["scope_type"], "GLOBAL");
     assert_eq!(updated["scope_key"], Value::Null);
@@ -758,7 +774,7 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
             .cookie(alice.clone())
             .set_json(json!({
                 "name": "Issue errors",
-                "search_type": "FILENAME",
+                "search_type": "DETAIL",
                 "query_text": "error",
                 "scope_type": "ISSUE",
                 "scope_key": " cn013 ",

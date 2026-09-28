@@ -135,22 +135,20 @@ async fn upload_search_tree_and_delete_issue() {
     assert_eq!(completed_task["stage"], "READY");
     assert!(completed_task["failure_reason"].is_null());
 
-    let filename_search: Value = test::call_and_read_body_json(
+    let filename_query: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()
-            .uri("/api/issues/SMOKE/search?q=app.log&mode=filename&size=10")
+            .uri("/api/issues/SMOKE/search?q=app.log&size=10")
             .cookie(auth_cookie.clone())
             .to_request(),
     )
     .await;
-    assert_eq!(filename_search["total"], 1);
-    assert_eq!(filename_search["hits"][0]["path"], "app.log");
-    assert_eq!(filename_search["hits"][0]["line_number"], Value::Null);
+    assert_eq!(filename_query["total"], 0);
 
     let search: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()
-            .uri("/api/issues/SMOKE/search?q=smoke&mode=content&size=10")
+            .uri("/api/issues/SMOKE/search?q=smoke&size=10")
             .cookie(auth_cookie.clone())
             .to_request(),
     )
@@ -169,7 +167,7 @@ async fn upload_search_tree_and_delete_issue() {
     let substring_search: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::get()
-            .uri("/api/issues/SMOKE/search?q=def123&mode=content&size=10")
+            .uri("/api/issues/SMOKE/search?q=def123&size=10")
             .cookie(auth_cookie.clone())
             .to_request(),
     )
@@ -185,7 +183,7 @@ async fn upload_search_tree_and_delete_issue() {
     let short_search = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/api/issues/SMOKE/search?q=ER&mode=content&size=10")
+            .uri("/api/issues/SMOKE/search?q=ER&size=10")
             .cookie(auth_cookie.clone())
             .to_request(),
     )

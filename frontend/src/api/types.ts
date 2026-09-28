@@ -103,7 +103,7 @@ export interface AuthMeResponse {
 
 export interface SavedSearchPayload {
   name: string;
-  search_type: 'FILENAME' | 'DETAIL';
+  search_type: 'DETAIL';
   query_text: string;
   options: Record<string, unknown>;
   is_pinned?: boolean;
@@ -311,13 +311,6 @@ export interface IssueLogSearchHit {
   timeline?: string;
   line_end?: number | null;
   line_number?: number | null;
-}
-
-export interface IssueLogSearchResponse {
-  total: number;
-  hits: IssueLogSearchHit[];
-  truncated: boolean;
-  max_search_window: number;
 }
 
 export interface TempResultInfo {

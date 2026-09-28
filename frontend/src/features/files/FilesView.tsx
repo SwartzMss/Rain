@@ -8,7 +8,6 @@ import { BinaryFileInfo } from './BinaryFileInfo';
 import { SearchTokenEditor } from './SearchTokenEditor';
 import { canPreviewText, isArchiveNode, isBinaryNode } from './filePresentation';
 import { isFileSearchConditionEmpty } from './fileSearchState';
-import { shouldShowFilenameClear } from './filenameSearch';
 import { getSearchHitSource } from './searchHitSource';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { uploadFailureMessage } from './uploadFailure';
@@ -37,7 +36,6 @@ import { useViewerTabs } from './hooks/useViewerTabs';
 import { useFileContent } from './hooks/useFileContent';
 import { centerElementInScrollContainer } from './centerElementInScrollContainer';
 import { ViewerTabBar } from './components/ViewerTabBar';
-import { FileIcon } from './components/FileIcons';
 import { CodeLinesPane } from './components/CodeLinesPane';
 import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
@@ -143,9 +141,6 @@ export function BundleView() {
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [filenameQuery, setFilenameQuery] = useState(
-    pendingSavedSearch?.search_type === 'FILENAME' ? pendingSavedSearch.query_text : ''
-  );
   const [searchTokens, setSearchTokens] = useState<SearchToken[]>(
     pendingDetailEditor.tokens
   );
@@ -153,13 +148,9 @@ export function BundleView() {
     pendingDetailEditor.rawExpression
   );
   const [searchDraft, setSearchDraft] = useState('');
-  const [searchResults, setSearchResults] = useState<IssueLogSearchHit[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchExecuted, setSearchExecuted] = useState(false);
-  const [searchMode, setSearchMode] = useState<'log' | 'detailed'>(
-    pendingSavedSearch?.search_type === 'FILENAME' ? 'log' : 'detailed'
-  );
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [savedSearchesOpen, setSavedSearchesOpen] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(Boolean(pendingSavedSearch));
@@ -183,7 +174,6 @@ export function BundleView() {
   const [sourceActionMessage, setSourceActionMessage] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const fileTreeContainerRef = useRef<HTMLDivElement | null>(null);
-  const filenameInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestGenerationRef = useRef(0);
   const restoredPendingSearchRef = useRef(Boolean(pendingSavedSearch));
   const contextKeyRef = useRef<string | null>(null);
@@ -259,7 +249,6 @@ export function BundleView() {
   });
 
   const currentSavedSearchPayload = useCallback((): SavedSearchPayload | null => {
-    if (searchMode !== 'detailed') return null;
     try {
       if (detailRawExpression !== null) {
         const query = detailRawExpression.trim();
@@ -281,7 +270,7 @@ export function BundleView() {
     } catch {
       return null;
     }
-  }, [detailRawExpression, savedSearchName, searchDraft, searchMode, searchTokens]);
+  }, [detailRawExpression, savedSearchName, searchDraft, searchTokens]);
 
   const loadSavedSearches = useCallback(async () => {
     if (auth.state.status !== 'AUTHENTICATED') return;
@@ -298,11 +287,7 @@ export function BundleView() {
     if (!pendingSavedSearch) {
       const pending = takePendingSavedSearch(sessionStorage, true);
       if (pending) {
-        const editor = detailEditorState(
-          pending.search_type === 'DETAIL' ? pending.query_text : undefined
-        );
-        setSearchMode(pending.search_type === 'FILENAME' ? 'log' : 'detailed');
-        setFilenameQuery(pending.search_type === 'FILENAME' ? pending.query_text : '');
+        const editor = detailEditorState(pending.query_text);
         setSearchTokens(editor.tokens);
         setDetailRawExpression(editor.rawExpression);
         setSearchDraft('');
@@ -343,7 +328,6 @@ export function BundleView() {
   };
 
   const useSavedSearch = async (item: SavedSearch) => {
-    setSearchMode('detailed');
     const editor = detailEditorState(item.query_text);
     setSearchTokens(editor.tokens);
     setDetailRawExpression(editor.rawExpression);
@@ -356,7 +340,6 @@ export function BundleView() {
         scopeKey: `issue:${issueCode}`,
         onSuccess: (response) => {
       const hits = response.lines.map((line) => ({ bundle_hash: line.bundle_hash, file_id: line.file_id ?? '', path: line.path, snippet: line.content, line_number: line.line_number }));
-      setSearchResults(hits);
       setSearchExecuted(true);
       openViewerTab({ id: `search:${Date.now()}`, kind: 'search', resultId: response.result_id, title: item.name, pinned: false, scrollTop: 0, expression: item.query_text, hits, total: response.total, from: 0, pageSize: LINE_PAGE_SIZE_OPTIONS[0], pageHistory: [], source: { kind: 'issue', issueCode } });
         }
@@ -510,24 +493,22 @@ export function BundleView() {
   const runSearch = useCallback(async () => {
     const issue = issueCode;
     if (!issue) {
-      setSearchResults([]);
       setSearchError(null);
       setSearchExecuted(false);
       setResultFilterTokens([]);
       setResultFilterDraft('');
       return;
     }
-    let keyword = filenameQuery.trim();
-    let title = keyword;
-    if (searchMode === 'detailed') {
-      if (detailRawExpression !== null) {
-        keyword = detailRawExpression.trim();
-        title = keyword;
-        if (!keyword) {
-          setSearchError('请输入详细搜索表达式');
-          return;
-        }
-      } else {
+    let keyword: string;
+    let title: string;
+    if (detailRawExpression !== null) {
+      keyword = detailRawExpression.trim();
+      title = keyword;
+      if (!keyword) {
+        setSearchError('请输入详细搜索表达式');
+        return;
+      }
+    } else {
       let finalizedTokens: SearchToken[];
       try {
         finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft);
@@ -539,9 +520,6 @@ export function BundleView() {
       title = formatSearchTokens(finalizedTokens);
       setSearchTokens(finalizedTokens);
       setSearchDraft('');
-      }
-    } else if (!keyword) {
-      return;
     }
     const requestGeneration = ++searchRequestGenerationRef.current;
     setSearchLoading(true);
@@ -557,76 +535,53 @@ export function BundleView() {
     setFileSearchError(null);
     setFileSearchExecuted(false);
     try {
-      if (searchMode === 'log') {
-        const response = await rainApi.searchIssueLogs(issue, keyword, {
-          mode: 'filename',
-          size: 50
-        });
-        if (requestGeneration !== searchRequestGenerationRef.current) return;
-        setSearchResults(response.hits);
-      } else {
-        const response = await issueSearchExecution.execute(
-          {
-            expression: keyword,
-            issue_code: issue,
-            from: 0,
-            size: LINE_PAGE_SIZE_OPTIONS[0]
-          },
-          {
-            scopeKey: `issue:${issue}`,
-            onSuccess: (response) => {
-              if (requestGeneration !== searchRequestGenerationRef.current) return;
-              const hits = response.lines.map((line) => ({
-                bundle_hash: line.bundle_hash,
-                file_id: line.file_id ?? '',
-                path: line.path,
-                snippet: line.content,
-                line_number: line.line_number
-              }));
-              setSearchResults(hits);
-              const id = `search:${Date.now()}`;
-              openViewerTab({
-                id,
-                kind: 'search',
-                resultId: response.result_id,
-                title,
-                pinned: false,
-                scrollTop: 0,
-                expression: keyword,
-                hits,
-                total: response.total,
-                from: 0,
-                pageSize: LINE_PAGE_SIZE_OPTIONS[0],
-                pageHistory: [],
-                source: { kind: 'issue', issueCode: issue }
-              });
-            }
+      const response = await issueSearchExecution.execute(
+        {
+          expression: keyword,
+          issue_code: issue,
+          from: 0,
+          size: LINE_PAGE_SIZE_OPTIONS[0]
+        },
+        {
+          scopeKey: `issue:${issue}`,
+          onSuccess: (response) => {
+            if (requestGeneration !== searchRequestGenerationRef.current) return;
+            const hits = response.lines.map((line) => ({
+              bundle_hash: line.bundle_hash,
+              file_id: line.file_id ?? '',
+              path: line.path,
+              snippet: line.content,
+              line_number: line.line_number
+            }));
+            const id = `search:${Date.now()}`;
+            openViewerTab({
+              id,
+              kind: 'search',
+              resultId: response.result_id,
+              title,
+              pinned: false,
+              scrollTop: 0,
+              expression: keyword,
+              hits,
+              total: response.total,
+              from: 0,
+              pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+              pageHistory: [],
+              source: { kind: 'issue', issueCode: issue }
+            });
           }
-        );
-        if (!response) return;
-      }
+        }
+      );
+      if (!response) return;
     } catch (error) {
       if (requestGeneration !== searchRequestGenerationRef.current) return;
-      setSearchResults([]);
       setSearchError(normalizeApiError(error));
     } finally {
       if (requestGeneration === searchRequestGenerationRef.current) {
         setSearchLoading(false);
       }
     }
-  }, [detailRawExpression, filenameQuery, issueCode, openViewerTab, searchDraft, searchMode, searchTokens]);
-
-  const clearFilenameSearch = useCallback(() => {
-    searchRequestGenerationRef.current += 1;
-    setFilenameQuery('');
-    setSearchResults([]);
-    setSearchLoading(false);
-    setSearchError(null);
-    setSearchExecuted(false);
-    setResultFilterTokens([]);
-    setResultFilterDraft('');
-    window.requestAnimationFrame(() => filenameInputRef.current?.focus());
-  }, []);
+  }, [detailRawExpression, issueCode, openViewerTab, searchDraft, searchTokens]);
 
   const clearDetailedSearch = useCallback(() => {
     searchRequestGenerationRef.current += 1;
@@ -634,7 +589,6 @@ export function BundleView() {
     setSearchTokens([]);
     setDetailRawExpression(null);
     setSearchDraft('');
-    setSearchResults([]);
     setSearchLoading(false);
     setSearchError(null);
     setSearchExecuted(false);
@@ -645,19 +599,6 @@ export function BundleView() {
   const handleSearchSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     void runSearch();
-  };
-
-  const changeSearchMode = (mode: 'log' | 'detailed') => {
-    if (mode === searchMode) return;
-    searchRequestGenerationRef.current += 1;
-    if (searchMode === 'detailed') void issueSearchExecution.cancel();
-    setSearchMode(mode);
-    setSearchResults([]);
-    setSearchLoading(false);
-    setSearchError(null);
-    setSearchExecuted(false);
-    setResultFilterTokens([]);
-    setResultFilterDraft('');
   };
 
   useEffect(() => {
@@ -831,11 +772,9 @@ export function BundleView() {
       return;
     }
     searchRequestGenerationRef.current += 1;
-    setFilenameQuery('');
     setSearchTokens([]);
     setDetailRawExpression(null);
     setSearchDraft('');
-    setSearchResults([]);
     setSearchLoading(false);
     setSearchError(null);
     setSearchExecuted(false);
@@ -870,7 +809,6 @@ export function BundleView() {
       setLineStart(0);
     }
     if (!options?.preserveSearch) {
-      setSearchResults([]);
       setSearchError(null);
       setSearchExecuted(false);
       setResultFilterTokens([]);
@@ -1427,29 +1365,16 @@ export function BundleView() {
     contentRef.current.scrollTop = activeViewerTab.scrollTop;
   }, [activeViewerTab?.id, activeViewerTab?.scrollTop, fileLines, targetLine]);
 
-  const searchHighlightTerm = searchMode === 'log'
-    ? filenameQuery.trim()
-    : detailRawExpression?.trim() || getSearchTerms(searchTokens)[0] || searchDraft.trim();
   const fileSearchHighlightTerm = getSearchTerms(fileSearchTokens)[0] ?? fileSearchDraft.trim();
   const resultFilterHighlightTerm = getSearchTerms(resultFilterTokens)[0] ?? resultFilterDraft.trim();
-  const canRunSearch = searchMode === 'log'
-    ? Boolean(filenameQuery.trim())
-    : detailRawExpression !== null
-      ? Boolean(detailRawExpression.trim())
-      : canFinalizeSearch(searchTokens, searchDraft);
-  const showFilenameClear = searchMode === 'log' && shouldShowFilenameClear({
-    query: filenameQuery,
-    executed: searchExecuted,
-    resultCount: searchResults.length,
-    loading: searchLoading,
-    error: searchError
-  });
-  const showDetailedClear = searchMode === 'detailed' && (
+  const canRunSearch = detailRawExpression !== null
+    ? Boolean(detailRawExpression.trim())
+    : canFinalizeSearch(searchTokens, searchDraft);
+  const showDetailedClear = (
     detailRawExpression !== null
     || searchTokens.length > 0
     || Boolean(searchDraft.trim())
     || searchExecuted
-    || searchResults.length > 0
     || searchLoading
     || Boolean(searchError)
   );
@@ -1487,48 +1412,26 @@ export function BundleView() {
                 onSubmit={handleSearchSubmit}
               >
                 <span className="mt-1.5 shrink-0 text-slate-500" aria-hidden="true">⌕</span>
-                {searchMode === 'log' ? (
+                {detailRawExpression !== null ? (
                   <input
-                    ref={filenameInputRef}
-                    className="h-8 min-w-0 flex-1 bg-transparent px-1 text-sm text-slate-950 outline-none placeholder:text-slate-500"
-                    aria-label="文件名搜索"
-                    placeholder="搜索文件或目录..."
-                    value={filenameQuery}
+                    className="h-8 min-w-0 flex-1 bg-transparent px-1 font-mono text-sm text-slate-950 outline-none placeholder:text-slate-500"
+                    aria-label="日志内容原始搜索表达式"
+                    placeholder="输入后端搜索表达式..."
+                    value={detailRawExpression}
                     disabled={searchLoading}
-                    onChange={(event) => setFilenameQuery(event.target.value)}
+                    onChange={(event) => setDetailRawExpression(event.target.value)}
                   />
                 ) : (
-                  detailRawExpression !== null ? (
-                    <input
-                      className="h-8 min-w-0 flex-1 bg-transparent px-1 font-mono text-sm text-slate-950 outline-none placeholder:text-slate-500"
-                      aria-label="日志内容原始搜索表达式"
-                      placeholder="输入后端搜索表达式..."
-                      value={detailRawExpression}
-                      disabled={searchLoading}
-                      onChange={(event) => setDetailRawExpression(event.target.value)}
-                    />
-                  ) : (
-                    <SearchTokenEditor
-                      tokens={searchTokens}
-                      draft={searchDraft}
-                      onTokensChange={setSearchTokens}
-                      onDraftChange={setSearchDraft}
-                      placeholder="输入完整关键词或短语..."
-                      ariaLabel="日志内容搜索条件"
-                      disabled={searchLoading}
-                    />
-                  )
+                  <SearchTokenEditor
+                    tokens={searchTokens}
+                    draft={searchDraft}
+                    onTokensChange={setSearchTokens}
+                    onDraftChange={setSearchDraft}
+                    placeholder="输入完整关键词或短语..."
+                    ariaLabel="日志内容搜索条件"
+                    disabled={searchLoading}
+                  />
                 )}
-                {showFilenameClear ? (
-                  <button
-                    type="button"
-                    className="mt-0.5 shrink-0 rounded border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-400 hover:text-slate-950"
-                    aria-label="清除文件名搜索"
-                    onClick={clearFilenameSearch}
-                  >
-                    清除
-                  </button>
-                ) : null}
                 {showDetailedClear ? (
                   <button
                     type="button"
@@ -1542,43 +1445,25 @@ export function BundleView() {
                 <button
                   type="submit"
                   className="mt-0.5 shrink-0 rounded bg-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-900 transition hover:bg-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-                  aria-label={searchMode === 'log' ? '搜索文件名' : '搜索日志内容'}
+                  aria-label="搜索日志内容"
                   disabled={searchLoading || !issueCode || !canRunSearch}
                 >
                   搜索
                 </button>
               </form>
               <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
-                <div className="flex rounded-md border border-slate-200 bg-slate-50 p-0.5 shadow-inner">
-                  <button
-                    type="button"
-                    className={`rounded px-2.5 py-1.5 font-semibold transition ${searchMode === 'log' ? 'border border-sky-300 bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
-                    onClick={() => changeSearchMode('log')}
-                  >
-                    按文件名
-                  </button>
-                  <button
-                    type="button"
-                    className={`rounded px-2.5 py-1.5 font-semibold transition ${searchMode === 'detailed' ? 'border border-sky-300 bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
-                    onClick={() => changeSearchMode('detailed')}
-                  >
-                    搜日志内容
-                  </button>
-                </div>
                 {auth.state.status === 'AUTHENTICATED' ? (
                   <>
-                    {auth.state.status === 'AUTHENTICATED' && searchMode === 'detailed' ? (
-                      <button
-                        type="button"
-                        className="ml-auto rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
-                        onClick={beginSaveSearch}
-                      >
-                        保存条件
-                      </button>
-                    ) : null}
                     <button
                       type="button"
-                      className={`${searchMode === 'detailed' ? '' : 'ml-auto '}rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400`}
+                      className="ml-auto rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
+                      onClick={beginSaveSearch}
+                    >
+                      保存条件
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
                       onClick={() => setSavedSearchesOpen((open) => !open)}
                     >
                       我的搜索条件
@@ -1586,12 +1471,10 @@ export function BundleView() {
                   </>
                 ) : null}
               </div>
-              {searchMode === 'detailed' ? (
-                <SearchExecutionStatus
-                  snapshot={issueSearchExecution.snapshot}
-                  onCancel={() => { void issueSearchExecution.cancel(); }}
-                />
-              ) : null}
+              <SearchExecutionStatus
+                snapshot={issueSearchExecution.snapshot}
+                onCancel={() => { void issueSearchExecution.cancel(); }}
+              />
               {savedSearchesOpen ? (
                 <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
                   {savedSearches.length === 0 ? <p className="text-xs text-slate-500">暂无搜索条件</p> : savedSearches.map((item) => (
@@ -1623,46 +1506,7 @@ export function BundleView() {
                 ))}
               </div>
             ) : null}
-            {searchMode === 'log' && searchExecuted ? (
-              searchLoading && searchResults.length === 0 ? (
-                <p className="py-6 text-center text-sm text-slate-500">正在匹配文件名...</p>
-              ) : searchResults.length === 0 ? (
-                <p className="py-6 text-center text-sm text-slate-500">未找到匹配的日志文件。</p>
-              ) : (
-                <div className="space-y-1 text-sm text-slate-700">
-                  <p className="px-2 pb-1 text-xs text-slate-500">找到 {searchResults.length} 个日志文件</p>
-                  {searchResults.map((hit, index) => {
-                    const targetId = hit.bundle_hash ? `${hit.bundle_hash}:${hit.file_id}` : '';
-                    const selected = !!targetId && selectedNodeId === targetId;
-                    return (
-                      <button
-                        key={`${hit.bundle_hash ?? 'b'}:${hit.file_id}:${index}`}
-                        type="button"
-                        className={`group flex h-10 w-full items-center gap-2 rounded border px-2 text-left transition ${
-                          selected
-                            ? 'border-sky-400 bg-sky-100 text-sky-950 shadow-[inset_4px_0_0_rgba(14,116,144,0.95),0_0_0_2px_rgba(14,165,233,0.16)]'
-                            : 'border-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-950'
-                        }`}
-                        onClick={() => {
-                          if (!targetId) return;
-                          handleNodeClick(targetId, null, { preserveSearch: true }).catch(() => undefined);
-                        }}
-                      >
-                        <FileIcon name={hit.path} />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-[13px] font-medium leading-4">
-                            {highlightText(hit.snippet, searchHighlightTerm)}
-                          </p>
-                          <p className="truncate text-[10px] leading-3 text-slate-500">
-                            {highlightText(formatHitPath(hit.path), searchHighlightTerm)}
-                          </p>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )
-            ) : rootIds.length > 0 ? (
+            {rootIds.length > 0 ? (
               <div className="min-w-max space-y-2 text-sm text-slate-700">
                 {rootIds.some((rootId) => {
                   const root = treeNodes[rootId];

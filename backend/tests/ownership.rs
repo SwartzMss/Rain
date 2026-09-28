@@ -115,7 +115,6 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
             "/api/files/v1/hash-private/files/1/content",
             "/api/files/v1/hash-private/files/1/lines",
             "/api/log/v2/hash-private/search?q=log",
-            "/api/issues/PRIVATE/search?q=log&mode=filename",
             "/api/issues/PRIVATE/search?q=log",
             "/api/uploads/hash-private",
         ] {

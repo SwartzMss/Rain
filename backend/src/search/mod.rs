@@ -157,22 +157,6 @@ pub struct ContentSearchResult {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct FilenameSearchRequest {
-    pub issue_code: String,
-    pub query: String,
-    pub from: i64,
-    pub size: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct FilenameSearchRow {
-    pub file_id: i64,
-    pub name: String,
-    pub path: String,
-    pub bundle_hash: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSearchMode {
     Fts,
@@ -214,12 +198,6 @@ pub struct SkillSearchResult {
 }
 
 #[derive(Debug, Clone)]
-pub struct FilenameSearchResult {
-    pub total: i64,
-    pub rows: Vec<FilenameSearchRow>,
-}
-
-#[derive(Debug, Clone)]
 pub struct IndexBatch {
     pub bundle_id: String,
     pub file_id: i64,
@@ -245,10 +223,6 @@ pub trait SearchIndex: Send + Sync {
         &self,
         request: ContentSearchRequest,
     ) -> Result<ContentSearchResult, AppError>;
-    async fn search_filenames(
-        &self,
-        request: FilenameSearchRequest,
-    ) -> Result<FilenameSearchResult, AppError>;
     async fn search_skill(
         &self,
         request: SkillSearchRequest,
