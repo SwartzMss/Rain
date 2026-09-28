@@ -329,6 +329,27 @@ pub async fn enqueue_file_deletion_batch(
                     .await
                     .map_err(AppError::Database)?;
                 }
+
+                let affected_bundle_ids: HashSet<String> = parsed_items
+                    .iter()
+                    .map(|(bundle_id, _)| bundle_id.clone())
+                    .collect();
+                for bundle_id in affected_bundle_ids {
+                    sqlx::query(
+                        "INSERT OR IGNORE INTO bundle_search_indexes (bundle_id, backend, state) VALUES (?, 'sqlite_fts', 'LEGACY')",
+                    )
+                    .bind(&bundle_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                    sqlx::query(
+                        "UPDATE bundle_search_indexes SET visibility_revision = visibility_revision + 1, state = CASE WHEN backend = 'tantivy' AND generation > 0 THEN 'NEEDS_REBUILD' ELSE state END, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ?",
+                    )
+                    .bind(&bundle_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                }
                 Ok(())
             })
         },
@@ -810,6 +831,7 @@ mod tests {
         enqueue_file_deletion_batch, load_file_deletion_batch, process_file_deletion_batches,
         process_file_deletion_jobs,
     };
+    use crate::search::publication::can_skip_visibility_snapshot;
 
     #[tokio::test]
     async fn delete_file_tree_uses_cascade_for_a_large_tree() {
@@ -1032,6 +1054,10 @@ mod tests {
             .execute(&pool)
             .await
             .expect("insert bundle");
+        sqlx::query("INSERT INTO bundle_search_indexes (bundle_id, backend, generation, state) VALUES ('batch-bundle', 'tantivy', 1, 'READY')")
+            .execute(&pool)
+            .await
+            .expect("insert search publication");
         let file_ids: Vec<i64> = {
             let mut ids = Vec::new();
             for name in ["one.log", "two.log"] {
@@ -1067,6 +1093,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["batch-hash", "batch-hash"]
         );
+        let publication: (String, i64, i64) = sqlx::query_as(
+            "SELECT state, visibility_revision, compacted_revision FROM bundle_search_indexes WHERE bundle_id='batch-bundle'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("search visibility revision");
+        assert_eq!(publication, ("NEEDS_REBUILD".into(), 1, 0));
+        assert!(!can_skip_visibility_snapshot(
+            &publication.0,
+            publication.1,
+            publication.2
+        ));
+        let visible: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM visible_files WHERE bundle_id='batch-bundle'")
+                .fetch_one(&pool)
+                .await
+                .expect("visible file count");
+        assert_eq!(visible, 0);
         for _ in 0..20 {
             process_file_deletion_batches(&pool)
                 .await
