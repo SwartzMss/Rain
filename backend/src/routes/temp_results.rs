@@ -200,6 +200,7 @@ mod common;
 mod lifecycle;
 mod repository;
 mod routes;
+mod search_plan;
 mod service;
 mod storage;
 

@@ -21,6 +21,25 @@ pub struct TempSource {
     pub file_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LineRange {
+    pub start: i64,
+    pub end: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateScanPlan {
+    pub ranges: Vec<LineRange>,
+    pub seek_line: i64,
+    pub seek_offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourceSearchPlan {
+    Raw { reason: &'static str },
+    Tantivy(CandidateScanPlan),
+}
+
 pub struct MaterializedPreview {
     pub total: i64,
     pub lines: Vec<PreviewLine>,
