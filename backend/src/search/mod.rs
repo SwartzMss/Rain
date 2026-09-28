@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use tokio::sync::OwnedSemaphorePermit;
 
-use crate::error::AppError;
+use crate::{error::AppError, services::search_execution::SearchExecutionContext};
 
 /// Absolute safety ceiling for any search page retained by a backend.
 ///
@@ -362,6 +362,31 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
 }
 
 #[cfg(feature = "tantivy-search")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit_and_context(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: std::collections::HashSet<i64>,
+    bundle_id: String,
+    generation: i64,
+    lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
+    context: SearchExecutionContext,
+) -> Result<ContentSearchResult, AppError> {
+    tantivy::search_bundle_visible_with_lease_and_permit_and_context(
+        path,
+        request,
+        visible_file_ids,
+        bundle_id,
+        generation,
+        lease,
+        permit,
+        context,
+    )
+    .await
+}
+
+#[cfg(feature = "tantivy-search")]
 pub(crate) async fn search_tantivy_bundle_with_lease_and_permit(
     path: std::path::PathBuf,
     request: ContentSearchRequest,
@@ -372,6 +397,22 @@ pub(crate) async fn search_tantivy_bundle_with_lease_and_permit(
 ) -> Result<ContentSearchResult, AppError> {
     tantivy::search_bundle_with_lease_and_permit(
         path, request, bundle_id, generation, lease, permit,
+    )
+    .await
+}
+
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn search_tantivy_bundle_with_lease_and_permit_and_context(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    bundle_id: String,
+    generation: i64,
+    lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
+    context: SearchExecutionContext,
+) -> Result<ContentSearchResult, AppError> {
+    tantivy::search_bundle_with_lease_and_permit_and_context(
+        path, request, bundle_id, generation, lease, permit, context,
     )
     .await
 }
@@ -413,6 +454,33 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
 }
 
 #[cfg(not(feature = "tantivy-search"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit_and_context(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: std::collections::HashSet<i64>,
+    bundle_id: String,
+    generation: i64,
+    lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
+    context: SearchExecutionContext,
+) -> Result<ContentSearchResult, AppError> {
+    let _ = (
+        path,
+        request,
+        visible_file_ids,
+        bundle_id,
+        generation,
+        lease,
+        permit,
+        context,
+    );
+    Err(AppError::Config(
+        "Tantivy backend requires the tantivy-search feature".into(),
+    ))
+}
+
+#[cfg(not(feature = "tantivy-search"))]
 pub(crate) async fn search_tantivy_bundle_with_lease_and_permit(
     path: std::path::PathBuf,
     request: ContentSearchRequest,
@@ -422,6 +490,22 @@ pub(crate) async fn search_tantivy_bundle_with_lease_and_permit(
     permit: OwnedSemaphorePermit,
 ) -> Result<ContentSearchResult, AppError> {
     let _ = (path, request, bundle_id, generation, lease, permit);
+    Err(AppError::Config(
+        "Tantivy backend requires the tantivy-search feature".into(),
+    ))
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+pub(crate) async fn search_tantivy_bundle_with_lease_and_permit_and_context(
+    path: std::path::PathBuf,
+    request: ContentSearchRequest,
+    bundle_id: String,
+    generation: i64,
+    lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
+    context: SearchExecutionContext,
+) -> Result<ContentSearchResult, AppError> {
+    let _ = (path, request, bundle_id, generation, lease, permit, context);
     Err(AppError::Config(
         "Tantivy backend requires the tantivy-search feature".into(),
     ))

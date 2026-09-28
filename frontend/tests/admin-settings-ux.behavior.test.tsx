@@ -345,7 +345,7 @@ it('edits search budgets in common settings and submits byte values', async () =
     temp_results_max_result_size: 64 * 1024 ** 2,
     temp_results_max_total_size: 1024 ** 3,
     temp_results_max_records: 1000,
-    temp_results_max_scan_duration_seconds: 30,
+    temp_results_max_scan_duration_seconds: 300,
   };
   const fields = Object.entries(configured).map(([key, value]) => ({
     key, category: 'common', visibility: 'default', value_type: 'integer',

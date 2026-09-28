@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState, AuthRateLimitBucket,
-    auth::extractor::{RequireBusinessUser, RequireUser},
+    auth::extractor::{OptionalUser, RequireBusinessUser, RequireUser},
     error::AppError,
     log_expression,
     repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
@@ -136,6 +136,7 @@ pub struct PreviewTempResultRequest {
     source_temp_id: Option<String>,
     from: Option<i64>,
     size: Option<i64>,
+    pub(crate) search_id: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -204,7 +205,7 @@ mod search_plan;
 mod service;
 mod storage;
 
-pub(crate) use lifecycle::cleanup_expired;
+pub(crate) use lifecycle::{check_temp_result_rate_limit, cleanup_expired};
 pub(crate) use routes::{
     create_temp_result, delete_temp_result, download_temp_result, get_temp_result,
     get_temp_result_lines, preview_temp_result,

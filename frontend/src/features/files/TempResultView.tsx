@@ -5,6 +5,8 @@ import type { TempResultInfo, TempResultLinesResponse } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { isUser } from '../../auth/permissions';
+import { SearchExecutionStatus } from '../../components/SearchExecutionStatus';
+import { useSearchExecution } from '../../hooks/useSearchExecution';
 
 type PageNavigation = 'next' | 'previous' | 'reset';
 
@@ -24,6 +26,13 @@ export function TempResultView() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestGeneration = useRef(0);
+  const searchExecution = useSearchExecution();
+
+  useEffect(() => {
+    if (searchExecution.snapshot.status === 'FAILED') {
+      setError(searchExecution.snapshot.errorMessage);
+    }
+  }, [searchExecution.snapshot.errorMessage, searchExecution.snapshot.status]);
 
   useEffect(() => {
     const generation = ++requestGeneration.current;
@@ -109,19 +118,17 @@ export function TempResultView() {
     if (!expression.trim() || !resultId) return;
     setCreating(true);
     setError(null);
-    try {
-      const created = await rainApi.previewTempResult({
+    const created = await searchExecution.execute(
+      {
         expression: expression.trim(),
         source_temp_id: resultId,
         from: 0,
         size: LINE_PAGE_SIZE_OPTIONS[0]
-      });
-      navigate(`/temp-results/${created.result_id}`);
-    } catch (createError) {
-      setError(normalizeApiError(createError));
-    } finally {
-      setCreating(false);
-    }
+      },
+      { scopeKey: `temp:${resultId}` }
+    );
+    setCreating(false);
+    if (created) navigate(`/temp-results/${created.result_id}`);
   };
 
   const deleteResult = async () => {
@@ -184,6 +191,10 @@ export function TempResultView() {
               {creating ? '搜索中...' : '搜索'}
             </button>
           </div>
+          <SearchExecutionStatus
+            snapshot={searchExecution.snapshot}
+            onCancel={() => { void searchExecution.cancel(); }}
+          />
 
           <div className="min-h-[65vh] overflow-auto rounded-lg bg-white p-3 text-xs leading-5 text-slate-900">
             <div className="grid grid-cols-[auto_1fr] gap-3 font-mono">

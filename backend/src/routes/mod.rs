@@ -18,7 +18,8 @@ pub(crate) use issues::cleanup_inactive_issues;
 pub use issues::resume_manual_issue_deletions;
 mod logs;
 mod saved_searches;
-mod temp_results;
+mod search_requests;
+pub(crate) mod temp_results;
 pub(crate) mod upload_sessions;
 mod uploads;
 
@@ -265,6 +266,8 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(logs::search_logs)
                 .service(temp_results::create_temp_result)
                 .service(temp_results::preview_temp_result)
+                .service(search_requests::reserve_search_request)
+                .service(search_requests::cancel_search_request)
                 .service(temp_results::get_temp_result)
                 .service(temp_results::get_temp_result_lines)
                 .service(temp_results::download_temp_result)

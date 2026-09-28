@@ -1,5 +1,7 @@
 use super::common::checked_page_end;
-use super::lifecycle::{abort_staging_result, acquire_materialization_lease};
+use super::lifecycle::{
+    abort_staging_result, acquire_materialization_lease, acquire_materialization_lease_for_client,
+};
 use super::lifecycle::{
     acquire_active_result, finish_deleting_temp_result, load_active_unexpired_record, load_record,
 };
@@ -8,7 +10,9 @@ use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
     insert_staging_temp_result_with_retention, publish_temp_result_with_retention,
 };
-use super::search_plan::{IndexedSource, PreviewSearchPlan, build_source_search_plans};
+use super::search_plan::{
+    IndexedSource, PreviewSearchPlan, build_source_search_plans_with_context,
+};
 use super::storage::checked_temp_path;
 use super::storage::invalid_sidecar;
 use super::storage::{
@@ -16,6 +20,10 @@ use super::storage::{
     temp_result_too_large,
 };
 use super::*;
+use crate::auth::extractor::OptionalUser;
+use crate::services::search_execution::{
+    SearchExecutionContext, SearchExecutionRegistry, StopReason, TerminalStatus,
+};
 use crate::services::temp_results::scan_timeout;
 use futures_util::TryStreamExt;
 
@@ -38,6 +46,86 @@ struct MaterializeOutcome {
     total: i64,
 }
 
+struct SearchExecutionGuard {
+    registry: SearchExecutionRegistry,
+    search_id: String,
+    token: crate::services::search_execution::CancellationToken,
+    finished: bool,
+}
+
+struct SearchExecutionHandlerGuard {
+    registry: SearchExecutionRegistry,
+    search_id: String,
+    token: crate::services::search_execution::CancellationToken,
+}
+
+impl SearchExecutionHandlerGuard {
+    fn new(registry: SearchExecutionRegistry, context: &SearchExecutionContext) -> Self {
+        Self {
+            registry,
+            search_id: context.search_id.clone(),
+            token: context.cancellation_token(),
+        }
+    }
+}
+
+impl Drop for SearchExecutionHandlerGuard {
+    fn drop(&mut self) {
+        self.token.cancel();
+        self.registry.cancel_from_handler(&self.search_id);
+    }
+}
+
+impl SearchExecutionGuard {
+    fn new(registry: SearchExecutionRegistry, context: SearchExecutionContext) -> Self {
+        let search_id = context.search_id.clone();
+        let token = context.cancellation_token();
+        Self {
+            registry,
+            search_id,
+            token,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, requested: TerminalStatus) -> TerminalStatus {
+        if self.finished {
+            return requested;
+        }
+        self.finished = true;
+        if !matches!(requested, TerminalStatus::Completed) {
+            self.token.cancel();
+        }
+        self.registry
+            .finish(&self.search_id, requested)
+            .unwrap_or(requested)
+    }
+
+    fn finish_result<T>(&mut self, result: &Result<T, AppError>) -> TerminalStatus {
+        let status = match result {
+            Ok(_) => TerminalStatus::Completed,
+            Err(error) if is_search_cancelled(error) => TerminalStatus::Cancelled,
+            Err(error) if is_scan_timeout(error) => TerminalStatus::TimedOut,
+            Err(_) => TerminalStatus::Failed,
+        };
+        self.finish(status)
+    }
+}
+
+impl Drop for SearchExecutionGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let status = if self.token.is_cancelled() {
+            TerminalStatus::Cancelled
+        } else {
+            TerminalStatus::Failed
+        };
+        self.finish(status);
+    }
+}
+
 pub(crate) struct ResolvedSources {
     sources: Vec<TempSource>,
     indexed_sources: Vec<Option<IndexedSource>>,
@@ -53,8 +141,32 @@ async fn materialize_result(
     mode: MaterializeMode,
     preview_plan: Option<&PreviewSearchPlan>,
 ) -> Result<MaterializeOutcome, AppError> {
+    materialize_result_with_context(
+        state,
+        expression_text,
+        expression,
+        sources,
+        source_label,
+        mode,
+        preview_plan,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_result_with_context(
+    state: &web::Data<AppState>,
+    expression_text: &str,
+    expression: &log_expression::Expression,
+    sources: &[TempSource],
+    source_label: &str,
+    mode: MaterializeMode,
+    preview_plan: Option<&PreviewSearchPlan>,
+    context: Option<&SearchExecutionContext>,
+) -> Result<MaterializeOutcome, AppError> {
     let settings = state.settings.snapshot().await;
-    materialize_result_with_timeout(
+    materialize_result_with_timeout_and_context(
         state,
         expression_text,
         expression,
@@ -63,11 +175,13 @@ async fn materialize_result(
         mode,
         preview_plan,
         std::time::Duration::from_secs(settings.effective.temp_results_max_scan_duration_seconds),
+        context,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn materialize_result_with_timeout(
     state: &web::Data<AppState>,
     expression_text: &str,
@@ -78,7 +192,34 @@ async fn materialize_result_with_timeout(
     preview_plan: Option<&PreviewSearchPlan>,
     timeout: std::time::Duration,
 ) -> Result<MaterializeOutcome, AppError> {
+    materialize_result_with_timeout_and_context(
+        state,
+        expression_text,
+        expression,
+        sources,
+        source_label,
+        mode,
+        preview_plan,
+        timeout,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_result_with_timeout_and_context(
+    state: &web::Data<AppState>,
+    expression_text: &str,
+    expression: &log_expression::Expression,
+    sources: &[TempSource],
+    source_label: &str,
+    mode: MaterializeMode,
+    preview_plan: Option<&PreviewSearchPlan>,
+    timeout: std::time::Duration,
+    context: Option<&SearchExecutionContext>,
+) -> Result<MaterializeOutcome, AppError> {
     let settings = state.settings.snapshot().await;
+    checkpoint(context)?;
     let id = Uuid::new_v4().simple().to_string();
     let directory = data_root(state).join("temp-results");
     tokio::fs::create_dir_all(&directory)
@@ -111,9 +252,11 @@ async fn materialize_result_with_timeout(
         let mut index = File::create(&staging_index_path)
             .await
             .map_err(AppError::Io)?;
-        let total = tokio::time::timeout(timeout, async {
+        let effective_timeout = context.map_or(timeout, |context| timeout.min(context.remaining()));
+        let total = tokio::time::timeout(effective_timeout, async {
+            checkpoint(context)?;
             if let Some(plan) = preview_plan {
-                let preview = TempResultExecutor::materialize_preview_with_plans(
+                let preview = TempResultExecutor::materialize_preview_with_plans_and_context(
                     sources,
                     &plan.source_plans,
                     expression,
@@ -123,6 +266,7 @@ async fn materialize_result_with_timeout(
                     &mut output,
                     &mut metadata,
                     &mut index,
+                    context,
                 )
                 .await?;
                 tracing::info!(
@@ -136,19 +280,21 @@ async fn materialize_result_with_timeout(
                 );
                 Ok::<i64, AppError>(preview.total)
             } else {
-                TempResultExecutor::write_matches(
+                TempResultExecutor::write_matches_with_context(
                     sources,
                     expression,
                     &mut output,
                     &mut metadata,
                     &mut index,
                     settings.effective.temp_results_max_result_size,
+                    context,
                 )
                 .await
             }
         })
         .await
-        .map_err(|_| scan_timeout())??;
+        .map_err(|_| stop_or_timeout(context))??;
+        checkpoint(context)?;
         drop(output);
         drop(metadata);
         drop(index);
@@ -159,6 +305,13 @@ async fn materialize_result_with_timeout(
         )
         .await
         .map_err(AppError::Io)?;
+        if let Some(context) = context {
+            state
+                .temp_results
+                .search_executions
+                .mark_committing(&context.search_id, context)
+                .map_err(StopReason::into_error)?;
+        }
         tokio::fs::rename(&staging_output_path, &output_path)
             .await
             .map_err(AppError::Io)?;
@@ -216,19 +369,30 @@ pub(crate) async fn resolve_sources(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
 ) -> Result<ResolvedSources, AppError> {
+    resolve_sources_with_context(payload, state, None).await
+}
+
+pub(crate) async fn resolve_sources_with_context(
+    payload: &CreateTempResultRequest,
+    state: &web::Data<AppState>,
+    context: Option<&SearchExecutionContext>,
+) -> Result<ResolvedSources, AppError> {
     let settings = state.settings.snapshot().await;
+    checkpoint(context)?;
     tokio::time::timeout(
         std::time::Duration::from_secs(settings.effective.temp_results_max_scan_duration_seconds),
-        resolve_sources_inner(payload, state),
+        resolve_sources_inner(payload, state, context),
     )
     .await
-    .map_err(|_| scan_timeout())?
+    .map_err(|_| stop_or_timeout(context))?
 }
 
 async fn resolve_sources_inner(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
+    context: Option<&SearchExecutionContext>,
 ) -> Result<ResolvedSources, AppError> {
+    checkpoint(context)?;
     if let Some(source_id) = payload.source_temp_id.as_deref() {
         let (source, source_lease) = acquire_active_result(state, source_id).await?;
         let path = checked_temp_path(state, &source.storage_path)?;
@@ -279,6 +443,7 @@ async fn resolve_sources_inner(
         let mut sources = Vec::new();
         let mut indexed_sources = Vec::new();
         while let Some(row) = rows.try_next().await.map_err(AppError::Database)? {
+            checkpoint(context)?;
             let file = FileRow {
                 id: row.id,
                 parent_id: None,
@@ -328,6 +493,7 @@ async fn resolve_sources_inner(
         .ok_or_else(|| AppError::BadRequest("file_id is required".into()))?
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest("invalid file_id".into()))?;
+    checkpoint(context)?;
     let bundle = load_bundle(&state.db.pool, bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
     let file = fetch_file(&state.db.pool, &bundle.id, file_id).await?;
@@ -415,13 +581,93 @@ async fn cleanup_published_result_after_preview_failure(
 }
 
 pub(crate) async fn create_preview_result(
+    user: OptionalUser,
     request: HttpRequest,
     payload: web::Json<PreviewTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let settings = state.settings.snapshot().await;
-    check_temp_result_rate_limit(&state, &request)?;
-    let _client_lease = acquire_materialization_lease(&state, &request)?;
+    let client_key = request_client_key(&request);
+    let payload = payload.into_inner();
+    let context = if let Some(search_id) = payload.search_id.as_deref() {
+        let Some(cancel_token) = request
+            .headers()
+            .get(crate::routes::search_requests::CANCEL_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(AppError::api(
+                StatusCode::CONFLICT,
+                "SEARCH_REQUEST_UNAVAILABLE",
+                "搜索请求不可用",
+            ));
+        };
+        state
+            .temp_results
+            .search_executions
+            .start_with_timeout(
+                search_id,
+                cancel_token,
+                user.0.as_ref().map(|user| user.id.as_str()),
+                std::time::Duration::from_secs(
+                    settings.effective.temp_results_max_scan_duration_seconds,
+                ),
+            )
+            .map(Some)
+            .map_err(|_| {
+                AppError::api(
+                    StatusCode::CONFLICT,
+                    "SEARCH_REQUEST_UNAVAILABLE",
+                    "搜索请求不可用",
+                )
+            })?
+    } else {
+        check_temp_result_rate_limit(&state, &request)?;
+        None
+    };
+    let Some(context) = context else {
+        return create_preview_result_inner(&client_key, &payload, &state, None)
+            .await
+            .map(|response| HttpResponse::Ok().json(response));
+    };
+
+    let worker_registry = state.temp_results.search_executions.clone();
+    let _handler_guard = SearchExecutionHandlerGuard::new(worker_registry.clone(), &context);
+    let worker_state = state.clone();
+    let worker_client_key = client_key.clone();
+    let worker = tokio::spawn(async move {
+        let mut execution_guard =
+            SearchExecutionGuard::new(worker_registry.clone(), context.clone());
+        let result = create_preview_result_inner(
+            &worker_client_key,
+            &payload,
+            &worker_state,
+            Some(&context),
+        )
+        .await;
+        execution_guard.finish_result(&result);
+        result
+    });
+    match worker.await {
+        Ok(Ok(response)) => Ok(HttpResponse::Ok().json(response)),
+        Ok(Err(error)) => Err(error),
+        Err(error) => {
+            tracing::error!(%error, "interactive search worker terminated unexpectedly");
+            Err(AppError::Config(
+                "interactive search worker terminated".into(),
+            ))
+        }
+    }
+}
+
+async fn create_preview_result_inner(
+    client_key: &str,
+    payload: &PreviewTempResultRequest,
+    state: &web::Data<AppState>,
+    context: Option<&SearchExecutionContext>,
+) -> Result<MaterializedPreviewResponse, AppError> {
+    let settings = state.settings.snapshot().await;
+    let _client_lease = acquire_materialization_lease_for_client(state, client_key)?;
     let _permit = state
         .temp_results
         .permits
@@ -434,7 +680,7 @@ pub(crate) async fn create_preview_result(
                 "临时结果生成任务过多，请稍后重试",
             )
         })?;
-    ensure_temp_result_budget(&state).await?;
+    ensure_temp_result_budget(state).await?;
     let expression_text = payload.expression.trim();
     let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
     let start = payload.from.unwrap_or(0).max(0);
@@ -451,36 +697,42 @@ pub(crate) async fn create_preview_result(
         issue_code: payload.issue_code.clone(),
         source_temp_id: payload.source_temp_id.clone(),
     };
-    let resolved = resolve_sources(&request, &state).await?;
-    let preview_plan =
-        build_source_search_plans(&state, &expression, &resolved.indexed_sources).await?;
+    let resolved = resolve_sources_with_context(&request, state, context).await?;
+    let preview_plan = build_source_search_plans_with_context(
+        state,
+        &expression,
+        &resolved.indexed_sources,
+        context,
+    )
+    .await?;
     let source_label = source_label(&resolved.sources);
-    let outcome = materialize_result(
-        &state,
+    let outcome = materialize_result_with_context(
+        state,
         expression_text,
         &expression,
         &resolved.sources,
         &source_label,
         MaterializeMode::Preview,
         Some(&preview_plan),
+        context,
     )
     .await?;
-    let (result, read_lease) = acquire_active_result(&state, &outcome.id).await?;
-    let page = read_result_page(&state, &result, start, limit).await;
+    let (result, read_lease) = acquire_active_result(state, &outcome.id).await?;
+    let page = read_result_page(state, &result, start, limit).await;
     drop(read_lease);
     let (lines, next_start) = match page {
         Ok(page) => page,
         Err(error) => {
-            cleanup_published_result_after_preview_failure(&state, &result).await;
+            cleanup_published_result_after_preview_failure(state, &result).await;
             return Err(error);
         }
     };
-    Ok(HttpResponse::Ok().json(MaterializedPreviewResponse {
+    Ok(MaterializedPreviewResponse {
         result_id: outcome.id,
         total: outcome.total,
         next_start,
         lines,
-    }))
+    })
 }
 
 pub(crate) async fn create_full_result(
@@ -593,6 +845,40 @@ pub(crate) async fn delete_result(
     Ok(HttpResponse::NoContent().finish())
 }
 
+fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> {
+    if let Some(context) = context {
+        context.checkpoint().map_err(StopReason::into_error)?;
+    }
+    Ok(())
+}
+
+fn stop_or_timeout(context: Option<&SearchExecutionContext>) -> AppError {
+    context
+        .and_then(|context| context.checkpoint().err())
+        .map(StopReason::into_error)
+        .unwrap_or_else(scan_timeout)
+}
+
+fn is_search_cancelled(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Api {
+            code: "SEARCH_CANCELLED",
+            ..
+        }
+    )
+}
+
+fn is_scan_timeout(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::PublicApi {
+            code: "TEMP_RESULT_SCAN_TIMEOUT",
+            ..
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -608,8 +894,13 @@ mod tests {
         MaterializeMode, materialize_result, materialize_result_with_timeout, resolve_sources,
     };
     use crate::{
-        AppState, config::AppLimits, db, error::AppError, log_expression,
-        routes::temp_results::CreateTempResultRequest, services::temp_results::TempSource,
+        AppState,
+        config::AppLimits,
+        db,
+        error::AppError,
+        log_expression,
+        routes::temp_results::CreateTempResultRequest,
+        services::{search_execution::TerminalStatus, temp_results::TempSource},
     };
 
     fn test_path(suffix: &str) -> PathBuf {
@@ -733,6 +1024,135 @@ mod tests {
         )
         .await;
         let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn context_materialization_commits_the_registered_search_execution() {
+        let root = test_path("registered-search");
+        let source_path = root.join("source.log");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(&source_path, "ERROR registered\n")
+            .await
+            .unwrap();
+        let state = test_state(&root, AppLimits::default()).await;
+        let reservation = state
+            .temp_results
+            .search_executions
+            .reserve("search-execution", None, "test-peer")
+            .unwrap();
+        let context = state
+            .temp_results
+            .search_executions
+            .start_with_timeout(
+                &reservation.search_id,
+                &reservation.cancel_token,
+                None,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let expression = log_expression::parse("ERROR").unwrap();
+
+        let outcome = super::materialize_result_with_timeout_and_context(
+            &state,
+            "ERROR",
+            &expression,
+            &[TempSource {
+                path: source_path,
+                metadata_path: None,
+                label: "app.log".into(),
+                bundle_hash: None,
+                file_id: None,
+            }],
+            "app.log",
+            MaterializeMode::Full,
+            None,
+            Duration::from_secs(5),
+            Some(&context),
+        )
+        .await;
+
+        assert!(outcome.is_ok(), "registered preview should publish");
+        assert_eq!(state.temp_results.search_executions.active_count(), 1);
+        state
+            .temp_results
+            .search_executions
+            .finish(&context.search_id, TerminalStatus::Completed);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[test]
+    fn dropped_preview_execution_guard_finishes_the_registered_execution() {
+        let state = crate::services::search_execution::SearchExecutionRegistry::new(
+            8,
+            8,
+            Duration::from_secs(60),
+        );
+        let reservation = state.reserve("dropped-search", None, "test-peer").unwrap();
+        let context = state
+            .start(&reservation.search_id, &reservation.cancel_token, None)
+            .unwrap();
+        let token = context.cancellation_token();
+
+        {
+            let _guard = super::SearchExecutionGuard::new(state.clone(), context);
+        }
+
+        assert!(token.is_cancelled());
+        assert_eq!(state.active_count(), 0);
+    }
+
+    #[test]
+    fn dropped_preview_handler_guard_marks_the_execution_cancelling() {
+        let state = crate::services::search_execution::SearchExecutionRegistry::new(
+            8,
+            8,
+            Duration::from_secs(60),
+        );
+        let reservation = state
+            .reserve("handler-drop-search", None, "test-peer")
+            .unwrap();
+        let context = state
+            .start(&reservation.search_id, &reservation.cancel_token, None)
+            .unwrap();
+        let token = context.cancellation_token();
+
+        {
+            let _guard = super::SearchExecutionHandlerGuard::new(state.clone(), &context);
+        }
+
+        assert!(token.is_cancelled());
+        assert_eq!(
+            state.finish("handler-drop-search", TerminalStatus::Completed),
+            Some(TerminalStatus::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_preview_execution_guard_does_not_cancel_after_finish() {
+        let state = crate::services::search_execution::SearchExecutionRegistry::new(
+            8,
+            8,
+            Duration::from_secs(60),
+        );
+        let reservation = state
+            .reserve("completed-search", None, "test-peer")
+            .unwrap();
+        let context = state
+            .start(&reservation.search_id, &reservation.cancel_token, None)
+            .unwrap();
+        let token = context.cancellation_token();
+
+        let mut guard = super::SearchExecutionGuard::new(state.clone(), context);
+        guard.finish(TerminalStatus::Completed);
+        drop(guard);
+
+        assert!(!token.is_cancelled());
+        assert_eq!(
+            state
+                .wait_for_terminal("completed-search", Duration::from_secs(1))
+                .await,
+            Some(TerminalStatus::Completed)
+        );
     }
 
     #[tokio::test]

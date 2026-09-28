@@ -65,16 +65,41 @@ where
     R: AsyncBufRead + Unpin,
     F: FnMut(&[u8]),
 {
+    read_line_bytes_limited_with_budget_and_callback_result(
+        reader,
+        output,
+        max_bytes,
+        scan_budget,
+        |chunk| {
+            on_content(chunk);
+            Ok::<(), io::Error>(())
+        },
+    )
+    .await
+}
+
+pub async fn read_line_bytes_limited_with_budget_and_callback_result<R, F, E>(
+    reader: &mut R,
+    output: &mut Vec<u8>,
+    max_bytes: usize,
+    scan_budget: usize,
+    mut on_content: F,
+) -> Result<LimitedLine, E>
+where
+    R: AsyncBufRead + Unpin,
+    E: From<io::Error>,
+    F: FnMut(&[u8]) -> Result<(), E>,
+{
     output.clear();
     let mut total_read = 0usize;
     let mut previous_byte = None;
     let mut deferred_carriage_return = false;
 
     loop {
-        let available = reader.fill_buf().await?;
+        let available = reader.fill_buf().await.map_err(E::from)?;
         if available.is_empty() {
             if deferred_carriage_return {
-                on_content(b"\r");
+                on_content(b"\r")?;
             }
             return if total_read == 0 {
                 Ok(LimitedLine::EndOfFile)
@@ -111,13 +136,13 @@ where
             }
         });
         if deferred_carriage_return && newline_pos != Some(0) {
-            on_content(b"\r");
+            on_content(b"\r")?;
         }
         let defer_carriage_return = newline_pos.is_none() && available.last() == Some(&b'\r');
         let callback_end = content_end.saturating_sub(usize::from(defer_carriage_return));
         let chunk = &available[..callback_end];
         let output_chunk = &available[..content_end];
-        on_content(chunk);
+        on_content(chunk)?;
         deferred_carriage_return = defer_carriage_return;
         total_read = total_read.saturating_add(output_chunk.len());
 
@@ -134,9 +159,9 @@ where
         reader.consume(consume_len);
 
         if newline_pos.is_none() && total_read == scan_budget {
-            if reader.fill_buf().await?.is_empty() {
+            if reader.fill_buf().await.map_err(E::from)?.is_empty() {
                 if deferred_carriage_return {
-                    on_content(b"\r");
+                    on_content(b"\r")?;
                 }
                 return Ok(LimitedLine::Line {
                     bytes_read: total_read,

@@ -353,3 +353,11 @@ export interface TempResultPreviewResponse {
     path: string;
   }>;
 }
+
+export interface SearchReservationResponse {
+  search_id: string;
+  cancel_token: string;
+  expires_in_ms: number;
+}
+
+export type SearchExecutionStatus = 'IDLE' | 'RUNNING' | 'CANCELLING' | 'CANCELLED' | 'SUCCEEDED' | 'FAILED';

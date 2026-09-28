@@ -14,9 +14,12 @@ use crate::{
             can_skip_visibility_snapshot,
         },
         search_tantivy_bundle_visible_with_lease_and_permit,
+        search_tantivy_bundle_visible_with_lease_and_permit_and_context,
         search_tantivy_bundle_with_lease_and_permit,
+        search_tantivy_bundle_with_lease_and_permit_and_context,
         visibility::snapshot_file_ids,
     },
+    services::search_execution::{SearchExecutionContext, StopReason},
     services::temp_results::{CandidateScanPlan, SourceSearchPlan, merge_line_ranges},
 };
 
@@ -53,11 +56,13 @@ impl PreviewSearchPlan {
 
 type PublicationRow = (String, String, i64, Option<i64>, Option<i64>, i64, i64);
 
-pub(crate) async fn build_source_search_plans(
+pub(crate) async fn build_source_search_plans_with_context(
     state: &web::Data<AppState>,
     expression: &Expression,
     indexed_sources: &[Option<IndexedSource>],
+    context: Option<&SearchExecutionContext>,
 ) -> Result<PreviewSearchPlan, AppError> {
+    checkpoint(context)?;
     let started = Instant::now();
     let (term, fallback_reason) = match classify_expression(expression) {
         SearchPlanKind::IndexedTerm => {
@@ -74,6 +79,7 @@ pub(crate) async fn build_source_search_plans(
     let mut candidate_count = 0_usize;
     let mut fallback_reasons = Vec::new();
     for indexed_source in indexed_sources {
+        checkpoint(context)?;
         let plan = if let Some(reason) = fallback_reason {
             fallback_reasons.push(reason);
             SourceSearchPlan::Raw { reason }
@@ -82,6 +88,7 @@ pub(crate) async fn build_source_search_plans(
                 state,
                 indexed_source,
                 term.as_deref().expect("indexed term is present"),
+                context,
             )
             .await
             {
@@ -89,10 +96,11 @@ pub(crate) async fn build_source_search_plans(
                     candidate_count = candidate_count.saturating_add(count);
                     plan
                 }
-                Err(reason) => {
+                Err(SearchPlanFailure::Fallback(reason)) => {
                     fallback_reasons.push(reason);
                     SourceSearchPlan::Raw { reason }
                 }
+                Err(SearchPlanFailure::Stopped(error)) => return Err(error),
             }
         } else {
             fallback_reasons.push("source_identity_missing");
@@ -114,14 +122,16 @@ async fn build_indexed_source_plan(
     state: &web::Data<AppState>,
     source: &IndexedSource,
     term: &str,
-) -> Result<(SourceSearchPlan, usize), &'static str> {
+    context: Option<&SearchExecutionContext>,
+) -> Result<(SourceSearchPlan, usize), SearchPlanFailure> {
+    checkpoint(context).map_err(SearchPlanFailure::Stopped)?;
     let publication: Option<PublicationRow> = sqlx::query_as(
         "SELECT backend, state, generation, schema_version, tokenizer_version, visibility_revision, compacted_revision FROM bundle_search_indexes WHERE bundle_id = ?",
     )
     .bind(&source.bundle_id)
     .fetch_optional(&state.db.pool)
     .await
-    .map_err(|_| "publication_lookup_failed")?;
+    .map_err(|_| SearchPlanFailure::Fallback("publication_lookup_failed"))?;
     let Some((
         backend,
         state_name,
@@ -132,31 +142,47 @@ async fn build_indexed_source_plan(
         compacted_revision,
     )) = publication
     else {
-        return Err("index_not_published");
+        return Err(SearchPlanFailure::Fallback("index_not_published"));
     };
     if backend != "tantivy" {
-        return Err("index_backend_not_tantivy");
+        return Err(SearchPlanFailure::Fallback("index_backend_not_tantivy"));
     }
     if !matches!(state_name.as_str(), "READY" | "NEEDS_REBUILD") {
-        return Err("index_not_ready");
+        return Err(SearchPlanFailure::Fallback("index_not_ready"));
     }
     if schema_version != Some(crate::search::publication::TANTIVY_SCHEMA_VERSION)
         || tokenizer_version != Some(crate::search::publication::TANTIVY_TOKENIZER_VERSION)
     {
-        return Err("index_version_unsupported");
+        return Err(SearchPlanFailure::Fallback("index_version_unsupported"));
     }
     if generation <= 0 {
-        return Err("index_generation_invalid");
+        return Err(SearchPlanFailure::Fallback("index_generation_invalid"));
     }
     let artifact = artifact_relative_path(&source.bundle_id, generation)
-        .map_err(|_| "index_artifact_invalid")?;
-    let permit = state
-        .search
-        .query_permits
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| "query_admission_unavailable")?;
+        .map_err(|_| SearchPlanFailure::Fallback("index_artifact_invalid"))?;
+    let permit = if let Some(context) = context {
+        let cancellation = context.cancellation_token();
+        let remaining = context.remaining();
+        tokio::select! {
+            permit = state.search.query_permits.clone().acquire_owned() => permit
+                .map_err(|_| SearchPlanFailure::Fallback("query_admission_unavailable"))?,
+            _ = cancellation.cancelled() => {
+                return Err(SearchPlanFailure::Stopped(StopReason::Cancelled.into_error()));
+            }
+            _ = tokio::time::sleep(remaining) => {
+                return Err(SearchPlanFailure::Stopped(StopReason::TimedOut.into_error()));
+            }
+        }
+    } else {
+        state
+            .search
+            .query_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| SearchPlanFailure::Fallback("query_admission_unavailable"))?
+    };
+    checkpoint(context).map_err(SearchPlanFailure::Stopped)?;
     let lease = acquire_generation_lease_with_registry(
         &state.search.generation_leases,
         &state.db.pool,
@@ -164,7 +190,7 @@ async fn build_indexed_source_plan(
         generation,
     )
     .await
-    .map_err(|_| "generation_lease_unavailable")?;
+    .map_err(|_| SearchPlanFailure::Fallback("generation_lease_unavailable"))?;
     let request = ContentSearchRequest {
         scope: ContentSearchScope::Bundle {
             bundle_id: source.bundle_id.clone(),
@@ -178,38 +204,70 @@ async fn build_indexed_source_plan(
     };
     let result =
         if can_skip_visibility_snapshot(&state_name, visibility_revision, compacted_revision) {
-            search_tantivy_bundle_with_lease_and_permit(
-                state.storage.data_root.join(artifact),
-                request,
-                source.bundle_id.clone(),
-                generation,
-                lease,
-                permit,
-            )
-            .await
+            if let Some(context) = context {
+                search_tantivy_bundle_with_lease_and_permit_and_context(
+                    state.storage.data_root.join(artifact),
+                    request,
+                    source.bundle_id.clone(),
+                    generation,
+                    lease,
+                    permit,
+                    context.clone(),
+                )
+                .await
+            } else {
+                search_tantivy_bundle_with_lease_and_permit(
+                    state.storage.data_root.join(artifact),
+                    request,
+                    source.bundle_id.clone(),
+                    generation,
+                    lease,
+                    permit,
+                )
+                .await
+            }
         } else {
             let visible_file_ids = snapshot_file_ids(&state.db.pool, &source.bundle_id)
                 .await
-                .map_err(|_| "visibility_snapshot_unavailable")?;
-            search_tantivy_bundle_visible_with_lease_and_permit(
-                state.storage.data_root.join(artifact),
-                request,
-                visible_file_ids,
-                source.bundle_id.clone(),
-                generation,
-                lease,
-                permit,
-            )
-            .await
-        }
-        .map_err(|_| "tantivy_query_failed")?;
+                .map_err(|_| SearchPlanFailure::Fallback("visibility_snapshot_unavailable"))?;
+            if let Some(context) = context {
+                search_tantivy_bundle_visible_with_lease_and_permit_and_context(
+                    state.storage.data_root.join(artifact),
+                    request,
+                    visible_file_ids,
+                    source.bundle_id.clone(),
+                    generation,
+                    lease,
+                    permit,
+                    context.clone(),
+                )
+                .await
+            } else {
+                search_tantivy_bundle_visible_with_lease_and_permit(
+                    state.storage.data_root.join(artifact),
+                    request,
+                    visible_file_ids,
+                    source.bundle_id.clone(),
+                    generation,
+                    lease,
+                    permit,
+                )
+                .await
+            }
+        };
+    let result = match result {
+        Ok(result) => result,
+        Err(error) if is_stop_error(&error) => return Err(SearchPlanFailure::Stopped(error)),
+        Err(_) => return Err(SearchPlanFailure::Fallback("tantivy_query_failed")),
+    };
+    checkpoint(context).map_err(SearchPlanFailure::Stopped)?;
     if result.total < 0 || result.total > HARD_MAX_SEARCH_WINDOW as i64 {
-        return Err("candidate_window_overflow");
+        return Err(SearchPlanFailure::Fallback("candidate_window_overflow"));
     }
     if result.rows.iter().any(|row| row.file_id != source.file_id) {
-        return Err("candidate_file_scope_mismatch");
+        return Err(SearchPlanFailure::Fallback("candidate_file_scope_mismatch"));
     }
-    let ranges = candidate_ranges_from_rows(&result.rows)?;
+    let ranges = candidate_ranges_from_rows(&result.rows).map_err(SearchPlanFailure::Fallback)?;
     if ranges.is_empty() {
         return Ok((
             SourceSearchPlan::Tantivy(CandidateScanPlan {
@@ -223,8 +281,9 @@ async fn build_indexed_source_plan(
     let (seek_line, seek_offset) =
         nearest_line_offset(&state.db.pool, source.file_id, ranges[0].start)
             .await
-            .map_err(|_| "line_offset_lookup_failed")?;
-    let seek_offset = u64::try_from(seek_offset).map_err(|_| "line_offset_invalid")?;
+            .map_err(|_| SearchPlanFailure::Fallback("line_offset_lookup_failed"))?;
+    let seek_offset = u64::try_from(seek_offset)
+        .map_err(|_| SearchPlanFailure::Fallback("line_offset_invalid"))?;
     Ok((
         SourceSearchPlan::Tantivy(CandidateScanPlan {
             ranges,
@@ -233,6 +292,31 @@ async fn build_indexed_source_plan(
         }),
         result.rows.len(),
     ))
+}
+
+enum SearchPlanFailure {
+    Fallback(&'static str),
+    Stopped(AppError),
+}
+
+fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> {
+    if let Some(context) = context {
+        context.checkpoint().map_err(StopReason::into_error)?;
+    }
+    Ok(())
+}
+
+fn is_stop_error(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Api {
+            code: "SEARCH_CANCELLED",
+            ..
+        } | AppError::PublicApi {
+            code: "TEMP_RESULT_SCAN_TIMEOUT",
+            ..
+        }
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

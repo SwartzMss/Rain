@@ -11,6 +11,7 @@ use tantivy::{
 };
 
 use crate::error::AppError;
+use crate::services::search_execution::{SearchExecutionContext, StopReason};
 
 use super::{
     tokenizer::{NGRAM_MAX, NGRAM_MIN},
@@ -117,6 +118,16 @@ impl CandidateSearch {
         query: &str,
         options: SearchOptions<'_>,
     ) -> Result<SearchPage, AppError> {
+        self.search_page_with_context(query, options, None)
+    }
+
+    pub(crate) fn search_page_with_context(
+        &self,
+        query: &str,
+        options: SearchOptions<'_>,
+        context: Option<&SearchExecutionContext>,
+    ) -> Result<SearchPage, AppError> {
+        checkpoint(context)?;
         let window = validate_tantivy_search_window(options.from, options.size)?;
         let query = query.trim();
         if query.chars().count() < NGRAM_MIN {
@@ -167,11 +178,13 @@ impl CandidateSearch {
         let mut total = 0_u64;
 
         for (segment_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
+            checkpoint(context)?;
             let mut scorer = weight
                 .scorer(segment_reader, 1.0)
                 .map_err(|error| AppError::Config(format!("score Tantivy query: {error}")))?;
             let mut doc_id = scorer.doc();
             while doc_id != TERMINATED {
+                checkpoint(context)?;
                 metrics.candidate_docs += 1;
                 let address = DocAddress {
                     segment_ord: segment_ord as u32,
@@ -273,6 +286,13 @@ impl CandidateSearch {
             metrics,
         })
     }
+}
+
+fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> {
+    if let Some(context) = context {
+        context.checkpoint().map_err(StopReason::into_error)?;
+    }
+    Ok(())
 }
 
 fn sort_key(hit: &SearchHit) -> (i64, i64, i64) {
