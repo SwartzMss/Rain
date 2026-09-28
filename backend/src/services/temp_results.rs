@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, SeekFrom},
 };
 
 use crate::{
@@ -235,6 +235,226 @@ impl TempResultExecutor {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn materialize_preview_with_plans(
+        sources: &[TempSource],
+        plans: &[SourceSearchPlan],
+        expression: &Expression,
+        from: i64,
+        size: i64,
+        max_output_bytes: u64,
+        output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
+    ) -> Result<MaterializedPreview, AppError> {
+        if sources.len() != plans.len() {
+            return Err(AppError::Config(
+                "temporary result source and search plan counts differ".into(),
+            ));
+        }
+        let page_end = from
+            .checked_add(size)
+            .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
+        let mut matched = 0_i64;
+        let mut lines = Vec::new();
+        let mut log_offset = 0_u64;
+        let mut meta_offset = 0_u64;
+        let mut total_output_bytes = 0_u64;
+        let max_logical_line_bytes =
+            usize::try_from(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES).map_err(|_| {
+                AppError::Config(
+                    "MAX_TEMP_RESULT_LOGICAL_LINE_BYTES cannot be represented on this platform"
+                        .into(),
+                )
+            })?;
+        let mut matcher = expression.chunk_matcher();
+        for (source, plan) in sources.iter().zip(plans) {
+            let (candidate_ranges, seek_line, seek_offset) = match plan {
+                SourceSearchPlan::Raw { .. } => (None, 0_i64, 0_u64),
+                SourceSearchPlan::Tantivy(candidate) if candidate.ranges.is_empty() => {
+                    continue;
+                }
+                SourceSearchPlan::Tantivy(candidate) => (
+                    Some(candidate.ranges.as_slice()),
+                    candidate.seek_line.min(candidate.ranges[0].start),
+                    candidate.seek_offset,
+                ),
+            };
+            let mut file = File::open(&source.path).await.map_err(AppError::Io)?;
+            if candidate_ranges.is_some() {
+                file.seek(SeekFrom::Start(seek_offset))
+                    .await
+                    .map_err(AppError::Io)?;
+            }
+            let mut reader = BufReader::new(file);
+            let mut source_metadata_reader = match source.metadata_path.as_ref() {
+                Some(path) => Some(BufReader::new(
+                    File::open(path).await.map_err(AppError::Io)?,
+                )),
+                None => None,
+            };
+            let mut bytes = Vec::new();
+            let mut source_metadata_line = String::new();
+            let mut source_line = seek_line;
+            let mut range_index = 0_usize;
+            loop {
+                if let Some(ranges) = candidate_ranges {
+                    while ranges
+                        .get(range_index)
+                        .is_some_and(|range| source_line > range.end)
+                    {
+                        range_index += 1;
+                    }
+                    if range_index == ranges.len() {
+                        break;
+                    }
+                }
+                let selected = candidate_ranges.is_none_or(|ranges| {
+                    ranges
+                        .get(range_index)
+                        .is_some_and(|range| source_line >= range.start)
+                });
+                bytes.clear();
+                let line = if selected {
+                    matcher.reset();
+                    read_line_bytes_limited_with_budget_and_callback(
+                        &mut reader,
+                        &mut bytes,
+                        max_logical_line_bytes,
+                        // No cumulative scan cap; the caller enforces a deadline.
+                        // Keep the retained line prefix bounded independently.
+                        usize::MAX,
+                        |chunk| matcher.feed_bytes(chunk),
+                    )
+                    .await
+                    .map_err(AppError::Io)?
+                } else {
+                    read_line_bytes_limited_with_budget_and_callback(
+                        &mut reader,
+                        &mut bytes,
+                        max_logical_line_bytes,
+                        // No cumulative scan cap; the caller enforces a deadline.
+                        // Keep the retained line prefix bounded independently.
+                        usize::MAX,
+                        |_| {},
+                    )
+                    .await
+                    .map_err(AppError::Io)?
+                };
+                let truncated = match line {
+                    LimitedLine::EndOfFile => break,
+                    LimitedLine::Line { truncated, .. } => truncated,
+                    LimitedLine::ScanLimit { .. } => {
+                        return Err(AppError::Io(std::io::Error::other(
+                            "logical line exceeds platform size",
+                        )));
+                    }
+                };
+                let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
+                    source_metadata_line.clear();
+                    if reader
+                        .read_line(&mut source_metadata_line)
+                        .await
+                        .map_err(AppError::Io)?
+                        == 0
+                    {
+                        return Err(invalid_sidecar(
+                            "temporary result metadata ended before its content",
+                        ));
+                    }
+                    if selected {
+                        Some(decode_json_line::<MatchMetadata>(
+                            source_metadata_line.trim_end(),
+                        )?)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if selected {
+                    matcher.finish();
+                }
+                if selected && matcher.matches(expression) {
+                    let content = decode_log_line(&bytes, truncated);
+                    let mut metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
+                        bundle_hash: source.bundle_hash.clone(),
+                        file_id: source.file_id.clone(),
+                        path: source.label.clone(),
+                        line_number: source_line,
+                        truncated,
+                    });
+                    metadata.truncated |= truncated;
+                    if matched % 1_000 == 0 {
+                        let checkpoint = SparseCheckpoint {
+                            result_line: matched,
+                            log_offset,
+                            meta_offset,
+                        };
+                        write_json_line(
+                            index_output,
+                            &checkpoint,
+                            max_output_bytes,
+                            &mut total_output_bytes,
+                        )
+                        .await?;
+                    }
+                    let line_bytes = content.len() as u64 + 1;
+                    let next_output_size =
+                        log_offset.checked_add(line_bytes).ok_or_else(too_large)?;
+                    ensure_output_capacity(total_output_bytes, line_bytes, max_output_bytes)?;
+                    output
+                        .write_all(content.as_bytes())
+                        .await
+                        .map_err(AppError::Io)?;
+                    log_offset = next_output_size;
+                    total_output_bytes = total_output_bytes
+                        .checked_add(line_bytes)
+                        .ok_or_else(too_large)?;
+                    output.write_all(b"\n").await.map_err(AppError::Io)?;
+                    meta_offset += write_json_line(
+                        metadata_output,
+                        &metadata,
+                        max_output_bytes,
+                        &mut total_output_bytes,
+                    )
+                    .await?;
+                    if matched >= from && matched < page_end {
+                        lines.push(PreviewLine {
+                            bundle_hash: metadata.bundle_hash.clone(),
+                            file_id: metadata.file_id.clone(),
+                            path: metadata.path.clone(),
+                            line_number: metadata.line_number,
+                            content,
+                        });
+                    }
+                    matched += 1;
+                }
+                source_line += 1;
+            }
+            if let Some(reader) = source_metadata_reader.as_mut() {
+                source_metadata_line.clear();
+                if reader
+                    .read_line(&mut source_metadata_line)
+                    .await
+                    .map_err(AppError::Io)?
+                    != 0
+                {
+                    return Err(invalid_sidecar(
+                        "temporary result metadata contains more records than its content",
+                    ));
+                }
+            }
+        }
+        output.flush().await.map_err(AppError::Io)?;
+        metadata_output.flush().await.map_err(AppError::Io)?;
+        index_output.flush().await.map_err(AppError::Io)?;
+        Ok(MaterializedPreview {
+            total: matched,
+            lines,
+        })
+    }
+
     pub async fn write_matches(
         sources: &[TempSource],
         expression: &Expression,
@@ -259,6 +479,22 @@ impl TempResultExecutor {
         .await?
         .total)
     }
+}
+
+pub(crate) fn merge_line_ranges(mut ranges: Vec<LineRange>) -> Vec<LineRange> {
+    ranges.retain(|range| range.start >= 0 && range.start <= range.end);
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<LineRange> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(current) = merged.last_mut()
+            && range.start <= current.end.saturating_add(1)
+        {
+            current.end = current.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
 }
 
 fn too_large() -> AppError {
@@ -336,11 +572,143 @@ mod tests {
     use tokio::fs::File;
     use uuid::Uuid;
 
-    use super::{SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint};
+    use super::{
+        CandidateScanPlan, LineRange, SourceSearchPlan, SparseCheckpoint, TempResultExecutor,
+        TempSource, merge_line_ranges, select_checkpoint,
+    };
     use crate::{error::AppError, ingest::TRUNCATED_LINE_MARKER, log_expression};
 
     fn test_path(suffix: &str) -> PathBuf {
         std::env::temp_dir().join(format!("rain-temp-result-{}-{suffix}", Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn materializes_only_exact_matches_inside_candidate_ranges() {
+        let source_path = test_path("candidate-source.log");
+        let log_path = test_path("candidate-result.log");
+        let meta_path = test_path("candidate-result.meta");
+        let index_path = test_path("candidate-result.idx");
+        let source_content = (0..=20)
+            .map(|line| {
+                if line == 3 {
+                    "ERROR candidate three".to_string()
+                } else if line == 17 {
+                    "ERROR candidate seventeen".to_string()
+                } else {
+                    format!("INFO line {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        tokio::fs::write(&source_path, source_content)
+            .await
+            .unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: Some("bundle-1".into()),
+            file_id: Some("42".into()),
+        }];
+        let plans = vec![SourceSearchPlan::Tantivy(CandidateScanPlan {
+            ranges: vec![
+                LineRange { start: 0, end: 5 },
+                LineRange { start: 15, end: 20 },
+            ],
+            seek_line: 0,
+            seek_offset: 0,
+        })];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let preview = TempResultExecutor::materialize_preview_with_plans(
+            &sources,
+            &plans,
+            &expression,
+            0,
+            10,
+            TEST_MAX_OUTPUT_BYTES,
+            &mut log,
+            &mut meta,
+            &mut index,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(preview.total, 2);
+        assert_eq!(
+            preview
+                .lines
+                .iter()
+                .map(|line| line.line_number)
+                .collect::<Vec<_>>(),
+            vec![3, 17]
+        );
+        assert_eq!(preview.lines[0].content, "ERROR candidate three");
+        assert_eq!(preview.lines[1].content, "ERROR candidate seventeen");
+
+        for path in [source_path, log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_candidate_ranges_do_not_open_or_scan_the_source() {
+        let source_path = test_path("empty-candidate-missing-source.log");
+        let log_path = test_path("empty-candidate-result.log");
+        let meta_path = test_path("empty-candidate-result.meta");
+        let index_path = test_path("empty-candidate-result.idx");
+        let sources = vec![TempSource {
+            path: source_path,
+            metadata_path: None,
+            label: "missing.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let plans = vec![SourceSearchPlan::Tantivy(CandidateScanPlan {
+            ranges: Vec::new(),
+            seek_line: 0,
+            seek_offset: 0,
+        })];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut log = File::create(&log_path).await.unwrap();
+        let mut meta = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+
+        let preview = TempResultExecutor::materialize_preview_with_plans(
+            &sources,
+            &plans,
+            &expression,
+            0,
+            10,
+            TEST_MAX_OUTPUT_BYTES,
+            &mut log,
+            &mut meta,
+            &mut index,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(preview.total, 0);
+        assert!(preview.lines.is_empty());
+        for path in [log_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[test]
+    fn candidate_ranges_are_sorted_and_merged_without_overlap() {
+        assert_eq!(
+            merge_line_ranges(vec![
+                LineRange { start: 5, end: 9 },
+                LineRange { start: 0, end: 4 },
+                LineRange { start: 8, end: 12 },
+            ]),
+            vec![LineRange { start: 0, end: 12 }]
+        );
     }
 
     #[tokio::test]
