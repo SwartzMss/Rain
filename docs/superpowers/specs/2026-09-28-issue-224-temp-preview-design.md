@@ -117,4 +117,3 @@ lifecycle state.
   requests, quoted phrases, and unsupported boolean expressions.
 - Run backend formatting, clippy, the full Tantivy-enabled backend suite, and
   the existing frontend build before creating the PR.
-
