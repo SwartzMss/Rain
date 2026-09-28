@@ -5,7 +5,6 @@ import type { TempResultInfo, TempResultLinesResponse } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { isUser } from '../../auth/permissions';
-import { SearchExecutionStatus } from '../../components/SearchExecutionStatus';
 import { useSearchExecution } from '../../hooks/useSearchExecution';
 
 type PageNavigation = 'next' | 'previous' | 'reset';
@@ -191,11 +190,6 @@ export function TempResultView() {
               {creating ? '搜索中...' : '搜索'}
             </button>
           </div>
-          <SearchExecutionStatus
-            snapshot={searchExecution.snapshot}
-            onCancel={() => { void searchExecution.cancel(); }}
-          />
-
           <div className="min-h-[65vh] overflow-auto rounded-lg bg-white p-3 text-xs leading-5 text-slate-900">
             <div className="grid grid-cols-[auto_1fr] gap-3 font-mono">
               <div className="select-none text-right text-slate-600">

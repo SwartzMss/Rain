@@ -32,6 +32,21 @@ try {
   assert.equal(filesView.includes('setSearchError(viewerSearchExecution.snapshot.errorMessage)'), false);
   assert.ok(filesView.includes("status === 'RUNNING' || status === 'CANCELLING' || status === 'CANCELLED' || status === 'SUCCEEDED'"));
   assert.ok(filesView.includes("setSearchDraft('');\n    setSearchError(null);\n    setSearchLoading(true);"));
+  assert.equal(
+    (filesView.match(/<SearchExecutionStatus/g) ?? []).length,
+    1,
+    'only the global Issue search should render detailed execution status'
+  );
+
+  const tempResultView = await readFile(
+    new URL('../src/features/files/TempResultView.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.equal(
+    (tempResultView.match(/<SearchExecutionStatus/g) ?? []).length,
+    0,
+    'temporary-result search should not render detailed execution status'
+  );
 
 } finally {
   await server.close();
