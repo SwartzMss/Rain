@@ -20,7 +20,7 @@ use std::{
     future::Future,
     path::PathBuf,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -108,7 +108,7 @@ pub struct UploadRuntime {
     pub tmp_bytes: Arc<AtomicU64>,
     pub tmp_max_bytes: Arc<AtomicU64>,
     pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
-    pub session_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    pub session_locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
 }
 
 pub struct SearchRuntime {
@@ -149,10 +149,13 @@ impl UploadRuntime {
             .session_locks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        locks
-            .entry(session_id.to_owned())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(session_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(session_id.to_owned(), Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -593,6 +596,23 @@ mod tests {
             auth.hash_permits.available_permits(),
             crate::config::AuthConfig::default().argon2_concurrency
         );
+    }
+
+    #[test]
+    fn session_locks_are_reused_while_active_and_released_afterwards() {
+        let upload = super::UploadRuntime::new(3, 2);
+        let active = upload.session_lock("active-session");
+        let reused = upload.session_lock("active-session");
+        assert!(std::sync::Arc::ptr_eq(&active, &reused));
+        drop(reused);
+        drop(active);
+
+        let other = upload.session_lock("other-session");
+        let locks = upload.session_locks.lock().unwrap();
+        assert_eq!(locks.len(), 1);
+        assert!(!locks.contains_key("active-session"));
+        assert!(locks.contains_key("other-session"));
+        drop(other);
     }
 
     #[test]
