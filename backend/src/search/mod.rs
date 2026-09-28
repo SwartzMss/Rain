@@ -136,6 +136,7 @@ pub struct ContentSearchRequest {
     pub path_like: Option<String>,
     pub from: i64,
     pub size: i64,
+    pub include_content: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +149,7 @@ pub struct ContentSearchRow {
     pub line_end: Option<i64>,
     pub chunk_index: Option<i64>,
     pub content: String,
+    pub(crate) tantivy_doc_address: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +393,18 @@ pub(crate) async fn search_tantivy_bundle_with_lease_and_permit_and_context(
     .await
 }
 
+#[cfg(feature = "tantivy-search")]
+pub(crate) async fn hydrate_tantivy_bundle_rows(
+    path: std::path::PathBuf,
+    bundle_id: String,
+    generation: i64,
+    lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
+    addresses: Vec<(u32, u32)>,
+) -> Result<Vec<String>, AppError> {
+    tantivy::hydrate_bundle_contents(path, bundle_id, generation, lease, permit, addresses).await
+}
+
 #[cfg(not(feature = "tantivy-search"))]
 pub async fn search_tantivy_bundle_visible(
     path: std::path::PathBuf,
@@ -480,6 +494,21 @@ pub(crate) async fn search_tantivy_bundle_with_lease_and_permit_and_context(
     context: SearchExecutionContext,
 ) -> Result<ContentSearchResult, AppError> {
     let _ = (path, request, bundle_id, generation, lease, permit, context);
+    Err(AppError::Config(
+        "Tantivy backend requires the tantivy-search feature".into(),
+    ))
+}
+
+#[cfg(not(feature = "tantivy-search"))]
+pub(crate) async fn hydrate_tantivy_bundle_rows(
+    path: std::path::PathBuf,
+    bundle_id: String,
+    generation: i64,
+    lease: generation_lease::GenerationLease,
+    permit: OwnedSemaphorePermit,
+    addresses: Vec<(u32, u32)>,
+) -> Result<Vec<String>, AppError> {
+    let _ = (path, bundle_id, generation, lease, permit, addresses);
     Err(AppError::Config(
         "Tantivy backend requires the tantivy-search feature".into(),
     ))

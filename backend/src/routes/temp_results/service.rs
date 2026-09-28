@@ -24,6 +24,7 @@ use crate::auth::extractor::OptionalUser;
 use crate::services::search_execution::{
     SearchExecutionContext, SearchExecutionRegistry, StopReason, TerminalStatus,
 };
+use crate::services::temp_results::SourceSearchPlan;
 use crate::services::temp_results::scan_timeout;
 use futures_util::TryStreamExt;
 
@@ -129,6 +130,7 @@ impl Drop for SearchExecutionGuard {
 pub(crate) struct ResolvedSources {
     sources: Vec<TempSource>,
     indexed_sources: Vec<Option<IndexedSource>>,
+    deferred_files: Option<Vec<FileRow>>,
     _source_lease: Option<TempResultReadLease>,
 }
 
@@ -369,7 +371,9 @@ pub(crate) async fn resolve_sources(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
 ) -> Result<ResolvedSources, AppError> {
-    resolve_sources_with_context(payload, state, None).await
+    let mut resolved = resolve_sources_with_context(payload, state, None).await?;
+    resolved.resolve_deferred_paths(state, None, None).await?;
+    Ok(resolved)
 }
 
 pub(crate) async fn resolve_sources_with_context(
@@ -418,6 +422,7 @@ async fn resolve_sources_inner(
                 file_id: None,
             }],
             indexed_sources: vec![None],
+            deferred_files: None,
             _source_lease: Some(source_lease),
         });
     }
@@ -442,6 +447,7 @@ async fn resolve_sources_inner(
         .fetch(&state.db.pool);
         let mut sources = Vec::new();
         let mut indexed_sources = Vec::new();
+        let mut deferred_files = Vec::new();
         while let Some(row) = rows.try_next().await.map_err(AppError::Database)? {
             checkpoint(context)?;
             let file = FileRow {
@@ -461,15 +467,17 @@ async fn resolve_sources_inner(
                 blob_state: row.blob_state,
             };
             sources.push(TempSource {
-                path: resolve_file_path(&file, state.storage.blob_store.as_ref()).await?,
+                path: std::path::PathBuf::new(),
                 metadata_path: None,
                 label: file.name.clone(),
                 bundle_hash: Some(row.bundle_hash),
                 file_id: Some(file.id.to_string()),
             });
+            let file_id = file.id;
+            deferred_files.push(file);
             indexed_sources.push(Some(IndexedSource {
                 bundle_id: row.bundle_id,
-                file_id: file.id,
+                file_id,
             }));
         }
         if sources.is_empty() {
@@ -480,6 +488,7 @@ async fn resolve_sources_inner(
         return Ok(ResolvedSources {
             sources,
             indexed_sources,
+            deferred_files: Some(deferred_files),
             _source_lease: None,
         });
     }
@@ -511,8 +520,34 @@ async fn resolve_sources_inner(
             bundle_id: bundle.id,
             file_id,
         })],
+        deferred_files: None,
         _source_lease: None,
     })
+}
+
+impl ResolvedSources {
+    async fn resolve_deferred_paths(
+        &mut self,
+        state: &web::Data<AppState>,
+        plan: Option<&PreviewSearchPlan>,
+        context: Option<&SearchExecutionContext>,
+    ) -> Result<(), AppError> {
+        let Some(files) = self.deferred_files.take() else {
+            return Ok(());
+        };
+        for (index, file) in files.into_iter().enumerate() {
+            checkpoint(context)?;
+            let should_resolve = plan.is_none_or(|plan| match plan.source_plans.get(index) {
+                Some(SourceSearchPlan::Tantivy(candidate)) => !candidate.ranges.is_empty(),
+                Some(SourceSearchPlan::Raw { .. }) | None => true,
+            });
+            if should_resolve {
+                self.sources[index].path =
+                    resolve_file_path(&file, state.storage.blob_store.as_ref()).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn source_label(sources: &[TempSource]) -> String {
@@ -697,7 +732,7 @@ async fn create_preview_result_inner(
         issue_code: payload.issue_code.clone(),
         source_temp_id: payload.source_temp_id.clone(),
     };
-    let resolved = resolve_sources_with_context(&request, state, context).await?;
+    let mut resolved = resolve_sources_with_context(&request, state, context).await?;
     let preview_plan = build_source_search_plans_with_context(
         state,
         &expression,
@@ -705,6 +740,9 @@ async fn create_preview_result_inner(
         context,
     )
     .await?;
+    resolved
+        .resolve_deferred_paths(state, Some(&preview_plan), context)
+        .await?;
     let source_label = source_label(&resolved.sources);
     let outcome = materialize_result_with_context(
         state,

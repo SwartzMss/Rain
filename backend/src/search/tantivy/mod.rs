@@ -188,6 +188,7 @@ async fn search_bundle_inner_with_permit(
     let path_like = request.path_like.clone();
     let from = request.from.max(0) as usize;
     let size = request.size.max(0) as usize;
+    let include_content = request.include_content;
     let query = request.query;
     let cache = generation.as_ref().map(|_| reader_cache());
     tokio::task::spawn_blocking(move || {
@@ -212,6 +213,7 @@ async fn search_bundle_inner_with_permit(
                 visible_file_ids: visible_file_ids.as_ref(),
                 from,
                 size,
+                include_content: Some(include_content),
             },
             context.as_ref(),
         )?;
@@ -231,6 +233,7 @@ async fn search_bundle_inner_with_permit(
                 line_end: hit.line_end,
                 chunk_index: Some(hit.chunk_index),
                 content: hit.content,
+                tantivy_doc_address: Some((hit.doc_address.segment_ord, hit.doc_address.doc_id)),
             })
             .collect();
         tracing::debug!(
@@ -250,6 +253,30 @@ async fn search_bundle_inner_with_permit(
     })
     .await
     .map_err(|error| AppError::Config(format!("Tantivy search task failed: {error}")))?
+}
+
+pub(crate) async fn hydrate_bundle_contents(
+    path: PathBuf,
+    bundle_id: String,
+    generation: i64,
+    lease: GenerationLease,
+    permit: OwnedSemaphorePermit,
+    addresses: Vec<(u32, u32)>,
+) -> Result<Vec<String>, AppError> {
+    if addresses.is_empty() {
+        return Ok(Vec::new());
+    }
+    tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        let _permit = permit;
+        let committed = reader_cache().get_or_open(
+            crate::search::generation_lease::GenerationLeaseKey::new(&bundle_id, generation),
+            path,
+        )?;
+        CandidateSearch::from_shared(committed).load_contents(&addresses)
+    })
+    .await
+    .map_err(|error| AppError::Config(format!("Tantivy hydration task failed: {error}")))?
 }
 
 /// Rebuild an immutable generation by copying only documents belonging to the
@@ -496,6 +523,50 @@ mod tests {
         assert_eq!(page.total, 2);
         assert_eq!(page.metrics.candidate_docs, 2);
         assert_eq!(page.hits.len(), 2);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn content_can_be_deferred_without_changing_hit_metadata() {
+        let path = temp_index_path();
+        let mut writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();
+        writer
+            .add_chunk(&IndexedChunk {
+                file_id: 7,
+                chunk_index: 3,
+                line_start: Some(12),
+                line_end: Some(13),
+                event_time_start_ms: None,
+                event_time_end_ms: None,
+                timeline: Some("all".into()),
+                content: "prefix marker suffix".into(),
+                path: "/app.log".into(),
+            })
+            .unwrap();
+        let search = CandidateSearch::new(writer.commit().unwrap());
+        let page = search
+            .search_page(
+                "marker",
+                SearchOptions {
+                    size: 1,
+                    include_content: Some(false),
+                    ..SearchOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.hits.len(), 1);
+        assert_eq!(page.hits[0].content, "");
+        assert_eq!(page.hits[0].path, "/app.log");
+        assert_eq!(page.hits[0].line_start, Some(12));
+
+        let address = page.hits[0].doc_address;
+        assert_eq!(
+            search
+                .load_contents(&[(address.segment_ord, address.doc_id)])
+                .unwrap(),
+            vec!["prefix marker suffix"]
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
 

@@ -1,4 +1,9 @@
-use std::{cmp::Ordering, collections::BinaryHeap, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use actix_web::{HttpResponse, get, web};
 use futures_util::StreamExt;
@@ -11,6 +16,7 @@ use crate::{
     search::generation_lease::GenerationLeaseRegistry,
     search::{
         ContentSearchRequest, ContentSearchResult, ContentSearchScope, SearchIndex, SearchWindow,
+        hydrate_tantivy_bundle_rows,
         parallel::stream_issue_bundle_searches,
         publication::{
             acquire_generation_lease_with_registry, artifact_relative_path,
@@ -114,6 +120,7 @@ async fn search_logs_inner(
         path_like,
         from,
         size,
+        include_content: true,
     };
     let publication: Option<PublicationRow> = sqlx::query_as(
         "SELECT backend, state, generation, schema_version, tokenizer_version, visibility_revision, compacted_revision FROM bundle_search_indexes WHERE bundle_id = ?",
@@ -285,6 +292,7 @@ async fn search_issue_logs_inner(
             path_like,
             from,
             size,
+            include_content: true,
         },
     )
     .await?;
@@ -319,7 +327,18 @@ async fn search_issue_logs_inner(
 struct RankedIssueRow {
     key: (i64, String, i64, i64),
     row: crate::search::ContentSearchRow,
+    tantivy_context: Option<TantivyIssueRowContext>,
 }
+
+#[derive(Debug, Clone)]
+struct TantivyIssueRowContext {
+    bundle_id: String,
+    generation: i64,
+    artifact_path: PathBuf,
+}
+
+type TantivyHydrationEntries = Vec<(usize, (u32, u32))>;
+type TantivyHydrationGroup = (PathBuf, TantivyHydrationEntries);
 
 impl PartialEq for RankedIssueRow {
     fn eq(&self, other: &Self) -> bool {
@@ -354,6 +373,7 @@ fn retain_issue_row(
     retained: &mut BinaryHeap<RankedIssueRow>,
     row: crate::search::ContentSearchRow,
     limit: usize,
+    tantivy_context: Option<TantivyIssueRowContext>,
 ) {
     if limit == 0 {
         return;
@@ -361,6 +381,7 @@ fn retain_issue_row(
     let ranked = RankedIssueRow {
         key: issue_row_key(&row),
         row,
+        tantivy_context,
     };
     if retained.len() < limit {
         retained.push(ranked);
@@ -371,6 +392,62 @@ fn retain_issue_row(
         retained.pop();
         retained.push(ranked);
     }
+}
+
+async fn hydrate_issue_rows(
+    rows: &mut [RankedIssueRow],
+    pool: &sqlx::SqlitePool,
+    registry: &GenerationLeaseRegistry,
+    query_permits: &Arc<tokio::sync::Semaphore>,
+) -> Result<(), AppError> {
+    let mut grouped: HashMap<(String, i64), TantivyHydrationGroup> = HashMap::new();
+    for (index, ranked) in rows.iter().enumerate() {
+        let Some(context) = ranked.tantivy_context.as_ref() else {
+            continue;
+        };
+        let Some(address) = ranked.row.tantivy_doc_address else {
+            return Err(AppError::Config(
+                "Tantivy result is missing its document address".into(),
+            ));
+        };
+        grouped
+            .entry((context.bundle_id.clone(), context.generation))
+            .or_insert_with(|| (context.artifact_path.clone(), Vec::new()))
+            .1
+            .push((index, address));
+    }
+
+    for ((bundle_id, generation), (artifact_path, entries)) in grouped {
+        let permit =
+            query_permits.clone().acquire_owned().await.map_err(|_| {
+                AppError::Conflict("Tantivy query admission is shutting down".into())
+            })?;
+        let lease =
+            acquire_generation_lease_with_registry(registry, pool, &bundle_id, generation).await?;
+        let addresses = entries
+            .iter()
+            .map(|(_, address)| *address)
+            .collect::<Vec<_>>();
+        let contents = hydrate_tantivy_bundle_rows(
+            artifact_path,
+            bundle_id,
+            generation,
+            lease,
+            permit,
+            addresses,
+        )
+        .await?;
+        if contents.len() != entries.len() {
+            return Err(AppError::Config(
+                "Tantivy hydration returned an unexpected row count".into(),
+            ));
+        }
+        for ((index, _), content) in entries.into_iter().zip(contents) {
+            rows[index].row.content = content;
+            rows[index].row.tantivy_doc_address = None;
+        }
+    }
+    Ok(())
 }
 
 async fn search_issue_content_mixed(
@@ -400,7 +477,7 @@ async fn search_issue_content_mixed(
         .await?;
     let mut retained = BinaryHeap::new();
     for row in sqlite_result.rows {
-        retain_issue_row(&mut retained, row, window.limit);
+        retain_issue_row(&mut retained, row, window.limit, None);
     }
     let mut total = sqlite_result.total;
     let bundles: Vec<IssueBundleSearchRow> = sqlx::query_as(
@@ -434,52 +511,60 @@ async fn search_issue_content_mixed(
     let pool_for_jobs = pool.clone();
     let data_root = data_root.to_path_buf();
     let registry = registry.clone();
+    let registry_for_jobs = registry.clone();
     let request_for_jobs = request.clone();
-    let mut results = stream_issue_bundle_searches(jobs, query_permits, move |bundle, permit| {
-        let pool = pool_for_jobs.clone();
-        let data_root = data_root.clone();
-        let registry = registry.clone();
-        let request = request_for_jobs.clone();
-        async move {
-            let (
-                bundle_id,
-                bundle_hash,
-                _,
-                state,
-                generation,
-                visibility_revision,
-                compacted_revision,
-                schema_version,
-                tokenizer_version,
-            ) = bundle;
-            debug_assert!(matches!(state.as_str(), "READY" | "NEEDS_REBUILD"));
-            debug_assert_eq!(
-                schema_version,
-                Some(crate::search::publication::TANTIVY_SCHEMA_VERSION)
-            );
-            debug_assert_eq!(
-                tokenizer_version,
-                Some(crate::search::publication::TANTIVY_TOKENIZER_VERSION)
-            );
-            let artifact = artifact_relative_path(&bundle_id, generation)?;
-            let lease =
-                acquire_generation_lease_with_registry(&registry, &pool, &bundle_id, generation)
-                    .await?;
-            let search_request = ContentSearchRequest {
-                scope: ContentSearchScope::Bundle {
-                    bundle_id: bundle_id.clone(),
-                    timeline: None,
-                    file_id: None,
-                },
-                query: request.query,
-                path_like: request.path_like,
-                from: 0,
-                size: candidate_limit as i64,
-            };
-            let result =
-                if can_skip_visibility_snapshot(&state, visibility_revision, compacted_revision) {
+    let mut results =
+        stream_issue_bundle_searches(jobs, query_permits.clone(), move |bundle, permit| {
+            let pool = pool_for_jobs.clone();
+            let data_root = data_root.clone();
+            let registry = registry_for_jobs.clone();
+            let request = request_for_jobs.clone();
+            async move {
+                let (
+                    bundle_id,
+                    bundle_hash,
+                    _,
+                    state,
+                    generation,
+                    visibility_revision,
+                    compacted_revision,
+                    schema_version,
+                    tokenizer_version,
+                ) = bundle;
+                debug_assert!(matches!(state.as_str(), "READY" | "NEEDS_REBUILD"));
+                debug_assert_eq!(
+                    schema_version,
+                    Some(crate::search::publication::TANTIVY_SCHEMA_VERSION)
+                );
+                debug_assert_eq!(
+                    tokenizer_version,
+                    Some(crate::search::publication::TANTIVY_TOKENIZER_VERSION)
+                );
+                let artifact = artifact_relative_path(&bundle_id, generation)?;
+                let artifact_path = data_root.join(&artifact);
+                let lease = acquire_generation_lease_with_registry(
+                    &registry, &pool, &bundle_id, generation,
+                )
+                .await?;
+                let search_request = ContentSearchRequest {
+                    scope: ContentSearchScope::Bundle {
+                        bundle_id: bundle_id.clone(),
+                        timeline: None,
+                        file_id: None,
+                    },
+                    query: request.query,
+                    path_like: request.path_like,
+                    from: 0,
+                    size: candidate_limit as i64,
+                    include_content: false,
+                };
+                let result = if can_skip_visibility_snapshot(
+                    &state,
+                    visibility_revision,
+                    compacted_revision,
+                ) {
                     search_tantivy_bundle_with_lease_and_permit(
-                        data_root.join(artifact),
+                        artifact_path.clone(),
                         search_request,
                         bundle_id.clone(),
                         generation,
@@ -490,7 +575,7 @@ async fn search_issue_content_mixed(
                 } else {
                     let visible_file_ids = snapshot_file_ids(&pool, &bundle_id).await?;
                     search_tantivy_bundle_visible_with_lease_and_permit(
-                        data_root.join(artifact),
+                        artifact_path.clone(),
                         search_request,
                         visible_file_ids,
                         bundle_id.clone(),
@@ -500,24 +585,35 @@ async fn search_issue_content_mixed(
                     )
                     .await?
                 };
-            Ok((bundle_hash, result))
-        }
-    });
+                Ok((bundle_id, bundle_hash, generation, artifact_path, result))
+            }
+        });
     while let Some((_index, result)) = results.next().await {
-        let (bundle_hash, result) = result?;
+        let (bundle_id, bundle_hash, generation, artifact_path, result) = result?;
         total = total.saturating_add(result.total);
         for mut row in result.rows {
             row.bundle_hash = Some(bundle_hash.clone());
-            retain_issue_row(&mut retained, row, window.limit);
+            retain_issue_row(
+                &mut retained,
+                row,
+                window.limit,
+                Some(TantivyIssueRowContext {
+                    bundle_id: bundle_id.clone(),
+                    generation,
+                    artifact_path: artifact_path.clone(),
+                }),
+            );
         }
     }
-    let mut rows: Vec<_> = retained.into_iter().map(|ranked| ranked.row).collect();
-    rows.sort_by_key(issue_row_key);
-    let rows = rows
+    let mut ranked_rows: Vec<_> = retained.into_iter().collect();
+    ranked_rows.sort_by_key(|ranked| ranked.key.clone());
+    let mut page: Vec<RankedIssueRow> = ranked_rows
         .into_iter()
         .skip(window.from)
         .take(window.size)
         .collect();
+    hydrate_issue_rows(&mut page, pool, &registry, &query_permits).await?;
+    let rows = page.into_iter().map(|ranked| ranked.row).collect();
     Ok(ContentSearchResult {
         total,
         rows,

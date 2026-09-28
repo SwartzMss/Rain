@@ -113,6 +113,7 @@ async fn search_bundle(
                 line_end: row.line_end,
                 chunk_index: row.chunk_index,
                 content: row.content,
+                tantivy_doc_address: None,
             })
             .collect(),
     })
@@ -146,6 +147,7 @@ async fn search_issue(
                 line_end: row.line_end,
                 chunk_index: row.chunk_index,
                 content: row.content,
+                tantivy_doc_address: None,
             })
             .collect(),
     })
@@ -448,6 +450,7 @@ mod tests {
                 path_like: Some("app".into()),
                 from: 0,
                 size: 10,
+                include_content: true,
             })
             .await
             .unwrap();
@@ -550,6 +553,7 @@ mod tests {
                 path_like: Some("literal%_\\path".into()),
                 from: 0,
                 size: 10,
+                include_content: true,
             })
             .await
             .unwrap();
@@ -570,6 +574,7 @@ mod tests {
                 path_like: Some("literal%_\\path".into()),
                 from: 0,
                 size: 10,
+                include_content: true,
             })
             .await
             .unwrap();
@@ -637,6 +642,7 @@ mod tests {
                 path_like: None,
                 from: 0,
                 size: 1,
+                include_content: true,
             })
             .await
             .unwrap();
@@ -705,6 +711,7 @@ mod tests {
                 path_like: None,
                 from: 100,
                 size: 2,
+                include_content: true,
             })
             .await
             .unwrap();
