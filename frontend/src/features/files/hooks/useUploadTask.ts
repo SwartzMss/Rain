@@ -38,6 +38,18 @@ export function useUploadTask(options: {
     [allTasks, currentIssueCode]
   );
 
+  const acknowledgeAcceptedTasks = useCallback((bundleHashes: ReadonlySet<string>) => {
+    uploadTasks.forEach((task) => {
+      if (
+        task.status === 'ACCEPTED' &&
+        task.response &&
+        bundleHashes.has(task.response.bundle_hash)
+      ) {
+        uploadQueue.markHandedOff(task.id);
+      }
+    });
+  }, [uploadTasks]);
+
   const uploading = uploadTasks.some(isTransporting);
   const uploadFailed = uploadTasks.some(isFailed);
   const uploadError = uploadTasks.find(isFailed)?.message ?? validationError;
@@ -75,10 +87,10 @@ export function useUploadTask(options: {
   }, []);
 
   const uploadSelection: UploadSelectionItem[] = uploadTasks
-    .filter((task) => task.status !== 'ACCEPTED')
+    .filter((task) => task.status !== 'ACCEPTED' && task.status !== 'HANDED_OFF')
     .map((task) => ({
-    name: task.name,
-    sizeBytes: task.sizeBytes
+      name: task.name,
+      sizeBytes: task.sizeBytes
     }));
   const activeTask = uploadTasks.find((task) => task.status === 'UPLOADING');
 
@@ -86,6 +98,7 @@ export function useUploadTask(options: {
     performUpload,
     resetSelection,
     retryUpload: uploadQueue.retry,
+    acknowledgeAcceptedTasks,
     uploadDisabled,
     uploadError: uploadError ? normalizeApiError(uploadError) : null,
     uploadFailed,
