@@ -793,6 +793,43 @@ async fn admin_can_view_and_clear_auth_rate_limits_with_audit() {
     assert_eq!(body.status(), StatusCode::OK);
     let body: serde_json::Value = test::read_body_json(body).await;
     assert!(body["login_ips"].as_array().unwrap().is_empty());
+    let legacy_details = serde_json::json!({
+        "changed_fields": ["issue_inactive_days", "provider_api_key"],
+        "changes": [{
+            "field": "provider_api_key",
+            "old_value": "old-secret",
+            "new_value": "new-secret",
+            "apply_mode": "hot"
+        }]
+    });
+    sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,action,old_value,new_value,details_json) VALUES('legacy-settings-audit','USER','SETTINGS_UPDATED',?,?,?)")
+        .bind(r#"{"issue_inactive_days":7,"provider_api_key":"old-secret"}"#)
+        .bind(r#"{"issue_inactive_days":8,"provider_api_key":"new-secret"}"#)
+        .bind(legacy_details.to_string())
+        .execute(&pool)
+        .await
+        .expect("legacy settings audit");
+    let audit_list = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/api/admin/audit-logs")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(audit_list.status(), StatusCode::OK);
+    let audit_list: serde_json::Value = test::read_body_json(audit_list).await;
+    let settings_audit = audit_list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "legacy-settings-audit")
+        .expect("settings audit response");
+    let details: serde_json::Value =
+        serde_json::from_str(settings_audit["details_json"].as_str().unwrap()).unwrap();
+    assert_eq!(details["changes"][0]["redacted"], true);
+    assert!(!audit_list.to_string().contains("old-secret"));
+    assert!(!audit_list.to_string().contains("new-secret"));
     let guest = test::call_service(
         &app,
         test::TestRequest::get()

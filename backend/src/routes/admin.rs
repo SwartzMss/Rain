@@ -825,7 +825,7 @@ pub async fn list_audit(
     let limit = limit(query.limit)?;
     let cursor = decode_cursor(query.cursor.as_deref())?;
     let mut sql = QueryBuilder::<Sqlite>::new(
-        "SELECT l.id,l.actor_type,l.actor_user_id,l.target_user_id,u.username AS target_username,l.action,l.old_value,l.new_value,l.client_ip,l.user_agent,l.created_at FROM admin_audit_logs l LEFT JOIN users u ON u.id=l.target_user_id WHERE 1=1",
+        "SELECT l.id,l.actor_type,l.actor_user_id,l.target_user_id,u.username AS target_username,l.action,l.old_value,l.new_value,l.details_json,l.client_ip,l.user_agent,l.created_at FROM admin_audit_logs l LEFT JOIN users u ON u.id=l.target_user_id WHERE 1=1",
     );
     if let Some(v) = query.action.as_deref() {
         sql.push(" AND l.action=").push_bind(v);
@@ -849,6 +849,16 @@ pub async fn list_audit(
         .fetch_all(&state.db.pool)
         .await
         .map_err(AppError::Database)?;
+    for item in &mut items {
+        if matches!(
+            item.action.as_str(),
+            "SETTINGS_UPDATED" | "SYSTEM_SETTINGS_INITIALIZED"
+        ) {
+            item.old_value = redact_settings_audit_json(item.old_value.take());
+            item.new_value = redact_settings_audit_json(item.new_value.take());
+            item.details_json = redact_settings_audit_json(item.details_json.take());
+        }
+    }
     let next_cursor = if items.len() as i64 > limit {
         items.pop();
         items.last().map(|v| encode_cursor(&v.created_at, &v.id))
@@ -856,4 +866,68 @@ pub async fn list_audit(
         None
     };
     Ok(HttpResponse::Ok().json(AuditLogPage { items, next_cursor }))
+}
+
+fn redact_settings_audit_json(raw: Option<String>) -> Option<String> {
+    let mut value = serde_json::from_str::<serde_json::Value>(raw.as_deref()?).ok()?;
+    redact_audit_json_value(&mut value);
+    Some(value.to_string())
+}
+
+fn redact_audit_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let sensitive_change = object
+                .get("field")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(crate::settings::is_sensitive_audit_field);
+            if sensitive_change {
+                object.remove("old_value");
+                object.remove("new_value");
+                object.insert("redacted".into(), serde_json::Value::Bool(true));
+            }
+            let keys: Vec<_> = object.keys().cloned().collect();
+            for key in keys {
+                if crate::settings::is_sensitive_audit_field(&key) {
+                    object.insert(key, serde_json::json!({ "redacted": true }));
+                } else if let Some(child) = object.get_mut(&key) {
+                    redact_audit_json_value(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_audit_json_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod audit_redaction_tests {
+    use super::redact_settings_audit_json;
+
+    #[test]
+    fn response_redaction_removes_sensitive_snapshot_and_change_values() {
+        let old_value = redact_settings_audit_json(Some(
+            r#"{"issue_inactive_days":7,"provider_api_key":"old-secret"}"#.into(),
+        ))
+        .expect("JSON snapshot");
+        let old_value: serde_json::Value = serde_json::from_str(&old_value).unwrap();
+        assert_eq!(old_value["issue_inactive_days"], 7);
+        assert_eq!(old_value["provider_api_key"]["redacted"], true);
+        assert!(!old_value.to_string().contains("old-secret"));
+
+        let details = redact_settings_audit_json(Some(
+            r#"{"changes":[{"field":"provider_api_key","old_value":"old-secret","new_value":"new-secret","apply_mode":"hot"}]}"#.into(),
+        ))
+        .expect("JSON details");
+        assert!(!details.contains("old-secret"));
+        assert!(!details.contains("new-secret"));
+        let details: serde_json::Value = serde_json::from_str(&details).unwrap();
+        assert_eq!(details["changes"][0]["redacted"], true);
+        assert!(details["changes"][0].get("old_value").is_none());
+        assert!(details["changes"][0].get("new_value").is_none());
+    }
 }
