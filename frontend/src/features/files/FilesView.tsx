@@ -180,6 +180,7 @@ export function BundleView() {
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const [sourceActionMessage, setSourceActionMessage] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const fileTreeContainerRef = useRef<HTMLDivElement | null>(null);
   const filenameInputRef = useRef<HTMLInputElement | null>(null);
   const searchRequestGenerationRef = useRef(0);
   const restoredPendingSearchRef = useRef(Boolean(pendingSavedSearch));
@@ -460,8 +461,8 @@ export function BundleView() {
   );
 
   const loadMoreNode = useCallback(
-    async (node: TreeNode) => {
-      if (!node.hasMoreChildren || !node.childrenCursor) return;
+    async (node: TreeNode): Promise<{ node: TreeNode; children: TreeNode[] } | null> => {
+      if (!node.hasMoreChildren || !node.childrenCursor) return null;
       setTreeLoading(true);
       setTreeError(null);
       try {
@@ -472,23 +473,31 @@ export function BundleView() {
         const childrenNodes = (response.children ?? []).map((child) =>
           toTreeNode(node.bundleId, child, node.id)
         );
+        const nextNode: TreeNode = {
+          ...node,
+          childrenIds: [...new Set([...node.childrenIds, ...childrenNodes.map((child) => child.id)])],
+          hasMoreChildren: response.has_more === true,
+          childrenCursor: response.next_cursor ?? null
+        };
         setTreeNodes((prev) => {
           const current = prev[node.id];
           if (!current) return prev;
           const next = { ...prev };
           next[node.id] = {
             ...current,
-            childrenIds: [...new Set([...current.childrenIds, ...childrenNodes.map((child) => child.id)])],
-            hasMoreChildren: response.has_more === true,
-            childrenCursor: response.next_cursor ?? null
+            childrenIds: nextNode.childrenIds,
+            hasMoreChildren: nextNode.hasMoreChildren,
+            childrenCursor: nextNode.childrenCursor
           };
           childrenNodes.forEach((child) => {
             next[child.id] = child;
           });
           return next;
         });
+        return { node: nextNode, children: childrenNodes };
       } catch (error) {
         setTreeError(normalizeApiError(error));
+        return null;
       } finally {
         setTreeLoading(false);
       }
@@ -914,12 +923,20 @@ export function BundleView() {
     if (!source) return;
 
     const knownNodes = new Map(Object.entries(treeNodesRef.current));
+    const remember = (node: TreeNode, children: TreeNode[]) => {
+      knownNodes.set(node.id, node);
+      children.forEach((child) => knownNodes.set(child.id, child));
+    };
+    const loadKnownNode = async (nodeId: string, parentId: string | null) => {
+      const result = await loadNode(source.bundleHash, nodeId, parentId);
+      if (!result) return null;
+      remember(result.node, result.children);
+      return result.node;
+    };
+
     let current = knownNodes.get(source.nodeId) ?? null;
     if (!current) {
-      const result = await loadNode(source.bundleHash, source.fileId, null);
-      current = result?.node ?? null;
-      result?.children.forEach((child) => knownNodes.set(child.id, child));
-      if (current) knownNodes.set(current.id, current);
+      current = await loadKnownNode(source.fileId, null);
     }
     if (!current) return;
 
@@ -931,12 +948,17 @@ export function BundleView() {
       visited.add(parentId);
       ancestors.push(parentId);
       let parent: TreeNode | null = knownNodes.get(parentId) ?? null;
-      if (!parent) {
+      if (!parent || !parent.hasLoadedChildren || !parent.childrenIds.includes(current.id)) {
         const rawParentId = parentId.split(/:(.+)/)[1] ?? '';
-        const result = await loadNode(source.bundleHash, rawParentId, null);
-        parent = result?.node ?? null;
-        result?.children.forEach((child) => knownNodes.set(child.id, child));
-        if (parent) knownNodes.set(parent.id, parent);
+        parent = await loadKnownNode(rawParentId, parent?.parentId ?? null);
+      }
+      if (parent) {
+        while (!parent.childrenIds.includes(current.id) && parent.hasMoreChildren && parent.childrenCursor) {
+          const nextPage = await loadMoreNode(parent);
+          if (!nextPage) break;
+          parent = nextPage.node;
+          remember(parent, nextPage.children);
+        }
       }
       if (!parent) break;
       current = parent;
@@ -1308,6 +1330,16 @@ export function BundleView() {
   ]);
 
   useEffect(() => {
+    const container = fileTreeContainerRef.current;
+    if (!container || !selectedNodeId) return;
+    const target = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-file-tree-node-id]')
+    ).find((element) => element.dataset.fileTreeNodeId === selectedNodeId);
+    if (!target || typeof target.scrollIntoView !== 'function') return;
+    target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [expandedNodes, selectedNodeId, treeNodes]);
+
+  useEffect(() => {
     if (selectedNodeId) return;
     if (rootIds.length === 0) return;
     const firstRoot = treeNodes[rootIds[0]];
@@ -1536,7 +1568,7 @@ export function BundleView() {
               {searchError ? <p className="mt-2 text-xs text-rose-600">{searchError}</p> : null}
               {savedSearchError ? <p className="mt-2 text-xs text-rose-600">{savedSearchError}</p> : null}
             </div>
-            <div className="min-h-0 flex-1 overflow-x-auto overflow-y-auto px-4 py-3">
+            <div ref={fileTreeContainerRef} className="min-h-0 flex-1 overflow-x-auto overflow-y-auto px-4 py-3">
             {nonReadyBundles.length > 0 ? (
               <div className="space-y-1 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
                 {nonReadyBundles.map((bundle) => (

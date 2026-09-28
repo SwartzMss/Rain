@@ -58,6 +58,8 @@ export function FileTreeNode({
       <button
         type="button"
         aria-label={node.name}
+        aria-current={isSelected ? 'true' : undefined}
+        data-file-tree-node-id={node.id}
         onClick={() => onNodeClick(node.id)}
         className={[
           'group flex h-9 w-full min-w-max items-center gap-2 rounded-md border border-transparent px-2 text-left text-sm transition',

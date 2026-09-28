@@ -99,6 +99,21 @@ try {
   assert.match(retryMarkup, /temporary extraction failure/);
   assert.match(retryMarkup, />重试<\/button>/);
 
+  const selectedMarkup = renderToStaticMarkup(
+    React.createElement(FileTreeNode, {
+      nodeId: fileId,
+      treeNodes,
+      expandedNodes: new Set([archiveId]),
+      selectedNodeId: fileId,
+      onNodeClick: () => undefined,
+      onLoadMore: () => undefined,
+      onRetryLoad: () => undefined
+    })
+  );
+  assert.match(selectedMarkup, /data-file-tree-node-id="bundle:file"/);
+  assert.match(selectedMarkup, /aria-current="true"/);
+  assert.match(selectedMarkup, /bg-sky-100/);
+
   const filesView = await readFile(
     new URL('../src/features/files/FilesView.tsx', import.meta.url),
     'utf8'
