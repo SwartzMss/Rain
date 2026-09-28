@@ -434,6 +434,19 @@ describe('interactive search execution', () => {
     }
   });
 
+  it('renders a failed execution message only in the execution status', () => {
+    render(<SearchExecutionStatus snapshot={{
+      status: 'FAILED',
+      searchId: 'id',
+      scopeKey: 'issue:X',
+      elapsedMs: 1_250,
+      errorMessage: '临时结果超过大小限制',
+      cancelUnconfirmed: false
+    }} onCancel={() => undefined} />);
+
+    expect(screen.getAllByText('临时结果超过大小限制')).toHaveLength(1);
+  });
+
   it('renders indeterminate progress without a fake percentage', () => {
     render(<SearchExecutionStatus snapshot={{ status: 'RUNNING', searchId: 'id', scopeKey: 'issue:X', elapsedMs: 1_250, errorMessage: null, cancelUnconfirmed: false }} onCancel={() => undefined} />);
     expect(screen.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
