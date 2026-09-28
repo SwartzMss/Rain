@@ -88,7 +88,7 @@ async fn check_database(pool: &sqlx::SqlitePool) -> bool {
     // The probe must roll back, so it cannot use the committing write::run helper.
     // This guard is released before readiness starts any storage I/O.
     let _writer = crate::db::write::acquire(pool).await;
-    let Ok(mut transaction) = pool.begin().await else {
+    let Ok(mut transaction) = crate::db::write::begin_immediate(pool).await else {
         return false;
     };
     let write = sqlx::query("INSERT INTO rain_ready_probe (id, value) VALUES (?, 1)")
@@ -105,7 +105,7 @@ mod tests {
     use std::path::PathBuf;
 
     use actix_web::{body::to_bytes, http::StatusCode, web};
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
     use super::readiness_response;
     use crate::{AppState, RecoveryRuntime, config::AppLimits, db};
@@ -160,13 +160,18 @@ mod tests {
 
     #[actix_web::test]
     async fn readiness_honors_write_gate_and_recovers_from_cancelled_refresh() {
+        let root = std::env::temp_dir().join(format!("rain-ready-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let options = SqliteConnectOptions::new()
+            .filename(root.join("rain.db"))
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect("sqlite::memory:")
+            .connect_with(options)
             .await
             .unwrap();
         db::prepare_schema(&pool, false).await.unwrap();
-        let root = std::env::temp_dir().join(format!("rain-ready-{}", uuid::Uuid::new_v4()));
         let state = AppState::new(pool.clone(), root.clone(), AppLimits::default());
         let gate = crate::db::write::acquire(&pool).await;
         {
@@ -176,7 +181,7 @@ mod tests {
             let connection =
                 tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire())
                     .await
-                    .expect("probe must wait before pool.begin")
+                    .expect("probe must wait before begin_immediate")
                     .unwrap();
             drop(connection);
         }
@@ -188,6 +193,8 @@ mod tests {
         .await
         .expect("cancelled refresh must release the cache lock");
         assert_eq!(response.status(), StatusCode::OK);
+        drop(state);
+        pool.close().await;
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

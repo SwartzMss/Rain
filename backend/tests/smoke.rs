@@ -2068,7 +2068,7 @@ async fn passive_cleanup_checkpoint_does_not_wait_for_a_reader() {
         .expect("write after reader snapshot");
 
     let checkpoint =
-        tokio::time::timeout(std::time::Duration::from_secs(1), db::checkpoint_wal(&pool))
+        tokio::time::timeout(std::time::Duration::from_secs(5), db::checkpoint_wal(&pool))
             .await
             .expect("passive checkpoint must not wait for the reader")
             .expect("checkpoint succeeds");

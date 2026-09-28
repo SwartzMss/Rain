@@ -1,6 +1,7 @@
 //! Short, replayable SQLite write transactions. Never do filesystem work here.
 use std::{
     collections::HashMap,
+    ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex, Weak},
     time::{Duration, Instant},
@@ -91,12 +92,83 @@ where
 
 /// Starts a transaction that reserves SQLite's writer slot before any reads.
 /// The caller owns admission and must commit or roll back before dropping it.
-pub async fn begin_immediate(pool: &SqlitePool) -> Result<PoolConnection<sqlx::Sqlite>, AppError> {
-    let mut connection = pool.acquire().await.map_err(AppError::Database)?;
-    sqlx::query("BEGIN IMMEDIATE")
+pub struct ImmediateConnection {
+    connection: Option<PoolConnection<sqlx::Sqlite>>,
+    transaction_active: bool,
+}
+
+impl ImmediateConnection {
+    fn new(connection: PoolConnection<sqlx::Sqlite>) -> Self {
+        Self {
+            connection: Some(connection),
+            transaction_active: true,
+        }
+    }
+
+    pub async fn commit(&mut self) -> Result<(), sqlx::Error> {
+        let result = sqlx::query("COMMIT").execute(&mut **self).await;
+        if result.is_ok() {
+            self.transaction_active = false;
+        }
+        result.map(|_| ())
+    }
+
+    pub async fn rollback(&mut self) -> Result<(), sqlx::Error> {
+        let result = sqlx::query("ROLLBACK").execute(&mut **self).await;
+        if result.is_ok() {
+            self.transaction_active = false;
+        }
+        result.map(|_| ())
+    }
+}
+
+impl Deref for ImmediateConnection {
+    type Target = SqliteConnection;
+
+    fn deref(&self) -> &Self::Target {
+        self.connection
+            .as_deref()
+            .expect("immediate transaction connection is present")
+    }
+}
+
+impl DerefMut for ImmediateConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.connection
+            .as_deref_mut()
+            .expect("immediate transaction connection is present")
+    }
+}
+
+impl Drop for ImmediateConnection {
+    fn drop(&mut self) {
+        if self.transaction_active {
+            // PoolConnection::Drop returns a live connection to the pool. A raw
+            // transaction cannot be rolled back asynchronously from Drop, so
+            // detach and drop the underlying connection instead of poisoning
+            // the pool if this future is cancelled or cleanup failed.
+            if let Some(connection) = self.connection.take() {
+                drop(connection.detach());
+            }
+        }
+    }
+}
+
+pub async fn begin_immediate(pool: &SqlitePool) -> Result<ImmediateConnection, AppError> {
+    let mut connection =
+        ImmediateConnection::new(pool.acquire().await.map_err(AppError::Database)?);
+    if let Err(error) = sqlx::query("BEGIN IMMEDIATE")
         .execute(&mut *connection)
         .await
-        .map_err(AppError::Database)?;
+    {
+        // SQLite may leave a connection in a transaction after a busy
+        // response from BEGIN IMMEDIATE. Clear that state before the pooled
+        // connection can be reused by a bounded retry.
+        if let Err(rollback_error) = connection.rollback().await {
+            tracing::warn!(%rollback_error, "failed to clear SQLite transaction after BEGIN IMMEDIATE failed");
+        }
+        return Err(AppError::Database(error));
+    }
     Ok(connection)
 }
 
@@ -135,22 +207,31 @@ where
         let mut execute_us = 0;
         let mut finish_us = 0;
         let mut rollback_failed = false;
+        let mut commit_attempted = false;
         let result = match begin_result {
             Ok(mut connection) => {
                 let execute_started = Instant::now();
-                let executed = execute(&mut *connection, input).await;
+                let executed = execute(&mut connection, input).await;
                 execute_us = micros(execute_started.elapsed());
                 let finish_started = Instant::now();
                 let result = match executed {
-                    Ok(value) => sqlx::query("COMMIT")
-                        .execute(&mut *connection)
-                        .await
-                        .map(|_| value)
-                        .map_err(AppError::Database),
-                    Err(error) => match sqlx::query("ROLLBACK")
-                        .execute(&mut *connection)
-                        .await
-                    {
+                    Ok(value) => {
+                        commit_attempted = true;
+                        match connection.commit().await {
+                            Ok(_) => Ok(value),
+                            Err(commit_error) => {
+                                if let Err(rollback_error) = connection.rollback().await {
+                                    rollback_failed = true;
+                                    tracing::warn!(
+                                        %rollback_error,
+                                        "failed to roll back SQLite transaction after COMMIT failed"
+                                    );
+                                }
+                                Err(AppError::Database(commit_error))
+                            }
+                        }
+                    }
+                    Err(error) => match connection.rollback().await {
                         Ok(_) => Err(error),
                         Err(rollback_error) => {
                             rollback_failed = true;
@@ -197,7 +278,11 @@ where
                 return Ok(value);
             }
             Err(error) => {
-                let retry = !rollback_failed && attempt < MAX_ATTEMPTS && busy(&error);
+                // Once COMMIT has been attempted, the transaction outcome is
+                // uncertain. Never replay the logical write, even if SQLite
+                // reports SQLITE_BUSY for the COMMIT itself.
+                let retry =
+                    !commit_attempted && !rollback_failed && attempt < MAX_ATTEMPTS && busy(&error);
                 tracing::warn!(metric = "sqlite_write", operation, attempt, queue_us, begin_us, execute_us, finish_us, queue_ms, elapsed_ms, retry, %error, "SQLite write transaction failed");
                 if !retry {
                     return Err(error);
@@ -214,11 +299,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
+    use sqlx::{
+        SqlitePool,
+        sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     async fn fixture() -> (PathBuf, SqlitePool, SqlitePool) {
+        fixture_with_max_connections(2).await
+    }
+
+    async fn fixture_with_max_connections(
+        max_connections: u32,
+    ) -> (PathBuf, SqlitePool, SqlitePool) {
         let root = std::env::temp_dir().join(format!("rain-write-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let options = SqliteConnectOptions::new()
@@ -227,7 +321,7 @@ mod tests {
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(Duration::from_millis(5));
         let pool = SqlitePoolOptions::new()
-            .max_connections(2)
+            .max_connections(max_connections)
             .connect_with(options.clone())
             .await
             .unwrap();
@@ -315,6 +409,51 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT value FROM counter")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        cleanup_fixture(root, pool, external).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_writer_drops_active_connection_without_poisoning_pool() {
+        let (root, pool, external) = fixture_with_max_connections(1).await;
+        let entered = Arc::new(Notify::new());
+        let entered_for_run = entered.clone();
+        let run_pool = pool.clone();
+        let task = tokio::spawn(async move {
+            run(&run_pool, "cancelled-writer", &(), move |_, _| {
+                let entered = entered_for_run.clone();
+                Box::pin(async move {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                    Ok(())
+                })
+            })
+            .await
+        });
+        entered.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run(&pool, "after-cancel", &(), |conn, _| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE counter SET value=value+1")
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT value FROM counter")
                 .fetch_one(&pool)

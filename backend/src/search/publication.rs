@@ -559,17 +559,33 @@ pub(crate) async fn refresh_rebuild_heartbeat(
     pool: &SqlitePool,
     claim: &crate::search::rebuild::RebuildClaim,
 ) -> Result<bool, AppError> {
-    let changed = sqlx::query(
-        "UPDATE bundle_search_indexes SET updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND pending_generation=? AND pending_revision=? AND pending_owner=? AND pending_state='BUILDING' AND pending_phase IN ('BUILDING','PUBLISHING')",
+    let input = (
+        claim.bundle_id.clone(),
+        claim.target_generation,
+        claim.target_revision,
+        claim.claim_token.clone(),
+    );
+    let changed = crate::db::write::run(
+        pool,
+        "heartbeat Tantivy deletion rebuild",
+        &input,
+        |conn, (bundle_id, target_generation, target_revision, claim_token)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE bundle_search_indexes SET updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND pending_generation=? AND pending_revision=? AND pending_owner=? AND pending_state='BUILDING' AND pending_phase IN ('BUILDING','PUBLISHING')",
+                )
+                .bind(bundle_id)
+                .bind(target_generation)
+                .bind(target_revision)
+                .bind(claim_token)
+                .execute(conn)
+                .await
+                .map(|result| result.rows_affected())
+                .map_err(AppError::Database)
+            })
+        },
     )
-    .bind(&claim.bundle_id)
-    .bind(claim.target_generation)
-    .bind(claim.target_revision)
-    .bind(&claim.claim_token)
-    .execute(pool)
-    .await
-    .map_err(AppError::Database)?
-    .rows_affected();
+    .await?;
     Ok(changed == 1)
 }
 
@@ -704,20 +720,38 @@ pub async fn cleanup_unpublished_artifacts(
     for (bundle_id, state, generation, pending_generation, pending_state) in rows {
         let _lifecycle = lock_bundle_lifecycle(&bundle_id).await;
         let generation_to_remove = pending_generation.unwrap_or(generation);
-        let claimed = sqlx::query(
-            "UPDATE bundle_search_indexes SET pending_state='CLEANING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND state=? AND generation=? AND pending_state=? AND ((pending_generation IS NULL AND ? IS NULL) OR pending_generation=?) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status <> 'DELETED') AND (pending_state <> 'CLEANING' OR datetime(updated_at) <= datetime('now','-5 minutes'))",
+        let input = (
+            bundle_id.clone(),
+            state.clone(),
+            generation,
+            pending_state.clone(),
+            pending_generation,
+            generation_to_remove,
+        );
+        let claimed = crate::db::write::run(
+            pool,
+            "claim unpublished search artifacts",
+            &input,
+            |conn, (bundle_id, state, generation, pending_state, pending_generation, generation_to_remove)| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE bundle_search_indexes SET pending_state='CLEANING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND state=? AND generation=? AND pending_state=? AND ((pending_generation IS NULL AND ? IS NULL) OR pending_generation=?) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status <> 'DELETED') AND (pending_state <> 'CLEANING' OR datetime(updated_at) <= datetime('now','-5 minutes'))",
+                    )
+                    .bind(bundle_id)
+                    .bind(state)
+                    .bind(generation)
+                    .bind(pending_state)
+                    .bind(pending_generation)
+                    .bind(generation_to_remove)
+                    .bind(bundle_id)
+                    .execute(conn)
+                    .await
+                    .map(|result| result.rows_affected())
+                    .map_err(AppError::Database)
+                })
+            },
         )
-        .bind(&bundle_id)
-        .bind(&state)
-        .bind(generation)
-        .bind(&pending_state)
-        .bind(pending_generation)
-        .bind(generation_to_remove)
-        .bind(&bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
+        .await?;
         if claimed != 1 {
             continue;
         }
@@ -733,19 +767,43 @@ pub async fn cleanup_unpublished_artifacts(
             removed = removed.saturating_add(1);
         }
         if pending_generation.is_some() {
-            sqlx::query("UPDATE bundle_search_indexes SET pending_state='IDLE', pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING' WHERE bundle_id=? AND pending_state='CLEANING' AND pending_generation=?")
-                .bind(&bundle_id)
-                .bind(generation_to_remove)
-                .execute(pool)
-                .await
-                .map_err(AppError::Database)?;
+            let input = (bundle_id.clone(), generation_to_remove);
+            crate::db::write::run(
+                pool,
+                "finish unpublished search cleanup",
+                &input,
+                |conn, (bundle_id, generation)| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE bundle_search_indexes SET pending_state='IDLE', pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING' WHERE bundle_id=? AND pending_state='CLEANING' AND pending_generation=?")
+                            .bind(bundle_id)
+                            .bind(generation)
+                            .execute(conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(AppError::Database)
+                    })
+                },
+            )
+            .await?;
         } else {
-            sqlx::query("UPDATE bundle_search_indexes SET state='FAILED', generation=0, artifact_key=NULL, last_error_code='RECOVERED_BUILDING', pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE' WHERE bundle_id=? AND state IN ('BUILDING','FAILED') AND pending_state='CLEANING' AND generation=?")
-                .bind(&bundle_id)
-                .bind(generation)
-                .execute(pool)
-                .await
-                .map_err(AppError::Database)?;
+            let input = (bundle_id.clone(), generation);
+            crate::db::write::run(
+                pool,
+                "recover unpublished search cleanup",
+                &input,
+                |conn, (bundle_id, generation)| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE bundle_search_indexes SET state='FAILED', generation=0, artifact_key=NULL, last_error_code='RECOVERED_BUILDING', pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE' WHERE bundle_id=? AND state IN ('BUILDING','FAILED') AND pending_state='CLEANING' AND generation=?")
+                            .bind(bundle_id)
+                            .bind(generation)
+                            .execute(conn)
+                            .await
+                            .map(|_| ())
+                            .map_err(AppError::Database)
+                    })
+                },
+            )
+            .await?;
         }
     }
 
@@ -830,28 +888,52 @@ pub(crate) async fn cleanup_deleted_bundle_artifacts_with_registry(
 
         let pending_generation = index.as_ref().and_then(|(_, pending, _, _)| *pending);
         if let Some(pending_generation) = pending_generation {
-            sqlx::query(
-                "UPDATE bundle_search_indexes SET pending_state='CLEANING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND pending_generation=? AND pending_state IN ('BUILDING','FAILED','CLEANING') AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
+            let input = (bundle_id.clone(), pending_generation);
+            crate::db::write::run(
+                pool,
+                "claim deleted search rebuild",
+                &input,
+                |conn, (bundle_id, pending_generation)| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "UPDATE bundle_search_indexes SET pending_state='CLEANING', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND pending_generation=? AND pending_state IN ('BUILDING','FAILED','CLEANING') AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
+                        )
+                        .bind(bundle_id)
+                        .bind(pending_generation)
+                        .bind(bundle_id)
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(AppError::Database)
+                    })
+                },
             )
-            .bind(&bundle_id)
-            .bind(pending_generation)
-            .bind(&bundle_id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+            .await?;
             if cleanup_pending_generation_artifacts(data_root, &bundle_id, pending_generation)
                 .await?
             {
                 removed = removed.saturating_add(1);
             }
-            sqlx::query(
-                "UPDATE bundle_search_indexes SET pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND pending_generation=? AND pending_state='CLEANING'",
+            let input = (bundle_id.clone(), pending_generation);
+            crate::db::write::run(
+                pool,
+                "finish deleted search rebuild cleanup",
+                &input,
+                |conn, (bundle_id, pending_generation)| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "UPDATE bundle_search_indexes SET pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy' AND pending_generation=? AND pending_state='CLEANING'",
+                        )
+                        .bind(bundle_id)
+                        .bind(pending_generation)
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(AppError::Database)
+                    })
+                },
             )
-            .bind(&bundle_id)
-            .bind(pending_generation)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+            .await?;
         }
 
         let mut generations = HashSet::new();
@@ -882,16 +964,27 @@ pub(crate) async fn cleanup_deleted_bundle_artifacts_with_registry(
                 protected_generations.insert(generation);
                 continue;
             };
-            let claimed = sqlx::query(
-                "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state IN ('ACTIVE','RETIRED') AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
+            let input = (bundle_id.clone(), generation);
+            let claimed = crate::db::write::run(
+                pool,
+                "claim deleted search artifact",
+                &input,
+                |conn, (bundle_id, generation)| {
+                    Box::pin(async move {
+                        sqlx::query(
+                            "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state IN ('ACTIVE','RETIRED') AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND EXISTS (SELECT 1 FROM bundles WHERE id=? AND status='DELETED')",
+                        )
+                        .bind(bundle_id)
+                        .bind(generation)
+                        .bind(bundle_id)
+                        .execute(conn)
+                        .await
+                        .map(|result| result.rows_affected())
+                        .map_err(AppError::Database)
+                    })
+                },
             )
-            .bind(&bundle_id)
-            .bind(generation)
-            .bind(&bundle_id)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?
-            .rows_affected();
+            .await?;
             let has_artifact: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM bundle_search_artifacts WHERE bundle_id=? AND generation=?)",
             )
@@ -912,12 +1005,24 @@ pub(crate) async fn cleanup_deleted_bundle_artifacts_with_registry(
                 Ok(removed) => removed,
                 Err(error) => {
                     if claimed == 1 {
-                        sqlx::query("UPDATE bundle_search_artifacts SET cleanup_claimed_at=NULL WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
-                            .bind(&bundle_id)
-                            .bind(generation)
-                            .execute(pool)
-                            .await
-                            .map_err(AppError::Database)?;
+                        let input = (bundle_id.clone(), generation);
+                        crate::db::write::run(
+                            pool,
+                            "release deleted search artifact claim",
+                            &input,
+                            |conn, (bundle_id, generation)| {
+                                Box::pin(async move {
+                                    sqlx::query("UPDATE bundle_search_artifacts SET cleanup_claimed_at=NULL WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
+                                        .bind(bundle_id)
+                                        .bind(generation)
+                                        .execute(conn)
+                                        .await
+                                        .map(|_| ())
+                                        .map_err(AppError::Database)
+                                })
+                            },
+                        )
+                        .await?;
                     }
                     return Err(error);
                 }
@@ -926,12 +1031,24 @@ pub(crate) async fn cleanup_deleted_bundle_artifacts_with_registry(
                 removed = removed.saturating_add(1);
             }
             if claimed == 1 {
-                sqlx::query("DELETE FROM bundle_search_artifacts WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
-                    .bind(&bundle_id)
-                    .bind(generation)
-                    .execute(pool)
-                    .await
-                    .map_err(AppError::Database)?;
+                let input = (bundle_id.clone(), generation);
+                crate::db::write::run(
+                    pool,
+                    "delete cleaned search artifact",
+                    &input,
+                    |conn, (bundle_id, generation)| {
+                        Box::pin(async move {
+                            sqlx::query("DELETE FROM bundle_search_artifacts WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
+                                .bind(bundle_id)
+                                .bind(generation)
+                                .execute(conn)
+                                .await
+                                .map(|_| ())
+                                .map_err(AppError::Database)
+                        })
+                    },
+                )
+                .await?;
                 unremoved_artifacts.remove(&generation);
             }
         }
@@ -944,13 +1061,25 @@ pub(crate) async fn cleanup_deleted_bundle_artifacts_with_registry(
         if cleanup_staging_bundle(data_root, &bundle_id).await? {
             removed = removed.saturating_add(1);
         }
-        sqlx::query(
-            "UPDATE bundle_search_indexes SET state='FAILED', generation=0, artifact_key=NULL, pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE', last_error_code='RECOVERED_DELETED', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy'",
+        let input = bundle_id.clone();
+        crate::db::write::run(
+            pool,
+            "recover deleted search index",
+            &input,
+            |conn, bundle_id| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE bundle_search_indexes SET state='FAILED', generation=0, artifact_key=NULL, pending_generation=NULL, pending_revision=NULL, pending_owner=NULL, pending_phase='BUILDING', pending_state='IDLE', last_error_code='RECOVERED_DELETED', updated_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND backend='tantivy'",
+                    )
+                    .bind(bundle_id)
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(AppError::Database)
+                })
+            },
         )
-        .bind(&bundle_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?;
+        .await?;
     }
     Ok(removed)
 }
@@ -981,15 +1110,26 @@ pub(crate) async fn cleanup_retired_artifacts_with_registry(
         let Some(cleanup_lease) = registry.try_claim_cleanup(&bundle_id, generation) else {
             continue;
         };
-        let claimed = sqlx::query(
-            "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state='RETIRED' AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND datetime(retired_at) <= datetime('now','-10 minutes')",
+        let input = (bundle_id.clone(), generation);
+        let claimed = crate::db::write::run(
+            pool,
+            "claim retired search artifact",
+            &input,
+            |conn, (bundle_id, generation)| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE bundle_search_artifacts SET cleanup_claimed_at=CURRENT_TIMESTAMP WHERE bundle_id=? AND generation=? AND state='RETIRED' AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at) <= datetime('now','-5 minutes')) AND datetime(retired_at) <= datetime('now','-10 minutes')",
+                    )
+                    .bind(bundle_id)
+                    .bind(generation)
+                    .execute(conn)
+                    .await
+                    .map(|result| result.rows_affected())
+                    .map_err(AppError::Database)
+                })
+            },
         )
-        .bind(&bundle_id)
-        .bind(generation)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
+        .await?;
         if claimed != 1 {
             drop(cleanup_lease);
             continue;
@@ -999,24 +1139,48 @@ pub(crate) async fn cleanup_retired_artifacts_with_registry(
         {
             Ok(removed) => removed,
             Err(error) => {
-                sqlx::query("UPDATE bundle_search_artifacts SET cleanup_claimed_at=NULL WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
-                    .bind(&bundle_id)
-                    .bind(generation)
-                    .execute(pool)
-                    .await
-                    .map_err(AppError::Database)?;
+                let input = (bundle_id.clone(), generation);
+                crate::db::write::run(
+                    pool,
+                    "release retired search artifact claim",
+                    &input,
+                    |conn, (bundle_id, generation)| {
+                        Box::pin(async move {
+                            sqlx::query("UPDATE bundle_search_artifacts SET cleanup_claimed_at=NULL WHERE bundle_id=? AND generation=? AND cleanup_claimed_at IS NOT NULL")
+                                .bind(bundle_id)
+                                .bind(generation)
+                                .execute(conn)
+                                .await
+                                .map(|_| ())
+                                .map_err(AppError::Database)
+                        })
+                    },
+                )
+                .await?;
                 return Err(error);
             }
         };
         if cleanup_removed {
             removed = removed.saturating_add(1);
         }
-        sqlx::query("DELETE FROM bundle_search_artifacts WHERE bundle_id=? AND generation=? AND state='RETIRED' AND cleanup_claimed_at IS NOT NULL")
-            .bind(&bundle_id)
-            .bind(generation)
-            .execute(pool)
-            .await
-            .map_err(AppError::Database)?;
+        let input = (bundle_id.clone(), generation);
+        crate::db::write::run(
+            pool,
+            "delete retired search artifact",
+            &input,
+            |conn, (bundle_id, generation)| {
+                Box::pin(async move {
+                    sqlx::query("DELETE FROM bundle_search_artifacts WHERE bundle_id=? AND generation=? AND state='RETIRED' AND cleanup_claimed_at IS NOT NULL")
+                        .bind(bundle_id)
+                        .bind(generation)
+                        .execute(conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(AppError::Database)
+                })
+            },
+        )
+        .await?;
     }
     Ok(removed)
 }
@@ -1087,13 +1251,18 @@ pub(crate) async fn acquire_generation_lease_with_registry(
 }
 
 pub async fn reset_generation_leases(pool: &SqlitePool) -> Result<(), AppError> {
-    sqlx::query(
-        "UPDATE bundle_search_artifacts SET active_readers=0, cleanup_claimed_at=NULL WHERE active_readers <> 0 OR cleanup_claimed_at IS NOT NULL",
-    )
-    .execute(pool)
+    crate::db::write::transaction(pool, "reset search generation leases", |_conn| {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE bundle_search_artifacts SET active_readers=0, cleanup_claimed_at=NULL WHERE active_readers <> 0 OR cleanup_claimed_at IS NOT NULL",
+            )
+            .execute(_conn)
+            .await
+            .map(|_| ())
+            .map_err(AppError::Database)
+        })
+    })
     .await
-    .map(|_| ())
-    .map_err(AppError::Database)
 }
 
 #[cfg(test)]

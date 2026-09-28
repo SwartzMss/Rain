@@ -28,13 +28,19 @@ pub(crate) async fn touch_owned_issue_activity(
     code: &str,
     user_id: &str,
 ) -> Result<bool, AppError> {
-    let updated = sqlx::query("UPDATE issues SET last_activity_at = CURRENT_TIMESTAMP WHERE code = ? AND owner_user_id = ? AND status = 'ACTIVE' AND datetime(last_activity_at) < datetime('now', '-1 hour')")
-        .bind(code)
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
+    let input = (code.to_owned(), user_id.to_owned());
+    let updated = crate::db::write::run(pool, "touch issue activity", &input, |conn, input| {
+        Box::pin(async move {
+            Ok(sqlx::query("UPDATE issues SET last_activity_at = CURRENT_TIMESTAMP WHERE code = ? AND owner_user_id = ? AND status = 'ACTIVE' AND datetime(last_activity_at) < datetime('now', '-1 hour')")
+                .bind(&input.0)
+                .bind(&input.1)
+                .execute(conn)
+                .await
+                .map_err(AppError::Database)?
+                .rows_affected())
+        })
+    })
+    .await?;
     Ok(updated == 1)
 }
 
@@ -251,19 +257,25 @@ pub async fn create_issue(
         ));
     }
 
-    let result = sqlx::query(
-        r#"
+    let input = (code.clone(), name.clone(), user.0.id.clone());
+    let result = crate::db::write::run(&state.db.pool, "create issue", &input, |conn, input| {
+        Box::pin(async move {
+            sqlx::query(
+                r#"
         INSERT INTO issues (code, name, owner_user_id)
         VALUES (?, ?, ?)
         ON CONFLICT(code) DO NOTHING
         "#,
-    )
-    .bind(&code)
-    .bind(&name)
-    .bind(&user.0.id)
-    .execute(&state.db.pool)
-    .await
-    .map_err(AppError::Database)?;
+            )
+            .bind(&input.0)
+            .bind(&input.1)
+            .bind(&input.2)
+            .execute(conn)
+            .await
+            .map_err(AppError::Database)
+        })
+    })
+    .await?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::Conflict(format!("issue {code} already exists")));
