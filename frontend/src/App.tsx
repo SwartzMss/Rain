@@ -120,10 +120,8 @@ function App() {
       </main>
 
       <footer className="border-t border-white/10 bg-slate-950 text-slate-300">
-        <div className="mx-auto flex w-full max-w-none flex-col items-center gap-2 px-5 py-5 text-center text-sm sm:px-6">
-          <div className="flex flex-col items-center gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">反馈与支持</span>
-            <nav aria-label="反馈与支持" className="flex flex-wrap items-center justify-center gap-1">
+        <div className="mx-auto flex w-full max-w-none flex-col items-center px-5 py-2 text-center text-sm sm:px-6">
+          <nav aria-label="页脚导航" className="flex flex-wrap items-center justify-center gap-1">
               <a
                 aria-label="联系作者（swartz_lubel@outlook.com）"
                 className="inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-slate-300 no-underline transition hover:bg-white/10 hover:text-cyan-200"
@@ -155,8 +153,7 @@ function App() {
                 报告问题
                 <ExternalLinkIcon />
               </a>
-            </nav>
-          </div>
+          </nav>
         </div>
       </footer>
     </div>
