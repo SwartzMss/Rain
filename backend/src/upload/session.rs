@@ -293,6 +293,13 @@ pub async fn cancel_session(
             ),
         ));
     }
+    if existing.bundle_id.is_some() {
+        return Err(AppError::public(
+            actix_web::http::StatusCode::CONFLICT,
+            "UPLOAD_SESSION_HANDOFF",
+            "upload session has already been handed off",
+        ));
+    }
     if matches!(
         existing.status,
         SessionStatus::Cancelled | SessionStatus::Expired | SessionStatus::Failed

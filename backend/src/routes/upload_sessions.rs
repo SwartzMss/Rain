@@ -246,6 +246,9 @@ pub(crate) async fn cancel_issue_sessions(
         if before.owner_user_id != owner_user_id {
             continue;
         }
+        if before.bundle_id.is_some() {
+            continue;
+        }
         let cancelled =
             crate::upload::session::cancel_session(&state.db.pool, &session.id, owner_user_id)
                 .await?;
@@ -548,5 +551,75 @@ impl From<UploadSession> for UploadSessionResponse {
             failure_reason: session.failure_reason,
             expires_at: session.expires_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cancel_issue_sessions;
+    use crate::{
+        AppState,
+        config::AppLimits,
+        db,
+        repositories::users::{self, CreateUserOutcome},
+    };
+    use sqlx::SqlitePool;
+    use uuid::Uuid;
+
+    async fn setup_handed_off_session() -> (SqlitePool, String) {
+        let pool = db::init_pool(&format!(
+            "sqlite:file:cancel-issue-handoff-{}?mode=memory&cache=shared",
+            Uuid::new_v4().simple()
+        ))
+        .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let user = match users::create_user(&pool, "cancel-issue-handoff-owner", "hash")
+            .await
+            .unwrap()
+        {
+            CreateUserOutcome::Created(user) => user,
+            CreateUserOutcome::DuplicateUsername => panic!("duplicate test user"),
+        };
+        sqlx::query("INSERT INTO issues (code, name, owner_user_id) VALUES ('CANCELHANDOFF', 'Cancel Handoff', ?)")
+            .bind(&user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('cancel-handoff-bundle', 'CANCELHANDOFF', 'cancel-handoff-hash', 'handoff.log', 'PROCESSING')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO upload_sessions (id, issue_code, owner_user_id, idempotency_key, file_name, file_size_bytes, chunk_size_bytes, status, input_path, bundle_id, expires_at) VALUES ('cancel-handoff-session', 'CANCELHANDOFF', ?, 'cancel-handoff-key', 'handoff.log', 67108864, 8388608, 'FINALIZING', '.uploads/cancel-handoff-session/input.part', 'cancel-handoff-bundle', '2099-01-01 00:00:00')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        (pool, user.id)
+    }
+
+    #[tokio::test]
+    async fn cancel_issue_sessions_skips_handed_off_sessions() {
+        let (pool, owner_user_id) = setup_handed_off_session().await;
+        let state = actix_web::web::Data::new(AppState::new(
+            pool.clone(),
+            std::env::temp_dir().join(format!("rain-cancel-issue-{}", Uuid::new_v4())),
+            AppLimits::default(),
+        ));
+
+        cancel_issue_sessions(&state, "CANCELHANDOFF", &owner_user_id)
+            .await
+            .unwrap();
+
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM upload_sessions WHERE id='cancel-handoff-session'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "FINALIZING");
     }
 }
