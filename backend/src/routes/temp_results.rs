@@ -14,7 +14,7 @@ use sqlx::FromRow;
 use std::time::Duration as StdDuration;
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom},
 };
 use uuid::Uuid;
 
@@ -25,7 +25,8 @@ use crate::{
     log_expression,
     repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
     services::temp_results::{
-        MatchMetadata, SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint,
+        MatchMetadata, SPARSE_CHECKPOINT_INDEX_MAGIC, SPARSE_CHECKPOINT_RECORD_BYTES,
+        SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint,
     },
 };
 
