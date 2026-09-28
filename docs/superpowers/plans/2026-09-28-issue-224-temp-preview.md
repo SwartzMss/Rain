@@ -13,7 +13,8 @@
 ## File map
 
 - Create `backend/src/routes/temp_results/search_plan.rs`: pure expression classification plus per-source Tantivy publication lookup, candidate search, sparse offset lookup, and structured plan statistics.
-- Modify `backend/src/routes/temp_results.rs`: register the search-plan module and expose the planner/materializer types needed by the route service.
+- Modify `backend/src/routes/temp_results.rs`: register the search-plan module and expose the planner entry point needed by the route service.
+- Modify `backend/src/services/temp_results.rs`: own the shared candidate line-range plan types used by both the planner and the materializer.
 - Modify `backend/src/routes/temp_results/service.rs`: retain Bundle/File identity during source resolution, request a preview search plan, invoke planned materialization, and emit preview observability fields.
 - Modify `backend/src/services/temp_results.rs`: add candidate line-range plans and a bounded raw verifier while keeping `materialize_preview` as the raw-scan compatibility wrapper.
 - Modify `backend/tests/smoke.rs`: extend the existing preview scenario to cover a supported indexed keyword and an unsupported boolean fallback with identical response semantics.
@@ -25,6 +26,7 @@
 **Files:**
 - Create: `backend/src/routes/temp_results/search_plan.rs`
 - Modify: `backend/src/routes/temp_results.rs`
+- Modify: `backend/src/services/temp_results.rs`
 
 - [ ] **Step 1: Write failing classifier tests.** Add a pure `classify_expression` function contract and tests in `search_plan.rs`:
 
@@ -56,6 +58,7 @@ pub(crate) enum SearchPlanKind {
     RawFallback(&'static str),
 }
 
+// In backend/src/services/temp_results.rs, define the shared materialization plan:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LineRange {
     pub start: i64,
@@ -76,11 +79,11 @@ pub(crate) enum SourceSearchPlan {
 }
 ```
 
-Register `mod search_plan;` in `backend/src/routes/temp_results.rs` and re-export the types needed by `service.rs` and `services::temp_results`.
+Register `mod search_plan;` in `backend/src/routes/temp_results.rs`; have `search_plan.rs` import the shared plan types from `crate::services::temp_results` and keep those types independent of route modules.
 
-- [ ] **Step 4: Run the focused tests and the existing log-expression tests.**
+- [ ] **Step 4: Run the focused classifier test and the existing log-expression tests.**
 
-Run: `cargo test --manifest-path backend/Cargo.toml routes::temp_results::search_plan::tests log_expression::tests`
+Run: `cargo test --manifest-path backend/Cargo.toml routes::temp_results::search_plan::tests` and `cargo test --manifest-path backend/Cargo.toml log_expression::tests`
 
 Expected: PASS with the new classifier cases and all existing expression behavior unchanged.
 
@@ -119,7 +122,7 @@ fn candidate_ranges_are_sorted_and_merged_without_overlap() {
 
 - [ ] **Step 2: Run the focused tests to verify the expected failures.**
 
-Run: `cargo test --manifest-path backend/Cargo.toml services::temp_results::tests::materializes_only_exact_matches_inside_candidate_ranges services::temp_results::tests::empty_candidate_ranges_do_not_open_or_scan_the_source services::temp_results::tests::candidate_ranges_are_sorted_and_merged_without_overlap`
+Run each command separately: `cargo test --manifest-path backend/Cargo.toml services::temp_results::tests::materializes_only_exact_matches_inside_candidate_ranges`, `cargo test --manifest-path backend/Cargo.toml services::temp_results::tests::empty_candidate_ranges_do_not_open_or_scan_the_source`, and `cargo test --manifest-path backend/Cargo.toml services::temp_results::tests::candidate_ranges_are_sorted_and_merged_without_overlap`
 
 Expected: FAIL because the executor has no candidate-plan API.
 
@@ -159,6 +162,7 @@ git commit -m "feat: verify temp preview candidates against raw lines"
 **Files:**
 - Modify: `backend/src/routes/temp_results/service.rs`
 - Modify: `backend/src/routes/temp_results/search_plan.rs`
+- Modify: `backend/src/services/temp_results.rs`
 
 - [ ] **Step 1: Write failing source-plan integration tests.** Add tests that seed an in-memory schema and a published Tantivy fixture, then assert:
 
@@ -177,9 +181,9 @@ async fn unsupported_expression_and_missing_index_use_raw_fallback() {
 }
 ```
 
-- [ ] **Step 2: Run the focused tests to verify they fail.**
+- [ ] **Step 2: Run the focused source-plan tests to verify they fail.**
 
-Run: `cargo test --manifest-path backend/Cargo.toml routes::temp_results::search_plan::tests::ready_tantivy_publication_returns_file_scoped_candidate_ranges routes::temp_results::search_plan::tests::unsupported_expression_and_missing_index_use_raw_fallback -- --exact`
+Run each command separately: `cargo test --manifest-path backend/Cargo.toml routes::temp_results::search_plan::tests::ready_tantivy_publication_returns_file_scoped_candidate_ranges -- --exact` and `cargo test --manifest-path backend/Cargo.toml routes::temp_results::search_plan::tests::unsupported_expression_and_missing_index_use_raw_fallback -- --exact`
 
 Expected: FAIL because resolved sources do not retain Bundle/File identity and no planner performs publication lookup.
 
@@ -208,7 +212,7 @@ Convert each returned row's `offset`/`line_end` into an inclusive `LineRange`, d
 
 - [ ] **Step 5: Run the focused planner tests and existing publication tests.**
 
-Run: `cargo test --manifest-path backend/Cargo.toml routes::temp_results::search_plan::tests search::publication::tests --features tantivy-search`
+Run each command separately: `cargo test --manifest-path backend/Cargo.toml routes::temp_results::search_plan::tests --features tantivy-search` and `cargo test --manifest-path backend/Cargo.toml search::publication::tests --features tantivy-search`
 
 Expected: PASS, including lease-safe visibility behavior and raw fallback cases.
 
