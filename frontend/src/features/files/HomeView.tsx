@@ -11,6 +11,7 @@ import { buildFileRows, canDeleteFileRow, type FileRow } from './homeRows';
 import { useIssueBundles } from './hooks/useIssueBundles';
 import { useIssues } from './hooks/useIssues';
 import { useUploadTask } from './hooks/useUploadTask';
+import { shouldShowOptimisticUploadTask } from './uploadRows';
 import { isUser } from '../../auth/permissions';
 import { IssueExpirationNotice } from './components/IssueExpirationNotice';
 import { IssueDeleteButton } from './components/IssueDeleteButton';
@@ -83,11 +84,19 @@ export function HomeView() {
     loadBundles: bundles.loadBundles,
     loadIssues: issues.loadIssues
   });
+
+  const existingBundleHashes = useMemo(
+    () => new Set(bundles.bundles.map((bundle) => bundle.hash)),
+    [bundles.bundles]
+  );
+
+  useEffect(() => {
+    upload.acknowledgeAcceptedTasks(existingBundleHashes);
+  }, [existingBundleHashes, upload.acknowledgeAcceptedTasks]);
+
   const visibleUploadTasks = useMemo(
-    () => upload.tasks.filter(
-      (task) => task.status !== 'ACCEPTED' || !task.response || !bundles.bundles.some((bundle) => bundle.hash === task.response?.bundle_hash)
-    ),
-    [bundles.bundles, upload.tasks]
+    () => upload.tasks.filter((task) => shouldShowOptimisticUploadTask(task, existingBundleHashes)),
+    [existingBundleHashes, upload.tasks]
   );
 
   const fileRows = useMemo(

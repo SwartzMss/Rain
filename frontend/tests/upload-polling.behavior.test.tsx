@@ -78,6 +78,34 @@ describe('upload and bundle polling behavior', () => {
     vi.resetAllMocks();
   });
 
+  it('acknowledges an accepted task only when its Bundle hash is observed', async () => {
+    vi.mocked(rainApi.uploadLogs).mockResolvedValueOnce(uploadResponse('handoff-226'));
+    const loadBundles = vi.fn().mockResolvedValue(undefined);
+    const loadIssues = vi.fn().mockResolvedValue(undefined);
+    const { result, unmount } = renderHook(() => useUploadTask({
+      currentIssueCode: 'ISSUE-HANDOFF-226',
+      loadBundles,
+      loadIssues
+    }));
+
+    await act(async () => {
+      await result.current.performUpload([new File(['a'], 'handoff.log')]);
+      await Promise.resolve();
+    });
+    expect(result.current.uploadTasks[0].status).toBe('ACCEPTED');
+
+    act(() => result.current.acknowledgeAcceptedTasks(new Set(['other-bundle'])));
+    expect(result.current.uploadTasks[0].status).toBe('ACCEPTED');
+
+    act(() => result.current.acknowledgeAcceptedTasks(new Set(['bundle-handoff-226'])));
+    expect(result.current.uploadTasks[0].status).toBe('HANDED_OFF');
+
+    act(() => result.current.acknowledgeAcceptedTasks(new Set(['bundle-handoff-226'])));
+    expect(result.current.uploadTasks[0].status).toBe('HANDED_OFF');
+    expect(result.current.uploadSelection).toEqual([]);
+    unmount();
+  });
+
   it('allows upload B to start after upload A is accepted with PROCESSING status', async () => {
     let finishRefreshA!: () => void;
     const refreshA = new Promise<void>((resolve) => {

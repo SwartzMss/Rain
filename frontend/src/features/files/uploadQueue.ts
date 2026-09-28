@@ -3,6 +3,7 @@ export type UploadQueueTaskStatus =
   | 'UPLOADING'
   | 'RETRY_WAIT'
   | 'ACCEPTED'
+  | 'HANDED_OFF'
   | 'FAILED'
   | 'UNCONFIRMED';
 
@@ -175,8 +176,16 @@ export function createUploadQueue<TResponse>(
     drain();
   };
 
+  const markHandedOff = (id: string) => {
+    const task = tasks.get(id);
+    if (!task || task.status !== 'ACCEPTED' || !task.response) return false;
+    update(id, { status: 'HANDED_OFF' });
+    return true;
+  };
+
   return {
     enqueue,
+    markHandedOff,
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => listeners.delete(listener);
