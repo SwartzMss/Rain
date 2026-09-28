@@ -26,6 +26,7 @@ interface ActiveExecution {
   cancelController: AbortController | null;
   cancelToken: string | null;
   cancelRequested: boolean;
+  settleCancellationUi: boolean;
   finished: boolean;
 }
 
@@ -93,7 +94,10 @@ export function useSearchExecution() {
   const requestCancellation = useCallback(async (active: ActiveExecution, invalidate: boolean) => {
     if (active.finished) return;
     active.cancelRequested = true;
-    if (invalidate) generationRef.current += 1;
+    if (invalidate) {
+      active.settleCancellationUi = true;
+      generationRef.current += 1;
+    }
     active.executionController.abort();
     if (invalidate) {
       setSnapshot((current) => current.searchId === active.searchId
@@ -102,21 +106,22 @@ export function useSearchExecution() {
     }
 
     if (!active.cancelToken) return;
+    const updateCancellationUi = invalidate || active.settleCancellationUi;
     active.cancelController?.abort();
     active.cancelController = new AbortController();
     try {
       const response = await rainApi.cancelSearchRequest(active.searchId, active.cancelToken, active.cancelController.signal);
       if (!response || response.status === 'cancelled' || response.status === 'timeout') {
         active.finished = true;
-        if (invalidate) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
+        if (updateCancellationUi) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
       } else if (response.status === 'completed' || response.status === 'failed') {
         active.finished = true;
-        if (invalidate) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
-      } else if (invalidate) {
+        if (updateCancellationUi) setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false } : current);
+      } else if (updateCancellationUi) {
         setSnapshot((current) => current.searchId === active.searchId ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true } : current);
       }
     } catch (error) {
-      if (error instanceof RequestCancelledError || !invalidate) return;
+      if (error instanceof RequestCancelledError || !updateCancellationUi) return;
       setSnapshot((current) => current.searchId === active.searchId
         ? { ...current, status: 'CANCELLING', cancelUnconfirmed: true, errorMessage: '取消请求未确认，可重试；服务器安全时限仍生效' }
         : current);
@@ -146,6 +151,7 @@ export function useSearchExecution() {
       cancelController: null,
       cancelToken: null,
       cancelRequested: false,
+      settleCancellationUi: false,
       finished: false
     };
     activeRef.current = active;
@@ -174,8 +180,24 @@ export function useSearchExecution() {
       options.onSuccess?.(result);
       return result;
     } catch (error) {
+      if (active.finished) return undefined;
+      if (active.cancelRequested) {
+        if (!active.cancelToken) {
+          active.finished = true;
+          if (active.settleCancellationUi) {
+            setSnapshot((current) => current.searchId === active.searchId
+              ? { ...current, status: 'CANCELLED', cancelUnconfirmed: false, elapsedMs: elapsedSince(active.startedAt) }
+              : current);
+          }
+        } else if (active.settleCancellationUi) {
+          setSnapshot((current) => current.searchId === active.searchId
+            ? { ...current, status: 'CANCELLING', elapsedMs: elapsedSince(active.startedAt) }
+            : current);
+        }
+        return undefined;
+      }
       if (!isCurrent()) return undefined;
-      if (error instanceof RequestCancelledError || active.cancelRequested) {
+      if (error instanceof RequestCancelledError) {
         setSnapshot((current) => ({ ...current, status: 'CANCELLING', elapsedMs: elapsedSince(active.startedAt) }));
         return undefined;
       }

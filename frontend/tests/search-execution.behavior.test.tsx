@@ -69,6 +69,42 @@ describe('interactive search execution', () => {
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/search-requests/'), expect.objectContaining({ method: 'DELETE' }));
   });
 
+  it('settles cancellation after the user cancels before reservation returns', async () => {
+    let resolveReservation!: (response: Response) => void;
+    const reservation = new Promise<Response>((resolve) => {
+      resolveReservation = resolve;
+    });
+    const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit = {}) => {
+      if (url.endsWith('/api/search-requests') && init.method === 'POST') {
+        return reservation;
+      }
+      if (url.includes('/api/search-requests/') && init.method === 'DELETE') {
+        return Promise.resolve(new Response(JSON.stringify({ status: 'cancelled' }), { status: 200 }));
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<ExecutionProbe />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
+    expect(screen.getByTestId('status')).toHaveTextContent('CANCELLING');
+
+    await act(async () => {
+      resolveReservation(new Response(JSON.stringify({
+        search_id: '00000000-0000-4000-8000-000000000001',
+        cancel_token: 'token',
+        expires_in_ms: 60_000
+      }), { status: 201 }));
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/search-requests/'),
+      expect.objectContaining({ method: 'DELETE' })
+    ));
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('CANCELLED'));
+  });
+
   it('does not let an aborted older execution overwrite a newer one', async () => {
     let previewCalls = 0;
     let resolveSecond!: (response: Response) => void;

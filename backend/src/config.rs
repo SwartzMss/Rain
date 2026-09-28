@@ -156,7 +156,9 @@ impl Default for TempResultConfig {
             max_total_size: GIB,
             max_records: 1_000,
             concurrent_materializations: 2,
-            max_scan_duration_seconds: 30,
+            // Interactive searches are user-cancellable; this is only the
+            // backend safety cap for searches that never receive a cancel.
+            max_scan_duration_seconds: 300,
         }
     }
 }
@@ -770,6 +772,7 @@ mod tests {
         assert_eq!(limits.api.max_line_page_bytes, 16 * 1024_u64.pow(2));
         assert_eq!(limits.api.concurrent_line_reads, 8);
         assert_eq!(limits.api.concurrent_line_reads_per_client, 2);
+        assert_eq!(limits.temp_results.max_scan_duration_seconds, 300);
         assert_eq!(
             limits.api.max_search_window,
             crate::search::DEFAULT_MAX_SEARCH_WINDOW

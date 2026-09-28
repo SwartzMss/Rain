@@ -479,7 +479,9 @@ fn details(key: SettingKey) -> FieldDetails {
         ),
         TempResultsMaxRecords => integer(1000, 1, None, "临时搜索结果最多保留份数"),
         TempResultsConcurrentMaterializations => integer(2, 1, None, "临时结果物化并发数"),
-        TempResultsMaxScanDurationSeconds => integer(30, 1, Some(31_536_000), "搜索超时时长（秒）"),
+        TempResultsMaxScanDurationSeconds => {
+            integer(300, 1, Some(31_536_000), "搜索安全上限（秒）")
+        }
     }
 }
 

@@ -85,11 +85,11 @@ Steps:
 ## Task 6: Final safety settings, documentation, and verification
 
 Files:
-- Modify `backend/src/config.rs`, `backend/src/settings/metadata.rs`, README/config examples only if benchmark evidence supports a default change.
+- Modify `backend/src/config.rs` and `backend/src/settings/metadata.rs` to use a 300-second default safety cap; preserve existing persisted values and document the user-cancellable lifecycle.
 - Add focused regression tests and a short benchmark/verification note if required by repository conventions.
 
 Steps:
-1. Keep the existing persisted timeout default unless measured evidence justifies changing it; update labels to describe a safety deadline and preserve existing database values.
+1. Use 300 seconds (5 minutes) as the initial backend safety cap rather than the normal user-search lifetime; update labels to describe a safety deadline and preserve existing database values.
 2. Run `cargo fmt --check`, `cargo test`, `cargo test --no-default-features`, `cd frontend && npm test`, and `npm run build`.
 3. Run `git diff --check`, inspect the diff for secret/capability logging, and verify worktree status.
 4. Commit coherent implementation changes, push `fix/issue-228-search-cancellation`, and create an implementation PR referencing #228 and design PR #230.
