@@ -11,6 +11,7 @@
     "test": "vitest run && node tests/binary-file-info.mjs && node tests/search-tokens.mjs && node tests/filename-search.mjs && node tests/upload-failure.mjs && node tests/upload-deletion.mjs && node tests/viewer-defaults.mjs && node tests/search-hit-source.mjs && node tests/file-tree-node.mjs && node tests/syntax-highlighting.mjs && node tests/file-search-state.mjs && node tests/pending-saved-search.mjs && node tests/auth-state.mjs && node tests/admin-permissions.mjs"
   },
   "dependencies": {
+    "@noble/hashes": "2.4.0",
     "highlight.js": "^11.11.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -76,11 +76,25 @@ async function removeRecord(key: string): Promise<void> {
 }
 
 async function sha256(value: ArrayBuffer): Promise<string> {
-  if (!globalThis.crypto?.subtle) {
-    throw new Error('当前浏览器不支持 Web Crypto，无法安全恢复上传');
+  let digest: Uint8Array;
+  if (globalThis.crypto?.subtle) {
+    digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', value));
+  } else {
+    // LAN HTTP origins do not expose SubtleCrypto. Keep the same SHA-256
+    // contract, yielding between blocks so hashing does not freeze the UI.
+    const { sha256: portableSha256 } = await import('@noble/hashes/sha2.js');
+    const hash = portableSha256.create();
+    const bytes = new Uint8Array(value);
+    const blockSize = 1024 * 1024;
+    for (let offset = 0; offset < bytes.length; offset += blockSize) {
+      hash.update(bytes.subarray(offset, offset + blockSize));
+      if (offset + blockSize < bytes.length) {
+        await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+      }
+    }
+    digest = hash.digest();
   }
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', value);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 async function sha256Text(value: string): Promise<string> {
