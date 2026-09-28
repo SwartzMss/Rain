@@ -50,15 +50,20 @@ struct SearchExecutionGuard {
     registry: SearchExecutionRegistry,
     search_id: String,
     token: crate::services::search_execution::CancellationToken,
+    finished: bool,
 }
 
 struct SearchExecutionHandlerGuard {
+    registry: SearchExecutionRegistry,
+    search_id: String,
     token: crate::services::search_execution::CancellationToken,
 }
 
 impl SearchExecutionHandlerGuard {
-    fn new(context: &SearchExecutionContext) -> Self {
+    fn new(registry: SearchExecutionRegistry, context: &SearchExecutionContext) -> Self {
         Self {
+            registry,
+            search_id: context.search_id.clone(),
             token: context.cancellation_token(),
         }
     }
@@ -67,6 +72,7 @@ impl SearchExecutionHandlerGuard {
 impl Drop for SearchExecutionHandlerGuard {
     fn drop(&mut self) {
         self.token.cancel();
+        self.registry.cancel_from_handler(&self.search_id);
     }
 }
 
@@ -78,19 +84,45 @@ impl SearchExecutionGuard {
             registry,
             search_id,
             token,
+            finished: false,
         }
+    }
+
+    fn finish(&mut self, requested: TerminalStatus) -> TerminalStatus {
+        if self.finished {
+            return requested;
+        }
+        self.finished = true;
+        if !matches!(requested, TerminalStatus::Completed) {
+            self.token.cancel();
+        }
+        self.registry
+            .finish(&self.search_id, requested)
+            .unwrap_or(requested)
+    }
+
+    fn finish_result<T>(&mut self, result: &Result<T, AppError>) -> TerminalStatus {
+        let status = match result {
+            Ok(_) => TerminalStatus::Completed,
+            Err(error) if is_search_cancelled(error) => TerminalStatus::Cancelled,
+            Err(error) if is_scan_timeout(error) => TerminalStatus::TimedOut,
+            Err(_) => TerminalStatus::Failed,
+        };
+        self.finish(status)
     }
 }
 
 impl Drop for SearchExecutionGuard {
     fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
         let status = if self.token.is_cancelled() {
             TerminalStatus::Cancelled
         } else {
             TerminalStatus::Failed
         };
-        self.token.cancel();
-        self.registry.finish(&self.search_id, status);
+        self.finish(status);
     }
 }
 
@@ -599,12 +631,13 @@ pub(crate) async fn create_preview_result(
             .map(|response| HttpResponse::Ok().json(response));
     };
 
-    let _handler_guard = SearchExecutionHandlerGuard::new(&context);
-    let worker_state = state.clone();
     let worker_registry = state.temp_results.search_executions.clone();
+    let _handler_guard = SearchExecutionHandlerGuard::new(worker_registry.clone(), &context);
+    let worker_state = state.clone();
     let worker_client_key = client_key.clone();
     let worker = tokio::spawn(async move {
-        let _execution_guard = SearchExecutionGuard::new(worker_registry.clone(), context.clone());
+        let mut execution_guard =
+            SearchExecutionGuard::new(worker_registry.clone(), context.clone());
         let result = create_preview_result_inner(
             &worker_client_key,
             &payload,
@@ -612,13 +645,7 @@ pub(crate) async fn create_preview_result(
             Some(&context),
         )
         .await;
-        let status = match &result {
-            Ok(_) => TerminalStatus::Completed,
-            Err(error) if is_search_cancelled(error) => TerminalStatus::Cancelled,
-            Err(error) if is_scan_timeout(error) => TerminalStatus::TimedOut,
-            Err(_) => TerminalStatus::Failed,
-        };
-        worker_registry.finish(&context.search_id, status);
+        execution_guard.finish_result(&result);
         result
     });
     match worker.await {
@@ -1072,6 +1099,60 @@ mod tests {
 
         assert!(token.is_cancelled());
         assert_eq!(state.active_count(), 0);
+    }
+
+    #[test]
+    fn dropped_preview_handler_guard_marks_the_execution_cancelling() {
+        let state = crate::services::search_execution::SearchExecutionRegistry::new(
+            8,
+            8,
+            Duration::from_secs(60),
+        );
+        let reservation = state
+            .reserve("handler-drop-search", None, "test-peer")
+            .unwrap();
+        let context = state
+            .start(&reservation.search_id, &reservation.cancel_token, None)
+            .unwrap();
+        let token = context.cancellation_token();
+
+        {
+            let _guard = super::SearchExecutionHandlerGuard::new(state.clone(), &context);
+        }
+
+        assert!(token.is_cancelled());
+        assert_eq!(
+            state.finish("handler-drop-search", TerminalStatus::Completed),
+            Some(TerminalStatus::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_preview_execution_guard_does_not_cancel_after_finish() {
+        let state = crate::services::search_execution::SearchExecutionRegistry::new(
+            8,
+            8,
+            Duration::from_secs(60),
+        );
+        let reservation = state
+            .reserve("completed-search", None, "test-peer")
+            .unwrap();
+        let context = state
+            .start(&reservation.search_id, &reservation.cancel_token, None)
+            .unwrap();
+        let token = context.cancellation_token();
+
+        let mut guard = super::SearchExecutionGuard::new(state.clone(), context);
+        guard.finish(TerminalStatus::Completed);
+        drop(guard);
+
+        assert!(!token.is_cancelled());
+        assert_eq!(
+            state
+                .wait_for_terminal("completed-search", Duration::from_secs(1))
+                .await,
+            Some(TerminalStatus::Completed)
+        );
     }
 
     #[tokio::test]

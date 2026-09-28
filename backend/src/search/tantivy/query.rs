@@ -184,9 +184,7 @@ impl CandidateSearch {
                 .map_err(|error| AppError::Config(format!("score Tantivy query: {error}")))?;
             let mut doc_id = scorer.doc();
             while doc_id != TERMINATED {
-                if metrics.candidate_docs % 32 == 0 {
-                    checkpoint(context)?;
-                }
+                checkpoint(context)?;
                 metrics.candidate_docs += 1;
                 let address = DocAddress {
                     segment_ord: segment_ord as u32,

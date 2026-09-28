@@ -328,7 +328,9 @@ pub fn rebuild_visible_index(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{collections::HashSet, time::Duration};
+
+    use crate::services::search_execution::SearchExecutionRegistry;
 
     use super::{
         BundleIndexWriter, CandidateSearch, IndexedChunk, SearchOptions, rebuild_visible_index,
@@ -494,6 +496,68 @@ mod tests {
         assert_eq!(page.total, 2);
         assert_eq!(page.metrics.candidate_docs, 2);
         assert_eq!(page.hits.len(), 2);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_tantivy_search_stops_after_cancellation() {
+        let path = temp_index_path();
+        let mut writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();
+        let content = format!("marker {}", "x".repeat(256));
+        for chunk_index in 0..50_000 {
+            writer
+                .add_chunk(&IndexedChunk {
+                    file_id: 1,
+                    chunk_index,
+                    line_start: Some(chunk_index),
+                    line_end: Some(chunk_index),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    timeline: Some("all".into()),
+                    content: content.clone(),
+                    path: "/app.log".into(),
+                })
+                .unwrap();
+        }
+        let search = CandidateSearch::new(writer.commit().unwrap());
+        let registry = SearchExecutionRegistry::new(8, 8, Duration::from_secs(60));
+        let reservation = registry
+            .reserve("tantivy-cancel", None, "test-peer")
+            .unwrap();
+        let context = registry
+            .start_with_timeout(
+                &reservation.search_id,
+                &reservation.cancel_token,
+                None,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        let token = context.cancellation_token();
+        let task = tokio::task::spawn_blocking(move || {
+            search.search_page_with_context(
+                "marker",
+                SearchOptions {
+                    size: 1,
+                    ..SearchOptions::default()
+                },
+                Some(&context),
+            )
+        });
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancellable Tantivy search should stop promptly")
+            .expect("blocking search task should join");
+        let error = result.expect_err("search should observe cancellation");
+        assert!(matches!(
+            error,
+            crate::error::AppError::Api {
+                code: "SEARCH_CANCELLED",
+                ..
+            }
+        ));
         std::fs::remove_dir_all(path).unwrap();
     }
 

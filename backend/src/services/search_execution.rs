@@ -317,24 +317,18 @@ impl SearchExecutionRegistry {
         if !authorized(entry, cancel_token, owner_user_id) {
             return CancelResult::Unknown;
         }
-        match entry.state {
-            EntryState::Reserved => {
-                entry.state = EntryState::Terminal(TerminalStatus::Cancelled);
-                entry.terminal_at = Some(Instant::now());
-                entry.token.cancel();
-                entry.notify.notify_waiters();
-                CancelResult::Terminal(TerminalStatus::Cancelled)
-            }
-            EntryState::Running => {
-                entry.state = EntryState::Cancelling;
-                entry.token.cancel();
-                entry.notify.notify_waiters();
-                CancelResult::Cancelling
-            }
-            EntryState::Cancelling => CancelResult::Cancelling,
-            EntryState::Committing => CancelResult::Finishing,
-            EntryState::Terminal(status) => CancelResult::Terminal(status),
-        }
+        cancel_entry(entry)
+    }
+
+    pub(crate) fn cancel_from_handler(&self, search_id: &str) -> CancelResult {
+        let Ok(mut inner) = self.inner.lock() else {
+            return CancelResult::Unknown;
+        };
+        self.prune_locked(&mut inner, Instant::now());
+        let Some(entry) = inner.entries.get_mut(search_id) else {
+            return CancelResult::Unknown;
+        };
+        cancel_entry(entry)
     }
 
     pub fn mark_committing(
@@ -464,6 +458,27 @@ fn digest_capability(token: &str) -> [u8; 32] {
 fn authorized(entry: &Entry, cancel_token: &str, owner_user_id: Option<&str>) -> bool {
     entry.capability_digest == digest_capability(cancel_token)
         && entry.owner_user_id.as_deref() == owner_user_id
+}
+
+fn cancel_entry(entry: &mut Entry) -> CancelResult {
+    match entry.state {
+        EntryState::Reserved => {
+            entry.state = EntryState::Terminal(TerminalStatus::Cancelled);
+            entry.terminal_at = Some(Instant::now());
+            entry.token.cancel();
+            entry.notify.notify_waiters();
+            CancelResult::Terminal(TerminalStatus::Cancelled)
+        }
+        EntryState::Running => {
+            entry.state = EntryState::Cancelling;
+            entry.token.cancel();
+            entry.notify.notify_waiters();
+            CancelResult::Cancelling
+        }
+        EntryState::Cancelling => CancelResult::Cancelling,
+        EntryState::Committing => CancelResult::Finishing,
+        EntryState::Terminal(status) => CancelResult::Terminal(status),
+    }
 }
 
 #[cfg(test)]
