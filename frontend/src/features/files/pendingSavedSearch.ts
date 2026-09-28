@@ -34,7 +34,7 @@ export function takePendingSavedSearch(
     if (
       !pending
       || typeof pending !== 'object'
-      || !['FILENAME', 'DETAIL'].includes(pending.search_type)
+      || pending.search_type !== 'DETAIL'
       || typeof pending.query_text !== 'string'
       || !pending.query_text.trim()
       || !pending.options

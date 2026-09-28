@@ -9,8 +9,7 @@ use crate::{
     models::logs::{LogSearchHit, LogSearchResponse},
     search::generation_lease::GenerationLeaseRegistry,
     search::{
-        ContentSearchRequest, ContentSearchResult, ContentSearchScope, FilenameSearchRequest,
-        SearchIndex, SearchWindow,
+        ContentSearchRequest, ContentSearchResult, ContentSearchScope, SearchIndex, SearchWindow,
         parallel::run_issue_bundle_searches,
         publication::{
             acquire_generation_lease_with_registry, artifact_relative_path,
@@ -224,19 +223,9 @@ async fn search_logs_inner(
 #[derive(Deserialize)]
 struct IssueLogQuery {
     q: String,
-    #[serde(default)]
-    mode: IssueSearchMode,
     path_like: Option<String>,
     from: Option<i64>,
     size: Option<i64>,
-}
-
-#[derive(Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum IssueSearchMode {
-    Filename,
-    #[default]
-    Content,
 }
 
 #[get("/issues/{issue_code}/search")]
@@ -268,19 +257,6 @@ async fn search_issue_logs_inner(
     }
     let window = normalize_search_window(&runtime_limits.api, term.from, term.size)?;
     ensure_issue_active(&state.db.pool, &issue_code).await?;
-
-    if matches!(term.mode, IssueSearchMode::Filename) {
-        let response = search_issue_files(
-            &state.db.pool,
-            &runtime_limits.api,
-            &issue_code,
-            search_term,
-            term.from,
-            term.size,
-        )
-        .await?;
-        return Ok(response);
-    }
 
     let path_like = term.path_like.and_then(|value| {
         let trimmed = value.trim().to_string();
@@ -547,51 +523,6 @@ async fn search_issue_content_mixed(
         rows,
         truncated: false,
     })
-}
-
-async fn search_issue_files(
-    pool: &sqlx::SqlitePool,
-    api: &crate::config::ApiConfig,
-    issue_code: &str,
-    search_term: &str,
-    from: Option<i64>,
-    size: Option<i64>,
-) -> Result<HttpResponse, AppError> {
-    let window = normalize_search_window(api, from, size)?;
-    let from = window.from as i64;
-    let size = window.size as i64;
-    let result = SqliteFtsSearchIndex::new(pool.clone())
-        .search_filenames(FilenameSearchRequest {
-            issue_code: issue_code.to_owned(),
-            query: search_term.to_owned(),
-            from,
-            size,
-        })
-        .await?;
-    let total = result.total;
-    let rows = result.rows;
-
-    let hits = rows
-        .into_iter()
-        .map(|row| LogSearchHit {
-            file_id: row.file_id.to_string(),
-            path: row.path,
-            bundle_hash: Some(row.bundle_hash),
-            snippet: row.name,
-            timeline: None,
-            offset: None,
-            line_end: None,
-            line_number: None,
-            chunk_index: None,
-        })
-        .collect();
-
-    Ok(HttpResponse::Ok().json(LogSearchResponse {
-        total: total.max(0) as u64,
-        hits,
-        truncated: false,
-        max_search_window: api.max_search_window as u64,
-    }))
 }
 
 fn normalize_search_window(

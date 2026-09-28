@@ -15,7 +15,7 @@ fn normalize_and_validate(payload: &SavedSearchPayload) -> Result<SavedSearchPay
         || payload.query_text.trim().is_empty()
         || payload.query_text.len() > MAX_EXPRESSION_BYTES
         || payload.query_text.chars().count() > MAX_EXPRESSION_CHARS
-        || !matches!(payload.search_type.as_str(), "FILENAME" | "DETAIL")
+        || payload.search_type != "DETAIL"
         || !payload.options.is_object()
     {
         return Err(AppError::api(
@@ -53,7 +53,11 @@ pub async fn list(
     state: web::Data<AppState>,
     _query: web::Query<SavedSearchListQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let items = saved_searches::list(&state.db.pool, &user.0.id).await?;
+    let items = saved_searches::list(&state.db.pool, &user.0.id)
+        .await?
+        .into_iter()
+        .filter(|item| item.search_type == "DETAIL")
+        .collect::<Vec<_>>();
     Ok(HttpResponse::Ok().json(
         items
             .into_iter()

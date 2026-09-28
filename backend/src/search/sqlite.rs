@@ -63,14 +63,6 @@ struct IssueRow {
     bundle_hash: String,
 }
 
-#[derive(FromRow)]
-struct FilenameRow {
-    file_id: i64,
-    name: String,
-    path: String,
-    bundle_hash: String,
-}
-
 fn escape_like_pattern(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -312,29 +304,6 @@ impl SearchIndex for SqliteFtsSearchIndex {
         }
     }
 
-    async fn search_filenames(
-        &self,
-        request: FilenameSearchRequest,
-    ) -> Result<FilenameSearchResult, AppError> {
-        let pattern = format!("%{}%", escape_like_pattern(&request.query));
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM visible_files f JOIN bundles b ON b.id=f.bundle_id JOIN issues i ON i.code=b.issue_code WHERE b.issue_code=? AND i.status='ACTIVE' AND b.status='READY' AND f.is_dir=0 AND (f.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR f.path LIKE ? ESCAPE '\\' COLLATE NOCASE)")
-            .bind(&request.issue_code).bind(&pattern).bind(&pattern).fetch_one(self.pool()).await.map_err(AppError::Database)?;
-        let rows = sqlx::query_as::<_, FilenameRow>("SELECT f.id AS file_id,f.name,CASE WHEN f.parent_id IS NULL THEN f.name ELSE f.path END AS path,b.hash AS bundle_hash FROM visible_files f JOIN bundles b ON b.id=f.bundle_id JOIN issues i ON i.code=b.issue_code WHERE b.issue_code=? AND i.status='ACTIVE' AND b.status='READY' AND f.is_dir=0 AND (f.name LIKE ? ESCAPE '\\' COLLATE NOCASE OR f.path LIKE ? ESCAPE '\\' COLLATE NOCASE) ORDER BY CASE WHEN f.name=? COLLATE NOCASE THEN 0 ELSE 1 END,f.name COLLATE NOCASE,f.path COLLATE NOCASE LIMIT ? OFFSET ?")
-            .bind(&request.issue_code).bind(&pattern).bind(&pattern).bind(&request.query).bind(request.size).bind(request.from).fetch_all(self.pool()).await.map_err(AppError::Database)?;
-        Ok(FilenameSearchResult {
-            total,
-            rows: rows
-                .into_iter()
-                .map(|row| FilenameSearchRow {
-                    file_id: row.file_id,
-                    name: row.name,
-                    path: row.path,
-                    bundle_hash: row.bundle_hash,
-                })
-                .collect(),
-        })
-    }
-
     async fn search_skill(
         &self,
         request: SkillSearchRequest,
@@ -466,7 +435,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn adapter_preserves_content_filename_and_skill_results() {
+    async fn adapter_preserves_content_and_skill_results() {
         let (pool, file) = fixture().await;
         let index = SqliteFtsSearchIndex::new(pool.clone());
         index.commit_batch(batch(file)).await.unwrap();
@@ -486,17 +455,6 @@ mod tests {
         assert_eq!(content.rows[0].file_id, file);
         assert_eq!(content.rows[0].offset, Some(0));
         assert_eq!(content.rows[0].line_end, Some(1));
-        let names = index
-            .search_filenames(FilenameSearchRequest {
-                issue_code: "SEARCH".into(),
-                query: "app.log".into(),
-                from: 0,
-                size: 10,
-            })
-            .await
-            .unwrap();
-        assert_eq!(names.total, 1);
-        assert_eq!(names.rows[0].path, "app.log");
         for (mode, query) in [
             (SkillSearchMode::Fts, "marker"),
             (SkillSearchMode::ShortLiteral, "rv"),

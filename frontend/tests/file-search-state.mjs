@@ -31,7 +31,10 @@ try {
   assert.equal(filesView.includes('setSearchError(issueSearchExecution.snapshot.errorMessage)'), false);
   assert.equal(filesView.includes('setSearchError(viewerSearchExecution.snapshot.errorMessage)'), false);
   assert.ok(filesView.includes("status === 'RUNNING' || status === 'CANCELLING' || status === 'CANCELLED' || status === 'SUCCEEDED'"));
-  assert.ok(filesView.includes("setSearchDraft('');\n    setSearchError(null);\n    setSearchLoading(true);"));
+  assert.match(
+    filesView,
+    /setSearchDraft\(''\);\s*setSearchError\(null\);\s*setSearchLoading\(true\);/
+  );
   assert.equal(
     (filesView.match(/<SearchExecutionStatus/g) ?? []).length,
     1,
