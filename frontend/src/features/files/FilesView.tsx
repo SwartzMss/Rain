@@ -1697,10 +1697,6 @@ export function BundleView() {
                     >
                       搜索
                     </button>
-                    <SearchExecutionStatus
-                      snapshot={fileSearchExecution.snapshot}
-                      onCancel={() => { void fileSearchExecution.cancel(); }}
-                    />
                   </div>
                 ) : null}
 
@@ -1766,10 +1762,6 @@ export function BundleView() {
                   )
                 ) : activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp' ? (
                   <>
-                    <SearchExecutionStatus
-                      snapshot={viewerSearchExecution.snapshot}
-                      onCancel={() => { void viewerSearchExecution.cancel(); }}
-                    />
                     <SearchResultViewer
                       activeViewerTab={activeViewerTab}
                       results={activeSearchResults}
