@@ -16,12 +16,19 @@ export type LocalUploadStage =
 
 export type UploadTaskSnapshot = UploadQueueTask<UploadResponse>;
 
+export const shouldShowOptimisticUploadTask = (
+  task: UploadTaskSnapshot,
+  existingBundleHashes: ReadonlySet<string>
+) =>
+  task.status !== 'HANDED_OFF' &&
+  (!task.response || !existingBundleHashes.has(task.response.bundle_hash));
+
 export const createOptimisticUploadRows = (
   tasks: readonly UploadTaskSnapshot[],
   existingBundleHashes: ReadonlySet<string>
 ) =>
   tasks
-    .filter((task) => !task.response || !existingBundleHashes.has(task.response.bundle_hash))
+    .filter((task) => shouldShowOptimisticUploadTask(task, existingBundleHashes))
     .map((task) => ({
       key: task.id,
       bundleHash: task.response?.bundle_hash ?? '',
