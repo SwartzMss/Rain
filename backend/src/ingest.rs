@@ -35,6 +35,7 @@ use indexing::clean_log_line;
 pub use indexing::line_reader::{
     LimitedLine, TRUNCATED_LINE_MARKER, decode_log_line, read_line_bytes_limited,
     read_line_bytes_limited_with_budget, read_line_bytes_limited_with_budget_and_callback,
+    read_line_bytes_limited_with_budget_and_callback_result,
 };
 use limits::{
     INDEX_CHUNK_MAX_LINES, INDEX_CHUNK_TARGET_BYTES, INDEX_COMMIT_MAX_LINES,

@@ -9,8 +9,11 @@ use tokio::{
 use crate::{
     config::MAX_TEMP_RESULT_LOGICAL_LINE_BYTES,
     error::AppError,
-    ingest::{LimitedLine, decode_log_line, read_line_bytes_limited_with_budget_and_callback},
+    ingest::{
+        LimitedLine, decode_log_line, read_line_bytes_limited_with_budget_and_callback_result,
+    },
     log_expression::Expression,
+    services::search_execution::{SearchExecutionContext, StopReason},
 };
 
 pub struct TempSource {
@@ -85,6 +88,32 @@ impl TempResultExecutor {
         metadata_output: &mut File,
         index_output: &mut File,
     ) -> Result<MaterializedPreview, AppError> {
+        Self::materialize_preview_with_context(
+            sources,
+            expression,
+            from,
+            size,
+            max_output_bytes,
+            output,
+            metadata_output,
+            index_output,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn materialize_preview_with_context(
+        sources: &[TempSource],
+        expression: &Expression,
+        from: i64,
+        size: i64,
+        max_output_bytes: u64,
+        output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
+        context: Option<&SearchExecutionContext>,
+    ) -> Result<MaterializedPreview, AppError> {
         let page_end = from
             .checked_add(size)
             .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
@@ -102,6 +131,7 @@ impl TempResultExecutor {
             })?;
         let mut matcher = expression.chunk_matcher();
         for source in sources {
+            checkpoint(context)?;
             let file = File::open(&source.path).await.map_err(AppError::Io)?;
             let mut reader = BufReader::new(file);
             let mut source_metadata_reader = match source.metadata_path.as_ref() {
@@ -114,19 +144,22 @@ impl TempResultExecutor {
             let mut source_metadata_line = String::new();
             let mut source_line = 0_i64;
             loop {
+                checkpoint(context)?;
                 bytes.clear();
                 matcher.reset();
-                let truncated = match read_line_bytes_limited_with_budget_and_callback(
+                let truncated = match read_line_bytes_limited_with_budget_and_callback_result(
                     &mut reader,
                     &mut bytes,
                     max_logical_line_bytes,
                     // No cumulative scan cap; the caller enforces a deadline.
                     // Keep the retained line prefix bounded independently.
                     usize::MAX,
-                    |chunk| matcher.feed_bytes(chunk),
+                    |chunk| {
+                        matcher.feed_bytes(chunk);
+                        checkpoint(context)
+                    },
                 )
-                .await
-                .map_err(AppError::Io)?
+                .await?
                 {
                     LimitedLine::EndOfFile => break,
                     LimitedLine::Line { truncated, .. } => truncated,
@@ -136,6 +169,7 @@ impl TempResultExecutor {
                         )));
                     }
                 };
+                checkpoint(context)?;
                 matcher.finish();
                 let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
                     source_metadata_line.clear();
@@ -156,6 +190,7 @@ impl TempResultExecutor {
                     None
                 };
                 if matcher.matches(expression) {
+                    checkpoint(context)?;
                     let content = decode_log_line(&bytes, truncated);
                     let mut metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
                         bundle_hash: source.bundle_hash.clone(),
@@ -229,6 +264,7 @@ impl TempResultExecutor {
         output.flush().await.map_err(AppError::Io)?;
         metadata_output.flush().await.map_err(AppError::Io)?;
         index_output.flush().await.map_err(AppError::Io)?;
+        checkpoint(context)?;
         Ok(MaterializedPreview {
             total: matched,
             lines,
@@ -236,6 +272,7 @@ impl TempResultExecutor {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) async fn materialize_preview_with_plans(
         sources: &[TempSource],
         plans: &[SourceSearchPlan],
@@ -246,6 +283,34 @@ impl TempResultExecutor {
         output: &mut File,
         metadata_output: &mut File,
         index_output: &mut File,
+    ) -> Result<MaterializedPreview, AppError> {
+        Self::materialize_preview_with_plans_and_context(
+            sources,
+            plans,
+            expression,
+            from,
+            size,
+            max_output_bytes,
+            output,
+            metadata_output,
+            index_output,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn materialize_preview_with_plans_and_context(
+        sources: &[TempSource],
+        plans: &[SourceSearchPlan],
+        expression: &Expression,
+        from: i64,
+        size: i64,
+        max_output_bytes: u64,
+        output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
+        context: Option<&SearchExecutionContext>,
     ) -> Result<MaterializedPreview, AppError> {
         if sources.len() != plans.len() {
             return Err(AppError::Config(
@@ -269,6 +334,7 @@ impl TempResultExecutor {
             })?;
         let mut matcher = expression.chunk_matcher();
         for (source, plan) in sources.iter().zip(plans) {
+            checkpoint(context)?;
             let (candidate_ranges, seek_line, seek_offset) = match plan {
                 SourceSearchPlan::Raw { .. } => (None, 0_i64, 0_u64),
                 SourceSearchPlan::Tantivy(candidate) if candidate.ranges.is_empty() => {
@@ -298,6 +364,7 @@ impl TempResultExecutor {
             let mut source_line = seek_line;
             let mut range_index = 0_usize;
             loop {
+                checkpoint(context)?;
                 if let Some(ranges) = candidate_ranges {
                     while ranges
                         .get(range_index)
@@ -317,29 +384,30 @@ impl TempResultExecutor {
                 bytes.clear();
                 let line = if selected {
                     matcher.reset();
-                    read_line_bytes_limited_with_budget_and_callback(
+                    read_line_bytes_limited_with_budget_and_callback_result(
                         &mut reader,
                         &mut bytes,
                         max_logical_line_bytes,
                         // No cumulative scan cap; the caller enforces a deadline.
                         // Keep the retained line prefix bounded independently.
                         usize::MAX,
-                        |chunk| matcher.feed_bytes(chunk),
+                        |chunk| {
+                            matcher.feed_bytes(chunk);
+                            checkpoint(context)
+                        },
                     )
-                    .await
-                    .map_err(AppError::Io)?
+                    .await?
                 } else {
-                    read_line_bytes_limited_with_budget_and_callback(
+                    read_line_bytes_limited_with_budget_and_callback_result(
                         &mut reader,
                         &mut bytes,
                         max_logical_line_bytes,
                         // No cumulative scan cap; the caller enforces a deadline.
                         // Keep the retained line prefix bounded independently.
                         usize::MAX,
-                        |_| {},
+                        |_| checkpoint(context),
                     )
-                    .await
-                    .map_err(AppError::Io)?
+                    .await?
                 };
                 let truncated = match line {
                     LimitedLine::EndOfFile => break,
@@ -350,6 +418,7 @@ impl TempResultExecutor {
                         )));
                     }
                 };
+                checkpoint(context)?;
                 let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
                     source_metadata_line.clear();
                     if reader
@@ -376,6 +445,7 @@ impl TempResultExecutor {
                     matcher.finish();
                 }
                 if selected && matcher.matches(expression) {
+                    checkpoint(context)?;
                     let content = decode_log_line(&bytes, truncated);
                     let mut metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
                         bundle_hash: source.bundle_hash.clone(),
@@ -449,6 +519,7 @@ impl TempResultExecutor {
         output.flush().await.map_err(AppError::Io)?;
         metadata_output.flush().await.map_err(AppError::Io)?;
         index_output.flush().await.map_err(AppError::Io)?;
+        checkpoint(context)?;
         Ok(MaterializedPreview {
             total: matched,
             lines,
@@ -463,10 +534,32 @@ impl TempResultExecutor {
         index_output: &mut File,
         max_output_bytes: u64,
     ) -> Result<i64, AppError> {
+        Self::write_matches_with_context(
+            sources,
+            expression,
+            output,
+            metadata_output,
+            index_output,
+            max_output_bytes,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_matches_with_context(
+        sources: &[TempSource],
+        expression: &Expression,
+        output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
+        max_output_bytes: u64,
+        context: Option<&SearchExecutionContext>,
+    ) -> Result<i64, AppError> {
         // Full materialization uses the same scan, metadata, index, newline, and
         // size-limit pipeline as preview; a zero-sized window suppresses only
         // collecting preview lines.
-        Ok(Self::materialize_preview(
+        Ok(Self::materialize_preview_with_context(
             sources,
             expression,
             0,
@@ -475,10 +568,18 @@ impl TempResultExecutor {
             output,
             metadata_output,
             index_output,
+            context,
         )
         .await?
         .total)
     }
+}
+
+fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> {
+    if let Some(context) = context {
+        context.checkpoint().map_err(StopReason::into_error)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn merge_line_ranges(mut ranges: Vec<LineRange>) -> Vec<LineRange> {

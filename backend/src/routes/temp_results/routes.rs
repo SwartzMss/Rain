@@ -3,11 +3,12 @@ use super::*;
 
 #[post("/temp-results/preview")]
 pub(crate) async fn preview_temp_result(
+    user: OptionalUser,
     request: HttpRequest,
     payload: web::Json<PreviewTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    service::create_preview_result(request, payload, state).await
+    service::create_preview_result(user, request, payload, state).await
 }
 
 #[post("/temp-results")]

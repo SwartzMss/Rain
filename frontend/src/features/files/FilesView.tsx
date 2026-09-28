@@ -38,6 +38,8 @@ import { FileIcon } from './components/FileIcons';
 import { CodeLinesPane } from './components/CodeLinesPane';
 import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
+import { SearchExecutionStatus } from '../../components/SearchExecutionStatus';
+import { useSearchExecution } from '../../hooks/useSearchExecution';
 import { PENDING_SAVED_SEARCH_KEY, takePendingSavedSearch } from './pendingSavedSearch';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
@@ -204,6 +206,19 @@ export function BundleView() {
     updateViewerTabs,
     togglePinnedViewerTab
   } = useViewerTabs(auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER');
+  const issueSearchExecution = useSearchExecution();
+  const fileSearchExecution = useSearchExecution();
+  const viewerSearchExecution = useSearchExecution();
+  useEffect(() => {
+    if (issueSearchExecution.snapshot.status === 'FAILED') {
+      setSearchError(issueSearchExecution.snapshot.errorMessage);
+    }
+    if (issueSearchExecution.snapshot.status === 'CANCELLED'
+      || issueSearchExecution.snapshot.status === 'FAILED'
+      || issueSearchExecution.snapshot.status === 'SUCCEEDED') {
+      setSearchLoading(false);
+    }
+  }, [issueSearchExecution.snapshot.errorMessage, issueSearchExecution.snapshot.status]);
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const {
     fileLines,
@@ -312,15 +327,20 @@ export function BundleView() {
     setDetailRawExpression(editor.rawExpression);
     setSearchDraft('');
     setSearchLoading(true);
-    try {
-      const response = await rainApi.previewTempResult({ expression: item.query_text, issue_code: issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] });
+    const response = await issueSearchExecution.execute(
+      { expression: item.query_text, issue_code: issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
+      {
+        scopeKey: `issue:${issueCode}`,
+        onSuccess: (response) => {
       const hits = response.lines.map((line) => ({ bundle_hash: line.bundle_hash, file_id: line.file_id ?? '', path: line.path, snippet: line.content, line_number: line.line_number }));
       setSearchResults(hits);
       setSearchExecuted(true);
       openViewerTab({ id: `search:${Date.now()}`, kind: 'search', resultId: response.result_id, title: item.name, pinned: false, scrollTop: 0, expression: item.query_text, hits, total: response.total, from: 0, pageSize: LINE_PAGE_SIZE_OPTIONS[0], pageHistory: [], source: { kind: 'issue', issueCode } });
-    } finally {
-      setSearchLoading(false);
-    }
+        }
+      }
+    );
+    setSearchLoading(false);
+    if (!response) return;
     await rainApi.markSavedSearchUsed(item.id);
     setSavedSearchesOpen(false);
   };
@@ -365,6 +385,10 @@ export function BundleView() {
   useEffect(() => {
     activeViewerTabIdRef.current = activeViewerTabId;
   }, [activeViewerTabId]);
+
+  useEffect(() => {
+    void viewerSearchExecution.cancel();
+  }, [activeViewerTab?.id]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -542,37 +566,45 @@ export function BundleView() {
         if (requestGeneration !== searchRequestGenerationRef.current) return;
         setSearchResults(response.hits);
       } else {
-        const response = await rainApi.previewTempResult({
-          expression: keyword,
-          issue_code: issue,
-          from: 0,
-          size: LINE_PAGE_SIZE_OPTIONS[0]
-        });
-        if (requestGeneration !== searchRequestGenerationRef.current) return;
-        const hits = response.lines.map((line) => ({
-          bundle_hash: line.bundle_hash,
-          file_id: line.file_id ?? '',
-          path: line.path,
-          snippet: line.content,
-          line_number: line.line_number
-        }));
-        setSearchResults(hits);
-        const id = `search:${Date.now()}`;
-        openViewerTab({
-          id,
-          kind: 'search',
-          resultId: response.result_id,
-          title,
-          pinned: false,
-          scrollTop: 0,
-          expression: keyword,
-          hits,
-          total: response.total,
-          from: 0,
-          pageSize: LINE_PAGE_SIZE_OPTIONS[0],
-          pageHistory: [],
-          source: { kind: 'issue', issueCode: issue }
-        });
+        const response = await issueSearchExecution.execute(
+          {
+            expression: keyword,
+            issue_code: issue,
+            from: 0,
+            size: LINE_PAGE_SIZE_OPTIONS[0]
+          },
+          {
+            scopeKey: `issue:${issue}`,
+            onSuccess: (response) => {
+              if (requestGeneration !== searchRequestGenerationRef.current) return;
+              const hits = response.lines.map((line) => ({
+                bundle_hash: line.bundle_hash,
+                file_id: line.file_id ?? '',
+                path: line.path,
+                snippet: line.content,
+                line_number: line.line_number
+              }));
+              setSearchResults(hits);
+              const id = `search:${Date.now()}`;
+              openViewerTab({
+                id,
+                kind: 'search',
+                resultId: response.result_id,
+                title,
+                pinned: false,
+                scrollTop: 0,
+                expression: keyword,
+                hits,
+                total: response.total,
+                from: 0,
+                pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+                pageHistory: [],
+                source: { kind: 'issue', issueCode: issue }
+              });
+            }
+          }
+        );
+        if (!response) return;
       }
     } catch (error) {
       if (requestGeneration !== searchRequestGenerationRef.current) return;
@@ -599,6 +631,7 @@ export function BundleView() {
 
   const clearDetailedSearch = useCallback(() => {
     searchRequestGenerationRef.current += 1;
+    void issueSearchExecution.cancel();
     setSearchTokens([]);
     setDetailRawExpression(null);
     setSearchDraft('');
@@ -608,7 +641,7 @@ export function BundleView() {
     setSearchExecuted(false);
     setResultFilterTokens([]);
     setResultFilterDraft('');
-  }, []);
+  }, [issueSearchExecution]);
 
   const handleSearchSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -618,6 +651,7 @@ export function BundleView() {
   const changeSearchMode = (mode: 'log' | 'detailed') => {
     if (mode === searchMode) return;
     searchRequestGenerationRef.current += 1;
+    if (searchMode === 'detailed') void issueSearchExecution.cancel();
     setSearchMode(mode);
     setSearchResults([]);
     setSearchLoading(false);
@@ -646,6 +680,9 @@ export function BundleView() {
         : viewerTabsRef.current;
 
       if (isContextChange) {
+        void issueSearchExecution.cancel();
+        void fileSearchExecution.cancel();
+        void viewerSearchExecution.cancel();
         setTreeNodes({});
         setExpandedNodes(new Set());
         setRootIds([]);
@@ -1048,6 +1085,7 @@ export function BundleView() {
   }, [activeViewerTabId, fileContentError, fileContentLoading, fileLines, updateViewerTabs]);
 
   const clearFileSearch = useCallback(() => {
+    void fileSearchExecution.cancel();
     setFileSearchTokens([]);
     setFileSearchDraft('');
     setFileSearchResults([]);
@@ -1083,47 +1121,53 @@ export function BundleView() {
     setFileSearchError(null);
     setFileSearchExecuted(true);
     try {
-      const response = await rainApi.previewTempResult({
-        expression,
-        bundle_hash: selectedBundleId,
-        file_id: selectedNode.rawId,
-        from,
-        size: LINE_PAGE_SIZE_OPTIONS[0]
-      });
-      const hits = response.lines.map((line) => ({
-        bundle_hash: selectedBundleId,
-        file_id: selectedNode.rawId,
-        path: selectedNode.path,
-        snippet: line.content,
-        line_number: line.line_number,
-        offset: line.line_number
-      }));
-      setFileSearchResults(hits);
-      setFileSearchTotal(response.total);
-      setFileSearchFrom(from);
-      if (from === 0 && hits.length > 0) {
-        const id = `search:${Date.now()}`;
-        openViewerTab({
-          id,
-          kind: 'search',
-          resultId: response.result_id,
-          title,
-          pinned: false,
-          scrollTop: 0,
+      const response = await fileSearchExecution.execute(
+        {
           expression,
-          hits,
-          total: response.total,
-          from: 0,
-          pageSize: LINE_PAGE_SIZE_OPTIONS[0],
-          pageHistory: [],
-          source: { kind: 'file', bundleHash: selectedBundleId, fileId: selectedNode.rawId }
-        });
-        setFileSearchResults([]);
-        setFileSearchExecuted(false);
-      }
+          bundle_hash: selectedBundleId,
+          file_id: selectedNode.rawId,
+          from,
+          size: LINE_PAGE_SIZE_OPTIONS[0]
+        },
+        {
+          scopeKey: `file:${selectedBundleId}:${selectedNode.rawId}`,
+          onSuccess: (response) => {
+            const hits = response.lines.map((line) => ({
+              bundle_hash: selectedBundleId,
+              file_id: selectedNode.rawId,
+              path: selectedNode.path,
+              snippet: line.content,
+              line_number: line.line_number,
+              offset: line.line_number
+            }));
+            setFileSearchResults(hits);
+            setFileSearchTotal(response.total);
+            setFileSearchFrom(from);
+            if (from === 0 && hits.length > 0) {
+              const id = `search:${Date.now()}`;
+              openViewerTab({
+                id,
+                kind: 'search',
+                resultId: response.result_id,
+                title,
+                pinned: false,
+                scrollTop: 0,
+                expression,
+                hits,
+                total: response.total,
+                from: 0,
+                pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+                pageHistory: [],
+                source: { kind: 'file', bundleHash: selectedBundleId, fileId: selectedNode.rawId }
+              });
+              setFileSearchResults([]);
+              setFileSearchExecuted(false);
+            }
+          }
+        }
+      );
+      if (!response) return;
     } catch (error) {
-      setFileSearchResults([]);
-      setFileSearchTotal(0);
       setFileSearchError(normalizeApiError(error));
     } finally {
       setFileSearchLoading(false);
@@ -1156,31 +1200,36 @@ export function BundleView() {
         from: 0,
         size: LINE_PAGE_SIZE_OPTIONS[0]
       };
-      const response = await rainApi.previewTempResult(payload);
-      const hits = response.lines.map((line) => ({
-        bundle_hash: line.bundle_hash,
-        file_id: line.file_id ?? '',
-        path: line.path,
-        snippet: line.content,
-        line_number: line.line_number
-      }));
-      setResultFilterTokens([]);
-      setResultFilterDraft('');
-      openViewerTab({
-        id: `search:${Date.now()}`,
-        kind: 'search',
-        resultId: response.result_id,
-        title,
-        pinned: false,
-        scrollTop: 0,
-        expression,
-        hits,
-        total: response.total,
-        from: 0,
-        pageSize: LINE_PAGE_SIZE_OPTIONS[0],
-        pageHistory: [],
-        source
+      const response = await viewerSearchExecution.execute(payload, {
+        scopeKey: `viewer:${activeViewerTab.id}:${activeViewerTab.resultId}`,
+        onSuccess: (response) => {
+          const hits = response.lines.map((line) => ({
+            bundle_hash: line.bundle_hash,
+            file_id: line.file_id ?? '',
+            path: line.path,
+            snippet: line.content,
+            line_number: line.line_number
+          }));
+          setResultFilterTokens([]);
+          setResultFilterDraft('');
+          openViewerTab({
+            id: `search:${Date.now()}`,
+            kind: 'search',
+            resultId: response.result_id,
+            title,
+            pinned: false,
+            scrollTop: 0,
+            expression,
+            hits,
+            total: response.total,
+            from: 0,
+            pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+            pageHistory: [],
+            source
+          });
+        }
       });
+      if (!response) return;
     } catch (error) {
       setSearchError(normalizeApiError(error));
     } finally {
@@ -1479,6 +1528,12 @@ export function BundleView() {
                   </>
                 ) : null}
               </div>
+              {searchMode === 'detailed' ? (
+                <SearchExecutionStatus
+                  snapshot={issueSearchExecution.snapshot}
+                  onCancel={() => { void issueSearchExecution.cancel(); }}
+                />
+              ) : null}
               {savedSearchesOpen ? (
                 <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
                   {savedSearches.length === 0 ? <p className="text-xs text-slate-500">暂无搜索条件</p> : savedSearches.map((item) => (
@@ -1655,6 +1710,10 @@ export function BundleView() {
                     >
                       搜索
                     </button>
+                    <SearchExecutionStatus
+                      snapshot={fileSearchExecution.snapshot}
+                      onCancel={() => { void fileSearchExecution.cancel(); }}
+                    />
                   </div>
                 ) : null}
 
@@ -1719,29 +1778,35 @@ export function BundleView() {
                     </div>
                   )
                 ) : activeViewerTab?.kind === 'search' || activeViewerTab?.kind === 'temp' ? (
-                  <SearchResultViewer
-                    activeViewerTab={activeViewerTab}
-                    results={activeSearchResults}
-                    resultFilterTokens={resultFilterTokens}
-                    resultFilterDraft={resultFilterDraft}
-                    onResultFilterTokensChange={setResultFilterTokens}
-                    onResultFilterDraftChange={setResultFilterDraft}
-                    onClearResultFilter={() => {
-                      setResultFilterTokens([]);
-                      setResultFilterDraft('');
-                    }}
-                    onSearchWithinResults={() => searchWithinActiveResults().catch(() => undefined)}
-                    canRunResultFilter={canRunResultFilter}
-                    searchLoading={searchLoading}
-                    contentRef={contentRef}
-                    pageSizeOptions={LINE_PAGE_SIZE_OPTIONS}
-                    onLoadPage={(tab, from, pageSize, navigation) => {
-                      loadViewerPage(tab, from, pageSize, navigation).catch(() => undefined);
-                    }}
-                    highlightTerm={resultFilterHighlightTerm}
-                    renderHighlightedText={highlightText}
-                    onOpenSource={openSearchHitSource}
-                  />
+                  <>
+                    <SearchExecutionStatus
+                      snapshot={viewerSearchExecution.snapshot}
+                      onCancel={() => { void viewerSearchExecution.cancel(); }}
+                    />
+                    <SearchResultViewer
+                      activeViewerTab={activeViewerTab}
+                      results={activeSearchResults}
+                      resultFilterTokens={resultFilterTokens}
+                      resultFilterDraft={resultFilterDraft}
+                      onResultFilterTokensChange={setResultFilterTokens}
+                      onResultFilterDraftChange={setResultFilterDraft}
+                      onClearResultFilter={() => {
+                        setResultFilterTokens([]);
+                        setResultFilterDraft('');
+                      }}
+                      onSearchWithinResults={() => searchWithinActiveResults().catch(() => undefined)}
+                      canRunResultFilter={canRunResultFilter}
+                      searchLoading={searchLoading}
+                      contentRef={contentRef}
+                      pageSizeOptions={LINE_PAGE_SIZE_OPTIONS}
+                      onLoadPage={(tab, from, pageSize, navigation) => {
+                        loadViewerPage(tab, from, pageSize, navigation).catch(() => undefined);
+                      }}
+                      highlightTerm={resultFilterHighlightTerm}
+                      renderHighlightedText={highlightText}
+                      onOpenSource={openSearchHitSource}
+                    />
+                  </>
                 ) : activeViewerTab?.kind !== 'file' || !selectedNode ? (
                   <p className="py-8 text-center text-sm text-slate-500">
                     输入关键词搜索当前 Issue 的日志。

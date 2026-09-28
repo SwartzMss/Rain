@@ -166,6 +166,8 @@ pub struct TempResultRuntime {
     pub reads: Arc<Mutex<HashMap<String, usize>>>,
     pub materializations: Arc<Mutex<HashMap<String, usize>>>,
     pub ip_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
+    pub search_cancel_limits: Arc<Mutex<HashMap<String, AuthRateLimitBucket>>>,
+    pub search_executions: crate::services::search_execution::SearchExecutionRegistry,
 }
 
 impl TempResultRuntime {
@@ -177,6 +179,12 @@ impl TempResultRuntime {
             reads: Arc::new(Mutex::new(HashMap::new())),
             materializations: Arc::new(Mutex::new(HashMap::new())),
             ip_limits: Arc::new(Mutex::new(HashMap::new())),
+            search_cancel_limits: Arc::new(Mutex::new(HashMap::new())),
+            search_executions: crate::services::search_execution::SearchExecutionRegistry::new(
+                1024,
+                1024,
+                Duration::from_secs(60),
+            ),
         }
     }
 }

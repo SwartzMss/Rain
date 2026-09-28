@@ -8,7 +8,9 @@ use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
     insert_staging_temp_result_with_retention, publish_temp_result_with_retention,
 };
-use super::search_plan::{IndexedSource, PreviewSearchPlan, build_source_search_plans};
+use super::search_plan::{
+    IndexedSource, PreviewSearchPlan, build_source_search_plans_with_context,
+};
 use super::storage::checked_temp_path;
 use super::storage::invalid_sidecar;
 use super::storage::{
@@ -16,6 +18,8 @@ use super::storage::{
     temp_result_too_large,
 };
 use super::*;
+use crate::auth::extractor::OptionalUser;
+use crate::services::search_execution::{SearchExecutionContext, StopReason, TerminalStatus};
 use crate::services::temp_results::scan_timeout;
 use futures_util::TryStreamExt;
 
@@ -53,8 +57,32 @@ async fn materialize_result(
     mode: MaterializeMode,
     preview_plan: Option<&PreviewSearchPlan>,
 ) -> Result<MaterializeOutcome, AppError> {
+    materialize_result_with_context(
+        state,
+        expression_text,
+        expression,
+        sources,
+        source_label,
+        mode,
+        preview_plan,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_result_with_context(
+    state: &web::Data<AppState>,
+    expression_text: &str,
+    expression: &log_expression::Expression,
+    sources: &[TempSource],
+    source_label: &str,
+    mode: MaterializeMode,
+    preview_plan: Option<&PreviewSearchPlan>,
+    context: Option<&SearchExecutionContext>,
+) -> Result<MaterializeOutcome, AppError> {
     let settings = state.settings.snapshot().await;
-    materialize_result_with_timeout(
+    materialize_result_with_timeout_and_context(
         state,
         expression_text,
         expression,
@@ -63,11 +91,13 @@ async fn materialize_result(
         mode,
         preview_plan,
         std::time::Duration::from_secs(settings.effective.temp_results_max_scan_duration_seconds),
+        context,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn materialize_result_with_timeout(
     state: &web::Data<AppState>,
     expression_text: &str,
@@ -78,7 +108,34 @@ async fn materialize_result_with_timeout(
     preview_plan: Option<&PreviewSearchPlan>,
     timeout: std::time::Duration,
 ) -> Result<MaterializeOutcome, AppError> {
+    materialize_result_with_timeout_and_context(
+        state,
+        expression_text,
+        expression,
+        sources,
+        source_label,
+        mode,
+        preview_plan,
+        timeout,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_result_with_timeout_and_context(
+    state: &web::Data<AppState>,
+    expression_text: &str,
+    expression: &log_expression::Expression,
+    sources: &[TempSource],
+    source_label: &str,
+    mode: MaterializeMode,
+    preview_plan: Option<&PreviewSearchPlan>,
+    timeout: std::time::Duration,
+    context: Option<&SearchExecutionContext>,
+) -> Result<MaterializeOutcome, AppError> {
     let settings = state.settings.snapshot().await;
+    checkpoint(context)?;
     let id = Uuid::new_v4().simple().to_string();
     let directory = data_root(state).join("temp-results");
     tokio::fs::create_dir_all(&directory)
@@ -111,9 +168,11 @@ async fn materialize_result_with_timeout(
         let mut index = File::create(&staging_index_path)
             .await
             .map_err(AppError::Io)?;
-        let total = tokio::time::timeout(timeout, async {
+        let effective_timeout = context.map_or(timeout, |context| timeout.min(context.remaining()));
+        let total = tokio::time::timeout(effective_timeout, async {
+            checkpoint(context)?;
             if let Some(plan) = preview_plan {
-                let preview = TempResultExecutor::materialize_preview_with_plans(
+                let preview = TempResultExecutor::materialize_preview_with_plans_and_context(
                     sources,
                     &plan.source_plans,
                     expression,
@@ -123,6 +182,7 @@ async fn materialize_result_with_timeout(
                     &mut output,
                     &mut metadata,
                     &mut index,
+                    context,
                 )
                 .await?;
                 tracing::info!(
@@ -136,19 +196,21 @@ async fn materialize_result_with_timeout(
                 );
                 Ok::<i64, AppError>(preview.total)
             } else {
-                TempResultExecutor::write_matches(
+                TempResultExecutor::write_matches_with_context(
                     sources,
                     expression,
                     &mut output,
                     &mut metadata,
                     &mut index,
                     settings.effective.temp_results_max_result_size,
+                    context,
                 )
                 .await
             }
         })
         .await
-        .map_err(|_| scan_timeout())??;
+        .map_err(|_| stop_or_timeout(context))??;
+        checkpoint(context)?;
         drop(output);
         drop(metadata);
         drop(index);
@@ -159,6 +221,13 @@ async fn materialize_result_with_timeout(
         )
         .await
         .map_err(AppError::Io)?;
+        if let Some(context) = context {
+            state
+                .temp_results
+                .search_executions
+                .mark_committing(&id, context)
+                .map_err(StopReason::into_error)?;
+        }
         tokio::fs::rename(&staging_output_path, &output_path)
             .await
             .map_err(AppError::Io)?;
@@ -216,19 +285,30 @@ pub(crate) async fn resolve_sources(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
 ) -> Result<ResolvedSources, AppError> {
+    resolve_sources_with_context(payload, state, None).await
+}
+
+pub(crate) async fn resolve_sources_with_context(
+    payload: &CreateTempResultRequest,
+    state: &web::Data<AppState>,
+    context: Option<&SearchExecutionContext>,
+) -> Result<ResolvedSources, AppError> {
     let settings = state.settings.snapshot().await;
+    checkpoint(context)?;
     tokio::time::timeout(
         std::time::Duration::from_secs(settings.effective.temp_results_max_scan_duration_seconds),
-        resolve_sources_inner(payload, state),
+        resolve_sources_inner(payload, state, context),
     )
     .await
-    .map_err(|_| scan_timeout())?
+    .map_err(|_| stop_or_timeout(context))?
 }
 
 async fn resolve_sources_inner(
     payload: &CreateTempResultRequest,
     state: &web::Data<AppState>,
+    context: Option<&SearchExecutionContext>,
 ) -> Result<ResolvedSources, AppError> {
+    checkpoint(context)?;
     if let Some(source_id) = payload.source_temp_id.as_deref() {
         let (source, source_lease) = acquire_active_result(state, source_id).await?;
         let path = checked_temp_path(state, &source.storage_path)?;
@@ -279,6 +359,7 @@ async fn resolve_sources_inner(
         let mut sources = Vec::new();
         let mut indexed_sources = Vec::new();
         while let Some(row) = rows.try_next().await.map_err(AppError::Database)? {
+            checkpoint(context)?;
             let file = FileRow {
                 id: row.id,
                 parent_id: None,
@@ -328,6 +409,7 @@ async fn resolve_sources_inner(
         .ok_or_else(|| AppError::BadRequest("file_id is required".into()))?
         .parse::<i64>()
         .map_err(|_| AppError::BadRequest("invalid file_id".into()))?;
+    checkpoint(context)?;
     let bundle = load_bundle(&state.db.pool, bundle_hash).await?;
     ensure_bundle_ready(&bundle)?;
     let file = fetch_file(&state.db.pool, &bundle.id, file_id).await?;
@@ -415,12 +497,71 @@ async fn cleanup_published_result_after_preview_failure(
 }
 
 pub(crate) async fn create_preview_result(
+    user: OptionalUser,
     request: HttpRequest,
     payload: web::Json<PreviewTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     let settings = state.settings.snapshot().await;
-    check_temp_result_rate_limit(&state, &request)?;
+    let context = if let Some(search_id) = payload.search_id.as_deref() {
+        let Some(cancel_token) = request
+            .headers()
+            .get(crate::routes::search_requests::CANCEL_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(AppError::api(
+                StatusCode::CONFLICT,
+                "SEARCH_REQUEST_UNAVAILABLE",
+                "搜索请求不可用",
+            ));
+        };
+        state
+            .temp_results
+            .search_executions
+            .start_with_timeout(
+                search_id,
+                cancel_token,
+                user.0.as_ref().map(|user| user.id.as_str()),
+                std::time::Duration::from_secs(
+                    settings.effective.temp_results_max_scan_duration_seconds,
+                ),
+            )
+            .map(Some)
+            .map_err(|_| {
+                AppError::api(
+                    StatusCode::CONFLICT,
+                    "SEARCH_REQUEST_UNAVAILABLE",
+                    "搜索请求不可用",
+                )
+            })?
+    } else {
+        check_temp_result_rate_limit(&state, &request)?;
+        None
+    };
+    let result = create_preview_result_inner(&request, &payload, &state, context.as_ref()).await;
+    if let Some(context) = context {
+        let status = match &result {
+            Ok(_) => TerminalStatus::Completed,
+            Err(error) if is_search_cancelled(error) => TerminalStatus::Cancelled,
+            Err(error) if is_scan_timeout(error) => TerminalStatus::TimedOut,
+            Err(_) => TerminalStatus::Failed,
+        };
+        state
+            .temp_results
+            .search_executions
+            .finish(&context.search_id, status);
+    }
+    result
+}
+
+async fn create_preview_result_inner(
+    request: &HttpRequest,
+    payload: &PreviewTempResultRequest,
+    state: &web::Data<AppState>,
+    context: Option<&SearchExecutionContext>,
+) -> Result<HttpResponse, AppError> {
+    let settings = state.settings.snapshot().await;
     let _client_lease = acquire_materialization_lease(&state, &request)?;
     let _permit = state
         .temp_results
@@ -451,11 +592,16 @@ pub(crate) async fn create_preview_result(
         issue_code: payload.issue_code.clone(),
         source_temp_id: payload.source_temp_id.clone(),
     };
-    let resolved = resolve_sources(&request, &state).await?;
-    let preview_plan =
-        build_source_search_plans(&state, &expression, &resolved.indexed_sources).await?;
+    let resolved = resolve_sources_with_context(&request, &state, context).await?;
+    let preview_plan = build_source_search_plans_with_context(
+        &state,
+        &expression,
+        &resolved.indexed_sources,
+        context,
+    )
+    .await?;
     let source_label = source_label(&resolved.sources);
-    let outcome = materialize_result(
+    let outcome = materialize_result_with_context(
         &state,
         expression_text,
         &expression,
@@ -463,6 +609,7 @@ pub(crate) async fn create_preview_result(
         &source_label,
         MaterializeMode::Preview,
         Some(&preview_plan),
+        context,
     )
     .await?;
     let (result, read_lease) = acquire_active_result(&state, &outcome.id).await?;
@@ -591,6 +738,40 @@ pub(crate) async fn delete_result(
         TransitionResult::NotFound | TransitionResult::StateMismatch => {}
     }
     Ok(HttpResponse::NoContent().finish())
+}
+
+fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> {
+    if let Some(context) = context {
+        context.checkpoint().map_err(StopReason::into_error)?;
+    }
+    Ok(())
+}
+
+fn stop_or_timeout(context: Option<&SearchExecutionContext>) -> AppError {
+    context
+        .and_then(|context| context.checkpoint().err())
+        .map(StopReason::into_error)
+        .unwrap_or_else(scan_timeout)
+}
+
+fn is_search_cancelled(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Api {
+            code: "SEARCH_CANCELLED",
+            ..
+        }
+    )
+}
+
+fn is_scan_timeout(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::PublicApi {
+            code: "TEMP_RESULT_SCAN_TIMEOUT",
+            ..
+        }
+    )
 }
 
 #[cfg(test)]

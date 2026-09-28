@@ -28,7 +28,8 @@ import type {
   FileDeletionJobResponse,
   FileDeletionBatchResponse,
   ResourceMode,
-} from './types';
+  SearchReservationResponse,
+  } from './types';
 
 const API_BASE_URL = '';
 const ISSUE_CODE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
@@ -43,6 +44,13 @@ export class ApiError extends Error {
   ) {
     super(message);
     this.name = 'ApiError';
+  }
+}
+
+export class RequestCancelledError extends Error {
+  constructor() {
+    super('请求已取消');
+    this.name = 'RequestCancelledError';
   }
 }
 
@@ -140,10 +148,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       credentials: 'include'
     });
   } catch (error) {
+    if (isAbortError(error, init?.signal)) {
+      throw new RequestCancelledError();
+    }
     throw new Error(normalizeApiError(error));
   }
 
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    if (isAbortError(error, init?.signal)) {
+      throw new RequestCancelledError();
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     if (shouldRevalidateAuthentication(response.status, text)) {
@@ -157,6 +176,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return JSON.parse(text) as T;
+}
+
+function isAbortError(error: unknown, signal?: AbortSignal | null): boolean {
+  return signal?.aborted === true || (error instanceof DOMException && error.name === 'AbortError') || (error instanceof Error && error.name === 'AbortError');
 }
 
 export const rainApi = {
@@ -316,10 +339,27 @@ export const rainApi = {
       body: JSON.stringify(payload)
     });
   },
-  previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }) {
+  reserveSearchRequest(searchId: string, signal?: AbortSignal) {
+    return request<SearchReservationResponse>('/api/search-requests', {
+      method: 'POST',
+      body: JSON.stringify({ search_id: searchId }),
+      signal
+    });
+  },
+  cancelSearchRequest(searchId: string, cancelToken: string, signal?: AbortSignal) {
+    return request<{ status: string }>(`/api/search-requests/${encodePathSegment(searchId)}`, {
+      method: 'DELETE',
+      headers: { 'X-Search-Cancel-Token': cancelToken },
+      signal
+    });
+  },
+  previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }, options?: { searchId?: string; cancelToken?: string; signal?: AbortSignal }) {
+    const headers = options?.cancelToken ? { 'X-Search-Cancel-Token': options.cancelToken } : undefined;
     return request<TempResultPreviewResponse>('/api/temp-results/preview', {
       method: 'POST',
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ ...payload, ...(options?.searchId ? { search_id: options.searchId } : {}) }),
+      headers,
+      signal: options?.signal
     });
   },
   fetchTempResult(id: string) {

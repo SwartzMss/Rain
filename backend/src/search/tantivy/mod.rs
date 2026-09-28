@@ -17,6 +17,7 @@ use crate::{
         ContentSearchRequest, ContentSearchResult, ContentSearchRow, ContentSearchScope,
         generation_lease::GenerationLease,
     },
+    services::search_execution::{SearchExecutionContext, StopReason},
 };
 use tantivy::{
     DocAddress, DocSet, TERMINATED, TantivyDocument,
@@ -87,6 +88,7 @@ pub(crate) async fn search_bundle_visible_with_lease_and_permit(
         Some((bundle_id, generation)),
         Some(lease),
         Some(permit),
+        None,
     )
     .await
 }
@@ -106,6 +108,50 @@ pub(crate) async fn search_bundle_with_lease_and_permit(
         Some((bundle_id, generation)),
         Some(lease),
         Some(permit),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn search_bundle_visible_with_lease_and_permit_and_context(
+    path: PathBuf,
+    request: ContentSearchRequest,
+    visible_file_ids: HashSet<i64>,
+    bundle_id: String,
+    generation: i64,
+    lease: GenerationLease,
+    permit: OwnedSemaphorePermit,
+    context: SearchExecutionContext,
+) -> Result<ContentSearchResult, AppError> {
+    search_bundle_inner_with_permit(
+        path,
+        request,
+        Some(visible_file_ids),
+        Some((bundle_id, generation)),
+        Some(lease),
+        Some(permit),
+        Some(context),
+    )
+    .await
+}
+
+pub(crate) async fn search_bundle_with_lease_and_permit_and_context(
+    path: PathBuf,
+    request: ContentSearchRequest,
+    bundle_id: String,
+    generation: i64,
+    lease: GenerationLease,
+    permit: OwnedSemaphorePermit,
+    context: SearchExecutionContext,
+) -> Result<ContentSearchResult, AppError> {
+    search_bundle_inner_with_permit(
+        path,
+        request,
+        None,
+        Some((bundle_id, generation)),
+        Some(lease),
+        Some(permit),
+        Some(context),
     )
     .await
 }
@@ -116,7 +162,7 @@ async fn search_bundle_inner(
     visible_file_ids: Option<HashSet<i64>>,
     lease: Option<GenerationLease>,
 ) -> Result<ContentSearchResult, AppError> {
-    search_bundle_inner_with_permit(path, request, visible_file_ids, None, lease, None).await
+    search_bundle_inner_with_permit(path, request, visible_file_ids, None, lease, None, None).await
 }
 
 async fn search_bundle_inner_with_permit(
@@ -126,6 +172,7 @@ async fn search_bundle_inner_with_permit(
     generation: Option<(String, i64)>,
     lease: Option<GenerationLease>,
     permit: Option<OwnedSemaphorePermit>,
+    context: Option<SearchExecutionContext>,
 ) -> Result<ContentSearchResult, AppError> {
     let ContentSearchScope::Bundle {
         timeline, file_id, ..
@@ -143,6 +190,9 @@ async fn search_bundle_inner_with_permit(
     let query = request.query;
     let cache = generation.as_ref().map(|_| reader_cache());
     tokio::task::spawn_blocking(move || {
+        if let Some(context) = context.as_ref() {
+            context.checkpoint().map_err(StopReason::into_error)?;
+        }
         let _lease = lease;
         let _permit = permit;
         let committed = match (cache, generation) {
@@ -152,7 +202,7 @@ async fn search_bundle_inner_with_permit(
             )?,
             _ => Arc::new(writer::open_committed(path)?),
         };
-        let page = CandidateSearch::from_shared(committed).search_page(
+        let page = CandidateSearch::from_shared(committed).search_page_with_context(
             &query,
             SearchOptions {
                 file_id,
@@ -162,6 +212,7 @@ async fn search_bundle_inner_with_permit(
                 from,
                 size,
             },
+            context.as_ref(),
         )?;
         let SearchPage {
             hits,
