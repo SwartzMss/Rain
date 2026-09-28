@@ -215,10 +215,16 @@ async function waitForDelivery(sessionId: string, session: UploadSessionResponse
   throw new Error('上传已提交，但服务器处理时间过长，请稍后刷新文件列表');
 }
 
+function deliveredBundleHash(session: UploadSessionResponse): string {
+  const bundleHash = session.bundle_hash?.trim();
+  if (!bundleHash) throw new Error('服务器未返回已交付的上传任务');
+  return bundleHash;
+}
+
 async function uploadLargeFile(issueCode: string, file: File, onProgress: (percent: number) => void): Promise<UploadResponse> {
   let { session, record } = await findOrCreateSession(issueCode, file);
   if (session.status === 'DELIVERED') {
-    const task = await rainApi.fetchUploadTask(session.bundle_id || '');
+    const task = await rainApi.fetchUploadTask(deliveredBundleHash(session));
     await removeRecord(record.key);
     return {
       task_id: task.task_id,
@@ -259,8 +265,7 @@ async function uploadLargeFile(issueCode: string, file: File, onProgress: (perce
     session = await waitForDelivery(session.session_id, session);
   }
 
-  if (!session.bundle_id) throw new Error('服务器未返回已交付的上传任务');
-  const task = await rainApi.fetchUploadTask(session.bundle_id);
+  const task = await rainApi.fetchUploadTask(deliveredBundleHash(session));
   await removeRecord(record.key);
   onProgress(100);
   return {

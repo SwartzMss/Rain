@@ -69,11 +69,18 @@ describe('resumable upload boundary', () => {
       next_chunk_index: index + 1
     }));
     api.completeUploadSession.mockResolvedValue({ ...session, status: 'FINALIZING' });
-    api.fetchUploadSession.mockResolvedValue({ ...session, status: 'DELIVERED', bundle_id: 'bundle-1' });
+    const internalBundleId = 'internal-bundle-1';
+    const publicBundleHash = 'public-hash-1';
+    api.fetchUploadSession.mockResolvedValue({
+      ...session,
+      status: 'DELIVERED',
+      bundle_id: internalBundleId,
+      bundle_hash: publicBundleHash
+    });
     api.fetchUploadTask.mockResolvedValue({
-      task_id: 'bundle-1',
+      task_id: publicBundleHash,
       issue_code: 'ISSUE-1',
-      bundle_hash: 'bundle-1',
+      bundle_hash: publicBundleHash,
       status: 'PROCESSING',
       stage: 'RECEIVING',
       progress_percent: 0,
@@ -87,6 +94,8 @@ describe('resumable upload boundary', () => {
     expect(api.createUploadSession).toHaveBeenCalledTimes(1);
     expect(api.uploadUploadSessionChunk).toHaveBeenCalledTimes(8);
     expect(api.completeUploadSession).toHaveBeenCalledWith('session-1');
-    expect(response.bundle_hash).toBe('bundle-1');
+    expect(api.fetchUploadTask).toHaveBeenCalledWith(publicBundleHash);
+    expect(api.fetchUploadTask).not.toHaveBeenCalledWith(internalBundleId);
+    expect(response.bundle_hash).toBe(publicBundleHash);
   });
 });
