@@ -41,6 +41,21 @@ try {
     }),
     null
   );
+  const { centerElementInScrollContainer } = await server.ssrLoadModule(
+    '/src/features/files/centerElementInScrollContainer.ts'
+  );
+  const filePane = {
+    scrollTop: 40,
+    clientTop: 2,
+    clientHeight: 200,
+    getBoundingClientRect: () => ({ top: 100 })
+  };
+  const targetLine = {
+    getBoundingClientRect: () => ({ top: 352, height: 20 })
+  };
+  centerElementInScrollContainer(filePane, targetLine);
+  assert.equal(filePane.scrollTop, 200, 'centers the target relative to the file pane');
+
   assert.deepEqual(
     placeContextMenu(
       { x: 990, y: 790 },
@@ -166,7 +181,7 @@ try {
   );
   assert.match(filesView, /onOpenSource=\{openSearchHitSource\}/);
   assert.doesNotMatch(filesView, /onCopySourcePath=/);
-  assert.match(filesView, /scrollIntoView\(\{ block: 'center' \}\)/);
+  assert.match(filesView, /centerElementInScrollContainer\(scrollContainer, target\)/);\n  assert.doesNotMatch(filesView, /\.scrollIntoView\(/);
   assert.match(codeLinesPane, /targetLine/);
   assert.match(codeLinesPane, /data-source-line/);
   assert.match(codeLinesPane, /bg-amber-100/);

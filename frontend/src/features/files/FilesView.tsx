@@ -34,6 +34,7 @@ import {
 } from './treeModel';
 import { useViewerTabs } from './hooks/useViewerTabs';
 import { useFileContent } from './hooks/useFileContent';
+import { centerElementInScrollContainer } from './centerElementInScrollContainer';
 import { ViewerTabBar } from './components/ViewerTabBar';
 import { FileIcon } from './components/FileIcons';
 import { CodeLinesPane } from './components/CodeLinesPane';
@@ -1371,13 +1372,16 @@ export function BundleView() {
   }, [selectedNode]);
 
   useEffect(() => {
-    if (!contentRef.current) return;
+    const scrollContainer = contentRef.current;
+    if (!scrollContainer) return;
     if (targetLine === null || targetLine === undefined) return;
     if (!fileLines) return;
-    const target = contentRef.current.querySelector<HTMLElement>(
+    const target = scrollContainer.querySelector<HTMLElement>(
       `[data-source-line="${targetLine}"]`
     );
-    target?.scrollIntoView({ block: 'center' });
+    if (target) {
+      centerElementInScrollContainer(scrollContainer, target);
+    }
   }, [fileLines, targetLine]);
 
   useEffect(() => {
