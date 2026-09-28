@@ -58,12 +58,17 @@ pub struct MatchMetadata {
     pub truncated: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SparseCheckpoint {
     pub result_line: i64,
     pub log_offset: u64,
     pub meta_offset: u64,
 }
+
+/// New temporary-result indexes use a header followed by fixed-width little-endian
+/// records so readers can binary-search checkpoints without parsing the whole file.
+pub(crate) const SPARSE_CHECKPOINT_INDEX_MAGIC: &[u8; 8] = b"RAINIDX1";
+pub(crate) const SPARSE_CHECKPOINT_RECORD_BYTES: u64 = 24;
 
 #[derive(Serialize)]
 pub struct PreviewLine {
@@ -121,7 +126,8 @@ impl TempResultExecutor {
         let mut lines = Vec::new();
         let mut log_offset = 0_u64;
         let mut meta_offset = 0_u64;
-        let mut total_output_bytes = 0_u64;
+        let mut total_output_bytes =
+            initialize_sparse_checkpoint_index(index_output, max_output_bytes).await?;
         let max_logical_line_bytes =
             usize::try_from(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES).map_err(|_| {
                 AppError::Config(
@@ -206,7 +212,7 @@ impl TempResultExecutor {
                             log_offset,
                             meta_offset,
                         };
-                        write_json_line(
+                        write_sparse_checkpoint(
                             index_output,
                             &checkpoint,
                             max_output_bytes,
@@ -324,7 +330,8 @@ impl TempResultExecutor {
         let mut lines = Vec::new();
         let mut log_offset = 0_u64;
         let mut meta_offset = 0_u64;
-        let mut total_output_bytes = 0_u64;
+        let mut total_output_bytes =
+            initialize_sparse_checkpoint_index(index_output, max_output_bytes).await?;
         let max_logical_line_bytes =
             usize::try_from(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES).map_err(|_| {
                 AppError::Config(
@@ -461,7 +468,7 @@ impl TempResultExecutor {
                             log_offset,
                             meta_offset,
                         };
-                        write_json_line(
+                        write_sparse_checkpoint(
                             index_output,
                             &checkpoint,
                             max_output_bytes,
@@ -582,6 +589,43 @@ fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> 
     Ok(())
 }
 
+async fn initialize_sparse_checkpoint_index(
+    output: &mut File,
+    max_output_bytes: u64,
+) -> Result<u64, AppError> {
+    output.set_len(0).await.map_err(AppError::Io)?;
+    output
+        .seek(SeekFrom::Start(0))
+        .await
+        .map_err(AppError::Io)?;
+    let header_bytes = SPARSE_CHECKPOINT_INDEX_MAGIC.len() as u64;
+    ensure_output_capacity(0, header_bytes, max_output_bytes)?;
+    output
+        .write_all(SPARSE_CHECKPOINT_INDEX_MAGIC)
+        .await
+        .map_err(AppError::Io)?;
+    Ok(header_bytes)
+}
+
+async fn write_sparse_checkpoint(
+    output: &mut File,
+    checkpoint: &SparseCheckpoint,
+    max_output_bytes: u64,
+    total_output_bytes: &mut u64,
+) -> Result<(), AppError> {
+    let mut bytes = [0_u8; SPARSE_CHECKPOINT_RECORD_BYTES as usize];
+    bytes[..8].copy_from_slice(&checkpoint.result_line.to_le_bytes());
+    bytes[8..16].copy_from_slice(&checkpoint.log_offset.to_le_bytes());
+    bytes[16..24].copy_from_slice(&checkpoint.meta_offset.to_le_bytes());
+    let record_bytes = SPARSE_CHECKPOINT_RECORD_BYTES;
+    ensure_output_capacity(*total_output_bytes, record_bytes, max_output_bytes)?;
+    output.write_all(&bytes).await.map_err(AppError::Io)?;
+    *total_output_bytes = total_output_bytes
+        .checked_add(record_bytes)
+        .ok_or_else(too_large)?;
+    Ok(())
+}
+
 pub(crate) fn merge_line_ranges(mut ranges: Vec<LineRange>) -> Vec<LineRange> {
     ranges.retain(|range| range.start >= 0 && range.start <= range.end);
     ranges.sort_by_key(|range| (range.start, range.end));
@@ -674,7 +718,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        CandidateScanPlan, LineRange, SourceSearchPlan, SparseCheckpoint, TempResultExecutor,
+        CandidateScanPlan, LineRange, SPARSE_CHECKPOINT_INDEX_MAGIC,
+        SPARSE_CHECKPOINT_RECORD_BYTES, SourceSearchPlan, SparseCheckpoint, TempResultExecutor,
         TempSource, merge_line_ranges, select_checkpoint,
     };
     use crate::{error::AppError, ingest::TRUNCATED_LINE_MARKER, log_expression};
@@ -905,15 +950,25 @@ mod tests {
                 .unwrap()
                 .contains("\"file_id\":\"42\"")
         );
-        let checkpoints: Vec<SparseCheckpoint> = tokio::fs::read_to_string(&index_path)
-            .await
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(checkpoints.len(), 2);
-        assert_eq!(checkpoints[0].result_line, 0);
-        assert_eq!(checkpoints[1].result_line, 1_000);
+        let index = tokio::fs::read(&index_path).await.unwrap();
+        assert_eq!(
+            &index[..SPARSE_CHECKPOINT_INDEX_MAGIC.len()],
+            SPARSE_CHECKPOINT_INDEX_MAGIC
+        );
+        assert_eq!(
+            index.len(),
+            SPARSE_CHECKPOINT_INDEX_MAGIC.len() + 2 * SPARSE_CHECKPOINT_RECORD_BYTES as usize
+        );
+        assert_eq!(i64::from_le_bytes(index[8..16].try_into().unwrap()), 0);
+        assert_eq!(
+            i64::from_le_bytes(
+                index[8 + SPARSE_CHECKPOINT_RECORD_BYTES as usize
+                    ..16 + SPARSE_CHECKPOINT_RECORD_BYTES as usize]
+                    .try_into()
+                    .unwrap()
+            ),
+            1_000
+        );
 
         for path in [source_path, log_path, meta_path, index_path] {
             let _ = tokio::fs::remove_file(path).await;

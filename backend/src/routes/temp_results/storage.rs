@@ -61,24 +61,7 @@ pub(crate) async fn read_indexed_lines_bounded(
     if start >= line_count {
         return Ok(Vec::new());
     }
-    let index_content = tokio::fs::read_to_string(index_path)
-        .await
-        .map_err(AppError::Io)?;
-    if index_content.is_empty() {
-        return Err(invalid_sidecar(
-            "temporary result index is empty for a nonempty result",
-        ));
-    }
-    let checkpoints = index_content
-        .lines()
-        .map(decode_sidecar::<SparseCheckpoint>)
-        .collect::<Result<Vec<_>, _>>()?;
-    let checkpoint = select_checkpoint(&checkpoints, start).ok_or_else(|| {
-        AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "temporary result index has no checkpoint for requested line",
-        ))
-    })?;
+    let checkpoint = load_checkpoint(index_path, start).await?;
     let mut log_reader = BufReader::new(File::open(result_path).await.map_err(AppError::Io)?);
     let mut meta_reader = BufReader::new(File::open(meta_path).await.map_err(AppError::Io)?);
     log_reader
@@ -179,6 +162,112 @@ pub(crate) async fn read_indexed_lines_bounded(
         current += 1;
     }
     Ok(lines)
+}
+
+async fn load_checkpoint(index_path: &Path, start: i64) -> Result<SparseCheckpoint, AppError> {
+    let mut index = File::open(index_path).await.map_err(AppError::Io)?;
+    let mut magic = [0_u8; SPARSE_CHECKPOINT_INDEX_MAGIC.len()];
+    let binary_index = match index.read_exact(&mut magic).await {
+        Ok(_) => magic == *SPARSE_CHECKPOINT_INDEX_MAGIC,
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => false,
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    if !binary_index {
+        drop(index);
+        return load_legacy_checkpoint(index_path, start).await;
+    }
+
+    let index_len = index.metadata().await.map_err(AppError::Io)?.len();
+    let payload_len = index_len
+        .checked_sub(SPARSE_CHECKPOINT_INDEX_MAGIC.len() as u64)
+        .ok_or_else(|| invalid_sidecar("temporary result index header is truncated"))?;
+    if payload_len == 0 {
+        return Err(invalid_sidecar(
+            "temporary result index is empty for a nonempty result",
+        ));
+    }
+    if payload_len % SPARSE_CHECKPOINT_RECORD_BYTES != 0 {
+        return Err(invalid_sidecar(
+            "temporary result index has a truncated checkpoint record",
+        ));
+    }
+
+    let checkpoint_count = payload_len / SPARSE_CHECKPOINT_RECORD_BYTES;
+    let mut low = 0_u64;
+    let mut high = checkpoint_count;
+    let mut selected = None;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let checkpoint = read_binary_checkpoint(&mut index, middle).await?;
+        if checkpoint.result_line <= start {
+            selected = Some(checkpoint);
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    selected.ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "temporary result index has no checkpoint for requested line",
+        ))
+    })
+}
+
+async fn read_binary_checkpoint(
+    index: &mut File,
+    ordinal: u64,
+) -> Result<SparseCheckpoint, AppError> {
+    let offset = (SPARSE_CHECKPOINT_INDEX_MAGIC.len() as u64)
+        .checked_add(
+            ordinal
+                .checked_mul(SPARSE_CHECKPOINT_RECORD_BYTES)
+                .ok_or_else(|| invalid_sidecar("temporary result index offset overflow"))?,
+        )
+        .ok_or_else(|| invalid_sidecar("temporary result index offset overflow"))?;
+    index
+        .seek(SeekFrom::Start(offset))
+        .await
+        .map_err(AppError::Io)?;
+    let mut bytes = [0_u8; SPARSE_CHECKPOINT_RECORD_BYTES as usize];
+    index.read_exact(&mut bytes).await.map_err(AppError::Io)?;
+    let checkpoint = SparseCheckpoint {
+        result_line: i64::from_le_bytes(bytes[..8].try_into().expect("checkpoint line bytes")),
+        log_offset: u64::from_le_bytes(bytes[8..16].try_into().expect("checkpoint log bytes")),
+        meta_offset: u64::from_le_bytes(bytes[16..24].try_into().expect("checkpoint meta bytes")),
+    };
+    if checkpoint.result_line < 0 {
+        return Err(invalid_sidecar(
+            "temporary result index contains a negative checkpoint line",
+        ));
+    }
+    Ok(checkpoint)
+}
+
+async fn load_legacy_checkpoint(
+    index_path: &Path,
+    start: i64,
+) -> Result<SparseCheckpoint, AppError> {
+    let index_content = tokio::fs::read_to_string(index_path)
+        .await
+        .map_err(AppError::Io)?;
+    if index_content.is_empty() {
+        return Err(invalid_sidecar(
+            "temporary result index is empty for a nonempty result",
+        ));
+    }
+    let checkpoints = index_content
+        .lines()
+        .map(decode_sidecar::<SparseCheckpoint>)
+        .collect::<Result<Vec<_>, _>>()?;
+    select_checkpoint(&checkpoints, start)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "temporary result index has no checkpoint for requested line",
+            ))
+        })
 }
 
 pub(crate) fn decode_sidecar<T: serde::de::DeserializeOwned>(line: &str) -> Result<T, AppError> {
@@ -351,7 +440,9 @@ mod tests {
     use tokio::fs::File;
     use uuid::Uuid;
 
-    use super::{read_indexed_lines, read_indexed_lines_bounded, staging_path};
+    use super::{
+        SPARSE_CHECKPOINT_INDEX_MAGIC, read_indexed_lines, read_indexed_lines_bounded, staging_path,
+    };
     use crate::{
         config::MAX_TEMP_RESULT_LOGICAL_LINE_BYTES,
         ingest::TRUNCATED_LINE_MARKER,
@@ -432,6 +523,71 @@ mod tests {
             error,
             crate::error::AppError::PublicApi { code, .. } if code == "LINE_PAGE_TOO_LARGE"
         ));
+
+        for path in [source_path, result_path, meta_path, index_path] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn indexed_reader_seeks_binary_checkpoints_for_deep_pages() {
+        let suffix = Uuid::new_v4();
+        let source_path = std::env::temp_dir().join(format!("rain-deep-source-{suffix}.log"));
+        let result_path = std::env::temp_dir().join(format!("rain-deep-result-{suffix}.log"));
+        let meta_path = std::env::temp_dir().join(format!("rain-deep-result-{suffix}.meta"));
+        let index_path = std::env::temp_dir().join(format!("rain-deep-result-{suffix}.idx"));
+        let source = (0..2_005)
+            .map(|line| format!("ERROR line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        tokio::fs::write(&source_path, source).await.unwrap();
+        let sources = vec![TempSource {
+            path: source_path.clone(),
+            metadata_path: None,
+            label: "app.log".into(),
+            bundle_hash: None,
+            file_id: None,
+        }];
+        let expression = log_expression::parse("ERROR").unwrap();
+        let mut result = File::create(&result_path).await.unwrap();
+        let mut metadata = File::create(&meta_path).await.unwrap();
+        let mut index = File::create(&index_path).await.unwrap();
+        let preview = TempResultExecutor::materialize_preview(
+            &sources,
+            &expression,
+            0,
+            0,
+            usize::MAX as u64,
+            &mut result,
+            &mut metadata,
+            &mut index,
+        )
+        .await
+        .unwrap();
+        drop(result);
+        drop(metadata);
+        drop(index);
+
+        let lines = read_indexed_lines(
+            &result_path,
+            &meta_path,
+            &index_path,
+            1_999,
+            1,
+            preview.total,
+        )
+        .await
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].content, "ERROR line 1999");
+        assert_eq!(
+            tokio::fs::read(&index_path)
+                .await
+                .unwrap()
+                .get(..SPARSE_CHECKPOINT_INDEX_MAGIC.len()),
+            Some(SPARSE_CHECKPOINT_INDEX_MAGIC.as_slice())
+        );
 
         for path in [source_path, result_path, meta_path, index_path] {
             let _ = tokio::fs::remove_file(path).await;
