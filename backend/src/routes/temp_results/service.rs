@@ -8,6 +8,7 @@ use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
     insert_staging_temp_result_with_retention, publish_temp_result_with_retention,
 };
+use super::search_plan::{IndexedSource, PreviewSearchPlan, build_source_search_plans};
 use super::storage::checked_temp_path;
 use super::storage::invalid_sidecar;
 use super::storage::{
@@ -39,6 +40,7 @@ struct MaterializeOutcome {
 
 pub(crate) struct ResolvedSources {
     sources: Vec<TempSource>,
+    indexed_sources: Vec<Option<IndexedSource>>,
     _source_lease: Option<TempResultReadLease>,
 }
 
@@ -49,6 +51,7 @@ async fn materialize_result(
     sources: &[TempSource],
     source_label: &str,
     mode: MaterializeMode,
+    preview_plan: Option<&PreviewSearchPlan>,
 ) -> Result<MaterializeOutcome, AppError> {
     let settings = state.settings.snapshot().await;
     materialize_result_with_timeout(
@@ -58,11 +61,13 @@ async fn materialize_result(
         sources,
         source_label,
         mode,
+        preview_plan,
         std::time::Duration::from_secs(settings.effective.temp_results_max_scan_duration_seconds),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn materialize_result_with_timeout(
     state: &web::Data<AppState>,
     expression_text: &str,
@@ -70,6 +75,7 @@ async fn materialize_result_with_timeout(
     sources: &[TempSource],
     source_label: &str,
     mode: MaterializeMode,
+    preview_plan: Option<&PreviewSearchPlan>,
     timeout: std::time::Duration,
 ) -> Result<MaterializeOutcome, AppError> {
     let settings = state.settings.snapshot().await;
@@ -106,15 +112,40 @@ async fn materialize_result_with_timeout(
             .await
             .map_err(AppError::Io)?;
         let total = tokio::time::timeout(timeout, async {
-            TempResultExecutor::write_matches(
-                sources,
-                expression,
-                &mut output,
-                &mut metadata,
-                &mut index,
-                settings.effective.temp_results_max_result_size,
-            )
-            .await
+            if let Some(plan) = preview_plan {
+                let preview = TempResultExecutor::materialize_preview_with_plans(
+                    sources,
+                    &plan.source_plans,
+                    expression,
+                    0,
+                    0,
+                    settings.effective.temp_results_max_result_size,
+                    &mut output,
+                    &mut metadata,
+                    &mut index,
+                )
+                .await?;
+                tracing::info!(
+                    metric = "temp_result_preview",
+                    search_backend = plan.backend_label(),
+                    candidate_count = plan.candidate_count,
+                    verified_match_count = preview.total,
+                    query_elapsed_ms = plan.query_elapsed_ms.min(u64::MAX as u128) as u64,
+                    fallback_reasons = ?plan.fallback_reasons,
+                    "completed temporary result preview"
+                );
+                Ok::<i64, AppError>(preview.total)
+            } else {
+                TempResultExecutor::write_matches(
+                    sources,
+                    expression,
+                    &mut output,
+                    &mut metadata,
+                    &mut index,
+                    settings.effective.temp_results_max_result_size,
+                )
+                .await
+            }
         })
         .await
         .map_err(|_| scan_timeout())??;
@@ -165,6 +196,7 @@ async fn materialize_result_with_timeout(
 
 #[derive(FromRow)]
 struct IssueSourceRow {
+    bundle_id: String,
     id: i64,
     name: String,
     path: String,
@@ -221,6 +253,7 @@ async fn resolve_sources_inner(
                 bundle_hash: None,
                 file_id: None,
             }],
+            indexed_sources: vec![None],
             _source_lease: Some(source_lease),
         });
     }
@@ -228,7 +261,7 @@ async fn resolve_sources_inner(
         let issue_code = normalize_issue_code(issue_code)?;
         let mut rows = sqlx::query_as::<_, IssueSourceRow>(
             r#"
-            SELECT f.id, f.name, f.path, f.size_bytes, f.line_count, f.mime_type,
+            SELECT b.id AS bundle_id, f.id, f.name, f.path, f.size_bytes, f.line_count, f.mime_type,
                    f.status, f.meta, f.blob_id, bl.storage_backend, bl.storage_key,
                    bl.state AS blob_state,
                    b.hash AS bundle_hash
@@ -244,6 +277,7 @@ async fn resolve_sources_inner(
         .bind(&issue_code)
         .fetch(&state.db.pool);
         let mut sources = Vec::new();
+        let mut indexed_sources = Vec::new();
         while let Some(row) = rows.try_next().await.map_err(AppError::Database)? {
             let file = FileRow {
                 id: row.id,
@@ -268,6 +302,10 @@ async fn resolve_sources_inner(
                 bundle_hash: Some(row.bundle_hash),
                 file_id: Some(file.id.to_string()),
             });
+            indexed_sources.push(Some(IndexedSource {
+                bundle_id: row.bundle_id,
+                file_id: file.id,
+            }));
         }
         if sources.is_empty() {
             return Err(AppError::NotFound(format!(
@@ -276,6 +314,7 @@ async fn resolve_sources_inner(
         }
         return Ok(ResolvedSources {
             sources,
+            indexed_sources,
             _source_lease: None,
         });
     }
@@ -302,6 +341,10 @@ async fn resolve_sources_inner(
             bundle_hash: Some(bundle.hash),
             file_id: Some(file.id.to_string()),
         }],
+        indexed_sources: vec![Some(IndexedSource {
+            bundle_id: bundle.id,
+            file_id,
+        })],
         _source_lease: None,
     })
 }
@@ -409,6 +452,8 @@ pub(crate) async fn create_preview_result(
         source_temp_id: payload.source_temp_id.clone(),
     };
     let resolved = resolve_sources(&request, &state).await?;
+    let preview_plan =
+        build_source_search_plans(&state, &expression, &resolved.indexed_sources).await?;
     let source_label = source_label(&resolved.sources);
     let outcome = materialize_result(
         &state,
@@ -417,6 +462,7 @@ pub(crate) async fn create_preview_result(
         &resolved.sources,
         &source_label,
         MaterializeMode::Preview,
+        Some(&preview_plan),
     )
     .await?;
     let (result, read_lease) = acquire_active_result(&state, &outcome.id).await?;
@@ -468,6 +514,7 @@ pub(crate) async fn create_full_result(
         &resolved.sources,
         &source_label,
         MaterializeMode::Full,
+        None,
     )
     .await?;
     let result = load_active_unexpired_record(&state, &outcome.id).await?;
@@ -595,6 +642,7 @@ mod tests {
                     &[source],
                     "app.log",
                     MaterializeMode::Full,
+                    None,
                     timeout,
                 )
                 .await
@@ -607,6 +655,7 @@ mod tests {
                     &[source],
                     "app.log",
                     MaterializeMode::Full,
+                    None,
                 )
                 .await
             }
@@ -768,6 +817,7 @@ mod tests {
             &resolved.sources,
             "all files",
             MaterializeMode::Preview,
+            None,
         )
         .await
         .unwrap();
