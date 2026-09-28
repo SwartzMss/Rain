@@ -907,12 +907,14 @@ mod audit_tests {
                 "allow_registration": true
             }"#,
         );
-        let old_modes = ResourceModes::from([
-            ("temp_results_concurrent_materializations".into(), ResourceMode::Auto),
-        ]);
-        let new_modes = ResourceModes::from([
-            ("temp_results_concurrent_materializations".into(), ResourceMode::Manual),
-        ]);
+        let old_modes = ResourceModes::from([(
+            "temp_results_concurrent_materializations".into(),
+            ResourceMode::Auto,
+        )]);
+        let new_modes = ResourceModes::from([(
+            "temp_results_concurrent_materializations".into(),
+            ResourceMode::Manual,
+        )]);
         let fields = [
             "issue_inactive_days",
             "upload_concurrent_processing_tasks",
@@ -922,13 +924,8 @@ mod audit_tests {
         ]
         .map(str::to_owned);
 
-        let (old_snapshot, new_snapshot, changes) = settings_audit_diff(
-            &old_values,
-            &new_values,
-            &old_modes,
-            &new_modes,
-            &fields,
-        );
+        let (old_snapshot, new_snapshot, changes) =
+            settings_audit_diff(&old_values, &new_values, &old_modes, &new_modes, &fields);
         let old_snapshot: serde_json::Value = serde_json::from_str(&old_snapshot).unwrap();
         let new_snapshot: serde_json::Value = serde_json::from_str(&new_snapshot).unwrap();
 

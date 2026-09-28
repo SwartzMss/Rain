@@ -257,10 +257,7 @@ async fn resource_modes_default_to_manual_and_round_trip() {
         details["changes"][0]["resource_mode"]["old_value"],
         "manual"
     );
-    assert_eq!(
-        details["changes"][0]["resource_mode"]["new_value"],
-        "auto"
-    );
+    assert_eq!(details["changes"][0]["resource_mode"]["new_value"], "auto");
 
     let reloaded = SettingsService::new(pool)
         .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
