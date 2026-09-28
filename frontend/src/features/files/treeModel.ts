@@ -38,6 +38,25 @@ export const isExtractionFolder = (node: TreeNode, parent?: TreeNode | null) => 
   return parent ? isArchiveNode(parent) : false;
 };
 
+export const mergeFlattenedExtractionChildren = (
+  parent: TreeNode,
+  extraction: TreeNode
+): TreeNode => {
+  if (
+    parent.childrenSourceId !== extraction.rawId ||
+    !isExtractionFolder(extraction, parent)
+  ) {
+    return parent;
+  }
+
+  return {
+    ...parent,
+    childrenIds: [...new Set([...parent.childrenIds, ...extraction.childrenIds])],
+    hasMoreChildren: extraction.hasMoreChildren,
+    childrenCursor: extraction.childrenCursor
+  };
+};
+
 export const formatHitPath = (raw: string) => {
   const parts = raw.replace(/^\//, '').split('/');
   if (parts.length === 0) return raw;
