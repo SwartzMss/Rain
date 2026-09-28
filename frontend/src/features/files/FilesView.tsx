@@ -211,15 +211,14 @@ export function BundleView() {
   const fileSearchExecution = useSearchExecution();
   const viewerSearchExecution = useSearchExecution();
   useEffect(() => {
-    if (issueSearchExecution.snapshot.status === 'FAILED') {
-      setSearchError(issueSearchExecution.snapshot.errorMessage);
+    const status = issueSearchExecution.snapshot.status;
+    if (status === 'RUNNING' || status === 'CANCELLING' || status === 'CANCELLED' || status === 'SUCCEEDED') {
+      setSearchError(null);
     }
-    if (issueSearchExecution.snapshot.status === 'CANCELLED'
-      || issueSearchExecution.snapshot.status === 'FAILED'
-      || issueSearchExecution.snapshot.status === 'SUCCEEDED') {
+    if (status === 'CANCELLED' || status === 'FAILED' || status === 'SUCCEEDED') {
       setSearchLoading(false);
     }
-  }, [issueSearchExecution.snapshot.errorMessage, issueSearchExecution.snapshot.status]);
+  }, [issueSearchExecution.snapshot.status]);
   useEffect(() => {
     if (fileSearchExecution.snapshot.status === 'FAILED') {
       setFileSearchError(fileSearchExecution.snapshot.errorMessage);
@@ -231,15 +230,14 @@ export function BundleView() {
     }
   }, [fileSearchExecution.snapshot.errorMessage, fileSearchExecution.snapshot.status]);
   useEffect(() => {
-    if (viewerSearchExecution.snapshot.status === 'FAILED') {
-      setSearchError(viewerSearchExecution.snapshot.errorMessage);
+    const status = viewerSearchExecution.snapshot.status;
+    if (status === 'RUNNING' || status === 'CANCELLING' || status === 'CANCELLED' || status === 'SUCCEEDED') {
+      setSearchError(null);
     }
-    if (viewerSearchExecution.snapshot.status === 'CANCELLED'
-      || viewerSearchExecution.snapshot.status === 'FAILED'
-      || viewerSearchExecution.snapshot.status === 'SUCCEEDED') {
+    if (status === 'CANCELLED' || status === 'FAILED' || status === 'SUCCEEDED') {
       setSearchLoading(false);
     }
-  }, [viewerSearchExecution.snapshot.errorMessage, viewerSearchExecution.snapshot.status]);
+  }, [viewerSearchExecution.snapshot.status]);
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const {
     fileLines,
@@ -347,6 +345,7 @@ export function BundleView() {
     setSearchTokens(editor.tokens);
     setDetailRawExpression(editor.rawExpression);
     setSearchDraft('');
+    setSearchError(null);
     setSearchLoading(true);
     const response = await issueSearchExecution.execute(
       { expression: item.query_text, issue_code: issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
