@@ -28,6 +28,11 @@ try {
     filesView,
     /useEffect\(\(\) => \{\s*if \(fileSearchExecuted && isFileSearchConditionEmpty\(fileSearchTokens, fileSearchDraft\)\) \{\s*clearFileSearch\(\);\s*\}\s*\}, \[clearFileSearch, fileSearchDraft, fileSearchExecuted, fileSearchTokens\]\);/
   );
+  assert.doesNotMatch(filesView, /setSearchError\\(issueSearchExecution\\.snapshot\\.errorMessage\\)/);
+  assert.doesNotMatch(filesView, /setSearchError\\(viewerSearchExecution\\.snapshot\\.errorMessage\\)/);
+  assert.match(filesView, /status === 'RUNNING'.*status === 'CANCELLING'.*status === 'CANCELLED'.*status === 'SUCCEEDED'/s);
+  assert.match(filesView, /setSearchDraft\\(''\\);\\s*setSearchError\\(null\\);\\s*setSearchLoading\\(true\\);/);
+
 } finally {
   await server.close();
 }
