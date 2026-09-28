@@ -181,7 +181,8 @@ try {
   );
   assert.match(filesView, /onOpenSource=\{openSearchHitSource\}/);
   assert.doesNotMatch(filesView, /onCopySourcePath=/);
-  assert.match(filesView, /centerElementInScrollContainer\(scrollContainer, target\)/);\n  assert.doesNotMatch(filesView, /\.scrollIntoView\(/);
+  assert.match(filesView, /centerElementInScrollContainer\(scrollContainer, target\)/);
+  assert.doesNotMatch(filesView, /scrollIntoView\(\{ block: 'center' \}\)/);
   assert.match(codeLinesPane, /targetLine/);
   assert.match(codeLinesPane, /data-source-line/);
   assert.match(codeLinesPane, /bg-amber-100/);
