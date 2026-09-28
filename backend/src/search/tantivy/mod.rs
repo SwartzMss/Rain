@@ -113,6 +113,7 @@ pub(crate) async fn search_bundle_with_lease_and_permit(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn search_bundle_visible_with_lease_and_permit_and_context(
     path: PathBuf,
     request: ContentSearchRequest,

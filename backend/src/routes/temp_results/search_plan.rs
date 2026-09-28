@@ -267,8 +267,7 @@ async fn build_indexed_source_plan(
     if result.rows.iter().any(|row| row.file_id != source.file_id) {
         return Err(SearchPlanFailure::Fallback("candidate_file_scope_mismatch"));
     }
-    let ranges = candidate_ranges_from_rows(&result.rows)
-        .map_err(|reason| SearchPlanFailure::Fallback(reason))?;
+    let ranges = candidate_ranges_from_rows(&result.rows).map_err(SearchPlanFailure::Fallback)?;
     if ranges.is_empty() {
         return Ok((
             SourceSearchPlan::Tantivy(CandidateScanPlan {

@@ -4,7 +4,7 @@ import { RequestCancelledError, rainApi } from '../src/api/client';
 import { SearchExecutionStatus } from '../src/components/SearchExecutionStatus';
 import { useSearchExecution } from '../src/hooks/useSearchExecution';
 import type { TempResultPreviewResponse } from '../src/api/types';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 function previewResponse(resultId: string): TempResultPreviewResponse {
   return { result_id: resultId, total: 1, next_start: null, lines: [{ line_number: 0, content: 'ERROR', path: 'app.log' }] };
@@ -89,10 +89,21 @@ describe('interactive search execution', () => {
 
     function ReplaceProbe() {
       const { snapshot, execute } = useSearchExecution();
+      const [loading, setLoading] = useState(false);
+      const run = () => {
+        setLoading(true);
+        void execute({ expression: 'WARN', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' });
+      };
+      useEffect(() => {
+        if (snapshot.status === 'CANCELLED' || snapshot.status === 'FAILED' || snapshot.status === 'SUCCEEDED') {
+          setLoading(false);
+        }
+      }, [snapshot.status]);
       return (
         <>
           <output data-testid="status">{snapshot.status}</output>
-          <button type="button" onClick={() => void execute({ expression: 'WARN', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' })}>new</button>
+          <output data-testid="loading">{String(loading)}</output>
+          <button type="button" onClick={run}>new</button>
         </>
       );
     }
@@ -102,6 +113,7 @@ describe('interactive search execution', () => {
     await waitFor(() => expect(previewCalls).toBe(1));
     fireEvent.click(screen.getByRole('button', { name: 'new' }));
     await waitFor(() => expect(previewCalls).toBe(2));
+    expect(screen.getByTestId('loading')).toHaveTextContent('true');
     await act(async () => resolveSecond(new Response(JSON.stringify(previewResponse('new')), { status: 200 })));
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('SUCCEEDED'));
   });

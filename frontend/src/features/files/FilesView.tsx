@@ -219,6 +219,26 @@ export function BundleView() {
       setSearchLoading(false);
     }
   }, [issueSearchExecution.snapshot.errorMessage, issueSearchExecution.snapshot.status]);
+  useEffect(() => {
+    if (fileSearchExecution.snapshot.status === 'FAILED') {
+      setFileSearchError(fileSearchExecution.snapshot.errorMessage);
+    }
+    if (fileSearchExecution.snapshot.status === 'CANCELLED'
+      || fileSearchExecution.snapshot.status === 'FAILED'
+      || fileSearchExecution.snapshot.status === 'SUCCEEDED') {
+      setFileSearchLoading(false);
+    }
+  }, [fileSearchExecution.snapshot.errorMessage, fileSearchExecution.snapshot.status]);
+  useEffect(() => {
+    if (viewerSearchExecution.snapshot.status === 'FAILED') {
+      setSearchError(viewerSearchExecution.snapshot.errorMessage);
+    }
+    if (viewerSearchExecution.snapshot.status === 'CANCELLED'
+      || viewerSearchExecution.snapshot.status === 'FAILED'
+      || viewerSearchExecution.snapshot.status === 'SUCCEEDED') {
+      setSearchLoading(false);
+    }
+  }, [viewerSearchExecution.snapshot.errorMessage, viewerSearchExecution.snapshot.status]);
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const {
     fileLines,
@@ -339,7 +359,6 @@ export function BundleView() {
         }
       }
     );
-    setSearchLoading(false);
     if (!response) return;
     await rainApi.markSavedSearchUsed(item.id);
     setSavedSearchesOpen(false);
@@ -1169,8 +1188,6 @@ export function BundleView() {
       if (!response) return;
     } catch (error) {
       setFileSearchError(normalizeApiError(error));
-    } finally {
-      setFileSearchLoading(false);
     }
   }, [bundleId, fileSearchDraft, fileSearchTokens, openViewerTab, selectedNode]);
 
@@ -1232,8 +1249,6 @@ export function BundleView() {
       if (!response) return;
     } catch (error) {
       setSearchError(normalizeApiError(error));
-    } finally {
-      setSearchLoading(false);
     }
   }, [activeViewerTab, openViewerTab, resultFilterDraft, resultFilterTokens]);
 

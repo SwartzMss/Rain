@@ -362,6 +362,7 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
 }
 
 #[cfg(feature = "tantivy-search")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit_and_context(
     path: std::path::PathBuf,
     request: ContentSearchRequest,
@@ -453,6 +454,7 @@ pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit(
 }
 
 #[cfg(not(feature = "tantivy-search"))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn search_tantivy_bundle_visible_with_lease_and_permit_and_context(
     path: std::path::PathBuf,
     request: ContentSearchRequest,
