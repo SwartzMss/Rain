@@ -61,6 +61,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Metrics {
             "operation_phase",
             "tantivy_search",
             "tantivy_index_build",
+            "temp_result_preview",
             "upload_preflight",
         ]
         .contains(&metric)
@@ -102,6 +103,8 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Metrics {
                     "committed_chunks",
                     "queued_writers",
                     "source_lines",
+                    "candidate_count",
+                    "verified_match_count",
                 ]
                 .contains(&key.as_str()))
                 && let Some(number) = value.as_u64()
@@ -451,6 +454,45 @@ async fn large_log_baseline() {
                     search.push(json!({"kind": kind, "term": term, "scope": scope, "samples_ms": latency, "percentiles": percentiles(&latency), "totals": totals}));
                 }
             }
+            let mut temp_previews = Vec::new();
+            for (kind, expression) in [
+                ("indexed_term", "RARE_SENTINEL"),
+                ("raw_boolean", "RARE_SENTINEL AND NOT absent"),
+            ] {
+                let mut latency = Vec::new();
+                let mut totals = Vec::new();
+                for sample in 0..queries.checked_add(warmup).unwrap() {
+                    let start = Instant::now();
+                    let response = test::call_service(
+                        &app,
+                        test::TestRequest::post()
+                            .uri("/api/temp-results/preview")
+                            .set_json(json!({
+                                "expression": expression,
+                                "issue_code": "BENCH",
+                                "from": 0,
+                                "size": 10,
+                            }))
+                            .cookie(cookie.clone())
+                            .to_request(),
+                    )
+                    .await;
+                    assert!(response.status().is_success(), "{kind}: {}", response.status());
+                    let body: Value = test::read_body_json(response).await;
+                    assert!(body["lines"].as_array().is_some_and(|lines| !lines.is_empty()), "missing preview matches: {body}");
+                    if sample >= warmup {
+                        latency.push(start.elapsed().as_secs_f64() * 1000.0);
+                        totals.push(body["total"].clone());
+                    }
+                }
+                temp_previews.push(json!({
+                    "kind": kind,
+                    "expression": expression,
+                    "samples_ms": latency,
+                    "percentiles": percentiles(&latency),
+                    "totals": totals,
+                }));
+            }
             let sampled_peaks = ["rss_bytes", "db_bytes", "wal_bytes"].into_iter().map(|key| (key.to_owned(), json!(samples.iter().filter_map(|s| s[key].as_u64()).max()))).collect::<serde_json::Map<_, _>>();
             json!({"schema_version": 2, "iteration": iteration, "timestamp": chrono::Utc::now().to_rfc3339(),
                 "machine": {"host_notes": std::env::var("RAIN_BENCH_HOST_NOTES").ok(), "filesystem": if cfg!(target_os = "linux") { command("df", &["-T", dir.0.to_str().unwrap()]) } else { None }, "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "clock_ticks_per_second": if cfg!(target_os = "linux") { command("getconf", &["CLK_TCK"]).and_then(|s| s.parse::<u64>().ok()) } else { None }, "logical_cpus": std::thread::available_parallelism().ok().map(|v| v.get()), "uname": command("uname", &["-a"]), "cpu": fs::read_to_string("/proc/cpuinfo").ok().and_then(|s| s.lines().find(|l| l.starts_with("model name")).map(str::to_owned)), "memory": fs::read_to_string("/proc/meminfo").ok().and_then(|s| s.lines().next().map(str::to_owned))},
@@ -460,7 +502,7 @@ async fn large_log_baseline() {
                 "inputs": inputs.iter().map(|(id, _, metadata, uploaded_bytes, uploaded_sha256)| json!({"bundle": id, "fixture": metadata, "uploaded_bytes": uploaded_bytes, "uploaded_sha256": uploaded_sha256})).collect::<Vec<_>>(),
                 "throughput": {"raw_mib_per_second": inputs.iter().map(|i| i.2.bytes).sum::<u64>() as f64 / 1048576.0 / (ingest_ms / 1000.0), "lines_per_second": inputs.iter().map(|i| i.2.lines).sum::<u64>() as f64 / (ingest_ms / 1000.0)},
                 "ingest_sampled_peaks": sampled_peaks,
-                "ingest_to_all_ready_ms": ingest_ms, "bundle_timings": times, "resources_before": before, "resources_after": resources(&db_path), "ingest_resource_samples": samples, "search": search, "reader_cache": reader_cache_metrics(selected_backend), "stage_metrics": ingest_metrics, "resources_after_ingest": after_ingest})
+                "ingest_to_all_ready_ms": ingest_ms, "bundle_timings": times, "resources_before": before, "resources_after": resources(&db_path), "ingest_resource_samples": samples, "search": search, "temp_previews": temp_previews, "reader_cache": reader_cache_metrics(selected_backend), "stage_metrics": ingest_metrics, "resources_after_ingest": after_ingest})
         }.with_subscriber(subscriber)).catch_unwind().await;
         pool.close().await;
         let report = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
