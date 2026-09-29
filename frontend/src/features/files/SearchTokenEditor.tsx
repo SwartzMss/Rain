@@ -98,9 +98,6 @@ export function SearchTokenEditor({
   const canAddNot = allowOperators && (operandExpected || last?.kind === 'term' || last?.kind === 'paren' && last.value === ')');
   const canAddLeftParen = allowOperators && (operandExpected || Boolean(last));
   const canAddRightParen = allowOperators && !operandExpected && hasUnclosedSearchParens(tokensForControls) > 0;
-  const notLabel = last?.kind === 'term' || (last?.kind === 'paren' && last.value === ')')
-    ? 'AND NOT'
-    : 'NOT';
 
   return (
     <div
@@ -211,7 +208,7 @@ export function SearchTokenEditor({
         <div className="flex items-center gap-1" aria-label="搜索语法">
           <button type="button" className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15 disabled:opacity-40" disabled={disabled || !canAddBinary} onClick={() => updateOperator('AND')}>AND</button>
           <button type="button" className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15 disabled:opacity-40" disabled={disabled || !canAddBinary} onClick={() => updateOperator('OR')}>OR</button>
-          <button type="button" className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15 disabled:opacity-40" disabled={disabled || !canAddNot} onClick={() => updateOperator('NOT')}>{notLabel}</button>
+          <button type="button" className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15 disabled:opacity-40" disabled={disabled || !canAddNot} onClick={() => updateOperator('NOT')}>NOT</button>
           <button type="button" className="h-7 rounded border border-violet-500/40 px-2 text-xs font-semibold text-violet-700 hover:bg-violet-500/15 disabled:opacity-40" disabled={disabled || !canAddLeftParen} onClick={() => updateParen('(')}>(</button>
           <button type="button" className="h-7 rounded border border-violet-500/40 px-2 text-xs font-semibold text-violet-700 hover:bg-violet-500/15 disabled:opacity-40" disabled={disabled || !canAddRightParen} onClick={() => updateParen(')')}>)</button>
         </div>

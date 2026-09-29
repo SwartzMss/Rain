@@ -282,7 +282,7 @@ describe('BundleView search expression flow', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
       target: { value: 'A' }
     });
-    fireEvent.click(screen.getByRole('button', { name: 'AND NOT' }));
+    fireEvent.click(screen.getByRole('button', { name: 'NOT' }));
     fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
       target: { value: 'B' }
     });

@@ -186,7 +186,8 @@ try {
     })
   );
   assert.match(expressionMarkup, />AND<\/button>/);
-  assert.match(expressionMarkup, />AND NOT<\/button>/);
+  assert.match(expressionMarkup, />NOT<\/button>/);
+  assert.doesNotMatch(expressionMarkup, />AND NOT<\/button>/);
   assert.match(expressionMarkup, />\(<\/button>/);
   assert.doesNotMatch(expressionMarkup, /简单模式|高级表达式|支持 AND/);
 
