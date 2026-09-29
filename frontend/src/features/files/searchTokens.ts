@@ -185,8 +185,9 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
     if (fragment.includes('(') || fragment.includes(')')) {
       throw new Error('括号表达式需要使用原始文本编辑器');
     }
-    if (['AND', 'OR', 'NOT'].includes(fragment)) {
-      tokens.push({ kind: 'operator', value: fragment as SearchOperator });
+    const normalizedFragment = fragment.toUpperCase();
+    if (['AND', 'OR', 'NOT'].includes(normalizedFragment)) {
+      tokens.push({ kind: 'operator', value: normalizedFragment as SearchOperator });
     } else if (fragment) {
       tokens.push({ kind: 'term', value: fragment });
     }

@@ -14,6 +14,10 @@ pub struct ParseError {
     pub message: String,
 }
 
+pub fn parse_error_message(error: &ParseError) -> String {
+    format!("搜索条件无效（位置 {}：{}）", error.offset, error.message)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TokenKind {
     Term(String),
@@ -508,6 +512,23 @@ mod tests {
         let expression = parse("(ERROR OR WARN) AND \"tracking point\"").expect("parse expression");
         assert!(expression.matches("warn Interaction Tracking Point moved"));
         assert!(!expression.matches("warn tracking stopped"));
+    }
+
+    #[test]
+    fn preserves_parentheses_and_boolean_precedence_for_issue_queries() {
+        let grouped = parse("ping AND (error OR timeout)").expect("grouped expression");
+        let lines = ["ping error", "ping timeout", "timeout only"];
+        let matching_lines = lines
+            .iter()
+            .filter(|line| grouped.matches(line))
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(matching_lines, ["ping error", "ping timeout"]);
+
+        let precedence = parse("A OR B AND C").expect("precedence expression");
+        assert!(precedence.matches("A"));
+        assert!(precedence.matches("B C"));
+        assert!(!precedence.matches("B"));
     }
 
     #[test]

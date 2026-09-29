@@ -237,6 +237,10 @@ export interface LogSearchResponse {
   max_search_window: number;
 }
 
+export interface SearchExpressionValidationResponse {
+  valid: true;
+}
+
 export interface UploadResponse {
   task_id: string;
   issue_code: string;

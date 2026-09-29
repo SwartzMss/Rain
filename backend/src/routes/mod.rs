@@ -18,6 +18,7 @@ pub(crate) use issues::cleanup_inactive_issues;
 pub use issues::resume_manual_issue_deletions;
 mod logs;
 mod saved_searches;
+mod search_expressions;
 mod search_requests;
 pub(crate) mod temp_results;
 pub(crate) mod upload_sessions;
@@ -254,6 +255,7 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(issues::get_issue_bundles)
                 .service(issues::delete_issue_bundle)
                 .service(issues::delete_issue)
+                .service(search_expressions::validate_expression)
                 .service(files::get_file_node)
                 .service(files::get_file_content)
                 .service(files::get_file_lines)

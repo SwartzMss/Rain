@@ -112,10 +112,7 @@ fn invalid_expression(error: log_expression::ParseError) -> AppError {
     AppError::public(
         StatusCode::BAD_REQUEST,
         "SEARCH_EXPRESSION_INVALID",
-        format!(
-            "搜索条件无效，请检查 AND/OR/NOT 前后是否都有关键词（位置 {}：{}）",
-            error.offset, error.message
-        ),
+        log_expression::parse_error_message(&error),
     )
 }
 
