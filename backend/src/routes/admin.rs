@@ -551,6 +551,28 @@ async fn settings_response_with_metadata(
             "decisions": plan.decisions,
         });
     }
+    let jobs = crate::job_runtime::JobType::ALL
+        .into_iter()
+        .map(|kind| {
+            let metrics = state.jobs.snapshot().for_type(kind);
+            (
+                kind.as_str().to_owned(),
+                serde_json::json!({
+                    "active": metrics.active,
+                    "queued": metrics.queued,
+                    "completed_total": metrics.completed_total,
+                    "failed_total": metrics.failed_total,
+                    "cancelled_total": metrics.cancelled_total,
+                    "timed_out_total": metrics.timed_out_total,
+                    "duration_count": metrics.duration_count,
+                    "duration_sum_ms": metrics.duration_sum_ms,
+                    "last_duration_ms": metrics.last_duration_ms,
+                    "last_success_at": metrics.last_success_at,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    response["jobs"] = serde_json::Value::Object(jobs);
     response["updated_at"] = serde_json::Value::String(updated_at);
     response["updated_by_username"] = updated_by_username
         .map(serde_json::Value::String)

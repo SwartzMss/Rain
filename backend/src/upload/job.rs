@@ -42,8 +42,13 @@ impl TempCleanupQueue {
     }
 }
 
-pub fn spawn_temp_cleanup_worker(queue: TempCleanupQueue) -> tokio::task::JoinHandle<()> {
+pub fn spawn_temp_cleanup_worker(
+    queue: TempCleanupQueue,
+    runtime: crate::job_runtime::JobRuntime,
+) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        runtime,
+        crate::job_runtime::JobType::Cleanup,
         "temporary-upload-cleanup",
         std::time::Duration::ZERO,
         std::time::Duration::from_secs(30),
@@ -95,10 +100,13 @@ pub struct UploadJob {
     pub search_resource_budget: crate::search::resource::SearchResourceBudget,
 }
 
-pub fn spawn_upload_job(job: UploadJob) {
+pub fn spawn_upload_job(
+    job: UploadJob,
+    runtime: crate::job_runtime::JobRuntime,
+) -> Result<(), crate::job_runtime::SubmitError> {
     // Start before scheduling so enqueue-to-READY includes executor delay.
     let queued_at = Instant::now();
-    tokio::spawn(async move {
+    let submission = runtime.spawn(crate::job_runtime::JobType::Upload, move |_context| async move {
         let file_count = job.files.len();
         let received_bytes = job
             .files
@@ -106,7 +114,7 @@ pub fn spawn_upload_job(job: UploadJob) {
             .fold(0_u64, |total, file| total.saturating_add(file.size_bytes));
         let _permit = match job.processing_permits.clone().acquire_owned().await {
             Ok(permit) => permit,
-            Err(error) => {
+            Err(ref error) => {
                 error!(
                     request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                     bundle_id = %job.bundle_id,
@@ -137,7 +145,7 @@ pub fn spawn_upload_job(job: UploadJob) {
                     job.temp_cleanup_queue
                         .enqueue(job.temp_dir.clone(), job.receive_reservation);
                 }
-                return;
+                return Err::<(), AppError>(AppError::Conflict("上传处理任务已停止".into()));
             }
         };
 
@@ -163,7 +171,7 @@ pub fn spawn_upload_job(job: UploadJob) {
                 elapsed_ms = processing_started.elapsed().as_millis() as u64,
                 "upload processing completed"
             ),
-            Err(error) => {
+            Err(ref error) => {
                 error!(
                     request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                     bundle_id = %job.bundle_id,
@@ -180,7 +188,7 @@ pub fn spawn_upload_job(job: UploadJob) {
                     &job.data_root,
                     &job.staging_root,
                     &job.bundle_hash,
-                    &error,
+                    error,
                 )
                 .await;
             }
@@ -197,7 +205,11 @@ pub fn spawn_upload_job(job: UploadJob) {
             job.temp_cleanup_queue
                 .enqueue(job.temp_dir.clone(), job.receive_reservation);
         }
+        process_result
     });
+    submission.map(|_| ()).inspect_err(|_error| {
+        error!("background upload job was rejected because the job runtime is closed");
+    })
 }
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {

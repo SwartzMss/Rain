@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod file_classification;
 pub mod ingest;
+pub mod job_runtime;
 pub mod log_expression;
 pub mod models;
 pub mod repositories;
@@ -36,6 +37,8 @@ use crate::error::AppError;
 use crate::search::resource::SearchResourceBudget;
 use crate::services::issue_cleanup_policy::IssueCleanupPolicy;
 use crate::settings::SettingsService;
+
+pub use job_runtime::{JobContext, JobRuntime, JobStatus, JobType, StopReason};
 
 #[derive(Debug, Clone)]
 pub struct RequestLogId(pub String);
@@ -266,6 +269,7 @@ pub(crate) struct ReadinessSnapshot {
 pub(crate) struct ReadinessCache(pub(crate) AsyncMutex<Option<ReadinessSnapshot>>);
 
 pub struct AppState {
+    pub jobs: crate::job_runtime::JobRuntime,
     pub db: DatabaseContext,
     pub storage: StorageContext,
     pub upload: UploadRuntime,
@@ -287,39 +291,25 @@ pub struct AppState {
     pub file_deletion_notify: Arc<Notify>,
 }
 
-const MAX_LINE_READ_CLIENTS: usize = 1024;
-
-/// Start a resilient Tokio periodic job. A failed iteration is logged and does
-/// not terminate the worker, so unrelated maintenance jobs keep running.
+/// Register a resilient periodic job under the shared application runtime.
 pub fn spawn_periodic_job<F, Fut>(
+    runtime: JobRuntime,
+    kind: JobType,
     name: &'static str,
     initial_delay: Duration,
     interval_duration: Duration,
-    mut job: F,
+    job: F,
 ) -> tokio::task::JoinHandle<()>
 where
-    F: FnMut() -> Fut + Send + 'static,
+    F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), String>> + Send + 'static,
 {
-    tokio::spawn(async move {
-        tokio::time::sleep(initial_delay).await;
-        let mut interval = tokio::time::interval(interval_duration);
-        loop {
-            interval.tick().await;
-            let started = Instant::now();
-            match job().await {
-                Ok(()) => tracing::debug!(
-                    job = name,
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "periodic job completed"
-                ),
-                Err(error) => {
-                    tracing::warn!(job = name, elapsed_ms = started.elapsed().as_millis(), %error, "periodic job failed; will retry")
-                }
-            }
-        }
-    })
+    runtime
+        .spawn_periodic_job(kind, name, initial_delay, interval_duration, job)
+        .unwrap_or_else(|_| tokio::spawn(async {}))
 }
+
+const MAX_LINE_READ_CLIENTS: usize = 1024;
 
 impl AppState {
     pub fn new(pool: SqlitePool, data_root: PathBuf, limits: AppLimits) -> Self {
@@ -395,11 +385,13 @@ impl AppState {
             max_concurrent_queries,
         );
         let temp_results = TempResultRuntime::new(limits.temp_results.concurrent_materializations);
+        let jobs = crate::job_runtime::JobRuntime::new();
         let line_read_permits = Arc::new(Semaphore::new(limits.api.concurrent_line_reads));
         let line_read_clients = Arc::new(Mutex::new(HashMap::new()));
         let settings = SettingsService::new_with_config(pool.clone(), &limits, &auth);
         let auth_runtime = AuthRuntime::new(auth);
         Self {
+            jobs,
             db: DatabaseContext { pool },
             storage: StorageContext {
                 data_root,

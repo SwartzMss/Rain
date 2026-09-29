@@ -1,7 +1,5 @@
 use super::common::checked_page_end;
-use super::lifecycle::{
-    abort_staging_result, acquire_materialization_lease, acquire_materialization_lease_for_client,
-};
+use super::lifecycle::{abort_staging_result, acquire_materialization_lease_for_client};
 use super::lifecycle::{
     acquire_active_result, finish_deleting_temp_result, load_active_unexpired_record, load_record,
 };
@@ -664,28 +662,61 @@ pub(crate) async fn create_preview_result(
         None
     };
     let Some(context) = context else {
-        return create_preview_result_inner(&client_key, &payload, &state, None)
-            .await
-            .map(|response| HttpResponse::Ok().json(response));
+        let worker_state = state.clone();
+        let worker_client_key = client_key.clone();
+        let worker = state
+            .jobs
+            .spawn(
+                crate::job_runtime::JobType::Materialize,
+                move |_job_context| async move {
+                    create_preview_result_inner(&worker_client_key, &payload, &worker_state, None)
+                        .await
+                },
+            )
+            .map_err(|_| AppError::Conflict("后台任务运行时已停止".into()))?;
+        return match worker.await {
+            Ok(Ok(response)) => Ok(HttpResponse::Ok().json(response)),
+            Ok(Err(error)) => Err(error),
+            Err(error) => {
+                tracing::error!(%error, "preview worker terminated unexpectedly");
+                Err(AppError::Config("preview worker terminated".into()))
+            }
+        };
     };
 
     let worker_registry = state.temp_results.search_executions.clone();
     let _handler_guard = SearchExecutionHandlerGuard::new(worker_registry.clone(), &context);
     let worker_state = state.clone();
     let worker_client_key = client_key.clone();
-    let worker = tokio::spawn(async move {
-        let mut execution_guard =
-            SearchExecutionGuard::new(worker_registry.clone(), context.clone());
-        let result = create_preview_result_inner(
-            &worker_client_key,
-            &payload,
-            &worker_state,
-            Some(&context),
+    let worker_runtime = state.jobs.clone();
+    let worker = state
+        .jobs
+        .spawn(
+            crate::job_runtime::JobType::Search,
+            move |job_context| async move {
+                let mut execution_guard =
+                    SearchExecutionGuard::new(worker_registry.clone(), context.clone());
+                let result = create_preview_result_inner(
+                    &worker_client_key,
+                    &payload,
+                    &worker_state,
+                    Some(&context),
+                )
+                .await;
+                execution_guard.finish_result(&result);
+                if let Err(error) = &result {
+                    if is_search_cancelled(error) {
+                        worker_runtime
+                            .stop(job_context.id(), crate::job_runtime::StopReason::Cancelled);
+                    } else if is_scan_timeout(error) {
+                        worker_runtime
+                            .stop(job_context.id(), crate::job_runtime::StopReason::TimedOut);
+                    }
+                }
+                result
+            },
         )
-        .await;
-        execution_guard.finish_result(&result);
-        result
-    });
+        .map_err(|_| AppError::Conflict("后台任务运行时已停止".into()))?;
     match worker.await {
         Ok(Ok(response)) => Ok(HttpResponse::Ok().json(response)),
         Ok(Err(error)) => Err(error),
@@ -783,37 +814,56 @@ pub(crate) async fn create_full_result(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
     check_temp_result_rate_limit(&state, &request)?;
-    let _client_lease = acquire_materialization_lease(&state, &request)?;
-    let _permit = state
-        .temp_results
-        .permits
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| {
-            AppError::api(
-                StatusCode::TOO_MANY_REQUESTS,
-                "TEMP_RESULT_BUSY",
-                "临时结果生成任务过多，请稍后重试",
-            )
-        })?;
-    ensure_temp_result_budget(&state).await?;
-    let expression_text = payload.expression.trim();
-    let expression = log_expression::parse(expression_text)
-        .map_err(|error| invalid_expression(expression_text, error))?;
-    let resolved = resolve_sources(&payload, &state).await?;
-    let source_label = source_label(&resolved.sources);
-    let outcome = materialize_result(
-        &state,
-        expression_text,
-        &expression,
-        &resolved.sources,
-        &source_label,
-        MaterializeMode::Full,
-        None,
-    )
-    .await?;
-    let result = load_active_unexpired_record(&state, &outcome.id).await?;
-    Ok(HttpResponse::Created().json(to_response(result)))
+    let client_key = request_client_key(&request);
+    let payload = payload.into_inner();
+    let worker_state = state.clone();
+    let worker = state
+        .jobs
+        .spawn(
+            crate::job_runtime::JobType::Materialize,
+            move |_job_context| async move {
+                let _client_lease =
+                    acquire_materialization_lease_for_client(&worker_state, &client_key)?;
+                let _permit = worker_state
+                    .temp_results
+                    .permits
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| {
+                        AppError::api(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "TEMP_RESULT_BUSY",
+                            "临时结果生成任务过多，请稍后重试",
+                        )
+                    })?;
+                ensure_temp_result_budget(&worker_state).await?;
+                let expression_text = payload.expression.trim();
+                let expression = log_expression::parse(expression_text)
+                    .map_err(|error| invalid_expression(expression_text, error))?;
+                let resolved = resolve_sources(&payload, &worker_state).await?;
+                let source_label = source_label(&resolved.sources);
+                let outcome = materialize_result(
+                    &worker_state,
+                    expression_text,
+                    &expression,
+                    &resolved.sources,
+                    &source_label,
+                    MaterializeMode::Full,
+                    None,
+                )
+                .await?;
+                load_active_unexpired_record(&worker_state, &outcome.id).await
+            },
+        )
+        .map_err(|_| AppError::Conflict("后台任务运行时已停止".into()))?;
+    match worker.await {
+        Ok(Ok(result)) => Ok(HttpResponse::Created().json(to_response(result))),
+        Ok(Err(error)) => Err(error),
+        Err(error) => {
+            tracing::error!(%error, "full result worker terminated unexpectedly");
+            Err(AppError::Config("full result worker terminated".into()))
+        }
+    }
 }
 
 pub(crate) async fn get_result(
