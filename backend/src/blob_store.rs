@@ -537,8 +537,11 @@ pub struct BlobRecoveryStats {
 pub fn spawn_blob_recovery(
     pool: SqlitePool,
     store: Arc<dyn BlobStore>,
+    runtime: crate::job_runtime::JobRuntime,
 ) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        runtime,
+        crate::job_runtime::JobType::Cleanup,
         "blob-recovery",
         std::time::Duration::from_secs(30),
         std::time::Duration::from_secs(300),
@@ -715,8 +718,11 @@ pub fn spawn_blob_audit(
     pool: SqlitePool,
     store: Arc<dyn BlobStore>,
     activity: BlobAuditActivity,
+    runtime: crate::job_runtime::JobRuntime,
 ) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        runtime,
+        crate::job_runtime::JobType::Cleanup,
         "blob-audit",
         AUDIT_INITIAL_DELAY,
         AUDIT_INTERVAL,
@@ -940,8 +946,11 @@ pub async fn garbage_collect_unreferenced_blobs_with_grace(
 pub fn spawn_blob_gc(
     pool: SqlitePool,
     store: std::sync::Arc<dyn BlobStore>,
+    runtime: crate::job_runtime::JobRuntime,
 ) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        runtime,
+        crate::job_runtime::JobType::Cleanup,
         "blob-gc",
         std::time::Duration::from_secs(3600),
         std::time::Duration::from_secs(3600),

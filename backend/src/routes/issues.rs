@@ -889,9 +889,14 @@ pub async fn delete_issue_bundle(
     .await;
 
     let pool = state.db.pool.clone();
-    tokio::spawn(async move {
-        if let Err(error) = crate::db::finish_bundle_deletion(&pool, &bundle_id).await {
-            tracing::error!(bundle_id, %error, "background bundle deletion failed; it will be retried at startup");
+    let runtime = state.jobs.clone();
+    let _ = runtime.spawn(crate::job_runtime::JobType::Cleanup, move |_context| async move {
+        match crate::db::finish_bundle_deletion(&pool, &bundle_id).await {
+            Ok(()) => Ok::<(), String>(()),
+            Err(error) => {
+                tracing::error!(bundle_id, %error, "background bundle deletion failed; it will be retried at startup");
+                Err(error.to_string())
+            }
         }
     });
 
@@ -993,7 +998,8 @@ pub async fn delete_issue(
     if !claimed {
         return Ok(HttpResponse::Accepted().finish());
     }
-    tokio::spawn(async move {
+    let runtime = state.jobs.clone();
+    let _ = runtime.spawn(crate::job_runtime::JobType::Cleanup, move |_context| async move {
         if let Err(error) = finish_manual_issue_deletion(
             &pool,
             &cleanup_issue_code,
@@ -1004,7 +1010,9 @@ pub async fn delete_issue(
         {
             schedule_manual_retry(&pool, &cleanup_issue_code, &lease_token).await;
             tracing::error!(issue_code = cleanup_issue_code, %error, "background issue deletion failed; it can be retried");
+            return Err(error.to_string());
         }
+        Ok::<(), String>(())
     });
 
     Ok(HttpResponse::Accepted().finish())

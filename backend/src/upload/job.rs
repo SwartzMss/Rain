@@ -42,8 +42,13 @@ impl TempCleanupQueue {
     }
 }
 
-pub fn spawn_temp_cleanup_worker(queue: TempCleanupQueue) -> tokio::task::JoinHandle<()> {
+pub fn spawn_temp_cleanup_worker(
+    queue: TempCleanupQueue,
+    runtime: crate::job_runtime::JobRuntime,
+) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        runtime,
+        crate::job_runtime::JobType::Cleanup,
         "temporary-upload-cleanup",
         std::time::Duration::ZERO,
         std::time::Duration::from_secs(30),
@@ -95,10 +100,10 @@ pub struct UploadJob {
     pub search_resource_budget: crate::search::resource::SearchResourceBudget,
 }
 
-pub fn spawn_upload_job(job: UploadJob) {
+pub fn spawn_upload_job(job: UploadJob, runtime: crate::job_runtime::JobRuntime) {
     // Start before scheduling so enqueue-to-READY includes executor delay.
     let queued_at = Instant::now();
-    tokio::spawn(async move {
+    let submission = runtime.spawn(crate::job_runtime::JobType::Upload, move |_context| async move {
         let file_count = job.files.len();
         let received_bytes = job
             .files
@@ -137,7 +142,7 @@ pub fn spawn_upload_job(job: UploadJob) {
                     job.temp_cleanup_queue
                         .enqueue(job.temp_dir.clone(), job.receive_reservation);
                 }
-                return;
+                return Ok::<(), AppError>(());
             }
         };
 
@@ -197,7 +202,11 @@ pub fn spawn_upload_job(job: UploadJob) {
             job.temp_cleanup_queue
                 .enqueue(job.temp_dir.clone(), job.receive_reservation);
         }
+        Ok::<(), AppError>(())
     });
+    if submission.is_err() {
+        error!("background upload job was rejected because the job runtime is closed");
+    }
 }
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {

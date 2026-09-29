@@ -193,33 +193,36 @@ pub async fn upload_logs(
 
     let file_count = upload.files.len() as u64;
     let staging_root = temp_dir.join("staging");
-    spawn_upload_job(UploadJob {
-        received_at,
-        pool: state.db.pool.clone(),
-        data_root: state.storage.data_root.clone(),
-        blob_store: state.storage.blob_store.clone(),
-        temp_dir,
-        staging_root,
-        processing_permits: state.upload.processing_permits.clone(),
-        archive_config: crate::config::ArchiveConfig::for_content_limit_with_working_size(
-            settings.effective.issue_max_content_size,
-            settings.effective.archive_max_working_size,
-        ),
-        indexing_config: crate::config::IndexingConfig {
-            max_indexed_line_size: settings.effective.indexing_max_indexed_line_size,
+    spawn_upload_job(
+        UploadJob {
+            received_at,
+            pool: state.db.pool.clone(),
+            data_root: state.storage.data_root.clone(),
+            blob_store: state.storage.blob_store.clone(),
+            temp_dir,
+            staging_root,
+            processing_permits: state.upload.processing_permits.clone(),
+            archive_config: crate::config::ArchiveConfig::for_content_limit_with_working_size(
+                settings.effective.issue_max_content_size,
+                settings.effective.archive_max_working_size,
+            ),
+            indexing_config: crate::config::IndexingConfig {
+                max_indexed_line_size: settings.effective.indexing_max_indexed_line_size,
+            },
+            request_id: request_id.clone(),
+            issue_code: issue_code.clone(),
+            issue_max_content_size: settings.effective.issue_max_content_size,
+            settings: state.settings.clone(),
+            bundle_id: bundle_id.clone(),
+            bundle_hash: bundle_hash.clone(),
+            files: upload.files,
+            receive_reservation: upload.receive_reservation,
+            temp_cleanup_queue: state.upload.temp_cleanup_queue.clone(),
+            search_backend: state.search_backend,
+            search_resource_budget: state.search.tantivy_budget.clone(),
         },
-        request_id: request_id.clone(),
-        issue_code: issue_code.clone(),
-        issue_max_content_size: settings.effective.issue_max_content_size,
-        settings: state.settings.clone(),
-        bundle_id: bundle_id.clone(),
-        bundle_hash: bundle_hash.clone(),
-        files: upload.files,
-        receive_reservation: upload.receive_reservation,
-        temp_cleanup_queue: state.upload.temp_cleanup_queue.clone(),
-        search_backend: state.search_backend,
-        search_resource_budget: state.search.tantivy_budget.clone(),
-    });
+        state.jobs.clone(),
+    );
 
     info!(
         request_id = request_id.as_deref().unwrap_or("unavailable"),

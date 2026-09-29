@@ -26,6 +26,8 @@ mod uploads;
 
 pub fn spawn_temp_result_cleanup(state: web::Data<crate::AppState>) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        state.jobs.clone(),
+        crate::job_runtime::JobType::Cleanup,
         "temporary-result-cleanup",
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(300),
@@ -44,6 +46,8 @@ pub fn spawn_inactive_issue_cleanup(
     state: web::Data<crate::AppState>,
 ) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        state.jobs.clone(),
+        crate::job_runtime::JobType::Cleanup,
         "inactive-issue-cleanup",
         std::time::Duration::ZERO,
         std::time::Duration::from_secs(60 * 60),
@@ -63,6 +67,8 @@ pub fn spawn_manual_issue_cleanup(
     state: web::Data<crate::AppState>,
 ) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        state.jobs.clone(),
+        crate::job_runtime::JobType::Cleanup,
         "manual-issue-cleanup",
         std::time::Duration::ZERO,
         std::time::Duration::from_secs(60),
@@ -81,57 +87,67 @@ pub fn spawn_manual_issue_cleanup(
 pub fn spawn_file_deletion_cleanup(
     state: web::Data<crate::AppState>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {},
-                _ = state.file_deletion_notify.notified() => {},
-            }
+    let runtime = state.jobs.clone();
+    runtime
+        .spawn(crate::job_runtime::JobType::Cleanup, move |context| async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = context.cancelled() => return Ok::<(), String>(()),
+                    _ = interval.tick() => {},
+                    _ = state.file_deletion_notify.notified() => {},
+                }
 
-            // Continue yielded jobs immediately. The timer remains a recovery
-            // path for jobs left behind by a restart or a missed notification.
-            let mut reached_turn_limit = true;
-            for _ in 0..100 {
-                let batch_work =
-                    match crate::services::file_deletion::process_file_deletion_batches(
-                        &state.db.pool,
-                    )
-                    .await
+                // Continue yielded jobs immediately. The timer remains a recovery
+                // path for jobs left behind by a restart or a missed notification.
+                let mut reached_turn_limit = true;
+                for _ in 0..100 {
+                    if context.is_cancelled() {
+                        return Ok(());
+                    }
+                    let batch_work =
+                        match crate::services::file_deletion::process_file_deletion_batches(
+                            &state.db.pool,
+                        )
+                        .await
+                        {
+                            Ok(processed) => processed,
+                            Err(error) => {
+                                reached_turn_limit = false;
+                                tracing::warn!(job = "file-deletion-cleanup", %error, "file deletion batch worker failed; will retry");
+                                break;
+                            }
+                        };
+                    match crate::services::file_deletion::process_file_deletion_jobs(&state.db.pool)
+                        .await
                     {
-                        Ok(processed) => processed,
-                        Err(error) => {
+                        Ok(0) if batch_work == 0 => {
                             reached_turn_limit = false;
-                            tracing::warn!(job = "file-deletion-cleanup", %error, "file deletion batch worker failed; will retry");
                             break;
                         }
-                    };
-                match crate::services::file_deletion::process_file_deletion_jobs(&state.db.pool)
-                    .await
-                {
-                    Ok(0) if batch_work == 0 => {
-                        reached_turn_limit = false;
-                        break;
-                    }
-                    Ok(_) => tokio::task::yield_now().await,
-                    Err(error) => {
-                        reached_turn_limit = false;
-                        tracing::warn!(job = "file-deletion-cleanup", %error, "file deletion worker failed; will retry");
-                        break;
+                        Ok(_) => tokio::task::yield_now().await,
+                        Err(error) => {
+                            reached_turn_limit = false;
+                            tracing::warn!(job = "file-deletion-cleanup", %error, "file deletion worker failed; will retry");
+                            break;
+                        }
                     }
                 }
+                if reached_turn_limit {
+                    state.file_deletion_notify.notify_one();
+                }
             }
-            if reached_turn_limit {
-                state.file_deletion_notify.notify_one();
-            }
-        }
-    })
+        })
+        .map(|handle| tokio::spawn(async move { let _ = handle.await; }))
+        .unwrap_or_else(|_| tokio::spawn(async {}))
 }
 
 pub fn spawn_search_artifact_cleanup(
     state: web::Data<crate::AppState>,
 ) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        state.jobs.clone(),
+        crate::job_runtime::JobType::Cleanup,
         "search-artifact-cleanup",
         std::time::Duration::from_secs(30),
         std::time::Duration::from_secs(30),
@@ -162,6 +178,8 @@ pub fn spawn_search_artifact_cleanup(
 
 pub fn spawn_search_rebuild(state: web::Data<crate::AppState>) -> tokio::task::JoinHandle<()> {
     crate::spawn_periodic_job(
+        state.jobs.clone(),
+        crate::job_runtime::JobType::Index,
         "search-rebuild",
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(15),

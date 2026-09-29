@@ -27,13 +27,6 @@ impl Drop for MaterializationLease {
     }
 }
 
-pub(crate) fn acquire_materialization_lease(
-    state: &web::Data<AppState>,
-    request: &HttpRequest,
-) -> Result<MaterializationLease, AppError> {
-    acquire_materialization_lease_for_client(state, &super::request_client_key(request))
-}
-
 pub(crate) fn acquire_materialization_lease_for_client(
     state: &web::Data<AppState>,
     key: &str,

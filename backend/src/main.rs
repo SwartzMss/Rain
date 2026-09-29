@@ -23,6 +23,7 @@ use tracing_appender::rolling;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 const STARTUP_RECOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const JOB_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 struct SqliteSidecarPaths {
     main: PathBuf,
@@ -332,6 +333,7 @@ async fn main() -> std::io::Result<()> {
         spawn_blob_gc(
             shared_state.db.pool.clone(),
             shared_state.storage.blob_store.clone(),
+            shared_state.jobs.clone(),
         ),
         spawn_blob_audit(
             shared_state.db.pool.clone(),
@@ -344,23 +346,33 @@ async fn main() -> std::io::Result<()> {
                 config.limits.upload.concurrent_receive_tasks,
                 runtime_plan.tantivy_max_concurrent_queries,
             ),
+            shared_state.jobs.clone(),
         ),
         spawn_blob_recovery(
             shared_state.db.pool.clone(),
             shared_state.storage.blob_store.clone(),
+            shared_state.jobs.clone(),
         ),
     ];
-    background_tasks.push(spawn_deleting_bundle_cleanup(shared_state.db.pool.clone()));
-    background_tasks.push(spawn_session_cleanup(shared_state.db.pool.clone()));
+    background_tasks.push(spawn_deleting_bundle_cleanup(
+        shared_state.db.pool.clone(),
+        shared_state.jobs.clone(),
+    ));
+    background_tasks.push(spawn_session_cleanup(
+        shared_state.db.pool.clone(),
+        shared_state.jobs.clone(),
+    ));
     if !recovery_runtime.invariant_recovery_ready() {
         background_tasks.push(spawn_invariant_recovery_supervisor(
             shared_state.db.pool.clone(),
             recovery_runtime,
             recovery_cutoff,
+            shared_state.jobs.clone(),
         ));
     }
     background_tasks.push(backend::upload::job::spawn_temp_cleanup_worker(
         shared_state.upload.temp_cleanup_queue.clone(),
+        shared_state.jobs.clone(),
     ));
     background_tasks.push(backend::upload::session_finalizer::spawn(
         shared_state.clone(),
@@ -382,17 +394,47 @@ async fn main() -> std::io::Result<()> {
     ));
     background_tasks.push(backend::routes::spawn_search_rebuild(shared_state.clone()));
 
-    let server = HttpServer::new(move || {
+    let server_state = shared_state.clone();
+    let server_builder = HttpServer::new(move || {
         App::new()
             .wrap(from_fn(http_access_log::log_useful_requests))
             .wrap(from_fn(backend::auth::same_origin::enforce_same_origin))
-            .app_data(shared_state.clone())
+            .app_data(server_state.clone())
             .configure(register)
             .default_service(web::get().to(embedded_frontend::serve_frontend))
     })
-    .bind(bind_addr)?
-    .run();
-    let result = server.await;
+    .disable_signals();
+    let server = match server_builder.bind(bind_addr) {
+        Ok(server) => server.run(),
+        Err(error) => {
+            let shutdown = shared_state.jobs.shutdown(JOB_SHUTDOWN_GRACE).await;
+            let background_task_count = background_tasks.len();
+            for task in background_tasks {
+                task.abort();
+            }
+            error!(
+                background_task_count,
+                graceful = shutdown.graceful,
+                outstanding_jobs = shutdown.outstanding,
+                error = %error,
+                "Rain backend failed to bind; shutdown completed"
+            );
+            return Err(error);
+        }
+    };
+    let server_handle = server.handle();
+    tokio::pin!(server);
+    let (result, shutdown) = tokio::select! {
+        result = &mut server => {
+            let shutdown = shared_state.jobs.shutdown(JOB_SHUTDOWN_GRACE).await;
+            (result, shutdown)
+        }
+        _ = wait_for_shutdown_signal() => {
+            server_handle.stop(true).await;
+            let (result, shutdown) = tokio::join!(&mut server, shared_state.jobs.shutdown(JOB_SHUTDOWN_GRACE));
+            (result, shutdown)
+        }
+    };
     let background_task_count = background_tasks.len();
     match &result {
         Ok(()) => info!(
@@ -408,12 +450,41 @@ async fn main() -> std::io::Result<()> {
     for task in background_tasks {
         task.abort();
     }
-    info!(background_task_count, "Rain backend shutdown completed");
+    info!(
+        background_task_count,
+        graceful = shutdown.graceful,
+        outstanding_jobs = shutdown.outstanding,
+        "Rain backend shutdown completed"
+    );
     result
 }
 
-fn spawn_deleting_bundle_cleanup(pool: sqlx::SqlitePool) -> tokio::task::JoinHandle<()> {
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn spawn_deleting_bundle_cleanup(
+    pool: sqlx::SqlitePool,
+    runtime: backend::JobRuntime,
+) -> tokio::task::JoinHandle<()> {
     backend::spawn_periodic_job(
+        runtime,
+        backend::JobType::Cleanup,
         "deleting-bundle-cleanup",
         Duration::from_secs(30),
         Duration::from_secs(300),
@@ -429,8 +500,13 @@ fn spawn_deleting_bundle_cleanup(pool: sqlx::SqlitePool) -> tokio::task::JoinHan
     )
 }
 
-fn spawn_session_cleanup(pool: sqlx::SqlitePool) -> tokio::task::JoinHandle<()> {
+fn spawn_session_cleanup(
+    pool: sqlx::SqlitePool,
+    runtime: backend::JobRuntime,
+) -> tokio::task::JoinHandle<()> {
     backend::spawn_periodic_job(
+        runtime,
+        backend::JobType::Cleanup,
         "session-cleanup",
         Duration::ZERO,
         Duration::from_secs(60 * 60),
@@ -450,47 +526,61 @@ fn spawn_invariant_recovery_supervisor(
     pool: sqlx::SqlitePool,
     recovery: Arc<RecoveryRuntime>,
     recovery_cutoff: String,
+    runtime: backend::JobRuntime,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut attempt = 0usize;
-        loop {
-            if recovery.invariant_recovery_ready() {
-                info!("invariant recovery supervisor completed");
-                return;
-            }
+    runtime
+        .spawn(backend::JobType::Cleanup, move |context| async move {
+            let mut attempt = 0usize;
+            loop {
+                if context.is_cancelled() {
+                    return Ok::<(), String>(());
+                }
+                if recovery.invariant_recovery_ready() {
+                    info!("invariant recovery supervisor completed");
+                    return Ok(());
+                }
 
-            attempt = attempt.saturating_add(1);
-            if !recovery.stale_processing_bundles_ready()
-                && run_recovery_stage(
-                    "stale-processing-bundles",
+                attempt = attempt.saturating_add(1);
+                if !recovery.stale_processing_bundles_ready()
+                    && run_recovery_stage(
+                        "stale-processing-bundles",
+                        attempt,
+                        STARTUP_RECOVERY_TIMEOUT,
+                        fail_stale_processing_bundles_before(&pool, &recovery_cutoff),
+                    )
+                    .await
+                {
+                    recovery.mark_stale_processing_bundles_ready();
+                }
+                if recovery.invariant_recovery_ready() {
+                    info!(attempt, "invariant recovery supervisor completed");
+                    return Ok(());
+                }
+
+                let retry_delay = match attempt {
+                    1 => Duration::from_secs(1),
+                    2 => Duration::from_secs(2),
+                    3 => Duration::from_secs(5),
+                    4 => Duration::from_secs(10),
+                    _ => Duration::from_secs(30),
+                };
+                warn!(
                     attempt,
-                    STARTUP_RECOVERY_TIMEOUT,
-                    fail_stale_processing_bundles_before(&pool, &recovery_cutoff),
-                )
-                .await
-            {
-                recovery.mark_stale_processing_bundles_ready();
+                    retry_in_ms = retry_delay.as_millis() as u64,
+                    "invariant recovery incomplete; scheduling retry"
+                );
+                tokio::select! {
+                    _ = context.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(retry_delay) => {}
+                }
             }
-            if recovery.invariant_recovery_ready() {
-                info!(attempt, "invariant recovery supervisor completed");
-                return;
-            }
-
-            let retry_delay = match attempt {
-                1 => Duration::from_secs(1),
-                2 => Duration::from_secs(2),
-                3 => Duration::from_secs(5),
-                4 => Duration::from_secs(10),
-                _ => Duration::from_secs(30),
-            };
-            warn!(
-                attempt,
-                retry_in_ms = retry_delay.as_millis() as u64,
-                "invariant recovery incomplete; scheduling retry"
-            );
-            tokio::time::sleep(retry_delay).await;
-        }
-    })
+        })
+        .map(|handle| {
+            tokio::spawn(async move {
+                let _ = handle.await;
+            })
+        })
+        .unwrap_or_else(|_| tokio::spawn(async {}))
 }
 
 async fn cleanup_temp_uploads(
