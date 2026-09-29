@@ -393,4 +393,131 @@ describe('BundleView search expression flow', () => {
       fileId === 'root' && Boolean(options?.cursor)
     ))).toBe(false);
   });
+
+  it('reveals a source inside an archive nested in another archive in one action', async () => {
+    const response = {
+      result_id: 'result-nested',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle',
+        file_id: 30,
+        path: '/outer.zip/inner.zip/source.log',
+        content: 'ERROR from nested source',
+        line_number: 10
+      }]
+    };
+    testMocks.fetchIssueBundles.mockResolvedValue({
+      log_bundles: [{ hash: 'bundle', name: 'Bundle', status: { upload_status: 'READY' } }]
+    });
+    testMocks.fetchFileNode.mockImplementation(async (_bundleId, fileId) => {
+      const responses = {
+        root: {
+          node: {
+            id: 'root', parent_id: null, name: 'bundle_root', path: '/',
+            is_dir: true, preview_kind: 'directory'
+          },
+          children: [{
+            id: 1, parent_id: null, name: 'first.log', path: '/first.log',
+            is_dir: false, preview_kind: 'text'
+          }, {
+            id: 10, parent_id: null, name: 'outer.zip', path: '/outer.zip',
+            is_dir: false, preview_kind: 'archive'
+          }],
+          has_more: false,
+          next_cursor: null
+        },
+        '10': {
+          node: {
+            id: 10, parent_id: null, name: 'outer.zip', path: '/outer.zip',
+            is_dir: false, preview_kind: 'archive'
+          },
+          children: [{
+            id: 11, parent_id: 10, name: 'outer.zip_extracted',
+            path: '/outer.zip_extracted', is_dir: true, preview_kind: 'directory'
+          }],
+          has_more: false,
+          next_cursor: null
+        },
+        '11': {
+          node: {
+            id: 11, parent_id: 10, name: 'outer.zip_extracted',
+            path: '/outer.zip_extracted', is_dir: true, preview_kind: 'directory'
+          },
+          children: [{
+            id: 20, parent_id: 11, name: 'inner.zip', path: '/outer.zip/inner.zip',
+            is_dir: false, preview_kind: 'archive'
+          }],
+          has_more: false,
+          next_cursor: null
+        },
+        '20': {
+          node: {
+            id: 20, parent_id: 11, name: 'inner.zip', path: '/outer.zip/inner.zip',
+            is_dir: false, preview_kind: 'archive'
+          },
+          children: [{
+            id: 21, parent_id: 20, name: 'inner.zip_extracted',
+            path: '/outer.zip/inner.zip_extracted', is_dir: true, preview_kind: 'directory'
+          }],
+          has_more: false,
+          next_cursor: null
+        },
+        '21': {
+          node: {
+            id: 21, parent_id: 20, name: 'inner.zip_extracted',
+            path: '/outer.zip/inner.zip_extracted', is_dir: true, preview_kind: 'directory'
+          },
+          children: [{
+            id: 30, parent_id: 21, name: 'source.log',
+            path: '/outer.zip/inner.zip/source.log', is_dir: false, preview_kind: 'text'
+          }],
+          has_more: false,
+          next_cursor: null
+        },
+        '30': {
+          node: {
+            id: 30, parent_id: 21, name: 'source.log',
+            path: '/outer.zip/inner.zip/source.log', is_dir: false, preview_kind: 'text'
+          },
+          children: [],
+          has_more: false,
+          next_cursor: null
+        }
+      } as const;
+      const result = responses[String(fileId) as keyof typeof responses];
+      if (!result) throw new Error(`unexpected file node request: ${fileId}`);
+      return result;
+    });
+    testMocks.fetchFileLines.mockResolvedValue({
+      path: '/outer.zip/inner.zip/source.log',
+      start: 0,
+      limit: 1000,
+      lines: [{ line_number: 10, content: 'ERROR from nested source' }]
+    });
+    testMocks.execute.mockImplementation(async (_request, options) => {
+      options?.onSuccess?.(response);
+      return response;
+    });
+
+    renderBundleView();
+    await waitFor(() => expect(testMocks.fetchFileNode).toHaveBeenCalledWith('bundle', 'root', { limit: 100 }));
+    await waitFor(() => expect(
+      document.querySelector('[data-file-tree-node-id="bundle:1"]')
+    ).toBeInTheDocument());
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'ERROR' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+
+    await waitFor(() => expect(screen.getByText('ERROR from nested source')).toBeInTheDocument());
+    fireEvent.contextMenu(screen.getByText('ERROR from nested source'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '在原文件中打开' }));
+
+    await waitFor(() => expect(
+      document.querySelector('[data-file-tree-node-id="bundle:30"]')
+    ).toBeInTheDocument());
+    expect(document.querySelector('[data-file-tree-node-id="bundle:30"]'))
+      .toHaveAttribute('aria-current', 'true');
+  });
 });
