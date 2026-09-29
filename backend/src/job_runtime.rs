@@ -189,6 +189,7 @@ impl<T, E> Future for JobHandle<T, E> {
 
 struct JobEntry {
     kind: JobType,
+    scheduler: bool,
     status: JobStatus,
     token: CancellationToken,
     stop_reason: Option<StopReason>,
@@ -237,6 +238,7 @@ const MAX_TERMINAL_JOBS: usize = 1024;
 struct RuntimeInner {
     state: Mutex<RuntimeState>,
     changed: Notify,
+    executor: Option<tokio::runtime::Handle>,
 }
 
 #[derive(Clone)]
@@ -264,6 +266,7 @@ impl JobRuntime {
                     metrics,
                 }),
                 changed: Notify::new(),
+                executor: tokio::runtime::Handle::try_current().ok(),
             }),
         }
     }
@@ -287,13 +290,29 @@ impl JobRuntime {
         F: FnOnce(JobContext) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
-        self.spawn_with_timeout(kind, None, factory)
+        self.spawn_with_options(kind, None, false, factory)
     }
 
     pub fn spawn_with_timeout<T, E, F, Fut>(
         &self,
         kind: JobType,
         timeout: Option<Duration>,
+        factory: F,
+    ) -> Result<JobHandle<T, E>, SubmitError>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce(JobContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        self.spawn_with_options(kind, timeout, false, factory)
+    }
+
+    fn spawn_with_options<T, E, F, Fut>(
+        &self,
+        kind: JobType,
+        timeout: Option<Duration>,
+        scheduler: bool,
         factory: F,
     ) -> Result<JobHandle<T, E>, SubmitError>
     where
@@ -321,6 +340,7 @@ impl JobRuntime {
                 id,
                 JobEntry {
                     kind,
+                    scheduler,
                     status: JobStatus::Pending,
                     token,
                     stop_reason: None,
@@ -329,11 +349,13 @@ impl JobRuntime {
                     terminal_at: None,
                 },
             );
-            state.metrics.entry(kind).or_default().queued += 1;
+            if !scheduler {
+                state.metrics.entry(kind).or_default().queued += 1;
+            }
         }
 
         let runtime = self.clone();
-        let task = tokio::spawn(async move {
+        let task = self.spawn_future(async move {
             runtime.mark_running(id);
             let mut completion_guard = CompletionGuard::new(runtime.clone(), id);
             let future = factory(context.clone());
@@ -379,7 +401,8 @@ impl JobRuntime {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
-        let handle = self.spawn(kind, move |context| async move {
+        let runtime_for_ticks = self.clone();
+        let handle = self.spawn_with_options(kind, None, true, move |context| async move {
             tokio::select! {
                 _ = context.cancelled() => return Ok::<(), String>(()),
                 _ = tokio::time::sleep(initial_delay) => {}
@@ -390,7 +413,9 @@ impl JobRuntime {
                     _ = context.cancelled() => break,
                     _ = interval.tick() => {
                         let started = Instant::now();
-                        match job().await {
+                        let result = job().await;
+                        runtime_for_ticks.record_periodic_result(kind, started.elapsed(), result.is_ok());
+                        match result {
                             Ok(()) => tracing::debug!(job = name, elapsed_ms = started.elapsed().as_millis(), "periodic job completed"),
                             Err(error) => tracing::warn!(job = name, elapsed_ms = started.elapsed().as_millis(), %error, "periodic job failed; will retry"),
                         }
@@ -399,9 +424,36 @@ impl JobRuntime {
             }
             Ok::<(), String>(())
         })?;
-        Ok(tokio::spawn(async move {
+        Ok(self.spawn_future(async move {
             let _ = handle.await;
         }))
+    }
+
+    fn spawn_future<F>(&self, future: F) -> tokio::task::JoinHandle<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        match self.inner.executor.clone() {
+            Some(executor) => executor.spawn(future),
+            None => tokio::spawn(future),
+        }
+    }
+
+    fn record_periodic_result(&self, kind: JobType, duration: Duration, succeeded: bool) {
+        if let Ok(mut state) = self.inner.state.lock()
+            && let Some(metrics) = state.metrics.get_mut(&kind)
+        {
+            if succeeded {
+                metrics.completed_total += 1;
+                metrics.last_success_at = Some(Utc::now().to_rfc3339());
+            } else {
+                metrics.failed_total += 1;
+            }
+            let millis = duration.as_millis();
+            metrics.duration_count += 1;
+            metrics.duration_sum_ms += millis;
+            metrics.last_duration_ms = Some(millis);
+        }
     }
 
     pub fn cancel(&self, id: Uuid) -> bool {
@@ -533,7 +585,11 @@ impl JobRuntime {
 
     fn mark_running(&self, id: Uuid) {
         if let Ok(mut state) = self.inner.state.lock() {
-            let Some(kind) = state.jobs.get(&id).map(|entry| entry.kind) else {
+            let Some((kind, scheduler)) = state
+                .jobs
+                .get(&id)
+                .map(|entry| (entry.kind, entry.scheduler))
+            else {
                 return;
             };
             if state.jobs.get(&id).is_some_and(|entry| {
@@ -553,7 +609,7 @@ impl JobRuntime {
                 }
                 entry.started_at = Some(Instant::now());
             }
-            if let Some(metrics) = state.metrics.get_mut(&kind) {
+            if !scheduler && let Some(metrics) = state.metrics.get_mut(&kind) {
                 metrics.queued = metrics.queued.saturating_sub(1);
                 metrics.active += 1;
             }
@@ -562,7 +618,7 @@ impl JobRuntime {
     }
 
     fn finish(&self, id: Uuid, succeeded: bool) -> JobStatus {
-        let (status, kind, duration) = {
+        let (status, kind, duration, scheduler) = {
             let mut state = self
                 .inner
                 .state
@@ -589,9 +645,10 @@ impl JobRuntime {
             let duration = entry.started_at.map(|started| started.elapsed());
             entry.status = status;
             entry.terminal_at = Some(Instant::now());
-            (status, entry.kind, duration)
+            (status, entry.kind, duration, entry.scheduler)
         };
-        if let Ok(mut state) = self.inner.state.lock()
+        if !scheduler
+            && let Ok(mut state) = self.inner.state.lock()
             && let Some(metrics) = state.metrics.get_mut(&kind)
         {
             metrics.active = metrics.active.saturating_sub(1);
@@ -617,7 +674,7 @@ impl JobRuntime {
     }
 
     fn finish_aborted(&self, id: Uuid) {
-        let (kind, duration, was_pending) = {
+        let (kind, duration, was_pending, scheduler) = {
             let mut state = self
                 .inner
                 .state
@@ -639,9 +696,10 @@ impl JobRuntime {
             let duration = entry.started_at.map(|started| started.elapsed());
             entry.status = JobStatus::Failed;
             entry.terminal_at = Some(Instant::now());
-            (entry.kind, duration, was_pending)
+            (entry.kind, duration, was_pending, entry.scheduler)
         };
-        if let Ok(mut state) = self.inner.state.lock()
+        if !scheduler
+            && let Ok(mut state) = self.inner.state.lock()
             && let Some(metrics) = state.metrics.get_mut(&kind)
         {
             if was_pending {

@@ -100,7 +100,10 @@ pub struct UploadJob {
     pub search_resource_budget: crate::search::resource::SearchResourceBudget,
 }
 
-pub fn spawn_upload_job(job: UploadJob, runtime: crate::job_runtime::JobRuntime) {
+pub fn spawn_upload_job(
+    job: UploadJob,
+    runtime: crate::job_runtime::JobRuntime,
+) -> Result<(), crate::job_runtime::SubmitError> {
     // Start before scheduling so enqueue-to-READY includes executor delay.
     let queued_at = Instant::now();
     let submission = runtime.spawn(crate::job_runtime::JobType::Upload, move |_context| async move {
@@ -111,7 +114,7 @@ pub fn spawn_upload_job(job: UploadJob, runtime: crate::job_runtime::JobRuntime)
             .fold(0_u64, |total, file| total.saturating_add(file.size_bytes));
         let _permit = match job.processing_permits.clone().acquire_owned().await {
             Ok(permit) => permit,
-            Err(error) => {
+            Err(ref error) => {
                 error!(
                     request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                     bundle_id = %job.bundle_id,
@@ -142,7 +145,7 @@ pub fn spawn_upload_job(job: UploadJob, runtime: crate::job_runtime::JobRuntime)
                     job.temp_cleanup_queue
                         .enqueue(job.temp_dir.clone(), job.receive_reservation);
                 }
-                return Ok::<(), AppError>(());
+                return Err::<(), AppError>(AppError::Conflict("上传处理任务已停止".into()));
             }
         };
 
@@ -168,7 +171,7 @@ pub fn spawn_upload_job(job: UploadJob, runtime: crate::job_runtime::JobRuntime)
                 elapsed_ms = processing_started.elapsed().as_millis() as u64,
                 "upload processing completed"
             ),
-            Err(error) => {
+            Err(ref error) => {
                 error!(
                     request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                     bundle_id = %job.bundle_id,
@@ -185,7 +188,7 @@ pub fn spawn_upload_job(job: UploadJob, runtime: crate::job_runtime::JobRuntime)
                     &job.data_root,
                     &job.staging_root,
                     &job.bundle_hash,
-                    &error,
+                    error,
                 )
                 .await;
             }
@@ -202,11 +205,11 @@ pub fn spawn_upload_job(job: UploadJob, runtime: crate::job_runtime::JobRuntime)
             job.temp_cleanup_queue
                 .enqueue(job.temp_dir.clone(), job.receive_reservation);
         }
-        Ok::<(), AppError>(())
+        process_result
     });
-    if submission.is_err() {
+    submission.map(|_| ()).inspect_err(|_error| {
         error!("background upload job was rejected because the job runtime is closed");
-    }
+    })
 }
 
 async fn process_upload_job(job: &UploadJob) -> Result<(), AppError> {

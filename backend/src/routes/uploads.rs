@@ -193,7 +193,8 @@ pub async fn upload_logs(
 
     let file_count = upload.files.len() as u64;
     let staging_root = temp_dir.join("staging");
-    spawn_upload_job(
+    let cleanup_temp_dir = temp_dir.clone();
+    let submission = spawn_upload_job(
         UploadJob {
             received_at,
             pool: state.db.pool.clone(),
@@ -223,6 +224,26 @@ pub async fn upload_logs(
         },
         state.jobs.clone(),
     );
+    if submission.is_err() {
+        remove_upload_reservation(&state.db.pool, &bundle_id).await;
+        if let Err(cleanup_error) = fs::remove_dir_all(&cleanup_temp_dir).await {
+            tracing::error!(
+                request_id = request_id.as_deref().unwrap_or("unavailable"),
+                bundle_id = %bundle_id,
+                path = %cleanup_temp_dir.display(),
+                error = %cleanup_error,
+                "failed to remove temporary upload directory after shutdown rejection"
+            );
+            state.upload.temp_cleanup_queue.enqueue(
+                cleanup_temp_dir,
+                ReceiveReservation::new_with_dynamic_max(
+                    state.upload.tmp_bytes.clone(),
+                    state.upload.tmp_max_bytes.clone(),
+                ),
+            );
+        }
+        return Err(AppError::Conflict("后台任务运行时已停止".into()));
+    }
 
     info!(
         request_id = request_id.as_deref().unwrap_or("unavailable"),

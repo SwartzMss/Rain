@@ -214,7 +214,8 @@ async fn finalize_one_locked(state: &AppState, session_id: &str) -> Result<(), A
         search_backend: state.search_backend,
         search_resource_budget: state.search.tantivy_budget.clone(),
     };
-    spawn_upload_job(job, state.jobs.clone());
+    spawn_upload_job(job, state.jobs.clone())
+        .map_err(|_| AppError::Conflict("后台任务运行时已停止".into()))?;
     mark_delivered(&state.db.pool, &session.id, &bundle_id).await?;
     Ok(())
 }
