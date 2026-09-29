@@ -116,13 +116,15 @@ describe('BundleView search expression flow', () => {
       .mockReturnValueOnce(secondValidation.promise);
 
     renderBundleView();
-    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
     const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
     fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
     fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
     await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
 
+    fireEvent.click(screen.getByRole('button', { name: '清除日志内容搜索' }));
     fireEvent.change(editor, { target: { value: 'B' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
     fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
     await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(2));
 
@@ -131,7 +133,7 @@ describe('BundleView search expression flow', () => {
     await act(async () => firstValidation.resolve({ valid: true }));
 
     await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
-    expect(testMocks.execute.mock.calls[0][0].expression).toBe('B');
+    expect(testMocks.execute.mock.calls[0][0].expression).toBe('"B"');
   });
 
   it('does not start validation that was cleared while it was pending', async () => {
@@ -139,9 +141,9 @@ describe('BundleView search expression flow', () => {
     testMocks.validateSearchExpression.mockReturnValue(validation.promise);
 
     renderBundleView();
-    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
     const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
     fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
     fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
     await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
 
@@ -156,9 +158,9 @@ describe('BundleView search expression flow', () => {
     testMocks.validateSearchExpression.mockReturnValue(validation.promise);
 
     renderBundleView();
-    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
     const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
     fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
     fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
     await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
 
@@ -172,12 +174,14 @@ describe('BundleView search expression flow', () => {
   it('does not start pending manual validation after using a saved search', async () => {
     const validation = deferred<{ valid: true }>();
     testMocks.fetchSavedSearches.mockResolvedValue([savedAdvancedSearch]);
-    testMocks.validateSearchExpression.mockReturnValue(validation.promise);
+    testMocks.validateSearchExpression
+      .mockReturnValueOnce(validation.promise)
+      .mockResolvedValue({ valid: true });
 
     renderBundleView();
-    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
     const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
     fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
     fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
     await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
 
@@ -200,9 +204,9 @@ describe('BundleView search expression flow', () => {
       .mockResolvedValueOnce(response);
 
     renderBundleView();
-    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
     const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
     fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
     fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
     await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
 
@@ -214,7 +218,7 @@ describe('BundleView search expression flow', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '搜索日志内容' })).toBeDisabled());
   });
 
-  it('round-trips an advanced saved search as raw advanced expression', async () => {
+  it('round-trips a parenthesized saved search in the unified editor', async () => {
     let savedSearches: typeof savedAdvancedSearch[] = [];
     testMocks.fetchSavedSearches.mockImplementation(async () => savedSearches);
     testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
@@ -232,10 +236,17 @@ describe('BundleView search expression flow', () => {
     });
 
     renderBundleView();
-    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
-    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
-      target: { value: 'A AND (B OR C)' }
-    });
+    const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
+    fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
+    fireEvent.click(screen.getByRole('button', { name: 'AND' }));
+    fireEvent.click(screen.getByRole('button', { name: '(' }));
+    fireEvent.change(editor, { target: { value: 'B' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
+    fireEvent.click(screen.getByRole('button', { name: 'OR' }));
+    fireEvent.change(editor, { target: { value: 'C' } });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
+    fireEvent.click(screen.getByRole('button', { name: ')' }));
     fireEvent.click(screen.getByRole('button', { name: '保存条件' }));
     fireEvent.change(screen.getByRole('textbox', { name: '名称' }), {
       target: { value: 'Advanced search' }
@@ -244,23 +255,23 @@ describe('BundleView search expression flow', () => {
 
     await waitFor(() => expect(testMocks.createSavedSearch).toHaveBeenCalledTimes(1));
     expect(testMocks.createSavedSearch.mock.calls[0][0]).toMatchObject({
-      query_text: 'A AND (B OR C)',
-      options: { version: 1, editor_mode: 'advanced' }
+      query_text: '"A" AND ( "B" OR "C" )',
+      options: { version: 1 }
     });
 
     fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
     fireEvent.click(await screen.findByRole('button', { name: '使用' }));
-    await waitFor(() => expect(screen.getByRole('tab', { name: '高级表达式' })).toHaveAttribute('aria-selected', 'true'));
-    expect(screen.getByRole('textbox', { name: '日志内容搜索条件' })).toHaveValue('A AND (B OR C)');
+    await waitFor(() => expect(screen.getByRole('button', { name: '编辑关键词 A' })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: '编辑关键词 B' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '编辑关键词 C' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
     fireEvent.click(await screen.findByRole('button', { name: '编辑' }));
-    expect(screen.getAllByRole('tab', { name: '高级表达式' })).toHaveLength(2);
-    expect(screen.getAllByRole('tab', { name: '高级表达式' }).every((tab) => tab.getAttribute('aria-selected') === 'true')).toBe(true);
-    expect(screen.getByRole('textbox', { name: '编辑详细搜索条件' })).toHaveValue('A AND (B OR C)');
+    expect(screen.getAllByRole('button', { name: '编辑关键词 A' })).toHaveLength(2);
+    expect(screen.getByRole('textbox', { name: '编辑详细搜索条件' })).toBeInTheDocument();
   });
 
-  it('round-trips a simple saved search with AND NOT in simple mode', async () => {
+  it('round-trips a saved search with unary NOT in the unified editor', async () => {
     let savedSearches: typeof savedAdvancedSearch[] = [];
     testMocks.fetchSavedSearches.mockImplementation(async () => savedSearches);
     testMocks.createSavedSearch.mockImplementation(async (payload) => {
@@ -281,7 +292,7 @@ describe('BundleView search expression flow', () => {
       target: { value: 'A' }
     });
     fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
-    fireEvent.click(screen.getByRole('button', { name: 'AND NOT' }));
+    fireEvent.click(screen.getByRole('button', { name: 'NOT' }));
     fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
       target: { value: 'B' }
     });
@@ -295,18 +306,17 @@ describe('BundleView search expression flow', () => {
     await waitFor(() => expect(testMocks.createSavedSearch).toHaveBeenCalledTimes(1));
     expect(testMocks.createSavedSearch.mock.calls[0][0]).toMatchObject({
       query_text: '"A" AND NOT "B"',
-      options: { version: 1, editor_mode: 'simple' }
+      options: { version: 1 }
     });
 
     fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
     fireEvent.click(await screen.findByRole('button', { name: '使用' }));
-    await waitFor(() => expect(screen.getByRole('tab', { name: '简单模式' })).toHaveAttribute('aria-selected', 'true'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '编辑关键词 A' })).toBeInTheDocument());
     expect(screen.getByRole('button', { name: '编辑关键词 A' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '编辑关键词 B' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
     fireEvent.click(await screen.findByRole('button', { name: '编辑' }));
-    expect(screen.getByRole('tab', { name: '简单模式' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getAllByRole('button', { name: '编辑关键词 A' })).toHaveLength(2);
   });
 
@@ -384,7 +394,9 @@ describe('BundleView search expression flow', () => {
     fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
     fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
 
-    fireEvent.contextMenu(await screen.findByText('ERROR from target'));
+    await waitFor(() => expect(screen.getByText('ERROR from target')).toBeInTheDocument());
+    await act(async () => {});
+    fireEvent.contextMenu(screen.getByText('ERROR from target'));
     fireEvent.click(await screen.findByRole('menuitem', { name: '在原文件中打开' }));
 
     const targetButton = await screen.findByRole('button', { name: 'target.log' });

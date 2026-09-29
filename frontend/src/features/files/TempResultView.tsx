@@ -174,7 +174,7 @@ export function TempResultView() {
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2">
             <input
               className="min-w-[220px] flex-1 bg-transparent text-sm text-slate-950 outline-none placeholder:text-slate-500"
-              placeholder='继续过滤，例如：(ERROR OR WARN) AND NOT heartbeat'
+              placeholder="继续过滤"
               value={expression}
               onChange={(event) => setExpression(event.target.value)}
               onKeyDown={(event) => {

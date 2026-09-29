@@ -9,10 +9,11 @@ const [filesView, expressionEditor] = await Promise.all([
 assert.match(filesView, /ariaLabel="日志内容搜索条件"/);
 assert.match(filesView, /aria-label="搜索日志内容"/);
 assert.match(filesView, /<SearchExpressionEditor/);
-assert.match(expressionEditor, /高级表达式/);
+assert.doesNotMatch(expressionEditor, /简单模式|高级表达式|支持 AND|优先于/);
+assert.match(expressionEditor, /SearchTokenEditor/);
 assert.match(filesView, /<FileTreeNode/);
 const savedSearchControls = filesView.match(
-  /<div className="mt-3 flex [^"]*text-xs text-slate-500">[\s\S]*?<SearchExecutionStatus/
+  /<div className="mt-3 flex w-full items-center [^"]*text-xs text-slate-500">[\s\S]*?<SearchExecutionStatus/
 );
 assert.ok(savedSearchControls, 'saved search controls should be grouped before the execution status');
 assert.match(savedSearchControls[0], /justify-(?:end|between)/);
