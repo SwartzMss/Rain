@@ -350,6 +350,19 @@ pub async fn upload_session_chunk(
         )));
     }
 
+    let _receive_permit = state
+        .upload
+        .receive_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            AppError::api(
+                StatusCode::TOO_MANY_REQUESTS,
+                "UPLOAD_RECEIVE_BUSY",
+                "上传接收任务过多，请稍后重试",
+            )
+        })?;
+
     let input_path = state.storage.data_root.join(&session.input_path);
     let mut file = OpenOptions::new()
         .read(true)

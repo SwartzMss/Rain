@@ -30,6 +30,11 @@ type RetryableError = {
   retryAfterMs?: number;
 };
 
+type PendingTask = {
+  id: string;
+  attempt: number;
+};
+
 let taskSequence = 0;
 
 const taskId = () => `upload-task-${Date.now()}-${taskSequence++}`;
@@ -68,7 +73,7 @@ export function createUploadQueue<TResponse>(
   }
 
   const tasks = new Map<string, UploadQueueTask<TResponse>>();
-  const pending: string[] = [];
+  const pending: PendingTask[] = [];
   const listeners = new Set<() => void>();
   let active = 0;
   let snapshot: readonly UploadQueueTask<TResponse>[] = [];
@@ -112,7 +117,7 @@ export function createUploadQueue<TResponse>(
         window.setTimeout(() => {
           const task = tasks.get(id);
           if (!task || task.status !== 'RETRY_WAIT') return;
-          pending.push(id);
+          pending.push({ id, attempt: attempt + 1 });
           update(id, { status: 'QUEUED', message: null });
           drain();
         }, delay);
@@ -132,12 +137,12 @@ export function createUploadQueue<TResponse>(
 
   const drain = () => {
     while (active < concurrency && pending.length > 0) {
-      const id = pending.shift();
-      if (!id) continue;
-      const task = tasks.get(id);
+      const pendingTask = pending.shift();
+      if (!pendingTask) continue;
+      const task = tasks.get(pendingTask.id);
       if (!task || task.status !== 'QUEUED') continue;
       active += 1;
-      void runTask(id, 0);
+      void runTask(pendingTask.id, pendingTask.attempt);
     }
   };
 
@@ -155,7 +160,7 @@ export function createUploadQueue<TResponse>(
         message: null,
         response: null
       });
-      pending.push(id);
+      pending.push({ id, attempt: 0 });
       return id;
     });
     notify();
@@ -172,7 +177,7 @@ export function createUploadQueue<TResponse>(
       message: null,
       response: null
     });
-    pending.push(id);
+    pending.push({ id, attempt: 0 });
     drain();
   };
 

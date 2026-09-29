@@ -87,6 +87,8 @@ async fn process(fail: bool) -> Events {
             indexing: &IndexingConfig::default(),
             search_index: None,
             preflighted: false,
+            processing_permit: None,
+            index_semaphore: None,
         }).await;
         assert_eq!(result.is_err(), fail);
         pool.close().await;

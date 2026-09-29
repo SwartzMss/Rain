@@ -573,6 +573,34 @@ async fn settings_response_with_metadata(
         })
         .collect::<serde_json::Map<_, _>>();
     response["jobs"] = serde_json::Value::Object(jobs);
+    let upload_processing_capacity = state.limits.upload.concurrent_processing_tasks;
+    let upload_receive_capacity = state.limits.upload.concurrent_receive_tasks;
+    let sqlite_index_capacity = 1_usize;
+    response["upload_resources"] = serde_json::json!({
+        "receive": {
+            "active": upload_receive_capacity.saturating_sub(
+                state.upload.receive_permits.available_permits()
+            ),
+            "capacity": upload_receive_capacity,
+        },
+        "process": {
+            "active": upload_processing_capacity.saturating_sub(
+                state.upload.processing_permits.available_permits()
+            ),
+            "capacity": upload_processing_capacity,
+        },
+        "sqlite_index": {
+            "active": sqlite_index_capacity.saturating_sub(
+                state.upload.sqlite_index_permits.available_permits()
+            ),
+            "capacity": sqlite_index_capacity,
+        },
+        "tantivy_index": {
+            "active": state.search.tantivy_budget.active_writers(),
+            "queued": state.search.tantivy_budget.queued_writers(),
+            "capacity": state.search.tantivy_budget.writer_capacity(),
+        },
+    });
     response["updated_at"] = serde_json::Value::String(updated_at);
     response["updated_by_username"] = updated_by_username
         .map(serde_json::Value::String)

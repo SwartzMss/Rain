@@ -17,6 +17,7 @@ pub const MAX_CONCURRENT_TANTIVY_QUERIES: usize = 4;
 #[derive(Clone)]
 pub struct SearchResourceBudget {
     writer_permits: Arc<Semaphore>,
+    writer_capacity: usize,
     writer_heap_size_bytes: usize,
     queued_writers: Arc<AtomicUsize>,
     active_writers: Arc<AtomicUsize>,
@@ -75,6 +76,7 @@ impl SearchResourceBudget {
         }
         Ok(Self {
             writer_permits: Arc::new(Semaphore::new(max_writers)),
+            writer_capacity: max_writers,
             writer_heap_size_bytes,
             queued_writers: Arc::new(AtomicUsize::new(0)),
             active_writers: Arc::new(AtomicUsize::new(0)),
@@ -105,6 +107,10 @@ impl SearchResourceBudget {
 
     pub fn available_writers(&self) -> usize {
         self.writer_permits.available_permits()
+    }
+
+    pub fn writer_capacity(&self) -> usize {
+        self.writer_capacity
     }
 
     pub fn queued_writers(&self) -> usize {

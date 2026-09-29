@@ -85,6 +85,7 @@ pub struct UploadJob {
     pub temp_dir: PathBuf,
     pub staging_root: PathBuf,
     pub processing_permits: Arc<Semaphore>,
+    pub sqlite_index_permits: Arc<Semaphore>,
     pub archive_config: ArchiveConfig,
     pub indexing_config: IndexingConfig,
     pub request_id: Option<String>,
@@ -106,107 +107,73 @@ pub fn spawn_upload_job(
 ) -> Result<(), crate::job_runtime::SubmitError> {
     // Start before scheduling so enqueue-to-READY includes executor delay.
     let queued_at = Instant::now();
-    let submission = runtime.spawn(crate::job_runtime::JobType::Upload, move |_context| async move {
-        let file_count = job.files.len();
-        let received_bytes = job
-            .files
-            .iter()
-            .fold(0_u64, |total, file| total.saturating_add(file.size_bytes));
-        let _permit = match job.processing_permits.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(ref error) => {
-                error!(
-                    request_id = job.request_id.as_deref().unwrap_or("unavailable"),
-                    bundle_id = %job.bundle_id,
-                    bundle_hash = %job.bundle_hash,
-                    file_count,
-                    received_bytes,
-                    queue_elapsed_ms = queued_at.elapsed().as_millis() as u64,
-                    error = %error,
-                    "failed to acquire upload processing permit"
-                );
-                finalize_bundle_failed(
-                    &job.pool,
-                    &job.bundle_id,
-                    &job.data_root,
-                    &job.staging_root,
-                    &job.bundle_hash,
-                    &AppError::Conflict("上传处理任务已停止".into()),
-                )
-                .await;
-                if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
-                    error!(
-                        request_id = job.request_id.as_deref().unwrap_or("unavailable"),
-                        bundle_id = %job.bundle_id,
-                        path = %job.temp_dir.display(),
-                        error = %cleanup_error,
-                        "failed to remove temporary upload directory; retaining budget reservation"
-                    );
-                    job.temp_cleanup_queue
-                        .enqueue(job.temp_dir.clone(), job.receive_reservation);
-                }
-                return Err::<(), AppError>(AppError::Conflict("上传处理任务已停止".into()));
-            }
-        };
-
-        let processing_started = Instant::now();
-        info!(
-            request_id = job.request_id.as_deref().unwrap_or("unavailable"),
-            bundle_id = %job.bundle_id,
-            bundle_hash = %job.bundle_hash,
-            file_count,
-            received_bytes,
-            queue_elapsed_ms = queued_at.elapsed().as_millis() as u64,
-            "upload processing started"
-        );
-        let process_result = process_upload_job(&job).await;
-
-        match process_result {
-            Ok(()) => info!(
+    let submission = runtime.spawn(
+        crate::job_runtime::JobType::Upload,
+        move |_context| async move {
+            let file_count = job.files.len();
+            let received_bytes = job
+                .files
+                .iter()
+                .fold(0_u64, |total, file| total.saturating_add(file.size_bytes));
+            let processing_started = Instant::now();
+            info!(
                 request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                 bundle_id = %job.bundle_id,
                 bundle_hash = %job.bundle_hash,
                 file_count,
                 received_bytes,
-                elapsed_ms = processing_started.elapsed().as_millis() as u64,
-                "upload processing completed"
-            ),
-            Err(ref error) => {
-                error!(
+                queue_elapsed_ms = queued_at.elapsed().as_millis() as u64,
+                "upload processing started"
+            );
+            let process_result = process_upload_job(&job).await;
+
+            match process_result {
+                Ok(()) => info!(
                     request_id = job.request_id.as_deref().unwrap_or("unavailable"),
                     bundle_id = %job.bundle_id,
                     bundle_hash = %job.bundle_hash,
                     file_count,
                     received_bytes,
                     elapsed_ms = processing_started.elapsed().as_millis() as u64,
-                    error = %error,
-                    "failed to process uploaded log bundle"
-                );
-                finalize_bundle_failed(
-                    &job.pool,
-                    &job.bundle_id,
-                    &job.data_root,
-                    &job.staging_root,
-                    &job.bundle_hash,
-                    error,
-                )
-                .await;
+                    "upload processing completed"
+                ),
+                Err(ref error) => {
+                    error!(
+                        request_id = job.request_id.as_deref().unwrap_or("unavailable"),
+                        bundle_id = %job.bundle_id,
+                        bundle_hash = %job.bundle_hash,
+                        file_count,
+                        received_bytes,
+                        elapsed_ms = processing_started.elapsed().as_millis() as u64,
+                        error = %error,
+                        "failed to process uploaded log bundle"
+                    );
+                    finalize_bundle_failed(
+                        &job.pool,
+                        &job.bundle_id,
+                        &job.data_root,
+                        &job.staging_root,
+                        &job.bundle_hash,
+                        error,
+                    )
+                    .await;
+                }
             }
-        }
 
-        if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
-            error!(
-                request_id = job.request_id.as_deref().unwrap_or("unavailable"),
-                bundle_id = %job.bundle_id,
-                path = %job.temp_dir.display(),
-                error = %cleanup_error,
-                "failed to remove temporary upload directory; retaining budget reservation"
-            );
-            job.temp_cleanup_queue
-                .enqueue(job.temp_dir.clone(), job.receive_reservation);
-        }
-        process_result
-    });
+            if let Err(cleanup_error) = fs::remove_dir_all(&job.temp_dir).await {
+                error!(
+                    request_id = job.request_id.as_deref().unwrap_or("unavailable"),
+                    bundle_id = %job.bundle_id,
+                    path = %job.temp_dir.display(),
+                    error = %cleanup_error,
+                    "failed to remove temporary upload directory; retaining budget reservation"
+                );
+                job.temp_cleanup_queue
+                    .enqueue(job.temp_dir.clone(), job.receive_reservation);
+            }
+            process_result
+        },
+    );
     submission.map(|_| ()).inspect_err(|_error| {
         error!("background upload job was rejected because the job runtime is closed");
     })
@@ -291,6 +258,12 @@ async fn process_upload_files_and_publish(
         current_issue_limit,
     );
 
+    let processing_permit = job
+        .processing_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| AppError::Conflict("上传处理准入已停止".into()))?;
     crate::upload::lifecycle::set_bundle_stage(&job.pool, &job.bundle_id, "VALIDATING").await?;
     let preflight_started = Instant::now();
     for uploaded in &job.files {
@@ -323,6 +296,7 @@ async fn process_upload_files_and_publish(
         queued_writers = job.search_resource_budget.queued_writers(),
         "uploaded bundle preflight completed"
     );
+    drop(processing_permit);
 
     for (file_index, uploaded) in job.files.iter().enumerate() {
         let file_started = Instant::now();
@@ -333,6 +307,14 @@ async fn process_upload_files_and_publish(
             size_bytes = uploaded.size_bytes,
             "uploaded file processing started"
         );
+        let processing_permit = job
+            .processing_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AppError::Conflict("上传处理准入已停止".into()))?;
+        let index_semaphore = (job.search_backend == SearchBackendKind::SqliteFts)
+            .then(|| job.sqlite_index_permits.clone());
         process_uploaded_file(ProcessFileOptions {
             pool: &job.pool,
             bundle_id: &job.bundle_id,
@@ -350,6 +332,8 @@ async fn process_upload_files_and_publish(
             indexing: &job.indexing_config,
             search_index: search_build_to_index(&search_build),
             preflighted: true,
+            processing_permit: Some(processing_permit),
+            index_semaphore,
         })
         .await?;
         debug!(

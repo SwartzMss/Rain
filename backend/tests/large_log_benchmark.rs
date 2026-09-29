@@ -420,6 +420,8 @@ async fn large_log_baseline() {
                         archive_budget: ArchiveBudget::new(ArchiveConfig::for_content_limit_with_working_size(limits.issue_max_content_size, limits.archive_max_working_size)),
                         issue_quota: IssueQuota::new(pool.clone(), "BENCH", id, limits.issue_max_content_size), indexing: &limits.indexing, search_index: bench_index(&search_build),
                         preflighted: false,
+                        processing_permit: None,
+                        index_semaphore: None,
                     }).await.unwrap();
                     finish_bench_build(&search_build).await.unwrap();
                     finalize_bundle_ready_with_retry(pool, id).await.unwrap();

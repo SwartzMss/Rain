@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createUploadQueue } from '../src/features/files/uploadQueue';
 import { createOptimisticUploadRows } from '../src/features/files/uploadRows';
 import { stageLabel } from '../src/features/files/homeRows';
@@ -93,6 +93,28 @@ describe('upload queue', () => {
     await settleQueue();
     expect(attempts).toBe(2);
     expect(queue.getTasks('ISSUE-1')[0].status).toBe('ACCEPTED');
+  });
+
+  it('bounds repeated 429 retries across queue drain cycles', async () => {
+    vi.useFakeTimers();
+    try {
+      let attempts = 0;
+      const queue = createUploadQueue(async () => {
+        attempts += 1;
+        throw Object.assign(new Error('busy'), { status: 429, retryAfterMs: 0 });
+      }, 1);
+
+      queue.enqueue('ISSUE-1', [new File(['a'], 'a.log')]);
+      await settleQueue();
+      expect(attempts).toBe(1);
+
+      await vi.runAllTimersAsync();
+      await settleQueue();
+      expect(attempts).toBe(3);
+      expect(queue.getTasks('ISSUE-1')[0].status).toBe('FAILED');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('maps queue states to independent file rows with a retry target', () => {
