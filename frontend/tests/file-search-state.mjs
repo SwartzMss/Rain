@@ -24,17 +24,14 @@ try {
     new URL('../src/features/files/FilesView.tsx', import.meta.url),
     'utf8'
   );
-  assert.match(
-    filesView,
-    /useEffect\(\(\) => \{\s*if \(fileSearchExecuted && isFileSearchConditionEmpty\(fileSearchTokens, fileSearchDraft\)\) \{\s*clearFileSearch\(\);\s*\}\s*\}, \[clearFileSearch, fileSearchDraft, fileSearchExecuted, fileSearchTokens\]\);/
-  );
-  assert.equal(filesView.includes('setSearchError(issueSearchExecution.snapshot.errorMessage)'), false);
-  assert.equal(filesView.includes('setSearchError(viewerSearchExecution.snapshot.errorMessage)'), false);
-  assert.ok(filesView.includes("status === 'RUNNING' || status === 'CANCELLING' || status === 'CANCELLED' || status === 'SUCCEEDED'"));
-  assert.match(
-    filesView,
-    /setSearchDraft\(''\);\s*setSearchError\(null\);\s*setSearchLoading\(true\);/
-  );
+  assert.match(filesView, /useIssueSearchController/);
+  assert.match(filesView, /useFileSearchController/);
+  assert.match(filesView, /useViewerSearchController/);
+  assert.match(filesView, /useViewerPaginationController/);
+  assert.match(filesView, /useSavedSearchController/);
+  assert.equal(filesView.includes('const [searchLoading'), false);
+  assert.equal(filesView.includes('const [searchError'), false);
+  assert.equal(filesView.includes('searchRequestGenerationRef'), false);
   assert.equal(
     (filesView.match(/<SearchExecutionStatus/g) ?? []).length,
     1,

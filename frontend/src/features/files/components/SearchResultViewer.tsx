@@ -17,6 +17,7 @@ type SearchResultViewerProps = {
   onSearchWithinResults: () => void;
   canRunResultFilter: boolean;
   searchLoading: boolean;
+  searchError?: string | null;
   contentRef: React.RefObject<HTMLDivElement>;
   pageSizeOptions: readonly number[];
   onLoadPage: (
@@ -41,6 +42,7 @@ export function SearchResultViewer({
   onSearchWithinResults,
   canRunResultFilter,
   searchLoading,
+  searchError,
   contentRef,
   pageSizeOptions,
   onLoadPage,
@@ -78,6 +80,7 @@ export function SearchResultViewer({
 
   return (
     <>
+      {searchError ? <p className="border-b border-rose-100 bg-rose-50 px-4 py-2 text-xs text-rose-700">{searchError}</p> : null}
       <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 focus-within:border-sky-400">
         <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
         <SearchTokenEditor

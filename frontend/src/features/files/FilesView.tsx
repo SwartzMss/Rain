@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, normalizeApiError, rainApi } from '../../api/client';
-import type { IssueLogSearchHit, LogSearchHit, SavedSearch, SavedSearchPayload, UploadSummary } from '../../api/types';
+import type { IssueLogSearchHit, LogSearchHit, UploadSummary } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import type { BundleInfo } from '../../lib/bundles';
 import { BinaryFileInfo } from './BinaryFileInfo';
@@ -47,8 +47,13 @@ import { CodeLinesPane } from './components/CodeLinesPane';
 import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
 import { SearchExecutionStatus } from '../../components/SearchExecutionStatus';
-import { useSearchExecution } from '../../hooks/useSearchExecution';
-import { PENDING_SAVED_SEARCH_KEY, takePendingSavedSearch } from './pendingSavedSearch';
+import { takePendingSavedSearch } from './pendingSavedSearch';
+import { useIssueSearchController } from './hooks/useIssueSearchController';
+import { useFileSearchController } from './hooks/useFileSearchController';
+import { useViewerSearchController } from './hooks/useViewerSearchController';
+import { currentExpression } from './hooks/useSearchController';
+import { useViewerPaginationController } from './hooks/useViewerPaginationController';
+import { useSavedSearchController } from './hooks/useSavedSearchController';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
@@ -156,31 +161,9 @@ export function BundleView() {
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [searchTokens, setSearchTokens] = useState<SearchToken[]>(
-    pendingDetailEditor.tokens
-  );
-  const [searchDraft, setSearchDraft] = useState('');
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(pendingDetailEditor.error);
-  const [searchExecuted, setSearchExecuted] = useState(false);
-  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
-  const [savedSearchesOpen, setSavedSearchesOpen] = useState(false);
-  const [saveDialogOpen, setSaveDialogOpen] = useState(Boolean(pendingSavedSearch));
-  const [savedSearchName, setSavedSearchName] = useState('');
-  const [savedSearchError, setSavedSearchError] = useState('');
-  const [editingSavedSearch, setEditingSavedSearch] = useState<SavedSearch | null>(null);
-  const [editingSearchTokens, setEditingSearchTokens] = useState<SearchToken[]>([]);
-  const [editingSearchDraft, setEditingSearchDraft] = useState('');
-  const [resultFilterTokens, setResultFilterTokens] = useState<SearchToken[]>([]);
-  const [resultFilterDraft, setResultFilterDraft] = useState('');
-  const [fileSearchTokens, setFileSearchTokens] = useState<SearchToken[]>([]);
-  const [fileSearchDraft, setFileSearchDraft] = useState('');
   const [fileSearchResults, setFileSearchResults] = useState<LogSearchHit[]>([]);
   const [fileSearchTotal, setFileSearchTotal] = useState(0);
   const [fileSearchFrom, setFileSearchFrom] = useState(0);
-  const [fileSearchLoading, setFileSearchLoading] = useState(false);
-  const [fileSearchError, setFileSearchError] = useState<string | null>(null);
-  const [fileSearchExecuted, setFileSearchExecuted] = useState(false);
   const [lineStart, setLineStart] = useState(0);
   const [linePageSize, setLinePageSize] = useState<number>(LINE_PAGE_SIZE_OPTIONS[0]);
   const [targetLine, setTargetLine] = useState<number | null>(null);
@@ -188,9 +171,6 @@ export function BundleView() {
   const [sourceActionMessage, setSourceActionMessage] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const fileTreeContainerRef = useRef<HTMLDivElement | null>(null);
-  const searchRequestGenerationRef = useRef(0);
-  const saveDialogGenerationRef = useRef(0);
-  const editingSaveGenerationRef = useRef(0);
   const restoredPendingSearchRef = useRef(Boolean(pendingSavedSearch));
   const contextKeyRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
@@ -217,39 +197,21 @@ export function BundleView() {
     updateViewerTabs,
     togglePinnedViewerTab
   } = useViewerTabs(auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER');
-  const issueSearchExecution = useSearchExecution();
-  const fileSearchExecution = useSearchExecution();
-  const viewerSearchExecution = useSearchExecution();
-  useEffect(() => {
-    const status = issueSearchExecution.snapshot.status;
-    if (status === 'RUNNING' || status === 'CANCELLING' || status === 'CANCELLED' || status === 'SUCCEEDED') {
-      setSearchError(null);
-    }
-    if (status === 'CANCELLED' || status === 'FAILED' || status === 'SUCCEEDED') {
-      setSearchLoading(false);
-    }
-  }, [issueSearchExecution.snapshot.status]);
-  useEffect(() => {
-    if (fileSearchExecution.snapshot.status === 'FAILED') {
-      setFileSearchError(fileSearchExecution.snapshot.errorMessage);
-    }
-    if (fileSearchExecution.snapshot.status === 'CANCELLED'
-      || fileSearchExecution.snapshot.status === 'FAILED'
-      || fileSearchExecution.snapshot.status === 'SUCCEEDED') {
-      setFileSearchLoading(false);
-    }
-  }, [fileSearchExecution.snapshot.errorMessage, fileSearchExecution.snapshot.status]);
-  useEffect(() => {
-    const status = viewerSearchExecution.snapshot.status;
-    if (status === 'RUNNING' || status === 'CANCELLING' || status === 'CANCELLED' || status === 'SUCCEEDED') {
-      setSearchError(null);
-    }
-    if (status === 'CANCELLED' || status === 'FAILED' || status === 'SUCCEEDED') {
-      setSearchLoading(false);
-    }
-  }, [viewerSearchExecution.snapshot.status]);
+  const issueSearch = useIssueSearchController(pendingDetailEditor.tokens, pendingDetailEditor.error);
+  const fileSearch = useFileSearchController();
+  const viewerSearch = useViewerSearchController();
+  const savedSearch = useSavedSearchController({
+    authenticated: auth.state.status === 'AUTHENTICATED',
+    issueCode,
+    locationPath: `${location.pathname}${location.search}`,
+    pendingSavedSearch,
+    issueSearch,
+    navigate,
+    openViewerTab
+  });
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const fileContextKey = `${issueCode}\u0000${bundleId}`;
+  const viewerPagination = useViewerPaginationController(fileContextKey, updateViewerTabs);
   const fileContentCache = useMemo(() => createFileContentCache(
     (request: FileContentRequestKey, signal: AbortSignal) => rainApi.fetchFileLines(
       request.bundle,
@@ -288,169 +250,6 @@ export function BundleView() {
     request: activeFileRequest
   });
 
-  const currentSavedSearchPayload = useCallback((): SavedSearchPayload | null => {
-    try {
-      const tokens = finalizeSearchTokens(searchTokens, searchDraft);
-      return {
-        name: savedSearchName,
-        search_type: 'DETAIL',
-        query_text: serializeSearchTokens(tokens),
-        options: { version: 1 }
-      };
-    } catch {
-      return null;
-    }
-  }, [savedSearchName, searchDraft, searchTokens]);
-
-  const loadSavedSearches = useCallback(async () => {
-    if (auth.state.status !== 'AUTHENTICATED') return;
-    const items = await rainApi.fetchSavedSearches();
-    setSavedSearches(items.filter((item) => item.search_type === 'DETAIL'));
-  }, [auth.state.status]);
-
-  useEffect(() => {
-    if (auth.state.status !== 'AUTHENTICATED') {
-      setSavedSearches([]);
-      return;
-    }
-    void loadSavedSearches().catch((error) => setSavedSearchError(normalizeApiError(error)));
-    if (!pendingSavedSearch) {
-      const pending = takePendingSavedSearch(sessionStorage, true);
-      if (pending) {
-        const editor = detailEditorState(pending.query_text, pending.options);
-        setSearchTokens(editor.tokens);
-        setSearchDraft('');
-        if (editor.error) setSearchError(editor.error);
-        setSaveDialogOpen(true);
-      }
-    }
-  }, [auth.state.status, issueCode, loadSavedSearches, pendingSavedSearch]);
-
-  const beginSaveSearch = () => {
-    const payload = currentSavedSearchPayload();
-    if (!payload) {
-      setSavedSearchError('请先输入有效搜索条件');
-      return;
-    }
-    if (auth.state.status !== 'AUTHENTICATED') {
-      sessionStorage.setItem(PENDING_SAVED_SEARCH_KEY, JSON.stringify(payload));
-      navigate('/login', { state: { from: `${location.pathname}${location.search}` } });
-      return;
-    }
-    saveDialogGenerationRef.current += 1;
-    setSavedSearchError('');
-    setSaveDialogOpen(true);
-  };
-
-  const saveSearch = async () => {
-    const saveGeneration = saveDialogGenerationRef.current;
-    const payload = currentSavedSearchPayload();
-    if (!payload || !savedSearchName.trim()) {
-      setSavedSearchError('请输入名称并确认搜索条件有效');
-      return;
-    }
-    try {
-      await rainApi.validateSearchExpression(payload.query_text);
-      if (saveGeneration !== saveDialogGenerationRef.current) return;
-      await rainApi.createSavedSearch({ ...payload, name: savedSearchName.trim() });
-      if (saveGeneration !== saveDialogGenerationRef.current) return;
-      setSavedSearchName('');
-      setSaveDialogOpen(false);
-      await loadSavedSearches();
-    } catch (error) {
-      setSavedSearchError(normalizeApiError(error));
-    }
-  };
-
-  const useSavedSearch = async (item: SavedSearch) => {
-    const requestGeneration = ++searchRequestGenerationRef.current;
-    const isCurrentSearch = () => requestGeneration === searchRequestGenerationRef.current;
-    const editor = detailEditorState(item.query_text, item.options);
-    if (editor.error) {
-      setSearchError(editor.error);
-      return;
-    }
-    try {
-      await rainApi.validateSearchExpression(item.query_text);
-    } catch (error) {
-      if (isCurrentSearch()) setSearchError(normalizeApiError(error));
-      return;
-    }
-    if (!isCurrentSearch()) return;
-    setSearchTokens(editor.tokens);
-    setSearchDraft('');
-    setSearchError(null);
-    setSearchLoading(true);
-    const response = await issueSearchExecution.execute(
-      { expression: item.query_text, issue_code: issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
-      {
-        scopeKey: `issue:${issueCode}`,
-        onSuccess: (response) => {
-          if (!isCurrentSearch()) return;
-
-          const hits = response.lines.map((line) => ({
-            bundle_hash: line.bundle_hash,
-            file_id: line.file_id ?? '',
-            path: line.path,
-            snippet: line.content,
-            line_number: line.line_number
-          }));
-          setSearchExecuted(true);
-          openViewerTab({
-            id: `search:${Date.now()}`,
-            kind: 'search',
-            resultId: response.result_id,
-            title: item.name,
-            pinned: false,
-            scrollTop: 0,
-            expression: item.query_text,
-            hits,
-            total: response.total,
-            from: 0,
-            pageSize: LINE_PAGE_SIZE_OPTIONS[0],
-            pageHistory: [],
-            source: { kind: 'issue', issueCode }
-          });
-        }
-      }
-    );
-    if (!response || !isCurrentSearch()) return;
-    await rainApi.markSavedSearchUsed(item.id);
-    if (isCurrentSearch()) setSavedSearchesOpen(false);
-  };
-
-  const updateEditingSavedSearch = async () => {
-    if (!editingSavedSearch) return;
-    const saveGeneration = editingSaveGenerationRef.current;
-    try {
-      const finalizedTokens = finalizeSearchTokens(editingSearchTokens, editingSearchDraft);
-      const queryText = serializeSearchTokens(finalizedTokens);
-      await rainApi.validateSearchExpression(queryText);
-      if (saveGeneration !== editingSaveGenerationRef.current) return;
-      await rainApi.updateSavedSearch(editingSavedSearch.id, {
-        name: editingSavedSearch.name.trim(),
-        search_type: 'DETAIL',
-        query_text: queryText,
-        options: { version: 1 },
-        is_pinned: editingSavedSearch.is_pinned
-      });
-      if (saveGeneration !== editingSaveGenerationRef.current) return;
-      setEditingSavedSearch(null);
-      await loadSavedSearches();
-    } catch (error) {
-      setSavedSearchError(normalizeApiError(error));
-    }
-  };
-
-  const beginEditingSavedSearch = (item: SavedSearch) => {
-    const editor = detailEditorState(item.query_text, item.options);
-    setEditingSearchTokens(editor.tokens);
-    setEditingSearchDraft('');
-    setSavedSearchError(editor.error ?? '');
-    editingSaveGenerationRef.current += 1;
-    setEditingSavedSearch({ ...item });
-  };
-
   useEffect(() => {
     viewerTabsRef.current = viewerTabs;
   }, [viewerTabs]);
@@ -460,8 +259,8 @@ export function BundleView() {
   }, [activeViewerTabId]);
 
   useEffect(() => {
-    void viewerSearchExecution.cancel();
-  }, [activeViewerTab?.id]);
+    void viewerSearch.cancel();
+  }, [activeViewerTab?.id, viewerSearch.cancel]);
 
   useEffect(() => {
     selectedNodeIdRef.current = selectedNodeId;
@@ -573,108 +372,65 @@ export function BundleView() {
   );
 
   const runSearch = useCallback(async () => {
-    const requestGeneration = ++searchRequestGenerationRef.current;
-    const isCurrentSearch = () => requestGeneration === searchRequestGenerationRef.current;
     const issue = issueCode;
     if (!issue) {
-      setSearchError(null);
-      setSearchExecuted(false);
-      setResultFilterTokens([]);
-      setResultFilterDraft('');
+      issueSearch.clear();
+      viewerSearch.clear();
       return;
     }
-    let keyword: string;
+    let expression: string;
     let title: string;
     let finalizedTokens: SearchToken[];
     try {
-      finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft);
-      keyword = serializeSearchTokens(finalizedTokens);
-      title = formatSearchTokens(finalizedTokens);
+      const finalized = currentExpression(issueSearch.tokens, issueSearch.draft);
+      expression = finalized.expression;
+      title = formatSearchTokens(finalized.tokens);
+      finalizedTokens = finalized.tokens;
     } catch (error) {
-      setSearchError(error instanceof Error ? error.message : '搜索条件无效');
+      issueSearch.setError(error instanceof Error ? error.message : '搜索条件无效');
       return;
     }
-    try {
-      await rainApi.validateSearchExpression(keyword);
-    } catch (error) {
-      if (isCurrentSearch()) setSearchError(normalizeApiError(error));
-      return;
-    }
-    if (!isCurrentSearch()) return;
-    setSearchTokens(finalizedTokens);
-    setSearchDraft('');
-    setSearchLoading(true);
-    setSearchError(null);
-    setSearchExecuted(true);
-    setResultFilterTokens([]);
-    setResultFilterDraft('');
+    issueSearch.setEditor(finalizedTokens);
+    viewerSearch.clear();
     setFileSearchResults([]);
-    setFileSearchTokens([]);
-    setFileSearchDraft('');
+    fileSearch.clear();
     setFileSearchTotal(0);
     setFileSearchFrom(0);
-    setFileSearchError(null);
-    setFileSearchExecuted(false);
-    try {
-      const response = await issueSearchExecution.execute(
-        {
-          expression: keyword,
-          issue_code: issue,
+    await issueSearch.run({
+      expression,
+      payload: { expression, issue_code: issue, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
+      scopeKey: `issue:${issue}`,
+      onSuccess: (response) => {
+        const hits = response.lines.map((line) => ({
+          bundle_hash: line.bundle_hash,
+          file_id: line.file_id ?? '',
+          path: line.path,
+          snippet: line.content,
+          line_number: line.line_number
+        }));
+        openViewerTab({
+          id: `search:${response.result_id}`,
+          kind: 'search',
+          resultId: response.result_id,
+          title,
+          pinned: false,
+          scrollTop: 0,
+          expression,
+          hits,
+          total: response.total,
           from: 0,
-          size: LINE_PAGE_SIZE_OPTIONS[0]
-        },
-        {
-          scopeKey: `issue:${issue}`,
-          onSuccess: (response) => {
-            if (requestGeneration !== searchRequestGenerationRef.current) return;
-            const hits = response.lines.map((line) => ({
-              bundle_hash: line.bundle_hash,
-              file_id: line.file_id ?? '',
-              path: line.path,
-              snippet: line.content,
-              line_number: line.line_number
-            }));
-            const id = `search:${Date.now()}`;
-            openViewerTab({
-              id,
-              kind: 'search',
-              resultId: response.result_id,
-              title,
-              pinned: false,
-              scrollTop: 0,
-              expression: keyword,
-              hits,
-              total: response.total,
-              from: 0,
-              pageSize: LINE_PAGE_SIZE_OPTIONS[0],
-              pageHistory: [],
-              source: { kind: 'issue', issueCode: issue }
-            });
-          }
-        }
-      );
-      if (!response) return;
-    } catch (error) {
-      if (requestGeneration !== searchRequestGenerationRef.current) return;
-      setSearchError(normalizeApiError(error));
-    } finally {
-      if (requestGeneration === searchRequestGenerationRef.current) {
-        setSearchLoading(false);
+          pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+          pageHistory: [],
+          source: { kind: 'issue', issueCode: issue }
+        });
       }
-    }
-  }, [issueCode, openViewerTab, searchDraft, searchTokens]);
+    });
+  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, viewerSearch.clear]);
 
   const clearDetailedSearch = useCallback(() => {
-    searchRequestGenerationRef.current += 1;
-    void issueSearchExecution.cancel();
-    setSearchTokens([]);
-    setSearchDraft('');
-    setSearchLoading(false);
-    setSearchError(null);
-    setSearchExecuted(false);
-    setResultFilterTokens([]);
-    setResultFilterDraft('');
-  }, [issueSearchExecution]);
+    issueSearch.clear();
+    viewerSearch.clear();
+  }, [issueSearch.clear, viewerSearch.clear]);
 
   const handleSearchSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -705,10 +461,9 @@ export function BundleView() {
         : viewerTabsRef.current;
 
       if (isContextChange) {
-        searchRequestGenerationRef.current += 1;
-        void issueSearchExecution.cancel();
-        void fileSearchExecution.cancel();
-        void viewerSearchExecution.cancel();
+        issueSearch.invalidate();
+        fileSearch.invalidate();
+        viewerSearch.invalidate();
         setTreeNodes({});
         setExpandedNodes(new Set());
         setRootIds([]);
@@ -898,7 +653,10 @@ export function BundleView() {
     navigate,
     refreshKey,
     resetViewerTabs,
-    setViewerTabsState
+    setViewerTabsState,
+    issueSearch.invalidate,
+    fileSearch.invalidate,
+    viewerSearch.invalidate
   ]);
 
   useEffect(() => {
@@ -906,15 +664,9 @@ export function BundleView() {
       restoredPendingSearchRef.current = false;
       return;
     }
-    searchRequestGenerationRef.current += 1;
-    setSearchTokens([]);
-    setSearchDraft('');
-    setSearchLoading(false);
-    setSearchError(null);
-    setSearchExecuted(false);
-    setResultFilterTokens([]);
-    setResultFilterDraft('');
-  }, [issueCode]);
+    issueSearch.clear();
+    viewerSearch.clear();
+  }, [issueCode, issueSearch.clear, viewerSearch.clear]);
 
   const activeSearchResults = useMemo<IssueLogSearchHit[]>(() => {
     if (activeViewerTab?.kind === 'search') return activeViewerTab.hits;
@@ -936,10 +688,8 @@ export function BundleView() {
   ) => {
     pendingFilePageRef.current = null;
     if (!options?.preserveSearch) {
-      setSearchError(null);
-      setSearchExecuted(false);
-      setResultFilterTokens([]);
-      setResultFilterDraft('');
+      issueSearch.clear();
+      viewerSearch.clear();
     }
     let node: TreeNode | null = options?.node ?? treeNodes[nodeId] ?? null;
     const [prefBundle, rawFromId] = nodeId.includes(':') ? nodeId.split(/:(.+)/) : [bundleId, nodeId];
@@ -1224,21 +974,17 @@ export function BundleView() {
   }, [activeViewerTabId, fileContentError, fileContentLoading, fileLines, updateViewerTabs]);
 
   const clearFileSearch = useCallback(() => {
-    void fileSearchExecution.cancel();
-    setFileSearchTokens([]);
-    setFileSearchDraft('');
+    fileSearch.clear();
     setFileSearchResults([]);
     setFileSearchTotal(0);
     setFileSearchFrom(0);
-    setFileSearchError(null);
-    setFileSearchExecuted(false);
-  }, []);
+  }, [fileSearch.clear]);
 
   useEffect(() => {
-    if (fileSearchExecuted && isFileSearchConditionEmpty(fileSearchTokens, fileSearchDraft)) {
+    if (fileSearch.executed && isFileSearchConditionEmpty(fileSearch.tokens, fileSearch.draft)) {
       clearFileSearch();
     }
-  }, [clearFileSearch, fileSearchDraft, fileSearchExecuted, fileSearchTokens]);
+  }, [clearFileSearch, fileSearch.draft, fileSearch.executed, fileSearch.tokens]);
 
   const runFileSearch = useCallback(async (from = 0) => {
     if (!selectedNode || !canPreviewText(selectedNode)) return;
@@ -1246,31 +992,25 @@ export function BundleView() {
     if (!selectedBundleId) return;
     let finalizedTokens: SearchToken[];
     try {
-      finalizedTokens = finalizeSearchTokens(fileSearchTokens, fileSearchDraft, false);
+      finalizedTokens = finalizeSearchTokens(fileSearch.tokens, fileSearch.draft, false);
     } catch (error) {
-      setFileSearchError(error instanceof Error ? error.message : '搜索条件无效');
+      fileSearch.setError(error instanceof Error ? error.message : '搜索条件无效');
       return;
     }
     const expression = serializeSearchTokens(finalizedTokens);
     const title = formatSearchTokens(finalizedTokens);
-    setFileSearchTokens(finalizedTokens);
-    setFileSearchDraft('');
-
-    setFileSearchLoading(true);
-    setFileSearchError(null);
-    setFileSearchExecuted(true);
-    try {
-      const response = await fileSearchExecution.execute(
-        {
-          expression,
-          bundle_hash: selectedBundleId,
-          file_id: selectedNode.rawId,
-          from,
-          size: LINE_PAGE_SIZE_OPTIONS[0]
-        },
-        {
-          scopeKey: `file:${selectedBundleId}:${selectedNode.rawId}`,
-          onSuccess: (response) => {
+    fileSearch.setEditor(finalizedTokens);
+    const response = await fileSearch.run({
+      expression,
+      payload: {
+        expression,
+        bundle_hash: selectedBundleId,
+        file_id: selectedNode.rawId,
+        from,
+        size: LINE_PAGE_SIZE_OPTIONS[0]
+      },
+      scopeKey: `file:${selectedBundleId}:${selectedNode.rawId}`,
+      onSuccess: (response) => {
             const hits = response.lines.map((line) => ({
               bundle_hash: selectedBundleId,
               file_id: selectedNode.rawId,
@@ -1283,7 +1023,7 @@ export function BundleView() {
             setFileSearchTotal(response.total);
             setFileSearchFrom(from);
             if (from === 0 && hits.length > 0) {
-              const id = `search:${Date.now()}`;
+              const id = `search:${response.result_id}`;
               openViewerTab({
                 id,
                 kind: 'search',
@@ -1300,24 +1040,20 @@ export function BundleView() {
                 source: { kind: 'file', bundleHash: selectedBundleId, fileId: selectedNode.rawId }
               });
               setFileSearchResults([]);
-              setFileSearchExecuted(false);
+              fileSearch.clear();
             }
           }
-        }
-      );
-      if (!response) return;
-    } catch (error) {
-      setFileSearchError(normalizeApiError(error));
-    }
-  }, [bundleId, fileSearchDraft, fileSearchTokens, openViewerTab, selectedNode]);
+    });
+    if (!response) return;
+  }, [bundleId, fileSearch, openViewerTab, selectedNode]);
 
   const searchWithinActiveResults = useCallback(async () => {
     if (!activeViewerTab || (activeViewerTab.kind !== 'search' && activeViewerTab.kind !== 'temp')) return;
     let finalizedTokens: SearchToken[];
     try {
-      finalizedTokens = finalizeSearchTokens(resultFilterTokens, resultFilterDraft, false);
+      finalizedTokens = finalizeSearchTokens(viewerSearch.tokens, viewerSearch.draft, false);
     } catch (error) {
-      setSearchError(error instanceof Error ? error.message : '搜索条件无效');
+      viewerSearch.setError(error instanceof Error ? error.message : '搜索条件无效');
       return;
     }
     const nestedExpression = serializeSearchTokens(finalizedTokens);
@@ -1328,18 +1064,17 @@ export function BundleView() {
       resultId: activeViewerTab.resultId
     };
 
-    setSearchLoading(true);
-    setSearchError(null);
-    try {
-      const payload = {
+    viewerSearch.setEditor(finalizedTokens);
+    const response = await viewerSearch.run({
+      expression,
+      payload: {
         expression,
         source_temp_id: source.resultId,
         from: 0,
         size: LINE_PAGE_SIZE_OPTIONS[0]
-      };
-      const response = await viewerSearchExecution.execute(payload, {
-        scopeKey: `viewer:${activeViewerTab.id}:${activeViewerTab.resultId}`,
-        onSuccess: (response) => {
+      },
+      scopeKey: `viewer:${activeViewerTab.id}:${activeViewerTab.resultId}`,
+      onSuccess: (response) => {
           const hits = response.lines.map((line) => ({
             bundle_hash: line.bundle_hash,
             file_id: line.file_id ?? '',
@@ -1347,10 +1082,9 @@ export function BundleView() {
             snippet: line.content,
             line_number: line.line_number
           }));
-          setResultFilterTokens([]);
-          setResultFilterDraft('');
+          viewerSearch.clear();
           openViewerTab({
-            id: `search:${Date.now()}`,
+            id: `search:${response.result_id}`,
             kind: 'search',
             resultId: response.result_id,
             title,
@@ -1365,77 +1099,11 @@ export function BundleView() {
             source
           });
         }
-      });
-      if (!response) return;
-    } catch (error) {
-      setSearchError(normalizeApiError(error));
-    }
-  }, [activeViewerTab, openViewerTab, resultFilterDraft, resultFilterTokens]);
+    });
+    if (!response) return;
+  }, [activeViewerTab, openViewerTab, viewerSearch]);
 
-  const loadViewerPage = useCallback(async (
-    tab: ViewerTab,
-    from: number,
-    pageSize: number,
-    navigation: 'next' | 'previous' | 'reset'
-  ) => {
-    setSearchLoading(true);
-    setSearchError(null);
-    try {
-      if (tab.kind === 'temp') {
-        const response = await rainApi.fetchTempResultLines(tab.resultId, {
-          start: from,
-          limit: pageSize
-        });
-        updateViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'temp'
-          ? {
-              ...item,
-              lines: response.lines.map((line) => line.content),
-              total: response.line_count,
-              from: response.start,
-              pageSize: response.limit,
-              pageHistory: navigation === 'next'
-                ? [...(item.pageHistory ?? []), item.from]
-                : navigation === 'previous'
-                  ? (item.pageHistory ?? []).slice(0, -1)
-                  : [],
-              scrollTop: 0
-            }
-          : item));
-        return;
-      }
-      if (tab.kind !== 'search') return;
-      const response = await rainApi.fetchTempResultLines(tab.resultId, {
-        start: from,
-        limit: pageSize
-      });
-      const hits = response.lines.map((line) => ({
-        bundle_hash: line.bundle_hash ?? undefined,
-        file_id: line.file_id ?? '',
-        path: line.path ?? '',
-        snippet: line.content,
-        line_number: line.line_number
-      }));
-      updateViewerTabs((tabs) => tabs.map((item) => item.id === tab.id && item.kind === 'search'
-        ? {
-            ...item,
-            hits,
-            total: response.line_count,
-            from: response.start,
-            pageSize: response.limit,
-            pageHistory: navigation === 'next'
-              ? [...(item.pageHistory ?? []), item.from]
-              : navigation === 'previous'
-                ? (item.pageHistory ?? []).slice(0, -1)
-                : [],
-            scrollTop: 0
-          }
-        : item));
-    } catch (error) {
-      setSearchError(normalizeApiError(error));
-    } finally {
-      setSearchLoading(false);
-    }
-  }, [updateViewerTabs]);
+  const loadViewerPage = viewerPagination.loadPage;
 
   const activeIssueLabel = activeBundle.issue || '未知 Issue';
 
@@ -1517,18 +1185,18 @@ export function BundleView() {
     contentRef.current.scrollTop = activeViewerTab.scrollTop;
   }, [activeViewerTab?.id, activeViewerTab?.scrollTop, fileLines, targetLine]);
 
-  const fileSearchHighlightTerm = getSearchTerms(fileSearchTokens)[0] ?? fileSearchDraft.trim();
-  const resultFilterHighlightTerm = getSearchTerms(resultFilterTokens)[0] ?? resultFilterDraft.trim();
-  const canRunSearch = canFinalizeSearch(searchTokens, searchDraft);
+  const fileSearchHighlightTerm = getSearchTerms(fileSearch.tokens)[0] ?? fileSearch.draft.trim();
+  const resultFilterHighlightTerm = getSearchTerms(viewerSearch.tokens)[0] ?? viewerSearch.draft.trim();
+  const canRunSearch = canFinalizeSearch(issueSearch.tokens, issueSearch.draft);
   const showDetailedClear = (
-    searchTokens.length > 0
-    || Boolean(searchDraft.trim())
-    || searchExecuted
-    || searchLoading
-    || Boolean(searchError)
+    issueSearch.tokens.length > 0
+    || Boolean(issueSearch.draft.trim())
+    || issueSearch.executed
+    || issueSearch.busy
+    || Boolean(issueSearch.error)
   );
-  const canRunFileSearch = canFinalizeSearch(fileSearchTokens, fileSearchDraft, false);
-  const canRunResultFilter = canFinalizeSearch(resultFilterTokens, resultFilterDraft, false);
+  const canRunFileSearch = canFinalizeSearch(fileSearch.tokens, fileSearch.draft, false);
+  const canRunResultFilter = canFinalizeSearch(viewerSearch.tokens, viewerSearch.draft, false);
 
   return (
     <div className="space-y-5">
@@ -1562,13 +1230,13 @@ export function BundleView() {
               >
                 <span className="mt-1.5 shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                 <SearchExpressionEditor
-                  tokens={searchTokens}
-                  draft={searchDraft}
-                  onTokensChange={(tokens) => { searchRequestGenerationRef.current += 1; setSearchTokens(tokens); setSearchError(null); }}
-                  onDraftChange={(draft) => { searchRequestGenerationRef.current += 1; setSearchDraft(draft); setSearchError(null); }}
+                  tokens={issueSearch.tokens}
+                  draft={issueSearch.draft}
+                  onTokensChange={issueSearch.setTokens}
+                  onDraftChange={issueSearch.setDraft}
                   placeholder="输入关键词"
                   ariaLabel="日志内容搜索条件"
-                  disabled={searchLoading}
+                  disabled={issueSearch.busy}
                 />
                 {showDetailedClear ? (
                   <button
@@ -1584,7 +1252,7 @@ export function BundleView() {
                   type="submit"
                   className="mt-0.5 shrink-0 rounded bg-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-900 transition hover:bg-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
                   aria-label="搜索日志内容"
-                  disabled={searchLoading || !issueCode || !canRunSearch}
+                  disabled={issueSearch.busy || !issueCode || !canRunSearch}
                 >
                   搜索
                 </button>
@@ -1595,14 +1263,14 @@ export function BundleView() {
                     <button
                       type="button"
                       className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
-                      onClick={() => setSavedSearchesOpen((open) => !open)}
+                      onClick={() => savedSearch.setSavedSearchesOpen((open) => !open)}
                     >
                       我的搜索条件
                     </button>
                     <button
                       type="button"
                       className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
-                      onClick={beginSaveSearch}
+                      onClick={savedSearch.beginSaveSearch}
                     >
                       保存条件
                     </button>
@@ -1610,26 +1278,26 @@ export function BundleView() {
                 ) : null}
               </div>
               <SearchExecutionStatus
-                snapshot={issueSearchExecution.snapshot}
-                onCancel={() => { void issueSearchExecution.cancel(); }}
+                snapshot={issueSearch.snapshot}
+                onCancel={() => { void issueSearch.cancel(); }}
               />
-              {savedSearchesOpen ? (
+              {savedSearch.savedSearchesOpen ? (
                 <div className="mt-3 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  {savedSearches.length === 0 ? <p className="text-xs text-slate-500">暂无搜索条件</p> : savedSearches.map((item) => (
+                  {savedSearch.savedSearches.length === 0 ? <p className="text-xs text-slate-500">暂无搜索条件</p> : savedSearch.savedSearches.map((item) => (
                     <div key={item.id} className="rounded-md border border-slate-200 bg-white p-2 text-xs">
                       <div className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate font-semibold">{item.is_pinned ? '★ ' : ''}{item.name}</span>
-                        <button className="text-sky-700" type="button" onClick={() => void useSavedSearch(item).catch((error) => setSavedSearchError(normalizeApiError(error)))}>使用</button>
-                        <button className="text-slate-700" type="button" onClick={() => beginEditingSavedSearch(item)}>编辑</button>
-                        <button className="text-rose-700" type="button" onClick={() => void rainApi.deleteSavedSearch(item.id).then(loadSavedSearches).catch((error) => setSavedSearchError(normalizeApiError(error)))}>删除</button>
+                        <button className="text-sky-700" type="button" onClick={() => void savedSearch.useSavedSearch(item).catch((error) => savedSearch.setError(normalizeApiError(error)))}>使用</button>
+                        <button className="text-slate-700" type="button" onClick={() => savedSearch.beginEditingSavedSearch(item)}>编辑</button>
+                        <button className="text-rose-700" type="button" onClick={() => void rainApi.deleteSavedSearch(item.id).then(savedSearch.loadSavedSearches).catch((error) => savedSearch.setError(normalizeApiError(error)))}>删除</button>
                       </div>
                       <p className="mt-1 truncate text-slate-500">{item.query_text}</p>
                     </div>
                   ))}
                 </div>
               ) : null}
-              {searchError ? <p className="mt-2 text-xs text-rose-600">{searchError}</p> : null}
-              {savedSearchError ? <p className="mt-2 text-xs text-rose-600">{savedSearchError}</p> : null}
+              {issueSearch.error ? <p className="mt-2 text-xs text-rose-600">{issueSearch.error}</p> : null}
+              {savedSearch.error ? <p className="mt-2 text-xs text-rose-600">{savedSearch.error}</p> : null}
             </div>
             <div ref={fileTreeContainerRef} className="min-h-0 flex-1 overflow-x-auto overflow-y-auto px-4 py-3">
             {nonReadyBundles.length > 0 ? (
@@ -1725,19 +1393,19 @@ export function BundleView() {
                     <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
                     <SearchTokenEditor
                       className="min-w-[220px]"
-                      tokens={fileSearchTokens}
-                      draft={fileSearchDraft}
-                      onTokensChange={setFileSearchTokens}
-                      onDraftChange={setFileSearchDraft}
+                      tokens={fileSearch.tokens}
+                      draft={fileSearch.draft}
+                      onTokensChange={fileSearch.setTokens}
+                      onDraftChange={fileSearch.setDraft}
                       placeholder="输入关键词"
                       ariaLabel="当前文件搜索条件"
                       allowOperators={false}
-                      disabled={fileSearchLoading}
+                      disabled={fileSearch.busy}
                     />
-                    {fileSearchExecuted ? (
+                    {fileSearch.executed ? (
                       <span className="shrink-0 text-xs text-slate-500">{fileSearchTotal} 个结果</span>
                     ) : null}
-                    {fileSearchTokens.length > 0 || fileSearchDraft ? (
+                    {fileSearch.tokens.length > 0 || fileSearch.draft ? (
                       <button
                         type="button"
                         className="shrink-0 rounded border border-transparent px-2 py-1 text-xs text-slate-500 transition hover:border-slate-300 hover:text-slate-950"
@@ -1749,7 +1417,7 @@ export function BundleView() {
                     <button
                       type="button"
                       className="shrink-0 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={fileSearchLoading || !canRunFileSearch}
+                      disabled={fileSearch.busy || !canRunFileSearch}
                       onClick={() => runFileSearch(0).catch(() => undefined)}
                     >
                       搜索
@@ -1757,11 +1425,11 @@ export function BundleView() {
                   </div>
                 ) : null}
 
-                {activeViewerTab?.kind === 'file' && fileSearchExecuted ? (
-                  fileSearchLoading && fileSearchResults.length === 0 ? (
+                {activeViewerTab?.kind === 'file' && fileSearch.executed ? (
+                  fileSearch.busy && fileSearchResults.length === 0 ? (
                     <p className="py-8 text-center text-sm text-slate-500">正在搜索当前文件...</p>
-                  ) : fileSearchError ? (
-                    <p className="py-8 text-center text-sm text-rose-600">{fileSearchError}</p>
+                  ) : fileSearch.error ? (
+                    <p className="py-8 text-center text-sm text-rose-600">{fileSearch.error}</p>
                   ) : fileSearchResults.length === 0 ? (
                     <p className="py-8 text-center text-sm text-slate-500">当前文件中没有相关日志。</p>
                   ) : (
@@ -1800,7 +1468,7 @@ export function BundleView() {
                           <button
                             type="button"
                             className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-                            disabled={fileSearchFrom === 0 || fileSearchLoading}
+                            disabled={fileSearchFrom === 0 || fileSearch.busy}
                             onClick={() => runFileSearch(Math.max(0, fileSearchFrom - 50)).catch(() => undefined)}
                           >
                             上一页
@@ -1808,7 +1476,7 @@ export function BundleView() {
                           <button
                             type="button"
                             className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-                            disabled={fileSearchFrom + fileSearchResults.length >= fileSearchTotal || fileSearchLoading}
+                            disabled={fileSearchFrom + fileSearchResults.length >= fileSearchTotal || fileSearch.busy}
                             onClick={() => runFileSearch(fileSearchFrom + 50).catch(() => undefined)}
                           >
                             下一页
@@ -1822,17 +1490,17 @@ export function BundleView() {
                     <SearchResultViewer
                       activeViewerTab={activeViewerTab}
                       results={activeSearchResults}
-                      resultFilterTokens={resultFilterTokens}
-                      resultFilterDraft={resultFilterDraft}
-                      onResultFilterTokensChange={setResultFilterTokens}
-                      onResultFilterDraftChange={setResultFilterDraft}
+                      resultFilterTokens={viewerSearch.tokens}
+                      resultFilterDraft={viewerSearch.draft}
+                      onResultFilterTokensChange={viewerSearch.setTokens}
+                      onResultFilterDraftChange={viewerSearch.setDraft}
                       onClearResultFilter={() => {
-                        setResultFilterTokens([]);
-                        setResultFilterDraft('');
+                        viewerSearch.clear();
                       }}
                       onSearchWithinResults={() => searchWithinActiveResults().catch(() => undefined)}
                       canRunResultFilter={canRunResultFilter}
-                      searchLoading={searchLoading}
+                      searchLoading={viewerSearch.busy || viewerPagination.getState(activeViewerTabId).loading}
+                      searchError={viewerSearch.error ?? viewerPagination.getState(activeViewerTabId).error}
                       contentRef={contentRef}
                       pageSizeOptions={LINE_PAGE_SIZE_OPTIONS}
                       onLoadPage={(tab, from, pageSize, navigation) => {
@@ -1963,35 +1631,35 @@ export function BundleView() {
           </div>
         </div>
       </section>
-      {saveDialogOpen ? (
+      {savedSearch.saveDialogOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <h3 className="text-xl font-semibold">保存搜索条件</h3>
             <label className="mt-4 block text-sm font-medium">名称
-              <input className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={savedSearchName} onChange={(event) => { saveDialogGenerationRef.current += 1; setSavedSearchName(event.target.value); }} autoFocus />
+              <input className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={savedSearch.savedSearchName} onChange={(event) => { savedSearch.bumpSaveGeneration(); savedSearch.setSavedSearchName(event.target.value); }} autoFocus />
             </label>
-            {savedSearchError ? <p className="mt-3 text-sm text-rose-600">{savedSearchError}</p> : null}
+            {savedSearch.error ? <p className="mt-3 text-sm text-rose-600">{savedSearch.error}</p> : null}
             <div className="mt-6 flex justify-end gap-3">
-              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { saveDialogGenerationRef.current += 1; setSaveDialogOpen(false); }}>取消</button>
-              <button className="rounded-lg bg-slate-950 px-4 py-2 font-semibold text-white" type="button" onClick={() => void saveSearch()}>保存</button>
+              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { savedSearch.bumpSaveGeneration(); savedSearch.setSaveDialogOpen(false); }}>取消</button>
+              <button className="rounded-lg bg-slate-950 px-4 py-2 font-semibold text-white" type="button" onClick={() => void savedSearch.saveSearch()}>保存</button>
             </div>
           </div>
         </div>
       ) : null}
-      {editingSavedSearch ? (
+      {savedSearch.editingSavedSearch ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
           <div className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
             <h3 className="text-xl font-semibold">编辑搜索条件</h3>
             <label className="block text-sm font-medium">名称
-              <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={editingSavedSearch.name} onChange={(event) => { editingSaveGenerationRef.current += 1; setEditingSavedSearch({ ...editingSavedSearch, name: event.target.value }); }} />
+              <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={savedSearch.editingSavedSearch.name} onChange={(event) => { savedSearch.bumpEditingGeneration(); savedSearch.setEditingSavedSearch({ ...savedSearch.editingSavedSearch!, name: event.target.value }); }} />
             </label>
             <label className="block text-sm font-medium">搜索表达式
               <div className="mt-1 rounded-lg border border-slate-300 px-3 py-2">
                 <SearchExpressionEditor
-                  tokens={editingSearchTokens}
-                  draft={editingSearchDraft}
-                  onTokensChange={(tokens) => { editingSaveGenerationRef.current += 1; setEditingSearchTokens(tokens); setSavedSearchError(''); }}
-                  onDraftChange={(draft) => { editingSaveGenerationRef.current += 1; setEditingSearchDraft(draft); setSavedSearchError(''); }}
+                  tokens={savedSearch.editingSearchTokens}
+                  draft={savedSearch.editingSearchDraft}
+                  onTokensChange={(tokens) => { savedSearch.bumpEditingGeneration(); savedSearch.setEditingSearchTokens(tokens); savedSearch.setError(''); }}
+                  onDraftChange={(draft) => { savedSearch.bumpEditingGeneration(); savedSearch.setEditingSearchDraft(draft); savedSearch.setError(''); }}
                   placeholder="输入关键词"
                   ariaLabel="编辑详细搜索条件"
                 />
@@ -1999,14 +1667,14 @@ export function BundleView() {
             </label>
             <div className="flex gap-6">
               <label className="flex items-center gap-2 text-sm font-medium">
-                <input type="checkbox" checked={editingSavedSearch.is_pinned} onChange={(event) => { editingSaveGenerationRef.current += 1; setEditingSavedSearch({ ...editingSavedSearch, is_pinned: event.target.checked }); }} />
+                <input type="checkbox" checked={savedSearch.editingSavedSearch.is_pinned} onChange={(event) => { savedSearch.bumpEditingGeneration(); savedSearch.setEditingSavedSearch({ ...savedSearch.editingSavedSearch!, is_pinned: event.target.checked }); }} />
                 置顶
               </label>
             </div>
             <div className="flex justify-end gap-3">
-              {savedSearchError ? <p className="mr-auto self-center text-sm text-rose-600">{savedSearchError}</p> : null}
-              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { editingSaveGenerationRef.current += 1; setEditingSavedSearch(null); }}>取消</button>
-              <button className="rounded-lg bg-slate-950 px-4 py-2 font-semibold text-white" type="button" onClick={() => void updateEditingSavedSearch()}>保存修改</button>
+              {savedSearch.error ? <p className="mr-auto self-center text-sm text-rose-600">{savedSearch.error}</p> : null}
+              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { savedSearch.bumpEditingGeneration(); savedSearch.setEditingSavedSearch(null); }}>取消</button>
+              <button className="rounded-lg bg-slate-950 px-4 py-2 font-semibold text-white" type="button" onClick={() => void savedSearch.updateEditingSavedSearch()}>保存修改</button>
             </div>
           </div>
         </div>
