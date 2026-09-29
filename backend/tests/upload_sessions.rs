@@ -298,6 +298,12 @@ async fn create_session_is_idempotent_and_rejects_key_reuse_with_different_metad
     )
     .await;
     assert_eq!(conflict.status(), actix_web::http::StatusCode::CONFLICT);
+    let conflict_body: serde_json::Value = actix_test::read_body_json(conflict).await;
+    assert_eq!(conflict_body["code"], "UPLOAD_IDEMPOTENCY_CONFLICT");
+    assert_eq!(
+        conflict_body["message"],
+        "上传请求标识已用于其他文件，请重新开始上传"
+    );
     let _ = tokio::fs::remove_dir_all(data_root).await;
 }
 
@@ -573,6 +579,12 @@ async fn chunk_endpoint_requires_sequential_offsets_and_verifies_hashes() {
     )
     .await;
     assert_eq!(conflicting.status(), actix_web::http::StatusCode::CONFLICT);
+    let conflicting_body: serde_json::Value = actix_test::read_body_json(conflicting).await;
+    assert_eq!(conflicting_body["code"], "UPLOAD_CHUNK_CONFLICT");
+    assert_eq!(
+        conflicting_body["message"],
+        "上传分片与已提交内容不一致，请重新开始上传"
+    );
 
     let future = actix_test::call_service(
         &app,
@@ -608,6 +620,53 @@ async fn chunk_endpoint_requires_sequential_offsets_and_verifies_hashes() {
             .len(),
         CHUNK_SIZE_BYTES
     );
+
+    sqlx::query("UPDATE upload_sessions SET status='FAILED' WHERE id=?")
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let terminal_chunk = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::put()
+            .uri(&format!("/api/upload-sessions/{session_id}/chunks/1"))
+            .cookie(cookie.clone())
+            .insert_header(("X-Upload-Offset", CHUNK_SIZE_BYTES.to_string()))
+            .insert_header(("X-Chunk-SHA256", first_hash.as_str()))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        terminal_chunk.status(),
+        actix_web::http::StatusCode::CONFLICT
+    );
+    let terminal_chunk_body: serde_json::Value = actix_test::read_body_json(terminal_chunk).await;
+    assert_eq!(terminal_chunk_body["code"], "UPLOAD_SESSION_NOT_OPEN");
+    assert_eq!(
+        terminal_chunk_body["message"],
+        "上传会话已结束，请重新开始上传"
+    );
+
+    let terminal_complete = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri(&format!("/api/upload-sessions/{session_id}/complete"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        terminal_complete.status(),
+        actix_web::http::StatusCode::CONFLICT
+    );
+    let terminal_complete_body: serde_json::Value =
+        actix_test::read_body_json(terminal_complete).await;
+    assert_eq!(terminal_complete_body["code"], "UPLOAD_SESSION_NOT_OPEN");
+    assert_eq!(
+        terminal_complete_body["message"],
+        "上传会话已结束，请重新开始上传"
+    );
+
     let _ = tokio::fs::remove_dir_all(data_root).await;
 }
 

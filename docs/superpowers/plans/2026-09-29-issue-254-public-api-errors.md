@@ -24,6 +24,7 @@ The following codes are in this PR. Messages contain no Issue code, file path, d
 | `UPLOAD_IDEMPOTENCY_CONFLICT` | 409 | `上传请求标识已用于其他文件，请重新开始上传` | resumable session idempotency key reused with different metadata |
 | `UPLOAD_SESSION_NOT_OPEN` | 409 | `上传会话已结束，请重新开始上传` | chunk/complete request against a terminal session |
 | `UPLOAD_CHUNK_CONFLICT` | 409 | `上传分片与已提交内容不一致，请重新开始上传` | replayed chunk does not match committed chunk history |
+| `UPLOAD_CONTENT_REJECTED` | 422 | `压缩包内容不符合处理要求，请检查后重试` | user-actionable archive validation/extraction rejection |
 
 Existing public codes such as `UPLOAD_OFFSET_CONFLICT`, authentication errors, settings errors, search window errors, and temporary-result errors remain unchanged. Search index readiness/version, Tantivy admission, publication generation, deletion/cleanup leases, upload storage races, and other invariant failures remain generic in this phase.
 

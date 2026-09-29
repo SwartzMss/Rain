@@ -1,6 +1,52 @@
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use thiserror::Error;
 
+pub mod codes {
+    pub const ISSUE_ALREADY_EXISTS: &str = "ISSUE_ALREADY_EXISTS";
+    pub const BUNDLE_PROCESSING: &str = "BUNDLE_PROCESSING";
+    pub const BUNDLE_PROCESSING_FAILED: &str = "BUNDLE_PROCESSING_FAILED";
+    pub const FILE_DELETE_BUNDLE_BUSY: &str = "FILE_DELETE_BUNDLE_BUSY";
+    pub const FILE_DELETE_ALREADY_RUNNING: &str = "FILE_DELETE_ALREADY_RUNNING";
+    pub const UPLOAD_IDEMPOTENCY_CONFLICT: &str = "UPLOAD_IDEMPOTENCY_CONFLICT";
+    pub const UPLOAD_SESSION_NOT_OPEN: &str = "UPLOAD_SESSION_NOT_OPEN";
+    pub const UPLOAD_CHUNK_CONFLICT: &str = "UPLOAD_CHUNK_CONFLICT";
+    pub const UPLOAD_CONTENT_REJECTED: &str = "UPLOAD_CONTENT_REJECTED";
+}
+
+#[cfg(test)]
+mod contract_tests {
+    #[test]
+    fn issue_and_bundle_codes_are_stable() {
+        assert_eq!(super::codes::ISSUE_ALREADY_EXISTS, "ISSUE_ALREADY_EXISTS");
+        assert_eq!(super::codes::BUNDLE_PROCESSING, "BUNDLE_PROCESSING");
+        assert_eq!(
+            super::codes::BUNDLE_PROCESSING_FAILED,
+            "BUNDLE_PROCESSING_FAILED"
+        );
+        assert_eq!(
+            super::codes::FILE_DELETE_BUNDLE_BUSY,
+            "FILE_DELETE_BUNDLE_BUSY"
+        );
+        assert_eq!(
+            super::codes::FILE_DELETE_ALREADY_RUNNING,
+            "FILE_DELETE_ALREADY_RUNNING"
+        );
+        assert_eq!(
+            super::codes::UPLOAD_IDEMPOTENCY_CONFLICT,
+            "UPLOAD_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            super::codes::UPLOAD_SESSION_NOT_OPEN,
+            "UPLOAD_SESSION_NOT_OPEN"
+        );
+        assert_eq!(super::codes::UPLOAD_CHUNK_CONFLICT, "UPLOAD_CHUNK_CONFLICT");
+        assert_eq!(
+            super::codes::UPLOAD_CONTENT_REJECTED,
+            "UPLOAD_CONTENT_REJECTED"
+        );
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("configuration error: {0}")]

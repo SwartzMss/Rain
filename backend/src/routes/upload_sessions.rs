@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     auth::extractor::RequireBusinessUser,
-    error::AppError,
+    error::{AppError, codes},
     upload::{
         multipart::TempBudget,
         session::{
@@ -29,6 +29,10 @@ use crate::{
 };
 
 use super::issues::{normalize_issue_code, require_issue_owner};
+
+const UPLOAD_IDEMPOTENCY_CONFLICT_MESSAGE: &str = "上传请求标识已用于其他文件，请重新开始上传";
+const UPLOAD_SESSION_NOT_OPEN_MESSAGE: &str = "上传会话已结束，请重新开始上传";
+const UPLOAD_CHUNK_CONFLICT_MESSAGE: &str = "上传分片与已提交内容不一致，请重新开始上传";
 
 #[derive(Debug, Deserialize)]
 pub struct CreateUploadSessionRequest {
@@ -117,8 +121,10 @@ pub async fn create_upload_session(
                 expires_at: String::new(),
             },
         ) {
-            return Err(AppError::Conflict(
-                "idempotency key was reused with different file metadata".into(),
+            return Err(AppError::api(
+                StatusCode::CONFLICT,
+                codes::UPLOAD_IDEMPOTENCY_CONFLICT,
+                UPLOAD_IDEMPOTENCY_CONFLICT_MESSAGE,
             ));
         }
         return Ok(session_response(existing, StatusCode::OK));
@@ -297,10 +303,7 @@ pub async fn upload_session_chunk(
         return Err(AppError::NotFound("upload session not found".into()));
     }
     if session.status != SessionStatus::Open {
-        return Err(AppError::Conflict(format!(
-            "upload session is {}",
-            session.status.as_str()
-        )));
+        return Err(upload_session_not_open());
     }
     let expected_size = expected_chunk_size(
         session.file_size_bytes,
@@ -314,10 +317,7 @@ pub async fn upload_session_chunk(
         return Err(AppError::NotFound("upload session not found".into()));
     }
     if session.status != SessionStatus::Open {
-        return Err(AppError::Conflict(format!(
-            "upload session is {}",
-            session.status.as_str()
-        )));
+        return Err(upload_session_not_open());
     }
     if chunk_index < session.next_chunk_index {
         let stored = find_chunk(&state.db.pool, &session_id, chunk_index)
@@ -329,8 +329,10 @@ pub async fn upload_session_chunk(
         {
             return Ok(session_response(session, StatusCode::OK));
         }
-        return Err(AppError::Conflict(
-            "upload chunk conflicts with the committed chunk".into(),
+        return Err(AppError::api(
+            StatusCode::CONFLICT,
+            codes::UPLOAD_CHUNK_CONFLICT,
+            UPLOAD_CHUNK_CONFLICT_MESSAGE,
         ));
     }
     if chunk_index != session.next_chunk_index || offset != session.committed_offset {
@@ -465,10 +467,7 @@ pub async fn complete_upload_session(
         }
         SessionStatus::Finalizing => Ok(session_response(session, StatusCode::ACCEPTED)),
         SessionStatus::Delivered => Ok(session_response(session, StatusCode::OK)),
-        _ => Err(AppError::Conflict(format!(
-            "upload session is {}",
-            session.status.as_str()
-        ))),
+        _ => Err(upload_session_not_open()),
     }
 }
 
@@ -501,6 +500,14 @@ fn offset_conflict(offset: u64) -> AppError {
         StatusCode::CONFLICT,
         "UPLOAD_OFFSET_CONFLICT",
         format!("authoritative committed offset is {offset}"),
+    )
+}
+
+fn upload_session_not_open() -> AppError {
+    AppError::api(
+        StatusCode::CONFLICT,
+        codes::UPLOAD_SESSION_NOT_OPEN,
+        UPLOAD_SESSION_NOT_OPEN_MESSAGE,
     )
 }
 

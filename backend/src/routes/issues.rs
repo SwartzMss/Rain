@@ -1,4 +1,8 @@
-use actix_web::{HttpResponse, delete, get, http::header::CACHE_CONTROL, post, web};
+use actix_web::{
+    HttpResponse, delete, get,
+    http::{StatusCode, header::CACHE_CONTROL},
+    post, web,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use sqlx::{FromRow, QueryBuilder, Sqlite};
@@ -10,7 +14,7 @@ use crate::{
     AppState,
     auth::extractor::{OptionalUser, RequireBusinessUser},
     db::finish_bundle_deletion_with_inactive_lease,
-    error::AppError,
+    error::{AppError, codes},
     models::issues::{
         IssueBundlesResponse, IssueInactivityExpiry, IssueListResponse, IssueSummary, UploadStage,
         UploadStatus, UploadStatusWrapper,
@@ -278,7 +282,11 @@ pub async fn create_issue(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::Conflict(format!("issue {code} already exists")));
+        return Err(AppError::api(
+            StatusCode::CONFLICT,
+            codes::ISSUE_ALREADY_EXISTS,
+            "该 Issue 已存在",
+        ));
     }
 
     Ok(HttpResponse::Created().json(IssueSummary {
