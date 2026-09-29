@@ -6,16 +6,15 @@ import { useAuth } from '../../auth/AuthContext';
 import type { BundleInfo } from '../../lib/bundles';
 import { BinaryFileInfo } from './BinaryFileInfo';
 import { SearchTokenEditor } from './SearchTokenEditor';
-import { SearchExpressionEditor, type SearchExpressionMode } from './SearchExpressionEditor';
+import { SearchExpressionEditor } from './SearchExpressionEditor';
 import { canPreviewText, isArchiveNode, isBinaryNode } from './filePresentation';
 import { isFileSearchConditionEmpty } from './fileSearchState';
 import { getSearchHitSource } from './searchHitSource';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { uploadFailureMessage } from './uploadFailure';
 import {
-  assertSimpleSearchRepresentable,
   canFinalizeSearch,
-  deserializeSimpleSearchTokens,
+  deserializeSearchTokens,
   finalizeSearchTokens,
   formatSearchTokens,
   getSearchTerms,
@@ -111,16 +110,14 @@ function highlightText(text: string, keyword: string): React.ReactNode {
 
 function detailEditorState(queryText: string | undefined, options?: Record<string, unknown>): {
   tokens: SearchToken[];
-  rawExpression: string | null;
+  error: string | null;
 } {
-  if (!queryText) return { tokens: [], rawExpression: null };
-  if (options?.editor_mode === 'advanced') {
-    return { tokens: [], rawExpression: queryText };
-  }
+  void options;
+  if (!queryText) return { tokens: [], error: null };
   try {
-    return { tokens: deserializeSimpleSearchTokens(queryText), rawExpression: null };
-  } catch {
-    return { tokens: [], rawExpression: queryText };
+    return { tokens: deserializeSearchTokens(queryText), error: null };
+  } catch (error) {
+    return { tokens: [], error: error instanceof Error ? error.message : '搜索条件无法加载' };
   }
 }
 
@@ -160,12 +157,9 @@ export function BundleView() {
   const [searchTokens, setSearchTokens] = useState<SearchToken[]>(
     pendingDetailEditor.tokens
   );
-  const [detailRawExpression, setDetailRawExpression] = useState<string | null>(
-    pendingDetailEditor.rawExpression
-  );
   const [searchDraft, setSearchDraft] = useState('');
   const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(pendingDetailEditor.error);
   const [searchExecuted, setSearchExecuted] = useState(false);
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [savedSearchesOpen, setSavedSearchesOpen] = useState(false);
@@ -175,7 +169,6 @@ export function BundleView() {
   const [editingSavedSearch, setEditingSavedSearch] = useState<SavedSearch | null>(null);
   const [editingSearchTokens, setEditingSearchTokens] = useState<SearchToken[]>([]);
   const [editingSearchDraft, setEditingSearchDraft] = useState('');
-  const [editingRawExpression, setEditingRawExpression] = useState<string | null>(null);
   const [resultFilterTokens, setResultFilterTokens] = useState<SearchToken[]>([]);
   const [resultFilterDraft, setResultFilterDraft] = useState('');
   const [fileSearchTokens, setFileSearchTokens] = useState<SearchToken[]>([]);
@@ -194,6 +187,8 @@ export function BundleView() {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const fileTreeContainerRef = useRef<HTMLDivElement | null>(null);
   const searchRequestGenerationRef = useRef(0);
+  const saveDialogGenerationRef = useRef(0);
+  const editingSaveGenerationRef = useRef(0);
   const restoredPendingSearchRef = useRef(Boolean(pendingSavedSearch));
   const contextKeyRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
@@ -293,29 +288,17 @@ export function BundleView() {
 
   const currentSavedSearchPayload = useCallback((): SavedSearchPayload | null => {
     try {
-      if (detailRawExpression !== null) {
-        const query = detailRawExpression.trim();
-        if (!query) return null;
-        return {
-          name: savedSearchName,
-          search_type: 'DETAIL',
-          query_text: query,
-          options: { version: 1, editor_mode: 'advanced' }
-        };
-      }
-      const tokens = assertSimpleSearchRepresentable(
-        finalizeSearchTokens(searchTokens, searchDraft)
-      );
+      const tokens = finalizeSearchTokens(searchTokens, searchDraft);
       return {
         name: savedSearchName,
         search_type: 'DETAIL',
         query_text: serializeSearchTokens(tokens),
-        options: { version: 1, editor_mode: 'simple', tokens }
+        options: { version: 1 }
       };
     } catch {
       return null;
     }
-  }, [detailRawExpression, savedSearchName, searchDraft, searchTokens]);
+  }, [savedSearchName, searchDraft, searchTokens]);
 
   const loadSavedSearches = useCallback(async () => {
     if (auth.state.status !== 'AUTHENTICATED') return;
@@ -334,8 +317,8 @@ export function BundleView() {
       if (pending) {
         const editor = detailEditorState(pending.query_text, pending.options);
         setSearchTokens(editor.tokens);
-        setDetailRawExpression(editor.rawExpression);
         setSearchDraft('');
+        if (editor.error) setSearchError(editor.error);
         setSaveDialogOpen(true);
       }
     }
@@ -352,21 +335,23 @@ export function BundleView() {
       navigate('/login', { state: { from: `${location.pathname}${location.search}` } });
       return;
     }
+    saveDialogGenerationRef.current += 1;
     setSavedSearchError('');
     setSaveDialogOpen(true);
   };
 
   const saveSearch = async () => {
+    const saveGeneration = saveDialogGenerationRef.current;
     const payload = currentSavedSearchPayload();
     if (!payload || !savedSearchName.trim()) {
       setSavedSearchError('请输入名称并确认搜索条件有效');
       return;
     }
     try {
-      if (detailRawExpression !== null) {
-        await rainApi.validateSearchExpression(detailRawExpression.trim());
-      }
+      await rainApi.validateSearchExpression(payload.query_text);
+      if (saveGeneration !== saveDialogGenerationRef.current) return;
       await rainApi.createSavedSearch({ ...payload, name: savedSearchName.trim() });
+      if (saveGeneration !== saveDialogGenerationRef.current) return;
       setSavedSearchName('');
       setSaveDialogOpen(false);
       await loadSavedSearches();
@@ -379,8 +364,18 @@ export function BundleView() {
     const requestGeneration = ++searchRequestGenerationRef.current;
     const isCurrentSearch = () => requestGeneration === searchRequestGenerationRef.current;
     const editor = detailEditorState(item.query_text, item.options);
+    if (editor.error) {
+      setSearchError(editor.error);
+      return;
+    }
+    try {
+      await rainApi.validateSearchExpression(item.query_text);
+    } catch (error) {
+      if (isCurrentSearch()) setSearchError(normalizeApiError(error));
+      return;
+    }
+    if (!isCurrentSearch()) return;
     setSearchTokens(editor.tokens);
-    setDetailRawExpression(editor.rawExpression);
     setSearchDraft('');
     setSearchError(null);
     setSearchLoading(true);
@@ -424,28 +419,20 @@ export function BundleView() {
 
   const updateEditingSavedSearch = async () => {
     if (!editingSavedSearch) return;
+    const saveGeneration = editingSaveGenerationRef.current;
     try {
-      let queryText: string;
-      let options: Record<string, unknown>;
-      if (editingRawExpression !== null) {
-        queryText = editingRawExpression.trim();
-        if (!queryText) throw new Error('搜索表达式不能为空');
-        await rainApi.validateSearchExpression(queryText);
-        options = { version: 1, editor_mode: 'advanced' };
-      } else {
-        const finalizedTokens = assertSimpleSearchRepresentable(
-          finalizeSearchTokens(editingSearchTokens, editingSearchDraft)
-        );
-        queryText = serializeSearchTokens(finalizedTokens);
-        options = { version: 1, editor_mode: 'simple', tokens: finalizedTokens };
-      }
+      const finalizedTokens = finalizeSearchTokens(editingSearchTokens, editingSearchDraft);
+      const queryText = serializeSearchTokens(finalizedTokens);
+      await rainApi.validateSearchExpression(queryText);
+      if (saveGeneration !== editingSaveGenerationRef.current) return;
       await rainApi.updateSavedSearch(editingSavedSearch.id, {
         name: editingSavedSearch.name.trim(),
         search_type: 'DETAIL',
         query_text: queryText,
-        options,
+        options: { version: 1 },
         is_pinned: editingSavedSearch.is_pinned
       });
+      if (saveGeneration !== editingSaveGenerationRef.current) return;
       setEditingSavedSearch(null);
       await loadSavedSearches();
     } catch (error) {
@@ -456,9 +443,9 @@ export function BundleView() {
   const beginEditingSavedSearch = (item: SavedSearch) => {
     const editor = detailEditorState(item.query_text, item.options);
     setEditingSearchTokens(editor.tokens);
-    setEditingRawExpression(editor.rawExpression);
     setEditingSearchDraft('');
-    setSavedSearchError('');
+    setSavedSearchError(editor.error ?? '');
+    editingSaveGenerationRef.current += 1;
     setEditingSavedSearch({ ...item });
   };
 
@@ -596,35 +583,24 @@ export function BundleView() {
     }
     let keyword: string;
     let title: string;
-    if (detailRawExpression !== null) {
-      keyword = detailRawExpression.trim();
-      title = keyword;
-      if (!keyword) {
-        setSearchError('请输入详细搜索表达式');
-        return;
-      }
-      try {
-        await rainApi.validateSearchExpression(keyword);
-      } catch (error) {
-        if (isCurrentSearch()) setSearchError(normalizeApiError(error));
-        return;
-      }
-      if (!isCurrentSearch()) return;
-    } else {
-      let finalizedTokens: SearchToken[];
-      try {
-        finalizedTokens = assertSimpleSearchRepresentable(
-          finalizeSearchTokens(searchTokens, searchDraft)
-        );
-      } catch (error) {
-        setSearchError(error instanceof Error ? error.message : '搜索条件无效');
-        return;
-      }
+    let finalizedTokens: SearchToken[];
+    try {
+      finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft);
       keyword = serializeSearchTokens(finalizedTokens);
       title = formatSearchTokens(finalizedTokens);
-      setSearchTokens(finalizedTokens);
-      setSearchDraft('');
+    } catch (error) {
+      setSearchError(error instanceof Error ? error.message : '搜索条件无效');
+      return;
     }
+    try {
+      await rainApi.validateSearchExpression(keyword);
+    } catch (error) {
+      if (isCurrentSearch()) setSearchError(normalizeApiError(error));
+      return;
+    }
+    if (!isCurrentSearch()) return;
+    setSearchTokens(finalizedTokens);
+    setSearchDraft('');
     setSearchLoading(true);
     setSearchError(null);
     setSearchExecuted(true);
@@ -684,89 +660,12 @@ export function BundleView() {
         setSearchLoading(false);
       }
     }
-  }, [detailRawExpression, issueCode, openViewerTab, searchDraft, searchTokens]);
-
-  const changeDetailExpressionMode = useCallback((mode: SearchExpressionMode) => {
-    if (mode === 'advanced') {
-      if (detailRawExpression !== null) return;
-      if (searchTokens.length === 0 && !searchDraft.trim()) {
-        setDetailRawExpression('');
-        setSearchError(null);
-        return;
-      }
-      try {
-        const finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft);
-        setSearchTokens(finalizedTokens);
-        setSearchDraft('');
-        setDetailRawExpression(serializeSearchTokens(finalizedTokens));
-        setSearchError(null);
-      } catch (error) {
-        setSearchError(error instanceof Error ? error.message : '请先完成当前搜索条件');
-      }
-      return;
-    }
-
-    if (detailRawExpression === null) return;
-    const expression = detailRawExpression.trim();
-    if (!expression) {
-      setDetailRawExpression(null);
-      setSearchError(null);
-      return;
-    }
-    try {
-      const tokens = deserializeSimpleSearchTokens(expression);
-      setSearchTokens(tokens);
-      setSearchDraft('');
-      setDetailRawExpression(null);
-      setSearchError(null);
-    } catch (error) {
-      setSearchError(error instanceof Error ? error.message : '该表达式无法无损转换为简单模式');
-    }
-  }, [detailRawExpression, searchDraft, searchTokens]);
-
-  const changeEditingExpressionMode = useCallback((mode: SearchExpressionMode) => {
-    if (mode === 'advanced') {
-      if (editingRawExpression !== null) return;
-      if (editingSearchTokens.length === 0 && !editingSearchDraft.trim()) {
-        setEditingRawExpression('');
-        setSavedSearchError('');
-        return;
-      }
-      try {
-        const finalizedTokens = finalizeSearchTokens(editingSearchTokens, editingSearchDraft);
-        setEditingSearchTokens(finalizedTokens);
-        setEditingSearchDraft('');
-        setEditingRawExpression(serializeSearchTokens(finalizedTokens));
-        setSavedSearchError('');
-      } catch (error) {
-        setSavedSearchError(error instanceof Error ? error.message : '请先完成当前搜索条件');
-      }
-      return;
-    }
-
-    if (editingRawExpression === null) return;
-    const expression = editingRawExpression.trim();
-    if (!expression) {
-      setEditingRawExpression(null);
-      setSavedSearchError('');
-      return;
-    }
-    try {
-      const tokens = deserializeSimpleSearchTokens(expression);
-      setEditingSearchTokens(tokens);
-      setEditingSearchDraft('');
-      setEditingRawExpression(null);
-      setSavedSearchError('');
-    } catch (error) {
-      setSavedSearchError(error instanceof Error ? error.message : '该表达式无法无损转换为简单模式');
-    }
-  }, [editingRawExpression, editingSearchDraft, editingSearchTokens]);
+  }, [issueCode, openViewerTab, searchDraft, searchTokens]);
 
   const clearDetailedSearch = useCallback(() => {
     searchRequestGenerationRef.current += 1;
     void issueSearchExecution.cancel();
     setSearchTokens([]);
-    setDetailRawExpression(null);
     setSearchDraft('');
     setSearchLoading(false);
     setSearchError(null);
@@ -1007,7 +906,6 @@ export function BundleView() {
     }
     searchRequestGenerationRef.current += 1;
     setSearchTokens([]);
-    setDetailRawExpression(null);
     setSearchDraft('');
     setSearchLoading(false);
     setSearchError(null);
@@ -1603,12 +1501,9 @@ export function BundleView() {
 
   const fileSearchHighlightTerm = getSearchTerms(fileSearchTokens)[0] ?? fileSearchDraft.trim();
   const resultFilterHighlightTerm = getSearchTerms(resultFilterTokens)[0] ?? resultFilterDraft.trim();
-  const canRunSearch = detailRawExpression !== null
-    ? Boolean(detailRawExpression.trim())
-    : canFinalizeSearch(searchTokens, searchDraft);
+  const canRunSearch = canFinalizeSearch(searchTokens, searchDraft);
   const showDetailedClear = (
-    detailRawExpression !== null
-    || searchTokens.length > 0
+    searchTokens.length > 0
     || Boolean(searchDraft.trim())
     || searchExecuted
     || searchLoading
@@ -1649,15 +1544,11 @@ export function BundleView() {
               >
                 <span className="mt-1.5 shrink-0 text-slate-500" aria-hidden="true">⌕</span>
                 <SearchExpressionEditor
-                  mode={detailRawExpression === null ? 'simple' : 'advanced'}
                   tokens={searchTokens}
                   draft={searchDraft}
-                  rawExpression={detailRawExpression ?? ''}
-                  onModeChange={changeDetailExpressionMode}
-                  onTokensChange={(tokens) => { setSearchTokens(tokens); setSearchError(null); }}
-                  onDraftChange={(draft) => { setSearchDraft(draft); setSearchError(null); }}
-                  onRawExpressionChange={(expression) => { setDetailRawExpression(expression); setSearchError(null); }}
-                  placeholder={detailRawExpression === null ? '输入完整关键词或短语...' : '例如：ping AND (error OR timeout)'}
+                  onTokensChange={(tokens) => { searchRequestGenerationRef.current += 1; setSearchTokens(tokens); setSearchError(null); }}
+                  onDraftChange={(draft) => { searchRequestGenerationRef.current += 1; setSearchDraft(draft); setSearchError(null); }}
+                  placeholder="输入关键词"
                   ariaLabel="日志内容搜索条件"
                   disabled={searchLoading}
                 />
@@ -1820,7 +1711,7 @@ export function BundleView() {
                       draft={fileSearchDraft}
                       onTokensChange={setFileSearchTokens}
                       onDraftChange={setFileSearchDraft}
-                      placeholder="输入当前文件的关键词或短语..."
+                      placeholder="输入关键词"
                       ariaLabel="当前文件搜索条件"
                       disabled={fileSearchLoading}
                     />
@@ -2058,11 +1949,11 @@ export function BundleView() {
           <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <h3 className="text-xl font-semibold">保存搜索条件</h3>
             <label className="mt-4 block text-sm font-medium">名称
-              <input className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={savedSearchName} onChange={(event) => setSavedSearchName(event.target.value)} autoFocus />
+              <input className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={savedSearchName} onChange={(event) => { saveDialogGenerationRef.current += 1; setSavedSearchName(event.target.value); }} autoFocus />
             </label>
             {savedSearchError ? <p className="mt-3 text-sm text-rose-600">{savedSearchError}</p> : null}
             <div className="mt-6 flex justify-end gap-3">
-              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => setSaveDialogOpen(false)}>取消</button>
+              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { saveDialogGenerationRef.current += 1; setSaveDialogOpen(false); }}>取消</button>
               <button className="rounded-lg bg-slate-950 px-4 py-2 font-semibold text-white" type="button" onClick={() => void saveSearch()}>保存</button>
             </div>
           </div>
@@ -2073,33 +1964,29 @@ export function BundleView() {
           <div className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
             <h3 className="text-xl font-semibold">编辑搜索条件</h3>
             <label className="block text-sm font-medium">名称
-              <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={editingSavedSearch.name} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, name: event.target.value })} />
+              <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={editingSavedSearch.name} onChange={(event) => { editingSaveGenerationRef.current += 1; setEditingSavedSearch({ ...editingSavedSearch, name: event.target.value }); }} />
             </label>
             <label className="block text-sm font-medium">搜索表达式
               <div className="mt-1 rounded-lg border border-slate-300 px-3 py-2">
                 <SearchExpressionEditor
-                  mode={editingRawExpression === null ? 'simple' : 'advanced'}
                   tokens={editingSearchTokens}
                   draft={editingSearchDraft}
-                  rawExpression={editingRawExpression ?? ''}
-                  onModeChange={changeEditingExpressionMode}
-                  onTokensChange={(tokens) => { setEditingSearchTokens(tokens); setSavedSearchError(''); }}
-                  onDraftChange={(draft) => { setEditingSearchDraft(draft); setSavedSearchError(''); }}
-                  onRawExpressionChange={(expression) => { setEditingRawExpression(expression); setSavedSearchError(''); }}
-                  placeholder={editingRawExpression === null ? '输入详细搜索关键词...' : '例如：ping AND (error OR timeout)'}
+                  onTokensChange={(tokens) => { editingSaveGenerationRef.current += 1; setEditingSearchTokens(tokens); setSavedSearchError(''); }}
+                  onDraftChange={(draft) => { editingSaveGenerationRef.current += 1; setEditingSearchDraft(draft); setSavedSearchError(''); }}
+                  placeholder="输入关键词"
                   ariaLabel="编辑详细搜索条件"
                 />
               </div>
             </label>
             <div className="flex gap-6">
               <label className="flex items-center gap-2 text-sm font-medium">
-                <input type="checkbox" checked={editingSavedSearch.is_pinned} onChange={(event) => setEditingSavedSearch({ ...editingSavedSearch, is_pinned: event.target.checked })} />
+                <input type="checkbox" checked={editingSavedSearch.is_pinned} onChange={(event) => { editingSaveGenerationRef.current += 1; setEditingSavedSearch({ ...editingSavedSearch, is_pinned: event.target.checked }); }} />
                 置顶
               </label>
             </div>
             <div className="flex justify-end gap-3">
               {savedSearchError ? <p className="mr-auto self-center text-sm text-rose-600">{savedSearchError}</p> : null}
-              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => setEditingSavedSearch(null)}>取消</button>
+              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { editingSaveGenerationRef.current += 1; setEditingSavedSearch(null); }}>取消</button>
               <button className="rounded-lg bg-slate-950 px-4 py-2 font-semibold text-white" type="button" onClick={() => void updateEditingSavedSearch()}>保存修改</button>
             </div>
           </div>

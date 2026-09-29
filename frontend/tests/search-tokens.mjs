@@ -20,12 +20,11 @@ try {
   );
   const {
     appendSearchOperator,
+    appendSearchParen,
     appendSearchTerm,
     combineSearchExpressions,
     deserializeSearchTokens,
-    deserializeSimpleSearchTokens,
     finalizeSearchTokens,
-    isSimpleSearchRepresentable,
     removeSearchToken,
     replaceSearchOperator,
     serializeSearchTokens,
@@ -67,19 +66,34 @@ try {
     { kind: 'operator', value: 'NOT' },
     { kind: 'term', value: 'timeout' }
   ]);
-  assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('A AND NOT B')), true);
-  assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('A OR NOT B')), false);
-  assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('NOT A')), false);
   const andNotTokens = deserializeSearchTokens('A AND NOT B');
-  assert.deepEqual(replaceSearchOperator(andNotTokens, 1, 'OR'), andNotTokens);
-  assert.deepEqual(removeSearchToken(andNotTokens, 0), [{ kind: 'term', value: 'B' }]);
+  assert.deepEqual(replaceSearchOperator(andNotTokens, 1, 'OR'), deserializeSearchTokens('A OR NOT B'));
+  assert.deepEqual(removeSearchToken(andNotTokens, 0), [
+    { kind: 'operator', value: 'NOT' },
+    { kind: 'term', value: 'B' }
+  ]);
+  assert.deepEqual(deserializeSearchTokens('A AND (B OR C)'), [
+    { kind: 'term', value: 'A' },
+    { kind: 'operator', value: 'AND' },
+    { kind: 'paren', value: '(' },
+    { kind: 'term', value: 'B' },
+    { kind: 'operator', value: 'OR' },
+    { kind: 'term', value: 'C' },
+    { kind: 'paren', value: ')' }
+  ]);
   assert.deepEqual(
-    deserializeSimpleSearchTokens('A AND NOT B'),
-    deserializeSearchTokens('A AND NOT B')
+    appendSearchParen(appendSearchOperator(appendSearchTerm([], 'A'), 'AND'), '('),
+    [
+      { kind: 'term', value: 'A' },
+      { kind: 'operator', value: 'AND' },
+      { kind: 'paren', value: '(' }
+    ]
   );
-  assert.throws(() => deserializeSimpleSearchTokens('A OR NOT B'), /简单模式无损编辑/);
-  assert.throws(() => deserializeSimpleSearchTokens('NOT A'), /简单模式无损编辑/);
-  assert.throws(() => deserializeSearchTokens('A AND (B OR C)'), /括号表达式/);
+  assert.deepEqual(deserializeSearchTokens('NOT NOT A'), [
+    { kind: 'operator', value: 'NOT' },
+    { kind: 'operator', value: 'NOT' },
+    { kind: 'term', value: 'A' }
+  ]);
 
   const assertSearchRoundTrip = (expression, expectedValue) => {
     const tokens = deserializeSearchTokens(expression);
@@ -95,6 +109,23 @@ try {
     message: 'AND 前缺少关键词'
   });
   assert.equal(validateSearchTokens([...booleanTokens, { kind: 'operator', value: 'AND' }]).valid, false);
+
+  assert.equal(serializeSearchTokens(deserializeSearchTokens('A AND (B OR C)')), '"A" AND ( "B" OR "C" )');
+  assert.equal(serializeSearchTokens(deserializeSearchTokens('NOT (A OR B)')), 'NOT ( "A" OR "B" )');
+  assert.throws(() => deserializeSearchTokens('A AND (B OR'), /缺少右括号|运算符/);
+  assert.throws(() => deserializeSearchTokens('A B'), /需要 AND/);
+  assert.equal(
+    serializeSearchTokens(removeSearchToken(deserializeSearchTokens('A AND NOT B'), 1)),
+    '"A"'
+  );
+  assert.equal(
+    serializeSearchTokens(removeSearchToken(deserializeSearchTokens('A AND (B OR C)'), 3)),
+    '"A" AND ( "C" )'
+  );
+  assert.equal(
+    serializeSearchTokens(removeSearchToken(deserializeSearchTokens('A AND (B OR C)'), 5)),
+    '"A" AND ( "B" )'
+  );
 
   const repaired = removeSearchToken(booleanTokens, 3);
   assert.equal(serializeSearchTokens(repaired), '"ERROR"');
@@ -127,25 +158,24 @@ try {
   assert.match(markup, /AND|OR/);
   assert.match(markup, /NOT 运算符/);
   assert.match(markup, /删除关键词 request timeout/);
-  assert.match(markup, />AND<\/button><button[^>]*>OR<\/button><button[^>]*>AND NOT<\/button>/);
+  assert.match(markup, />AND<\/button>/);
+  assert.match(markup, />OR<\/button>/);
+  assert.match(markup, />NOT<\/button>/);
 
-  const advancedMarkup = renderToStaticMarkup(
+  const expressionMarkup = renderToStaticMarkup(
     React.createElement(SearchExpressionEditor, {
-      mode: 'advanced',
-      tokens: [],
+      tokens: deserializeSearchTokens('A AND (B OR C)'),
       draft: '',
-      rawExpression: 'A AND (B OR C)',
-      onModeChange: () => undefined,
       onTokensChange: () => undefined,
       onDraftChange: () => undefined,
-      onRawExpressionChange: () => undefined,
-      placeholder: '输入表达式',
-      ariaLabel: '高级表达式'
+      placeholder: '输入关键词',
+      ariaLabel: '搜索条件'
     })
   );
-  assert.match(advancedMarkup, />A AND \(B OR C\)<\/textarea>/);
-  assert.match(advancedMarkup, /简单模式/);
-  assert.match(advancedMarkup, /高级表达式/);
+  assert.match(expressionMarkup, />AND<\/button>/);
+  assert.match(expressionMarkup, />NOT<\/button>/);
+  assert.match(expressionMarkup, />\(<\/button>/);
+  assert.doesNotMatch(expressionMarkup, /简单模式|高级表达式|支持 AND/);
 
   const emptyMarkup = renderToStaticMarkup(
     React.createElement(SearchTokenEditor, {
@@ -157,7 +187,7 @@ try {
       ariaLabel: '空搜索条件'
     })
   );
-  assert.doesNotMatch(emptyMarkup, />NOT<\/button>/);
+  assert.match(emptyMarkup, />NOT<\/button>/);
 } finally {
   await server.close();
 }

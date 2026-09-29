@@ -1,16 +1,44 @@
 export type SearchOperator = 'AND' | 'OR' | 'NOT';
+export type SearchParen = '(' | ')';
 
 export type SearchToken =
   | { kind: 'term'; value: string }
-  | { kind: 'operator'; value: SearchOperator };
+  | { kind: 'operator'; value: SearchOperator }
+  | { kind: 'paren'; value: SearchParen };
 
 export type SearchTokenValidation =
   | { valid: true }
   | { valid: false; message: string };
 
+function isBinaryOperator(token: SearchToken | undefined): boolean {
+  return token?.kind === 'operator' && (token.value === 'AND' || token.value === 'OR');
+}
+
+function isOperandEnd(token: SearchToken | undefined): boolean {
+  return token?.kind === 'term' || (token?.kind === 'paren' && token.value === ')');
+}
+
+function isOperandStart(token: SearchToken | undefined): boolean {
+  return token?.kind === 'term'
+    || (token?.kind === 'paren' && token.value === '(')
+    || (token?.kind === 'operator' && token.value === 'NOT');
+}
+
 export function expectsSearchTerm(tokens: SearchToken[]): boolean {
   if (tokens.length === 0) return true;
-  return tokens[tokens.length - 1].kind === 'operator';
+  return !isOperandEnd(tokens[tokens.length - 1]);
+}
+
+export function hasUnclosedSearchParens(tokens: SearchToken[]): number {
+  let depth = 0;
+  for (const token of tokens) {
+    if (token.kind === 'paren') depth += token.value === '(' ? 1 : -1;
+  }
+  return Math.max(depth, 0);
+}
+
+function canAppendLeftParen(tokens: SearchToken[]): boolean {
+  return tokens.length === 0 || expectsSearchTerm(tokens);
 }
 
 export function appendSearchTerm(
@@ -23,7 +51,7 @@ export function appendSearchTerm(
   if (!allowOperators) return [{ kind: 'term', value: term }];
 
   const next = [...tokens];
-  if (!expectsSearchTerm(next)) {
+  if (isOperandEnd(next[next.length - 1])) {
     next.push({ kind: 'operator', value: 'AND' });
   }
   next.push({ kind: 'term', value: term });
@@ -34,20 +62,30 @@ export function appendSearchOperator(
   tokens: SearchToken[],
   operator: SearchOperator
 ): SearchToken[] {
+  const next = [...tokens];
   if (operator === 'NOT') {
-    if (!expectsSearchTerm(tokens) || tokens[tokens.length - 1]?.value === 'NOT') return tokens;
-    return [...tokens, { kind: 'operator', value: operator }];
+    if (isOperandEnd(next[next.length - 1])) next.push({ kind: 'operator', value: 'AND' });
+    if (!next.length || expectsSearchTerm(next)) next.push({ kind: 'operator', value: 'NOT' });
+    return next;
   }
 
-  if (tokens.length === 0) return tokens;
-  const last = tokens[tokens.length - 1];
-  if (last.kind === 'term') {
-    return [...tokens, { kind: 'operator', value: operator }];
+  const last = next[next.length - 1];
+  if (isOperandEnd(last)) return [...next, { kind: 'operator', value: operator }];
+  if (isBinaryOperator(last)) {
+    return [...next.slice(0, -1), { kind: 'operator', value: operator }];
   }
-  if (last.value === 'AND' || last.value === 'OR') {
-    return [...tokens.slice(0, -1), { kind: 'operator', value: operator }];
+  return next;
+}
+
+export function appendSearchParen(tokens: SearchToken[], paren: SearchParen): SearchToken[] {
+  if (paren === '(') {
+    const next = [...tokens];
+    if (isOperandEnd(next[next.length - 1])) next.push({ kind: 'operator', value: 'AND' });
+    if (canAppendLeftParen(next)) next.push({ kind: 'paren', value: '(' });
+    return next;
   }
-  return tokens;
+  if (!tokens.length || expectsSearchTerm(tokens) || hasUnclosedSearchParens(tokens) === 0) return tokens;
+  return [...tokens, { kind: 'paren', value: ')' }];
 }
 
 export function replaceSearchOperator(
@@ -57,13 +95,6 @@ export function replaceSearchOperator(
 ): SearchToken[] {
   const current = tokens[index];
   if (!current || current.kind !== 'operator' || current.value === 'NOT') return tokens;
-  if (
-    current.value === 'AND'
-    && tokens[index + 1]?.kind === 'operator'
-    && tokens[index + 1].value === 'NOT'
-  ) {
-    return tokens;
-  }
   return tokens.map((token, tokenIndex) =>
     tokenIndex === index ? { kind: 'operator', value: operator } : token
   );
@@ -81,70 +112,132 @@ export function replaceSearchTerm(
   );
 }
 
-export function removeSearchToken(tokens: SearchToken[], index: number): SearchToken[] {
+function matchingParen(tokens: SearchToken[], index: number): number | null {
   const token = tokens[index];
-  if (!token) return tokens;
-  if (token.kind === 'operator' && token.value === 'NOT') {
-    return tokens.filter((_, tokenIndex) => tokenIndex !== index);
-  }
-
-  let start = index;
-  let end = index;
-  if (token.kind === 'operator') {
-    while (end + 1 < tokens.length && tokens[end + 1].kind === 'operator') end += 1;
-    if (end + 1 < tokens.length) end += 1;
-  } else {
-    while (start > 0 && tokens[start - 1].kind === 'operator' && tokens[start - 1].value === 'NOT') {
-      start -= 1;
+  if (token?.kind !== 'paren') return null;
+  let depth = 0;
+  if (token.value === '(') {
+    for (let cursor = index; cursor < tokens.length; cursor += 1) {
+      const current = tokens[cursor];
+      if (current.kind !== 'paren') continue;
+      depth += current.value === '(' ? 1 : -1;
+      if (depth === 0) return cursor;
     }
-    if (start > 0) {
-      start -= 1;
-    } else if (end + 1 < tokens.length && tokens[end + 1].kind === 'operator') {
-      end += 1;
-      if (
-        tokens[end].value === 'AND'
-        && tokens[end + 1]?.kind === 'operator'
-        && tokens[end + 1].value === 'NOT'
-      ) {
-        end += 1;
+  } else {
+    for (let cursor = index; cursor >= 0; cursor -= 1) {
+      const current = tokens[cursor];
+      if (current.kind !== 'paren') continue;
+      depth += current.value === ')' ? 1 : -1;
+      if (depth === 0) return cursor;
+    }
+  }
+  return null;
+}
+
+function operandStart(tokens: SearchToken[], index: number): number {
+  let start = index;
+  while (start > 0 && tokens[start - 1].kind === 'operator' && tokens[start - 1].value === 'NOT') start -= 1;
+  return start;
+}
+
+function operandEnd(tokens: SearchToken[], index: number): number {
+  let cursor = index;
+  while (tokens[cursor]?.kind === 'operator' && tokens[cursor].value === 'NOT') cursor += 1;
+  if (tokens[cursor]?.kind === 'paren' && tokens[cursor].value === '(') {
+    return matchingParen(tokens, cursor) ?? tokens.length - 1;
+  }
+  return cursor;
+}
+
+function cleanupSearchTokens(tokens: SearchToken[]): SearchToken[] {
+  let next = [...tokens];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let index = 0; index < next.length; index += 1) {
+      const token = next[index];
+      if (token.kind === 'paren' && token.value === '(') {
+        const close = matchingParen(next, index);
+        if (close === index + 1) {
+          let start = index;
+          while (start > 0 && next[start - 1].kind === 'operator' && next[start - 1].value === 'NOT') start -= 1;
+          next.splice(start, close - start + 1);
+          changed = true;
+          break;
+        }
+      }
+      if (isBinaryOperator(token) && (!isOperandEnd(next[index - 1]) || !isOperandStart(next[index + 1]))) {
+        next.splice(index, 1);
+        changed = true;
+        break;
       }
     }
   }
-  return tokens.filter((_, tokenIndex) => tokenIndex < start || tokenIndex > end);
+  return next;
+}
+
+export function removeSearchToken(tokens: SearchToken[], index: number): SearchToken[] {
+  const token = tokens[index];
+  if (!token) return tokens;
+
+  let start = index;
+  let end = index;
+  if (token.kind === 'paren') {
+    const pair = matchingParen(tokens, index);
+    if (pair !== null) {
+      start = Math.min(index, pair);
+      end = Math.max(index, pair);
+    }
+  } else if (token.kind === 'operator' && token.value === 'NOT') {
+    return cleanupSearchTokens(tokens.filter((_, tokenIndex) => tokenIndex !== index));
+  } else if (token.kind === 'operator') {
+    const right = index + 1;
+    start = index;
+    end = right < tokens.length ? operandEnd(tokens, operandStart(tokens, right)) : index;
+  } else {
+    start = operandStart(tokens, index);
+    end = operandEnd(tokens, index);
+  }
+
+  return cleanupSearchTokens(tokens.filter((_, tokenIndex) => tokenIndex < start || tokenIndex > end));
 }
 
 export function validateSearchTokens(tokens: SearchToken[]): SearchTokenValidation {
   if (tokens.length === 0) return { valid: false, message: '请添加搜索关键词' };
 
-  let expectsTerm = true;
+  let expectsOperand = true;
+  let depth = 0;
   for (const token of tokens) {
-    if (expectsTerm) {
+    if (expectsOperand) {
       if (token.kind === 'term') {
         if (!token.value.trim()) return { valid: false, message: '关键词不能为空' };
-        expectsTerm = false;
+        expectsOperand = false;
+      } else if (token.kind === 'operator' && token.value === 'NOT') {
         continue;
+      } else if (token.kind === 'paren' && token.value === '(') {
+        depth += 1;
+      } else {
+        return { valid: false, message: `${token.value} 前缺少关键词` };
       }
-      if (token.value === 'NOT') continue;
-      return { valid: false, message: `${token.value} 前缺少关键词` };
+      continue;
     }
 
     if (token.kind === 'operator' && (token.value === 'AND' || token.value === 'OR')) {
-      expectsTerm = true;
-      continue;
+      expectsOperand = true;
+    } else if (token.kind === 'paren' && token.value === ')') {
+      if (depth === 0) return { valid: false, message: '右括号前缺少左括号' };
+      depth -= 1;
+    } else {
+      return { valid: false, message: '关键词之间需要 AND 或 OR' };
     }
-    return { valid: false, message: '关键词之间需要 AND 或 OR' };
   }
 
-  return expectsTerm
-    ? { valid: false, message: 'AND、OR 或 NOT 后缺少关键词' }
-    : { valid: true };
+  if (expectsOperand) return { valid: false, message: '运算符或左括号后缺少关键词' };
+  if (depth > 0) return { valid: false, message: '缺少右括号' };
+  return { valid: true };
 }
 
-export function finalizeSearchTokens(
-  tokens: SearchToken[],
-  draft: string,
-  allowOperators = true
-): SearchToken[] {
+export function finalizeSearchTokens(tokens: SearchToken[], draft: string, allowOperators = true): SearchToken[] {
   const finalized = appendSearchTerm(tokens, draft, allowOperators);
   const validation = validateSearchTokens(finalized);
   if (!validation.valid) throw new Error(validation.message);
@@ -158,9 +251,7 @@ export function quoteSearchTerm(value: string): string {
 export function serializeSearchTokens(tokens: SearchToken[]): string {
   const validation = validateSearchTokens(tokens);
   if (!validation.valid) throw new Error(validation.message);
-  return tokens
-    .map((token) => token.kind === 'term' ? quoteSearchTerm(token.value) : token.value)
-    .join(' ');
+  return tokens.map((token) => token.kind === 'term' ? quoteSearchTerm(token.value) : token.value).join(' ');
 }
 
 export function deserializeSearchTokens(expression: string): SearchToken[] {
@@ -169,6 +260,11 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
   while (index < expression.length) {
     while (/\s/.test(expression[index] ?? '')) index += 1;
     if (index >= expression.length) break;
+    if (expression[index] === '(' || expression[index] === ')') {
+      tokens.push({ kind: 'paren', value: expression[index] as SearchParen });
+      index += 1;
+      continue;
+    }
     if (expression[index] === '"') {
       index += 1;
       let value = '';
@@ -194,11 +290,8 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
       continue;
     }
     const start = index;
-    while (index < expression.length && !/\s/.test(expression[index])) index += 1;
+    while (index < expression.length && !/\s/.test(expression[index]) && expression[index] !== '(' && expression[index] !== ')') index += 1;
     const fragment = expression.slice(start, index);
-    if (fragment.includes('(') || fragment.includes(')')) {
-      throw new Error('括号表达式需要使用原始文本编辑器');
-    }
     const normalizedFragment = fragment.toUpperCase();
     if (['AND', 'OR', 'NOT'].includes(normalizedFragment)) {
       tokens.push({ kind: 'operator', value: normalizedFragment as SearchOperator });
@@ -209,42 +302,6 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
   const validation = validateSearchTokens(tokens);
   if (!validation.valid) throw new Error(validation.message);
   return tokens;
-}
-
-export function isSimpleSearchRepresentable(tokens: SearchToken[]): boolean {
-  if (tokens.length === 0) return true;
-  if (tokens[0].kind !== 'term') return false;
-
-  let index = 1;
-  while (index < tokens.length) {
-    const operator = tokens[index];
-    if (operator.kind !== 'operator' || (operator.value !== 'AND' && operator.value !== 'OR')) {
-      return false;
-    }
-    index += 1;
-    if (operator.value === 'AND' && tokens[index]?.kind === 'operator' && tokens[index].value === 'NOT') {
-      index += 1;
-    }
-    if (tokens[index]?.kind !== 'term') return false;
-    index += 1;
-  }
-  return true;
-}
-
-export function assertSimpleSearchRepresentable(tokens: SearchToken[]): SearchToken[] {
-  if (!isSimpleSearchRepresentable(tokens)) {
-    throw new Error('该搜索条件无法由简单模式无损编辑，请切换高级表达式');
-  }
-  return tokens;
-}
-
-export function deserializeSimpleSearchTokens(expression: string): SearchToken[] {
-  const tokens = deserializeSearchTokens(expression);
-  try {
-    return assertSimpleSearchRepresentable(tokens);
-  } catch {
-    throw new Error('该表达式无法由简单模式无损编辑，请保留高级表达式');
-  }
 }
 
 export function formatSearchTokens(tokens: SearchToken[]): string {

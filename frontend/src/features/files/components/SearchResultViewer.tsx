@@ -86,7 +86,7 @@ export function SearchResultViewer({
           draft={resultFilterDraft}
           onTokensChange={onResultFilterTokensChange}
           onDraftChange={onResultFilterDraftChange}
-          placeholder="在当前结果中添加关键词或短语..."
+          placeholder="添加关键词"
           ariaLabel="当前结果筛选条件"
           disabled={searchLoading}
         />

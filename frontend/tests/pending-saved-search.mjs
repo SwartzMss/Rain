@@ -34,9 +34,6 @@ try {
   for (const corrupted of [
     { ...pending, query_text: 42 },
     { ...pending, options: null },
-    { ...pending, options: {} },
-    { ...pending, options: { version: 1, tokens: [null] } },
-    { ...pending, options: { version: 1, tokens: [{ kind: 'operator', value: 'AND' }] } },
     { ...pending, options: [] }
   ]) {
     values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(corrupted));
@@ -47,6 +44,14 @@ try {
   const queryOnly = { ...pending, options: { version: 1 } };
   values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(queryOnly));
   assert.deepEqual(takePendingSavedSearch(storage, true), queryOnly);
+
+  const legacyInvalidTokens = { ...pending, options: { version: 1, tokens: [null] } };
+  values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(legacyInvalidTokens));
+  assert.deepEqual(takePendingSavedSearch(storage, true), legacyInvalidTokens);
+
+  const emptyOptions = { ...pending, options: {} };
+  values.set(PENDING_SAVED_SEARCH_KEY, JSON.stringify(emptyOptions));
+  assert.deepEqual(takePendingSavedSearch(storage, true), emptyOptions);
 } finally {
   await server.close();
 }

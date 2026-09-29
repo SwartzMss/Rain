@@ -1,11 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   appendSearchOperator,
+  appendSearchParen,
   appendSearchTerm,
   expectsSearchTerm,
+  hasUnclosedSearchParens,
   removeSearchToken,
   replaceSearchOperator,
   replaceSearchTerm,
+  type SearchOperator,
+  type SearchParen,
   type SearchToken
 } from './searchTokens';
 
@@ -38,9 +42,7 @@ export function SearchTokenEditor({
   const tokenRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   useEffect(() => {
-    if (editingIndex !== null && tokens[editingIndex]?.kind !== 'term') {
-      setEditingIndex(null);
-    }
+    if (editingIndex !== null && tokens[editingIndex]?.kind !== 'term') setEditingIndex(null);
   }, [editingIndex, tokens]);
 
   const commitDraft = () => {
@@ -52,14 +54,13 @@ export function SearchTokenEditor({
 
   const commitEdit = () => {
     if (editingIndex === null) return;
-    onTokensChange(replaceSearchTerm(tokens, editingIndex, editingValue));
+    const next = replaceSearchTerm(tokens, editingIndex, editingValue);
+    if (next !== tokens) onTokensChange(next);
     setEditingIndex(null);
     setEditingValue('');
   };
 
-  const focusToken = (index: number) => {
-    tokenRefs.current[index]?.focus();
-  };
+  const focusToken = (index: number) => tokenRefs.current[index]?.focus();
 
   const removeAt = (index: number) => {
     onTokensChange(removeSearchToken(tokens, index));
@@ -70,7 +71,20 @@ export function SearchTokenEditor({
     });
   };
 
-  const canAddOperator = allowOperators && !expectsSearchTerm(tokens) && !draft.trim();
+  const updateOperator = (operator: SearchOperator) => {
+    onTokensChange(appendSearchOperator(tokens, operator));
+  };
+
+  const updateParen = (paren: SearchParen) => {
+    onTokensChange(appendSearchParen(tokens, paren));
+  };
+
+  const operandExpected = expectsSearchTerm(tokens);
+  const last = tokens[tokens.length - 1];
+  const canAddBinary = allowOperators && (last?.kind === 'term' || last?.kind === 'paren' && last.value === ')' || last?.kind === 'operator' && (last.value === 'AND' || last.value === 'OR'));
+  const canAddNot = allowOperators && (operandExpected || last?.kind === 'term' || last?.kind === 'paren' && last.value === ')');
+  const canAddLeftParen = allowOperators && (operandExpected || Boolean(last));
+  const canAddRightParen = allowOperators && !operandExpected && hasUnclosedSearchParens(tokens) > 0;
 
   return (
     <div
@@ -82,9 +96,11 @@ export function SearchTokenEditor({
         <span
           key={`${token.kind}:${token.value}:${index}`}
           className={`inline-flex h-7 max-w-full items-center overflow-hidden rounded border text-xs ${
-            token.kind === 'operator'
-              ? 'border-cyan-500/50 bg-cyan-500/15 font-semibold text-cyan-800'
-              : 'border-slate-300 bg-slate-100 text-slate-900'
+            token.kind === 'term'
+              ? 'border-slate-300 bg-slate-100 text-slate-900'
+              : token.kind === 'paren'
+                ? 'border-violet-500/50 bg-violet-500/10 font-semibold text-violet-800'
+                : 'border-cyan-500/50 bg-cyan-500/15 font-semibold text-cyan-800'
           }`}
         >
           {editingIndex === index && token.kind === 'term' ? (
@@ -103,6 +119,7 @@ export function SearchTokenEditor({
                 } else if (event.key === 'Escape') {
                   event.preventDefault();
                   setEditingIndex(null);
+                  setEditingValue('');
                 }
               }}
             />
@@ -111,14 +128,14 @@ export function SearchTokenEditor({
               ref={(element) => { tokenRefs.current[index] = element; }}
               type="button"
               className="min-w-0 truncate px-2 py-1"
-              title={token.kind === 'operator' && token.value !== 'NOT' ? '点击切换 AND / OR' : token.value}
+              title={token.kind === 'operator' && token.value !== 'NOT' ? '切换 AND / OR' : token.value}
               aria-label={token.kind === 'term' ? `编辑关键词 ${token.value}` : `${token.value} 运算符`}
               disabled={disabled}
               onClick={() => {
                 if (token.kind === 'term') {
                   setEditingIndex(index);
                   setEditingValue(token.value);
-                } else if (token.value !== 'NOT') {
+                } else if (token.kind === 'operator' && token.value !== 'NOT') {
                   onTokensChange(replaceSearchOperator(tokens, index, token.value === 'AND' ? 'OR' : 'AND'));
                 }
               }}
@@ -143,7 +160,7 @@ export function SearchTokenEditor({
             type="button"
             className="flex h-full w-6 shrink-0 items-center justify-center border-l border-current/20 opacity-60 hover:opacity-100"
             title={`删除 ${token.value}`}
-            aria-label={`删除${token.kind === 'term' ? '关键词' : '运算符'} ${token.value}`}
+            aria-label={`删除${token.kind === 'term' ? '关键词' : '语法'} ${token.value}`}
             disabled={disabled}
             onClick={() => removeAt(index)}
           >
@@ -186,36 +203,14 @@ export function SearchTokenEditor({
           +
         </button>
       ) : null}
-      {canAddOperator ? (
-        <>
-          <button
-            type="button"
-            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15"
-            disabled={disabled}
-            onClick={() => onTokensChange(appendSearchOperator(tokens, 'AND'))}
-          >
-            AND
-          </button>
-          <button
-            type="button"
-            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15"
-            disabled={disabled}
-            onClick={() => onTokensChange(appendSearchOperator(tokens, 'OR'))}
-          >
-            OR
-          </button>
-          <button
-            type="button"
-            className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15"
-            disabled={disabled}
-            onClick={() => {
-              const withAnd = appendSearchOperator(tokens, 'AND');
-              onTokensChange(appendSearchOperator(withAnd, 'NOT'));
-            }}
-          >
-            AND NOT
-          </button>
-        </>
+      {allowOperators ? (
+        <div className="flex items-center gap-1" aria-label="搜索语法">
+          <button type="button" className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15 disabled:opacity-40" disabled={disabled || !canAddBinary} onClick={() => updateOperator('AND')}>AND</button>
+          <button type="button" className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15 disabled:opacity-40" disabled={disabled || !canAddBinary} onClick={() => updateOperator('OR')}>OR</button>
+          <button type="button" className="h-7 rounded border border-cyan-500/40 px-2 text-xs font-semibold text-cyan-700 hover:bg-cyan-500/15 disabled:opacity-40" disabled={disabled || !canAddNot} onClick={() => updateOperator('NOT')}>NOT</button>
+          <button type="button" className="h-7 rounded border border-violet-500/40 px-2 text-xs font-semibold text-violet-700 hover:bg-violet-500/15 disabled:opacity-40" disabled={disabled || !canAddLeftParen} onClick={() => updateParen('(')}>(</button>
+          <button type="button" className="h-7 rounded border border-violet-500/40 px-2 text-xs font-semibold text-violet-700 hover:bg-violet-500/15 disabled:opacity-40" disabled={disabled || !canAddRightParen} onClick={() => updateParen(')')}>)</button>
+        </div>
       ) : null}
     </div>
   );
