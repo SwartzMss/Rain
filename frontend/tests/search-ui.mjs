@@ -9,6 +9,11 @@ const [filesView, expressionEditor] = await Promise.all([
 assert.match(filesView, /ariaLabel="日志内容搜索条件"/);
 assert.match(filesView, /aria-label="搜索日志内容"/);
 assert.match(filesView, /<SearchExpressionEditor/);
+const fileSearchEditor = filesView.match(
+  /ariaLabel="当前文件搜索条件"[\s\S]*?\/>/
+);
+assert.ok(fileSearchEditor, 'file search should use the shared token editor');
+assert.match(fileSearchEditor[0], /allowOperators=\{false\}/);
 assert.doesNotMatch(expressionEditor, /简单模式|高级表达式|支持 AND|优先于/);
 assert.match(expressionEditor, /SearchTokenEditor/);
 assert.match(filesView, /<FileTreeNode/);

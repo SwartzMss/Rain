@@ -162,6 +162,19 @@ try {
   assert.match(markup, />OR<\/button>/);
   assert.match(markup, />NOT<\/button>/);
 
+  const simpleMarkup = renderToStaticMarkup(
+    React.createElement(SearchTokenEditor, {
+      tokens: [],
+      draft: '',
+      onTokensChange: () => undefined,
+      onDraftChange: () => undefined,
+      placeholder: '输入关键词',
+      ariaLabel: '简单搜索条件',
+      allowOperators: false
+    })
+  );
+  assert.doesNotMatch(simpleMarkup, /搜索语法|>AND<|>OR<|>NOT</);
+
   const expressionMarkup = renderToStaticMarkup(
     React.createElement(SearchExpressionEditor, {
       tokens: deserializeSearchTokens('A AND (B OR C)'),
@@ -173,7 +186,7 @@ try {
     })
   );
   assert.match(expressionMarkup, />AND<\/button>/);
-  assert.match(expressionMarkup, />NOT<\/button>/);
+  assert.match(expressionMarkup, />AND NOT<\/button>/);
   assert.match(expressionMarkup, />\(<\/button>/);
   assert.doesNotMatch(expressionMarkup, /简单模式|高级表达式|支持 AND/);
 

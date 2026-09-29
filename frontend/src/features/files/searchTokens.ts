@@ -312,9 +312,9 @@ export function getSearchTerms(tokens: SearchToken[]): string[] {
   return tokens.flatMap((token) => token.kind === 'term' ? [token.value] : []);
 }
 
-export function canFinalizeSearch(tokens: SearchToken[], draft: string): boolean {
+export function canFinalizeSearch(tokens: SearchToken[], draft: string, allowOperators = true): boolean {
   try {
-    finalizeSearchTokens(tokens, draft);
+    finalizeSearchTokens(tokens, draft, allowOperators);
     return true;
   } catch {
     return false;

@@ -1239,7 +1239,7 @@ export function BundleView() {
     if (!selectedBundleId) return;
     let finalizedTokens: SearchToken[];
     try {
-      finalizedTokens = finalizeSearchTokens(fileSearchTokens, fileSearchDraft);
+      finalizedTokens = finalizeSearchTokens(fileSearchTokens, fileSearchDraft, false);
     } catch (error) {
       setFileSearchError(error instanceof Error ? error.message : '搜索条件无效');
       return;
@@ -1520,7 +1520,7 @@ export function BundleView() {
     || searchLoading
     || Boolean(searchError)
   );
-  const canRunFileSearch = canFinalizeSearch(fileSearchTokens, fileSearchDraft);
+  const canRunFileSearch = canFinalizeSearch(fileSearchTokens, fileSearchDraft, false);
   const canRunResultFilter = canFinalizeSearch(resultFilterTokens, resultFilterDraft);
 
   return (
@@ -1724,6 +1724,7 @@ export function BundleView() {
                       onDraftChange={setFileSearchDraft}
                       placeholder="输入关键词"
                       ariaLabel="当前文件搜索条件"
+                      allowOperators={false}
                       disabled={fileSearchLoading}
                     />
                     {fileSearchExecuted ? (
