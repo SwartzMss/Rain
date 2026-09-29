@@ -40,14 +40,15 @@ describe('write permission behavior', () => {
     expect(onIssueScopeChange).toHaveBeenCalledWith('all');
   });
 
-  it('shows Issue names and owners in the Issue list', () => {
+  it('shows Issue names and the double-click hint without owner details on cards', () => {
     const props = { ...issueProps(false), filteredIssues: [
       { code: 'OWNED', name: 'Owned', bundle_count: 0, can_write: false, owner_username: 'owner' },
       { code: 'UNKNOWN', name: 'Unknown', bundle_count: 0, can_write: false, owner_username: null }
     ] };
     render(<IssueSelector {...props} />);
     expect(screen.getByText('Owned')).toBeInTheDocument();
-    expect(screen.getByText('所有者：owner')).toBeInTheDocument();
+    expect(screen.queryByText('所有者：owner')).not.toBeInTheDocument();
+    expect(screen.getAllByText('双击查看日志')).toHaveLength(2);
   });
 
   it('keeps double-click navigation for an Issue', () => {

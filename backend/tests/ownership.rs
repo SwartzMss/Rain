@@ -233,7 +233,7 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     )
     .await;
     let guest_list: Value = test::read_body_json(guest_list).await;
-    assert!(guest_list["items"][0]["owner_username"].is_null());
+    assert_eq!(guest_list["items"][0]["owner_username"], "owner-http");
     let issue_detail = test::call_service(
         &app,
         test::TestRequest::get()
@@ -252,7 +252,7 @@ async fn foreign_user_cannot_upload_or_delete_owned_issue() {
     )
     .await;
     let guest_detail: Value = test::read_body_json(guest_detail).await;
-    assert!(guest_detail["owner_username"].is_null());
+    assert_eq!(guest_detail["owner_username"], "owner-http");
     let _ = tokio::fs::remove_dir_all(data_root).await;
 
     let delete = test::call_service(

@@ -132,9 +132,7 @@ export function IssueSelector({
                 {issue.name && issue.name !== issue.code ? (
                   <span className="block truncate text-[10px] font-normal text-slate-500">{issue.name}</span>
                 ) : null}
-                {issueScope === 'all' && issue.owner_username ? (
-                  <span className="block truncate text-[10px] font-normal text-slate-500">所有者：{issue.owner_username}</span>
-                ) : null}
+                <span className="block text-[10px] font-normal text-slate-400">双击查看日志</span>
               </span>
             </button>
           );
