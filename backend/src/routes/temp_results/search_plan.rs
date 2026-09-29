@@ -4,6 +4,7 @@ use std::{
 };
 
 use actix_web::web;
+use futures_util::StreamExt;
 
 use crate::{
     AppState,
@@ -102,15 +103,18 @@ pub(crate) async fn build_source_search_plans_with_context(
                 pending[index] = Some(Err("source_identity_missing"));
             }
         }
-        for sources in bundles.values() {
+        let bundle_count = bundles.len();
+        let mut bundle_plans = futures_util::stream::iter(bundles.into_values().map(|sources| {
+            let state = state.clone();
+            async move { build_indexed_bundle_plans(&state, &sources, term, context).await }
+        }))
+        .buffer_unordered(crate::search::parallel::issue_search_parallelism(
+            bundle_count,
+        ));
+        while let Some(plans) = bundle_plans.next().await {
             checkpoint(context)?;
-            match build_indexed_bundle_plans(state, sources, term, context).await {
-                Ok(plans) => {
-                    for (index, plan) in plans {
-                        pending[index] = Some(plan);
-                    }
-                }
-                Err(error) => return Err(error),
+            for (index, plan) in plans? {
+                pending[index] = Some(plan);
             }
         }
     }
@@ -253,12 +257,13 @@ async fn build_indexed_bundle_plans(
         scope: ContentSearchScope::Bundle {
             bundle_id: first_source.bundle_id.clone(),
             timeline: None,
-            file_id: None,
+            file_id: (sources.len() == 1).then_some(first_source.file_id),
         },
         query: term.to_owned(),
         path_like: None,
         from: 0,
         size: HARD_MAX_SEARCH_WINDOW as i64,
+        include_content: false,
     };
     let result =
         if can_skip_visibility_snapshot(&state_name, visibility_revision, compacted_revision) {
@@ -523,6 +528,7 @@ mod tests {
                 line_end: Some(12),
                 chunk_index: Some(2),
                 content: "marker".into(),
+                tantivy_doc_address: None,
             },
             ContentSearchRow {
                 file_id: 42,
@@ -533,6 +539,7 @@ mod tests {
                 line_end: Some(20),
                 chunk_index: Some(3),
                 content: "marker".into(),
+                tantivy_doc_address: None,
             },
         ];
 
@@ -553,6 +560,7 @@ mod tests {
             line_end: Some(12),
             chunk_index: Some(2),
             content: "marker".into(),
+            tantivy_doc_address: None,
         }];
 
         assert_eq!(

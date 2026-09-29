@@ -30,6 +30,7 @@ pub struct SearchHit {
     pub timeline: Option<String>,
     pub content: String,
     pub path: String,
+    pub doc_address: DocAddress,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -40,6 +41,7 @@ pub(crate) struct SearchOptions<'a> {
     pub visible_file_ids: Option<&'a HashSet<i64>>,
     pub from: usize,
     pub size: usize,
+    pub include_content: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -242,8 +244,13 @@ impl CandidateSearch {
                                 .get_first(self.index.fields.line_end)
                                 .and_then(|value| value.as_i64()),
                             timeline,
-                            content: content.to_owned(),
+                            content: if options.include_content.unwrap_or(true) {
+                                content.to_owned()
+                            } else {
+                                String::new()
+                            },
                             path,
+                            doc_address: address,
                         };
                         total += 1;
                         if window_limit > 0 {
@@ -285,6 +292,28 @@ impl CandidateSearch {
             total: total as i64,
             metrics,
         })
+    }
+
+    pub(crate) fn load_contents(&self, addresses: &[(u32, u32)]) -> Result<Vec<String>, AppError> {
+        let searcher = self.index.reader.searcher();
+        addresses
+            .iter()
+            .map(|(segment_ord, doc_id)| {
+                let document: TantivyDocument = searcher
+                    .doc(DocAddress {
+                        segment_ord: *segment_ord,
+                        doc_id: *doc_id,
+                    })
+                    .map_err(|error| {
+                        AppError::Config(format!("read Tantivy document content: {error}"))
+                    })?;
+                document
+                    .get_first(self.index.fields.content)
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| AppError::Config("Tantivy document content is missing".into()))
+            })
+            .collect()
     }
 }
 

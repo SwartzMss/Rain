@@ -112,6 +112,7 @@ async fn publishes_reopens_and_searches_a_bundle_index() {
             path_like: None,
             from: 0,
             size: 10,
+            include_content: true,
         },
     )
     .await
@@ -194,6 +195,7 @@ async fn streaming_build_keeps_chunk_body_out_of_sqlite() {
             path_like: None,
             from: 0,
             size: 10,
+            include_content: true,
         },
     )
     .await
@@ -362,6 +364,7 @@ async fn deletion_rebuild_publishes_only_visible_documents() {
             path_like: None,
             from: 0,
             size: 10,
+            include_content: true,
         },
         visible,
     )
