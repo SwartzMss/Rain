@@ -27,6 +27,7 @@ import {
 } from './viewerTabs';
 import {
   formatHitPath,
+  attachTreeChild,
   hydrateTreeNode,
   isExtractionFolder,
   mergeFlattenedExtractionChildren,
@@ -1010,6 +1011,24 @@ export function BundleView() {
       knownNodes.set(node.id, node);
       children.forEach((child) => knownNodes.set(child.id, child));
     };
+    const updateTreeNodes = (nodes: TreeNode[]) => {
+      nodes.forEach((node) => knownNodes.set(node.id, node));
+      setTreeNodes((prev) => {
+        const next = { ...prev };
+        nodes.forEach((node) => {
+          next[node.id] = node;
+        });
+        return next;
+      });
+    };
+    const attachChild = (parent: TreeNode, child: TreeNode) => {
+      const knownChildren = parent.childrenIds
+        .map((childId) => knownNodes.get(childId))
+        .filter((knownChild): knownChild is TreeNode => Boolean(knownChild));
+      const attached = attachTreeChild(parent, child, knownChildren);
+      updateTreeNodes([attached.parent, attached.child]);
+      return attached;
+    };
     const loadKnownNode = async (nodeId: string, parentId: string | null) => {
       const result = await loadNode(source.bundleHash, nodeId, parentId);
       if (!result) return null;
@@ -1053,27 +1072,12 @@ export function BundleView() {
         if (flattened !== parent) {
           const flattenedParent: TreeNode = flattened;
           parent = flattenedParent;
-          knownNodes.set(flattenedParent.id, flattenedParent);
-          setTreeNodes((prev) => {
-            const stored = prev[flattenedParent.id];
-            if (!stored) return prev;
-            return {
-              ...prev,
-              [flattenedParent.id]: {
-                ...stored,
-                childrenIds: flattenedParent.childrenIds,
-                hasMoreChildren: flattenedParent.hasMoreChildren,
-                childrenCursor: flattenedParent.childrenCursor
-              }
-            };
-          });
-        } else {
-          while (!parent.childrenIds.includes(activeNode.id) && parent.hasMoreChildren && parent.childrenCursor) {
-            const nextPage = await loadMoreNode(parent);
-            if (!nextPage) break;
-            parent = nextPage.node;
-            remember(parent, nextPage.children);
-          }
+          updateTreeNodes([flattenedParent]);
+        } else if (
+          !parent.childrenIds.includes(activeNode.id)
+          && !isExtractionFolder(activeNode, parent)
+        ) {
+          parent = attachChild(parent, activeNode).parent;
         }
       }
       if (!parent) break;
@@ -1082,6 +1086,13 @@ export function BundleView() {
 
     if (ancestors.length > 0) {
       setExpandedNodes((prev) => new Set([...prev, ...ancestors]));
+    }
+
+    const syntheticRootId = `${source.bundleHash}:root`;
+    const syntheticRoot = knownNodes.get(syntheticRootId)
+      ?? await loadKnownNode('root', null);
+    if (syntheticRoot && current.id !== syntheticRoot.id && !current.parentId) {
+      attachChild(syntheticRoot, current);
     }
     return sourceNode;
   };

@@ -1,7 +1,48 @@
 import { describe, expect, it, vi } from 'vitest';
-import { hydrateTreeNode } from '../src/features/files/treeModel';
+import { attachTreeChild, hydrateTreeNode, toTreeNode } from '../src/features/files/treeModel';
 
 describe('file tree loading', () => {
+  it('attaches a revealed top-level node to the synthetic root without closing pagination', () => {
+    const root = toTreeNode('bundle', {
+      id: 'root',
+      parent_id: null,
+      name: 'bundle_root',
+      path: '/',
+      is_dir: true,
+      preview_kind: 'directory'
+    }, null);
+    const firstPageChild = toTreeNode('bundle', {
+      id: 1,
+      parent_id: null,
+      name: 'Z.log',
+      path: '/Z.log',
+      is_dir: false,
+      preview_kind: 'text'
+    }, root.id);
+    const target = toTreeNode('bundle', {
+      id: 101,
+      parent_id: null,
+      name: 'a.log',
+      path: '/a.log',
+      is_dir: false,
+      preview_kind: 'text'
+    }, null);
+    const rootWithPage = {
+      ...root,
+      childrenIds: [firstPageChild.id],
+      hasLoadedChildren: true,
+      hasMoreChildren: true,
+      childrenCursor: 'cursor-1'
+    };
+
+    const result = attachTreeChild(rootWithPage, target, [firstPageChild]);
+
+    expect(result.child.parentId).toBe(root.id);
+    expect(result.parent.childrenIds).toEqual([firstPageChild.id, target.id]);
+    expect(result.parent.hasMoreChildren).toBe(true);
+    expect(result.parent.childrenCursor).toBe('cursor-1');
+  });
+
   it('keeps an archive retryable when its extracted directory fails to load', async () => {
     const fetchNode = vi.fn()
       .mockResolvedValueOnce({
