@@ -88,6 +88,7 @@ export function SearchResultViewer({
           onDraftChange={onResultFilterDraftChange}
           placeholder="添加关键词"
           ariaLabel="当前结果筛选条件"
+          allowOperators={false}
           disabled={searchLoading}
         />
         <span className="shrink-0 text-xs text-slate-500">
