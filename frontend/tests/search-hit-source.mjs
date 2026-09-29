@@ -175,8 +175,9 @@ try {
     filesView.indexOf('const revealSourceNode'),
     filesView.indexOf('const openSearchHitSource')
   );
-  assert.match(revealSourceImplementation, /!parent\.hasLoadedChildren/);
-  assert.match(revealSourceImplementation, /loadMoreNode\(parent/);
+  assert.match(revealSourceImplementation, /attachTreeChild/);
+  assert.match(revealSourceImplementation, /syntheticRoot/);
+  assert.doesNotMatch(revealSourceImplementation, /loadMoreNode\(parent/);
   assert.doesNotMatch(filesView, /navigator\.clipboard\.writeText\(hit\.path\)/);
   assert.match(
     filesView,

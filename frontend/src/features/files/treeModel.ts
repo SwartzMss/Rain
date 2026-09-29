@@ -57,6 +57,59 @@ export const mergeFlattenedExtractionChildren = (
   };
 };
 
+const compareTreeNodes = (left: TreeNode, right: TreeNode) => {
+  if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1;
+  const leftName = new TextEncoder().encode(left.name);
+  const rightName = new TextEncoder().encode(right.name);
+  const nameLength = Math.min(leftName.length, rightName.length);
+  let nameOrder = 0;
+  for (let index = 0; index < nameLength; index += 1) {
+    if (leftName[index] === rightName[index]) continue;
+    nameOrder = leftName[index] < rightName[index] ? -1 : 1;
+    break;
+  }
+  if (nameOrder === 0 && leftName.length !== rightName.length) {
+    nameOrder = leftName.length < rightName.length ? -1 : 1;
+  }
+  if (nameOrder !== 0) return nameOrder;
+
+  const leftRawId = Number(left.rawId);
+  const rightRawId = Number(right.rawId);
+  if (Number.isSafeInteger(leftRawId) && Number.isSafeInteger(rightRawId)) {
+    return leftRawId - rightRawId;
+  }
+  return left.rawId < right.rawId ? -1 : left.rawId > right.rawId ? 1 : 0;
+};
+
+export const attachTreeChild = (
+  parent: TreeNode,
+  child: TreeNode,
+  knownChildren: TreeNode[]
+): { parent: TreeNode; child: TreeNode } => {
+  const attachedChild = parent.rawId === 'root' && child.parentId !== parent.id
+    ? { ...child, parentId: parent.id }
+    : child;
+  const childrenById = new Map(knownChildren.map((knownChild) => [knownChild.id, knownChild]));
+  childrenById.set(attachedChild.id, attachedChild);
+  const existingOrder = new Map(parent.childrenIds.map((childId, index) => [childId, index]));
+  const nextChildrenIds = [...new Set([...parent.childrenIds, attachedChild.id])];
+
+  nextChildrenIds.sort((leftId, rightId) => {
+    const left = childrenById.get(leftId);
+    const right = childrenById.get(rightId);
+    if (!left || !right) {
+      return (existingOrder.get(leftId) ?? Number.MAX_SAFE_INTEGER)
+        - (existingOrder.get(rightId) ?? Number.MAX_SAFE_INTEGER);
+    }
+    return compareTreeNodes(left, right);
+  });
+
+  return {
+    parent: { ...parent, childrenIds: nextChildrenIds },
+    child: attachedChild
+  };
+};
+
 export const formatHitPath = (raw: string) => {
   const parts = raw.replace(/^\//, '').split('/');
   if (parts.length === 0) return raw;

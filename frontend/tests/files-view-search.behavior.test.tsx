@@ -309,4 +309,88 @@ describe('BundleView search expression flow', () => {
     expect(screen.getByRole('tab', { name: '简单模式' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getAllByRole('button', { name: '编辑关键词 A' })).toHaveLength(2);
   });
+
+  it('reveals a root page-two source in the file tree without loading sibling pages', async () => {
+    const response = {
+      result_id: 'result-1',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle',
+        file_id: 101,
+        path: '/target.log',
+        content: 'ERROR from target',
+        line_number: 10
+      }]
+    };
+    testMocks.fetchIssueBundles.mockResolvedValue({
+      log_bundles: [{ hash: 'bundle', name: 'Bundle', status: { upload_status: 'READY' } }]
+    });
+    testMocks.fetchFileNode.mockImplementation(async (_bundleId, fileId) => {
+      if (fileId === 'root') {
+        return {
+          node: {
+            id: 'root',
+            parent_id: null,
+            name: 'bundle_root',
+            path: '/',
+            is_dir: true,
+            preview_kind: 'directory'
+          },
+          children: [{
+            id: 1,
+            parent_id: null,
+            name: 'first.log',
+            path: '/first.log',
+            is_dir: false,
+            preview_kind: 'text'
+          }],
+          has_more: true,
+          next_cursor: 'root-cursor'
+        };
+      }
+      if (fileId === '101') {
+        return {
+          node: {
+            id: 101,
+            parent_id: null,
+            name: 'target.log',
+            path: '/target.log',
+            is_dir: false,
+            preview_kind: 'text'
+          },
+          children: [],
+          has_more: false,
+          next_cursor: null
+        };
+      }
+      throw new Error(`unexpected file node request: ${fileId}`);
+    });
+    testMocks.fetchFileLines.mockResolvedValue({
+      path: '/target.log',
+      start: 0,
+      limit: 1000,
+      lines: [{ line_number: 10, content: 'ERROR from target' }]
+    });
+    testMocks.execute.mockImplementation(async (_request, options) => {
+      options?.onSuccess?.(response);
+      return response;
+    });
+
+    renderBundleView();
+    await waitFor(() => expect(testMocks.fetchFileNode).toHaveBeenCalledWith('bundle', 'root', { limit: 100 }));
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'ERROR' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+
+    fireEvent.contextMenu(await screen.findByText('ERROR from target'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '在原文件中打开' }));
+
+    const targetButton = await screen.findByRole('button', { name: 'target.log' });
+    expect(targetButton).toHaveAttribute('aria-current', 'true');
+    expect(testMocks.fetchFileNode.mock.calls.some(([, fileId, options]) => (
+      fileId === 'root' && Boolean(options?.cursor)
+    ))).toBe(false);
+  });
 });
