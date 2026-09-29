@@ -213,7 +213,6 @@ pub(crate) fn failure_details(error: &AppError) -> FailureDetails {
 
 pub(crate) fn user_facing_failure_reason(error: &AppError) -> String {
     match error {
-        AppError::BadRequest(message) | AppError::Conflict(message) => message.clone(),
         AppError::Api { message, .. } => (*message).to_string(),
         AppError::PublicApi { message, .. } => message.clone(),
         _ => "上传处理失败，请删除后重试".to_string(),
@@ -369,9 +368,25 @@ mod tests {
     }
 
     #[test]
-    fn preserves_actionable_bad_request_failure_reason() {
-        let error = AppError::BadRequest("压缩包条目超过配置上限".into());
-        assert_eq!(user_facing_failure_reason(&error), "压缩包条目超过配置上限");
+    fn preserves_actionable_public_content_failure_reason() {
+        let error = AppError::api(
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "UPLOAD_CONTENT_REJECTED",
+            "压缩包内容不符合处理要求，请检查后重试",
+        );
+        assert_eq!(
+            user_facing_failure_reason(&error),
+            "压缩包内容不符合处理要求，请检查后重试"
+        );
+    }
+
+    #[test]
+    fn sanitizes_raw_conflict_failure_reason_before_persistence() {
+        let error = AppError::Conflict("secret internal state".into());
+        let details = super::failure_details(&error);
+        assert_eq!(details.code, "CONFLICT");
+        assert_eq!(details.reason, "上传处理失败，请删除后重试");
+        assert!(!details.reason.contains("secret internal state"));
     }
 
     #[test]

@@ -1845,6 +1845,9 @@ async fn issue_creation_and_upload_require_existing_issue() {
     )
     .await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    let duplicate_body: Value = test::read_body_json(duplicate).await;
+    assert_eq!(duplicate_body["code"], "ISSUE_ALREADY_EXISTS");
+    assert_eq!(duplicate_body["message"], "该 Issue 已存在");
 
     let invalid = test::call_service(
         &app,
@@ -2467,6 +2470,9 @@ async fn processing_bundles_cannot_be_deleted() {
     )
     .await;
     assert_eq!(file_root.status(), StatusCode::CONFLICT);
+    let file_root_body: Value = test::read_body_json(file_root).await;
+    assert_eq!(file_root_body["code"], "BUNDLE_PROCESSING");
+    assert_eq!(file_root_body["message"], "文件仍在处理中，请稍后重试");
 
     let issue_search: Value = test::call_and_read_body_json(
         &app,
@@ -2487,6 +2493,87 @@ async fn processing_bundles_cannot_be_deleted() {
     )
     .await;
     assert_eq!(delete_issue.status(), StatusCode::CONFLICT);
+}
+
+#[actix_web::test]
+async fn competing_file_deletion_returns_stable_code_without_job_id() {
+    let test_dir = TestDir::new("rain-file-delete-conflict");
+    let db_url = sqlite_url(&test_dir.path.join("rain.db"));
+    let data_root = test_dir.path.join("uploads");
+    fs::create_dir_all(&data_root).expect("create data root");
+
+    let pool = db::init_pool(&db_url).expect("init sqlite pool");
+    db::prepare_schema(&pool, true)
+        .await
+        .expect("prepare schema");
+    sqlx::query(
+        "INSERT INTO issues (code, name, status) VALUES ('DELETE_BUSY', 'DELETE_BUSY', 'ACTIVE')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert issue");
+    sqlx::query(
+        "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('delete-bundle', 'DELETE_BUSY', 'delete-hash', 'delete', 'READY')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert ready bundle");
+    let first_root_id: i64 = sqlx::query_scalar(
+        "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('delete-bundle', 'first', '/first', 1) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert first root");
+    let second_root_id: i64 = sqlx::query_scalar(
+        "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('delete-bundle', 'second', '/second', 1) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("insert second root");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(AppState::new(
+                pool.clone(),
+                data_root,
+                AppLimits::default(),
+            )))
+            .configure(routes::register),
+    )
+    .await;
+    let auth_cookie = test_auth_cookie(&pool).await;
+
+    let first_response = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/api/files/v1/delete-hash/files/{first_root_id}"))
+            .cookie(auth_cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+    let first_body: Value = test::read_body_json(first_response).await;
+    let first_job_id = first_body["job_id"]
+        .as_str()
+        .expect("first deletion job id")
+        .to_owned();
+
+    let second_response = test::call_service(
+        &app,
+        test::TestRequest::delete()
+            .uri(&format!("/api/files/v1/delete-hash/files/{second_root_id}"))
+            .cookie(auth_cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(second_response.status(), StatusCode::CONFLICT);
+    let second_body: Value = test::read_body_json(second_response).await;
+    assert_eq!(second_body["code"], "FILE_DELETE_ALREADY_RUNNING");
+    assert_eq!(
+        second_body["message"],
+        "当前 Bundle 已有删除任务，请稍后重试"
+    );
+    assert!(!second_body.to_string().contains(&first_job_id));
 }
 
 #[actix_web::test]

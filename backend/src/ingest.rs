@@ -1,3 +1,4 @@
+use actix_web::http::StatusCode;
 use once_cell::sync::Lazy;
 use regex::Regex;
 #[cfg(any(feature = "tantivy-search", test))]
@@ -14,7 +15,7 @@ use tokio::io::BufReader;
 use crate::{
     blob_store::{BlobStore, mark_blob_ready, persist_blob},
     config::IndexingConfig,
-    error::AppError,
+    error::{AppError, codes},
     file_classification::{PreviewKind, classify_file, effective_mime_type},
     search::{IndexBatch, IndexChunk, IngestIndex, sqlite::SqliteFtsSearchIndex},
     services::wall_clock,
@@ -52,6 +53,17 @@ static EVENT_TIMESTAMP_PATTERN: Lazy<Regex> = Lazy::new(|| {
     )
     .expect("valid event timestamp pattern")
 });
+
+const UPLOAD_CONTENT_REJECTED_MESSAGE: &str = "压缩包内容不符合处理要求，请检查后重试";
+
+fn upload_content_rejected() -> AppError {
+    AppError::api(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        codes::UPLOAD_CONTENT_REJECTED,
+        UPLOAD_CONTENT_REJECTED_MESSAGE,
+    )
+}
+
 pub use quota::IssueQuota;
 
 pub(crate) fn parse_event_time_ms(line: &str) -> Option<i64> {
@@ -262,10 +274,7 @@ fn preflight_directory<'a>(
             update_process_stage(pool, bundle_id, "EXTRACTING").await?;
             let db_path = format!("/{}/{}", relative_root.trim_start_matches('/'), name);
             if archive_depth >= archive_budget.config.max_recursion_depth {
-                return Err(AppError::BadRequest(format!(
-                    "archive recursion is too deep; max {}: {db_path}",
-                    archive_budget.config.max_recursion_depth
-                )));
+                return Err(upload_content_rejected());
             }
             let extracted_dir_name = format!("{name}_extracted");
             let extracted_dir = dir_path.join(&extracted_dir_name);
@@ -275,10 +284,7 @@ fn preflight_directory<'a>(
                 archive_budget.config.max_output_path_chars,
             )?;
             if fs::metadata(&extracted_dir).await.is_ok() {
-                return Err(AppError::BadRequest(format!(
-                    "archive extraction output already exists: {}",
-                    extracted_dir.display()
-                )));
+                return Err(upload_content_rejected());
             }
             fs::create_dir_all(&extracted_dir).await.map_err(|error| {
                 io_error_at(
@@ -668,16 +674,10 @@ fn ingest_directory<'a>(
                     }
                 } else {
                     if archive_depth >= archive_budget.config.max_recursion_depth {
-                        return Err(AppError::BadRequest(format!(
-                            "archive recursion is too deep; max {}: {db_path}",
-                            archive_budget.config.max_recursion_depth
-                        )));
+                        return Err(upload_content_rejected());
                     }
                     if fs::metadata(&extracted_dir).await.is_ok() {
-                        return Err(AppError::BadRequest(format!(
-                            "archive extraction output already exists: {}",
-                            extracted_dir.display()
-                        )));
+                        return Err(upload_content_rejected());
                     }
                     fs::create_dir_all(&extracted_dir).await.map_err(|error| {
                         io_error_at(
