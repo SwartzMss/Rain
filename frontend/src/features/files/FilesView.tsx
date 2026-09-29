@@ -1691,7 +1691,7 @@ export function BundleView() {
                   搜索
                 </button>
               </form>
-              <div className="mt-3 flex flex-wrap items-center justify-end gap-1.5 text-xs text-slate-500">
+              <div className="mt-3 flex w-full items-center justify-between gap-2 text-xs text-slate-500">
                 {auth.state.status === 'AUTHENTICATED' ? (
                   <>
                     <button
