@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     config::AppLimits,
+    search::resource::TANTIVY_WRITER_CONCURRENCY,
     settings::{ResourceMode, ResourceModes, SettingsValues},
 };
 
@@ -18,8 +19,6 @@ const MIB: u64 = 1024 * 1024;
 #[cfg(test)]
 const GIB: u64 = 1024 * MIB;
 
-const MIN_WRITERS: usize = 1;
-const MAX_WRITERS: usize = 4;
 const MIN_PROCESSING: usize = 1;
 const MAX_PROCESSING: usize = 8;
 const MIN_QUERIES: usize = 1;
@@ -181,7 +180,7 @@ fn select_memory_source(
 impl RuntimePlan {
     pub fn apply_to_limits(&self, limits: &mut AppLimits) {
         limits.upload.concurrent_processing_tasks = self.upload_processing_tasks;
-        limits.search.tantivy_max_writers = self.tantivy_max_writers;
+        limits.search.tantivy_max_writers = TANTIVY_WRITER_CONCURRENCY;
         limits.search.tantivy_writer_heap_size = self.tantivy_writer_heap_size;
     }
 }
@@ -195,25 +194,19 @@ pub fn resolve(
     let cores = resources.cpu_cores.max(1);
     let memory = resources.memory_limit_bytes;
     let auto_processing = (cores.saturating_add(1) / 2).clamp(MIN_PROCESSING, MAX_PROCESSING);
-    let auto_writers = (cores / 4).clamp(MIN_WRITERS, MAX_WRITERS);
     let auto_heap = memory
         .map(|bytes| ((bytes / 64) / (16 * MIB) * (16 * MIB)).clamp(MIN_HEAP, MAX_HEAP))
         .unwrap_or(MIN_HEAP);
     let auto_queries = cores.clamp(MIN_QUERIES, MAX_QUERIES);
 
     let processing_mode = mode_for(modes, "upload_concurrent_processing_tasks");
-    let writers_mode = mode_for(modes, "search_tantivy_max_writers");
     let heap_mode = mode_for(modes, "search_tantivy_writer_heap_size");
     let mut processing = choose(
         processing_mode,
         configured.upload_concurrent_processing_tasks,
         auto_processing,
     );
-    let mut writers = choose(
-        writers_mode,
-        configured.search_tantivy_max_writers,
-        auto_writers,
-    );
+    let writers = TANTIVY_WRITER_CONCURRENCY;
     let mut heap = choose_bytes(
         heap_mode,
         configured.search_tantivy_writer_heap_size,
@@ -233,8 +226,6 @@ pub fn resolve(
         while estimate_for_runtime(processing, writers, heap, queries).total_bytes > target_bytes {
             if heap_mode == ResourceMode::Auto && heap > MIN_HEAP {
                 heap = heap.saturating_sub(16 * MIB).max(MIN_HEAP);
-            } else if writers_mode == ResourceMode::Auto && writers > 1 {
-                writers -= 1;
             } else if processing_mode == ResourceMode::Auto && processing > 1 {
                 processing -= 1;
             } else if tantivy_enabled && queries > 1 {
@@ -246,7 +237,6 @@ pub fn resolve(
         }
     }
     if !tantivy_enabled {
-        writers = configured.search_tantivy_max_writers;
         heap = configured.search_tantivy_writer_heap_size;
     }
 
@@ -254,14 +244,6 @@ pub fn resolve(
         (
             "upload_concurrent_processing_tasks".into(),
             decision(processing_mode, processing as u64, "cpu_capacity"),
-        ),
-        (
-            "search_tantivy_max_writers".into(),
-            decision(
-                writers_mode,
-                writers as u64,
-                "cpu_capacity_and_memory_budget",
-            ),
         ),
         (
             "search_tantivy_writer_heap_size".into(),
@@ -648,7 +630,6 @@ mod tests {
     fn modes(mode: ResourceMode) -> ResourceModes {
         [
             "upload_concurrent_processing_tasks",
-            "search_tantivy_max_writers",
             "search_tantivy_writer_heap_size",
         ]
         .into_iter()
@@ -874,16 +855,16 @@ mod tests {
         };
         let plan = resolve(&resources, &values(), &modes(ResourceMode::Auto), true);
         assert_eq!(plan.upload_processing_tasks, 8);
-        assert_eq!(plan.tantivy_max_writers, 4);
+        assert_eq!(plan.tantivy_max_writers, TANTIVY_WRITER_CONCURRENCY);
         assert_eq!(plan.tantivy_writer_heap_size, 256 * MIB);
         assert_eq!(plan.tantivy_max_concurrent_queries, 16);
         assert_eq!(plan.memory_estimate.upload_processing_bytes, 8 * 32 * MIB);
         assert_eq!(
             plan.memory_estimate.tantivy_writer_bytes,
-            4 * (256 * MIB + 32 * MIB)
+            256 * MIB + 32 * MIB
         );
         assert_eq!(plan.memory_estimate.tantivy_query_bytes, 16 * 32 * MIB);
-        assert_eq!(plan.memory_estimate.total_bytes, 1920 * MIB);
+        assert_eq!(plan.memory_estimate.total_bytes, 1056 * MIB);
         assert_eq!(plan.estimated_bytes, plan.memory_estimate.total_bytes);
         assert!(
             !plan
@@ -909,11 +890,10 @@ mod tests {
             warnings: Vec::new(),
         };
         let mut configured = values();
-        configured.search_tantivy_max_writers = 3;
         configured.search_tantivy_writer_heap_size = 64 * MIB;
         let modes = modes(ResourceMode::Manual);
         let plan = resolve(&resources, &configured, &modes, true);
-        assert_eq!(plan.tantivy_max_writers, 3);
+        assert_eq!(plan.tantivy_max_writers, TANTIVY_WRITER_CONCURRENCY);
         assert_eq!(plan.tantivy_writer_heap_size, 64 * MIB);
     }
 
@@ -929,7 +909,7 @@ mod tests {
         };
         let plan = resolve(&resources, &values(), &modes(ResourceMode::Auto), true);
         assert!(plan.estimated_bytes <= plan.adaptive_memory_target_bytes.unwrap());
-        assert!(plan.tantivy_max_writers >= 1);
+        assert_eq!(plan.tantivy_max_writers, TANTIVY_WRITER_CONCURRENCY);
     }
 
     #[cfg(target_os = "linux")]

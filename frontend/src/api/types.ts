@@ -70,7 +70,7 @@ export interface RegistrationSettings extends RegistrationStatus {
       warnings: string[];
     };
     upload_concurrent_processing_tasks: number;
-    search_tantivy_max_writers: number;
+    tantivy_writer_capacity: number;
     search_tantivy_writer_heap_size: number;
     estimated_bytes: number;
     memory_estimate?: {

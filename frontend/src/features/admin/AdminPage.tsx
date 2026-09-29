@@ -58,7 +58,6 @@ function memoryFallbackReasonLabel(reason: string): string {
 
 const runtimeDecisionLabels: Record<string, string> = {
   upload_concurrent_processing_tasks: "上传处理并发",
-  search_tantivy_max_writers: "Tantivy writer 并发",
   search_tantivy_writer_heap_size: "writer 堆大小",
 };
 

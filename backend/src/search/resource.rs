@@ -14,6 +14,11 @@ use crate::error::AppError;
 /// Issue searches add a smaller per-request limit on top of this budget.
 pub const MAX_CONCURRENT_TANTIVY_QUERIES: usize = 4;
 
+/// Tantivy uses a single writer admission slot per process.  The persisted
+/// writer setting is retained only so older databases can be read and
+/// migrated without a schema break.
+pub const TANTIVY_WRITER_CONCURRENCY: usize = 1;
+
 #[derive(Clone)]
 pub struct SearchResourceBudget {
     writer_permits: Arc<Semaphore>,
@@ -58,12 +63,7 @@ impl Drop for QueueGuard {
 }
 
 impl SearchResourceBudget {
-    pub fn new(max_writers: usize, writer_heap_size_bytes: u64) -> Result<Self, AppError> {
-        if max_writers == 0 {
-            return Err(AppError::Config(
-                "RAIN_SEARCH_TANTIVY_MAX_WRITERS must be positive".into(),
-            ));
-        }
+    pub fn new(_legacy_max_writers: usize, writer_heap_size_bytes: u64) -> Result<Self, AppError> {
         let writer_heap_size_bytes = usize::try_from(writer_heap_size_bytes).map_err(|_| {
             AppError::Config(
                 "RAIN_SEARCH_TANTIVY_WRITER_HEAP is too large for this platform".into(),
@@ -75,8 +75,8 @@ impl SearchResourceBudget {
             ));
         }
         Ok(Self {
-            writer_permits: Arc::new(Semaphore::new(max_writers)),
-            writer_capacity: max_writers,
+            writer_permits: Arc::new(Semaphore::new(TANTIVY_WRITER_CONCURRENCY)),
+            writer_capacity: TANTIVY_WRITER_CONCURRENCY,
             writer_heap_size_bytes,
             queued_writers: Arc::new(AtomicUsize::new(0)),
             active_writers: Arc::new(AtomicUsize::new(0)),

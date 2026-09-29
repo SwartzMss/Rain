@@ -308,6 +308,21 @@ async fn registration_settings_are_persistent_and_admin_only() {
         "manual"
     );
     assert!(
+        body["configured"]
+            .get("search_tantivy_max_writers")
+            .is_none()
+    );
+    assert!(
+        body["effective"]
+            .get("search_tantivy_max_writers")
+            .is_none()
+    );
+    assert!(
+        body["resource_modes"]
+            .get("search_tantivy_max_writers")
+            .is_none()
+    );
+    assert!(
         body["auto_values"]
             .as_object()
             .is_some_and(|values| !values.contains_key("upload_concurrent_processing_tasks"))
