@@ -1451,22 +1451,22 @@ export function BundleView() {
                   搜索
                 </button>
               </form>
-              <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+              <div className="mt-3 flex flex-wrap items-center justify-end gap-1.5 text-xs text-slate-500">
                 {auth.state.status === 'AUTHENTICATED' ? (
                   <>
-                    <button
-                      type="button"
-                      className="ml-auto rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
-                      onClick={beginSaveSearch}
-                    >
-                      保存条件
-                    </button>
                     <button
                       type="button"
                       className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
                       onClick={() => setSavedSearchesOpen((open) => !open)}
                     >
                       我的搜索条件
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
+                      onClick={beginSaveSearch}
+                    >
+                      保存条件
                     </button>
                   </>
                 ) : null}
