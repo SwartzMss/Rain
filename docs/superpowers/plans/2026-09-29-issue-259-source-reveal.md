@@ -16,7 +16,7 @@
 - Modify: `frontend/tests/file-tree-loading.behavior.test.ts`
 - Modify: `frontend/src/features/files/treeModel.ts`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add a test that constructs a synthetic root with a loaded first-page child and an unseen top-level target, then asserts that attaching the target:
 
@@ -48,9 +48,9 @@ it('attaches a revealed top-level node to the synthetic root without closing pag
 });
 ```
 
-- [ ] **Step 2: Run the focused test to verify it fails**
+- [x] **Step 2: Run the focused test to verify it fails**
 
-Run: `npm exec vitest run tests/file-tree-loading.behavior.test.ts`
+Run: `node_modules/.bin/vitest run tests/file-tree-loading.behavior.test.ts`
 
 Expected: FAIL because `attachTreeChild` does not exist yet.
 
@@ -60,13 +60,13 @@ Expected: FAIL because `attachTreeChild` does not exist yet.
 - Modify: `frontend/src/features/files/treeModel.ts`
 - Test: `frontend/tests/file-tree-loading.behavior.test.ts`
 
-- [ ] **Step 1: Implement the minimal helper**
+- [x] **Step 1: Implement the minimal helper**
 
 Add `attachTreeChild(parent, child, knownChildren)` that normalizes a synthetic-root child’s `parentId`, inserts the child according to the existing directory/name/id ordering, deduplicates IDs, and leaves `hasMoreChildren` and `childrenCursor` unchanged.
 
-- [ ] **Step 2: Run the focused test**
+- [x] **Step 2: Run the focused test**
 
-Run: `npm exec vitest run tests/file-tree-loading.behavior.test.ts`
+Run: `node_modules/.bin/vitest run tests/file-tree-loading.behavior.test.ts`
 
 Expected: PASS.
 
@@ -75,18 +75,19 @@ Expected: PASS.
 **Files:**
 - Modify: `frontend/src/features/files/FilesView.tsx:1107-1188`
 - Test: `frontend/tests/search-hit-source.mjs`
+- Test: `frontend/tests/files-view-search.behavior.test.tsx`
 
-- [ ] **Step 1: Replace reveal-time sibling pagination with explicit attachment**
+- [x] **Step 1: Replace reveal-time sibling pagination with explicit attachment**
 
 Use the helper whenever a loaded parent does not list the active node. Keep the existing archive flatten branch. After ancestor traversal reaches a node whose `parentId` is null, load or reuse `${bundleHash}:root` and attach that node to the synthetic root. Update both `knownNodes` and React state for every attached parent/child pair.
 
-- [ ] **Step 2: Update structural expectations**
+- [x] **Step 2: Update structural expectations**
 
-Change the source-reveal static test to require synthetic-root attachment and no longer require `loadMoreNode(parent)` for reveal.
+Change the source-reveal static test to require synthetic-root attachment and no longer require `loadMoreNode(parent)` for reveal. Add a BundleView test with a root page cursor and a search hit outside the first page; assert that the hit becomes selected without a cursor request.
 
-- [ ] **Step 3: Run the focused tests**
+- [x] **Step 3: Run the focused tests**
 
-Run: `npm exec vitest run tests/file-tree-loading.behavior.test.ts tests/files-view-search.behavior.test.tsx`
+Run: `node_modules/.bin/vitest run tests/file-tree-loading.behavior.test.ts tests/files-view-search.behavior.test.tsx`
 
 Expected: PASS.
 
@@ -95,19 +96,19 @@ Expected: PASS.
 **Files:**
 - No additional files.
 
-- [ ] **Step 1: Run the full frontend test suite**
+- [x] **Step 1: Run the full frontend test suite**
 
 Run: `npm test`
 
 Expected: 0 failures, including Vitest and all standalone behavior tests.
 
-- [ ] **Step 2: Run the frontend type check**
+- [x] **Step 2: Run the frontend type check**
 
 Run: `npm run lint`
 
 Expected: TypeScript exits successfully with no errors.
 
-- [ ] **Step 3: Review the final diff**
+- [x] **Step 3: Review the final diff**
 
 Run: `git diff --check && git diff --stat`
 
