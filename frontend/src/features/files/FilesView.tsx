@@ -34,6 +34,10 @@ import {
 } from './treeModel';
 import { useViewerTabs } from './hooks/useViewerTabs';
 import { useFileContent } from './hooks/useFileContent';
+import {
+  createFileContentCache,
+  type FileContentRequestKey
+} from './fileContentCache';
 import { centerElementInScrollContainer } from './centerElementInScrollContainer';
 import { ViewerTabBar } from './components/ViewerTabBar';
 import { CodeLinesPane } from './components/CodeLinesPane';
@@ -62,6 +66,12 @@ const bundleStatusLabel = (bundle: UploadSummary) => {
 };
 
 const FILE_TREE_PAGE_SIZE = 100;
+
+type TreeLoadGuard = {
+  contextKey: string;
+  generation: number;
+  isCurrent: () => boolean;
+};
 
 function highlightText(text: string, keyword: string): React.ReactNode {
   const normalizedKeyword = keyword.trim();
@@ -170,6 +180,9 @@ export function BundleView() {
   const [fileSearchLoading, setFileSearchLoading] = useState(false);
   const [fileSearchError, setFileSearchError] = useState<string | null>(null);
   const [fileSearchExecuted, setFileSearchExecuted] = useState(false);
+  const [lineStart, setLineStart] = useState(0);
+  const [linePageSize, setLinePageSize] = useState<number>(LINE_PAGE_SIZE_OPTIONS[0]);
+  const [targetLine, setTargetLine] = useState<number | null>(null);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const [sourceActionMessage, setSourceActionMessage] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -177,6 +190,7 @@ export function BundleView() {
   const searchRequestGenerationRef = useRef(0);
   const restoredPendingSearchRef = useRef(Boolean(pendingSavedSearch));
   const contextKeyRef = useRef<string | null>(null);
+  const refreshGenerationRef = useRef(0);
   const viewerTabsRef = useRef<ViewerTab[]>([]);
   const activeViewerTabIdRef = useRef<string | null>(null);
   const selectedNodeIdRef = useRef<string | null>(null);
@@ -232,20 +246,43 @@ export function BundleView() {
     }
   }, [viewerSearchExecution.snapshot.status]);
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
+  const fileContextKey = `${issueCode}\u0000${bundleId}`;
+  const fileContentCache = useMemo(() => createFileContentCache(
+    (request: FileContentRequestKey, signal: AbortSignal) => rainApi.fetchFileLines(
+      request.bundle,
+      request.file,
+      { start: request.start, limit: request.requestedLimit, signal }
+    ),
+    {
+      estimateBytes: (response) => 256
+        + response.path.length * 2
+        + response.lines.reduce((sum, line) => sum + 64 + line.content.length * 2, 0)
+    }
+  ), [fileContextKey]);
+  useEffect(() => () => fileContentCache.reset(), [fileContentCache]);
+  const activeFileNode = activeViewerTab?.kind === 'file'
+    ? treeNodes[activeViewerTab.nodeId] ?? null
+    : null;
+  const activeFileRequest = useMemo<FileContentRequestKey | null>(() => {
+    if (activeViewerTab?.kind !== 'file' || !activeFileNode || !canPreviewText(activeFileNode)) return null;
+    return {
+      bundle: activeFileNode.bundleId || bundleId,
+      file: activeFileNode.rawId,
+      context: fileContextKey,
+      open: activeViewerTab.id,
+      start: activeViewerTab.lineStart,
+      requestedLimit: activeViewerTab.pageSize
+    };
+  }, [activeFileNode, activeViewerTab, bundleId, fileContextKey]);
   const {
     fileLines,
-    lineStart,
-    setLineStart,
-    linePageSize,
-    setLinePageSize,
     fileContentLoading,
     fileContentError,
-    targetLine,
-    setTargetLine
+    retryFileContent
   } = useFileContent({
-    bundleId,
-    selectedNode,
-    defaultPageSize: LINE_PAGE_SIZE_OPTIONS[0]
+    cache: fileContentCache,
+    owner: activeViewerTab?.kind === 'file' ? activeViewerTab.id : null,
+    request: activeFileRequest
   });
 
   const currentSavedSearchPayload = useCallback((): SavedSearchPayload | null => {
@@ -407,11 +444,19 @@ export function BundleView() {
     async (
       bundle: string,
       nodeId: string,
-      parentId: string | null = null
+      parentId: string | null = null,
+      guard?: TreeLoadGuard
     ): Promise<{ node: TreeNode; children: TreeNode[] } | null> => {
       if (!bundle) return null;
-      setTreeLoading(true);
-      setTreeError(null);
+      const canCommit = () => !guard || (
+        guard.generation === refreshGenerationRef.current
+        && contextKeyRef.current === guard.contextKey
+        && guard.isCurrent()
+      );
+      if (canCommit()) {
+        setTreeLoading(true);
+        setTreeError(null);
+      }
       try {
         const result = await hydrateTreeNode(
           bundle,
@@ -421,25 +466,31 @@ export function BundleView() {
           FILE_TREE_PAGE_SIZE
         );
         const { node: normalized, children: childrenNodes } = result;
-        if (normalized.childrenLoadError) {
+        if (normalized.childrenLoadError && canCommit()) {
           setTreeError(normalized.childrenLoadError);
         }
 
-        setTreeNodes((prev) => {
-          const next = { ...prev };
-          next[normalized.id] = normalized;
-          childrenNodes.forEach((child) => {
-            next[child.id] = child;
+        if (canCommit()) {
+          setTreeNodes((prev) => {
+            const next = { ...prev };
+            next[normalized.id] = normalized;
+            childrenNodes.forEach((child) => {
+              next[child.id] = child;
+            });
+            return next;
           });
-          return next;
-        });
+        }
 
         return { node: normalized, children: childrenNodes };
       } catch (error) {
-        setTreeError(normalizeApiError(error));
+        if (canCommit()) {
+          setTreeError(normalizeApiError(error));
+        }
         throw error;
       } finally {
-        setTreeLoading(false);
+        if (canCommit()) {
+          setTreeLoading(false);
+        }
       }
     },
     []
@@ -609,6 +660,11 @@ export function BundleView() {
     contextKeyRef.current = contextKey;
 
     let ignore = false;
+    const refreshGeneration = ++refreshGenerationRef.current;
+    const isCurrentRefresh = () => !ignore
+      && refreshGeneration === refreshGenerationRef.current
+      && contextKeyRef.current === contextKey;
+    const refreshGuard: TreeLoadGuard = { contextKey, generation: refreshGeneration, isCurrent: isCurrentRefresh };
     const init = async () => {
       setTreeLoading(true);
       setTreeError(null);
@@ -641,7 +697,7 @@ export function BundleView() {
           const notReady = data.log_bundles.filter(
             (bundle) => bundle.status.upload_status !== 'READY'
           );
-          if (!ignore) {
+          if (isCurrentRefresh()) {
             setNonReadyBundles(notReady);
           }
           const list = data.log_bundles
@@ -651,12 +707,12 @@ export function BundleView() {
         } catch (error) {
           loadFailed = true;
           if (error instanceof ApiError && (error.code === 'RESOURCE_NOT_FOUND' || error.status === 404)) {
-            if (!ignore) {
+            if (isCurrentRefresh()) {
               navigate('/', { replace: true });
             }
             return;
           }
-          if (!ignore) {
+          if (isCurrentRefresh()) {
             setTreeError(normalizeApiError(error));
           }
         }
@@ -667,17 +723,19 @@ export function BundleView() {
 
       for (const bundle of bundles) {
         try {
-          const result = await loadNode(bundle.hash, 'root', null);
+          const result = await loadNode(bundle.hash, 'root', null, refreshGuard);
           if (!result) continue;
 
-          setTreeNodes((prev) => {
-            const next = { ...prev };
-            const current = next[result.node.id];
-            if (current) {
-              next[result.node.id] = { ...current, name: bundle.name };
-            }
-            return next;
-          });
+          if (isCurrentRefresh()) {
+            setTreeNodes((prev) => {
+              const next = { ...prev };
+              const current = next[result.node.id];
+              if (current) {
+                next[result.node.id] = { ...current, name: bundle.name };
+              }
+              return next;
+            });
+          }
 
           collectedRoots.push(result.node.id);
           if (!first) {
@@ -685,13 +743,15 @@ export function BundleView() {
           }
         } catch (error) {
           loadFailed = true;
-          if (!ignore) {
+          if (isCurrentRefresh()) {
             setTreeError(normalizeApiError(error));
           }
         }
       }
 
       const fileTabMetadata: Record<string, { nodeId: string; title: string }> = {};
+      const refreshedFileNodes: Record<string, TreeNode> = {};
+      const invalidFileTabIds = new Set<string>();
       if (!isContextChange && !loadFailed) {
         for (const tab of tabsSnapshot) {
           if (tab.kind !== 'file') continue;
@@ -700,17 +760,27 @@ export function BundleView() {
             : [bundleId, tab.nodeId];
           const previousNode = treeNodesRef.current[tab.nodeId];
           try {
-            const result = await loadNode(tabBundleId, rawFileId, previousNode?.parentId ?? null);
+            const result = await loadNode(
+              tabBundleId,
+              rawFileId,
+              previousNode?.parentId ?? null,
+              refreshGuard
+            );
             const node = result?.node ?? null;
             if (node && !node.is_dir && !isArchiveNode(node)) {
               fileTabMetadata[tab.nodeId] = {
                 nodeId: node.id,
                 title: node.name
               };
+              refreshedFileNodes[tab.nodeId] = node;
             }
           } catch (error) {
+            if (error instanceof ApiError && (error.code === 'RESOURCE_NOT_FOUND' || error.status === 404)) {
+              invalidFileTabIds.add(tab.id);
+              continue;
+            }
             loadFailed = true;
-            if (!ignore) {
+            if (isCurrentRefresh()) {
               setTreeError(normalizeApiError(error));
             }
             break;
@@ -718,17 +788,46 @@ export function BundleView() {
         }
       }
 
-      if (!ignore) {
+      if (isCurrentRefresh()) {
         if (isContextChange) {
           setRootIds(collectedRoots);
           setExpandedNodes(new Set());
           setSelectedNodeId(first);
         } else if (!loadFailed) {
           setRootIds(collectedRoots);
+          const currentTabs = viewerTabsRef.current;
+          const currentTabMetadata = { ...fileTabMetadata };
+          const validatedTabIds = new Set(tabsSnapshot.filter((tab) => tab.kind === 'file').map((tab) => tab.id));
+          for (const tab of currentTabs) {
+            if (tab.kind !== 'file' || validatedTabIds.has(tab.id) || currentTabMetadata[tab.nodeId]) continue;
+            currentTabMetadata[tab.nodeId] = { nodeId: tab.nodeId, title: tab.title };
+          }
+          for (const tab of currentTabs) {
+            if (tab.kind !== 'file' || !validatedTabIds.has(tab.id)) continue;
+            const refreshed = refreshedFileNodes[tab.nodeId];
+            if (invalidFileTabIds.has(tab.id)) {
+              fileContentCache.reset(tab.id);
+              continue;
+            }
+            if (!refreshed) {
+              fileContentCache.reset(tab.id);
+              continue;
+            }
+            const previous = treeNodesRef.current[tab.nodeId];
+            if (previous && (
+              previous.bundleId !== refreshed.bundleId
+              || previous.rawId !== refreshed.rawId
+              || previous.preview_kind !== refreshed.preview_kind
+              || previous.size_bytes !== refreshed.size_bytes
+              || previous.status !== refreshed.status
+            )) {
+              fileContentCache.reset(tab.id);
+            }
+          }
           const reconciled = reconcileViewerTabs(
-            tabsSnapshot,
-            activeTabIdSnapshot,
-            fileTabMetadata
+            currentTabs,
+            activeViewerTabIdRef.current,
+            currentTabMetadata
           );
           setViewerTabsState(reconciled.tabs, reconciled.activeTabId);
 
@@ -738,7 +837,7 @@ export function BundleView() {
             setLineStart(activeTab.lineStart);
             setLinePageSize(activeTab.pageSize);
             setTargetLine(activeTab.targetLine);
-          } else if (tabsSnapshot.find((tab) => tab.id === activeTabIdSnapshot)?.kind === 'file') {
+          } else if (currentTabs.find((tab) => tab.id === activeViewerTabIdRef.current)?.kind === 'file') {
             setSelectedNodeId(null);
           } else if (!selectedNodeIdRef.current) {
             setSelectedNodeId(first);
@@ -747,10 +846,16 @@ export function BundleView() {
           setSelectedNodeId(first);
         }
       }
-      setTreeLoading(false);
+      if (isCurrentRefresh()) {
+        setTreeLoading(false);
+      }
     };
 
-    init().catch(() => setTreeLoading(false));
+    init().catch(() => {
+      if (isCurrentRefresh()) {
+        setTreeLoading(false);
+      }
+    });
     return () => {
       ignore = true;
     };
@@ -801,13 +906,6 @@ export function BundleView() {
     options?: { preserveSearch?: boolean; node?: TreeNode | null }
   ) => {
     pendingFilePageRef.current = null;
-    if (typeof line === 'number' && line >= 0) {
-      setTargetLine(line);
-      setLineStart(Math.floor(line / linePageSize) * linePageSize);
-    } else {
-      setTargetLine(null);
-      setLineStart(0);
-    }
     if (!options?.preserveSearch) {
       setSearchError(null);
       setSearchExecuted(false);
@@ -842,19 +940,37 @@ export function BundleView() {
 
     setSelectedNodeId(node.id);
     if (!node.is_dir && !isArchiveNode(node)) {
+      const tabId = `file:${node.id}`;
+      const existing = viewerTabsRef.current.find((tab) => tab.id === tabId);
+      const pageSize = existing?.kind === 'file' ? existing.pageSize : linePageSize;
+      const sourceLine = typeof line === 'number' && line >= 0 ? line : null;
+      const nextStart = sourceLine === null ? 0 : Math.floor(sourceLine / pageSize) * pageSize;
+      if (sourceLine !== null) {
+        setTargetLine(sourceLine);
+        setLineStart(nextStart);
+        setLinePageSize(pageSize);
+        updateViewerTabs((tabs) => tabs.map((tab) => tab.id === tabId && tab.kind === 'file'
+          ? { ...tab, lineStart: nextStart, pageSize, pageHistory: [], targetLine: sourceLine, scrollTop: 0 }
+          : tab));
+      } else if (existing?.kind === 'file') {
+        setLineStart(existing.lineStart);
+        setLinePageSize(existing.pageSize);
+        setTargetLine(existing.targetLine);
+      } else {
+        setTargetLine(null);
+        setLineStart(0);
+      }
       openViewerTab({
-        id: `file:${node.id}`,
+        id: tabId,
         kind: 'file',
         title: node.name,
         pinned: false,
         scrollTop: 0,
         nodeId: node.id,
-        lineStart: typeof line === 'number' && line >= 0
-          ? Math.floor(line / linePageSize) * linePageSize
-          : 0,
-        pageSize: linePageSize,
+        lineStart: sourceLine === null ? 0 : nextStart,
+        pageSize,
         pageHistory: [],
-        targetLine: typeof line === 'number' && line >= 0 ? line : null
+        targetLine: sourceLine
       });
     }
   };
@@ -986,6 +1102,7 @@ export function BundleView() {
   const closeTab = (id: string) => {
     const index = viewerTabs.findIndex((tab) => tab.id === id);
     const remaining = viewerTabs.filter((tab) => tab.id !== id);
+    fileContentCache.reset(id);
     closeViewerTab(id);
     if (activeViewerTabId === id) {
       const next = remaining[Math.min(index, remaining.length - 1)] ?? null;
@@ -1007,6 +1124,7 @@ export function BundleView() {
       ? remaining.find((tab) => tab.id === activeViewerTabId) ?? null
       : null;
     const next = activeRemains ?? remaining[Math.min(Math.max(activeIndex, 0), remaining.length - 1)] ?? null;
+    for (const id of closing) fileContentCache.reset(id);
     setViewerTabsState(remaining, next?.id ?? null);
     if (next?.kind === 'file') {
       setSelectedNodeId(next.nodeId);
@@ -1032,17 +1150,6 @@ export function BundleView() {
       targetLine
     });
   }, [linePageSize, lineStart, openViewerTab, selectedNode, targetLine]);
-
-  useEffect(() => {
-    if (!activeViewerTab || activeViewerTab.kind !== 'file') return;
-    updateViewerTabs((tabs) =>
-      tabs.map((tab) =>
-        tab.id === activeViewerTab.id && tab.kind === 'file'
-          ? { ...tab, lineStart, pageSize: linePageSize, targetLine }
-          : tab
-      )
-    );
-  }, [activeViewerTab?.id, linePageSize, lineStart, targetLine, updateViewerTabs]);
 
   useEffect(() => {
     const pending = pendingFilePageRef.current;
@@ -1581,8 +1688,8 @@ export function BundleView() {
             </p>
             <div className="flex min-h-0 flex-1 flex-col p-4">
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm shadow-slate-100">
-                {activeViewerTab?.kind === 'file' && selectedNode &&
-                canPreviewText(selectedNode) ? (
+                {activeViewerTab?.kind === 'file' && activeFileNode &&
+                canPreviewText(activeFileNode) ? (
                   <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 focus-within:border-sky-400">
                     <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
                     <SearchTokenEditor
@@ -1704,22 +1811,31 @@ export function BundleView() {
                       onOpenSource={openSearchHitSource}
                     />
                   </>
-                ) : activeViewerTab?.kind !== 'file' || !selectedNode ? (
+                ) : activeViewerTab?.kind !== 'file' || !activeFileNode ? (
                   <p className="py-8 text-center text-sm text-slate-500">
                     输入关键词搜索当前 Issue 的日志。
                   </p>
-                ) : isArchiveNode(selectedNode) ? (
+                ) : isArchiveNode(activeFileNode) ? (
                   <p className="text-sm text-slate-500">压缩包请在左侧展开查看内部文件。</p>
-                ) : selectedNode.is_dir ? (
+                ) : activeFileNode.is_dir ? (
                   <p className="text-sm text-slate-500">当前为目录，选择文件后展示内容。</p>
-                ) : isBinaryNode(selectedNode) ? (
+                ) : isBinaryNode(activeFileNode) ? (
                   <BinaryFileInfo
-                    node={selectedNode}
+                    node={activeFileNode}
                   />
                 ) : fileContentLoading ? (
                   <p className="text-sm text-slate-500">读取中...</p>
                 ) : fileContentError ? (
-                  <p className="text-sm text-rose-600">{fileContentError}</p>
+                  <div className="flex flex-col items-center justify-center gap-3 py-8 text-sm text-rose-600">
+                    <p>{fileContentError}</p>
+                    <button
+                      type="button"
+                      className="rounded border border-slate-300 px-3 py-1 text-slate-700 hover:border-slate-500"
+                      onClick={retryFileContent}
+                    >
+                      重试
+                    </button>
+                  </div>
                 ) : fileLines ? (
                   <div className="flex min-h-0 flex-1 flex-col gap-2">
                     <CodeLinesPane
@@ -1727,7 +1843,7 @@ export function BundleView() {
                       contentRef={contentRef}
                       lineNumberOffset={fileLines.start}
                       targetLine={targetLine}
-                      fileName={selectedNode.name}
+                      fileName={activeFileNode.name}
                     />
                     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
                       <label className="flex items-center gap-2">
@@ -1737,14 +1853,18 @@ export function BundleView() {
                           value={linePageSize}
                           onChange={(event) => {
                             if (activeViewerTab?.kind !== 'file') return;
+                            const nextPageSize = Number(event.target.value);
                             pendingFilePageRef.current = {
                               tabId: activeViewerTab.id,
                               from: 0,
                               navigation: 'reset'
                             };
-                            setLinePageSize(Number(event.target.value));
+                            setLinePageSize(nextPageSize);
                             setLineStart(0);
                             setTargetLine(null);
+                            updateViewerTabs((tabs) => tabs.map((tab) => tab.id === activeViewerTab.id && tab.kind === 'file'
+                              ? { ...tab, lineStart: 0, pageSize: nextPageSize, pageHistory: [], targetLine: null, scrollTop: 0 }
+                              : tab));
                           }}
                         >
                           {LINE_PAGE_SIZE_OPTIONS.map((size) => (
@@ -1772,6 +1892,9 @@ export function BundleView() {
                             from: previousStart,
                             navigation: 'previous'
                           };
+                          updateViewerTabs((tabs) => tabs.map((tab) => tab.id === activeViewerTab.id && tab.kind === 'file'
+                            ? { ...tab, lineStart: previousStart, targetLine: null }
+                            : tab));
                           setLineStart(previousStart);
                         }}
                       >
@@ -1790,6 +1913,9 @@ export function BundleView() {
                             navigation: 'next',
                             previousStart: lineStart
                           };
+                          updateViewerTabs((tabs) => tabs.map((tab) => tab.id === activeViewerTab.id && tab.kind === 'file'
+                            ? { ...tab, lineStart: nextStart, targetLine: null }
+                            : tab));
                           setLineStart(nextStart);
                         }}
                       >

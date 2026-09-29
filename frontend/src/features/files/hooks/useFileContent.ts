@@ -1,79 +1,53 @@
-import { useEffect, useState } from 'react';
-import { normalizeApiError, rainApi } from '../../../api/client';
+import { useCallback, useEffect, useSyncExternalStore } from 'react';
+import { normalizeApiError, RequestCancelledError } from '../../../api/client';
 import type { FileLinesResponse } from '../../../api/types';
-import { canPreviewText } from '../filePresentation';
-import type { TreeNode } from '../treeModel';
+import {
+  FileContentCache,
+  type FileContentRequestKey
+} from '../fileContentCache';
 
 type UseFileContentOptions = {
-  bundleId: string;
-  selectedNode: TreeNode | null;
-  defaultPageSize: number;
+  cache: FileContentCache<FileLinesResponse>;
+  owner: string | null;
+  request: FileContentRequestKey | null;
 };
 
-export function useFileContent({
-  bundleId,
-  selectedNode,
-  defaultPageSize
-}: UseFileContentOptions) {
-  const [fileLines, setFileLines] = useState<FileLinesResponse | null>(null);
-  const [lineStart, setLineStart] = useState(0);
-  const [linePageSize, setLinePageSize] = useState(defaultPageSize);
-  const [fileContentLoading, setFileContentLoading] = useState(false);
-  const [fileContentError, setFileContentError] = useState<string | null>(null);
-  const [targetLine, setTargetLine] = useState<number | null>(null);
+const EMPTY_SNAPSHOT = { value: null, error: null };
+
+export function useFileContent({ cache, owner, request }: UseFileContentOptions) {
+  const snapshot = useSyncExternalStore(
+    (listener) => owner ? cache.subscribe(owner, listener) : () => undefined,
+    () => cache.getSnapshot(owner, request),
+    () => EMPTY_SNAPSHOT
+  );
 
   useEffect(() => {
-    setFileLines(null);
-    setFileContentError(null);
-    setFileContentLoading(false);
-    if (!selectedNode || !canPreviewText(selectedNode)) return;
-    const bundleForContent = selectedNode.bundleId || bundleId;
-    if (!bundleForContent) return;
-
-    let ignore = false;
-    const fetchContent = async () => {
-      setFileContentLoading(true);
-      try {
-        const content = await rainApi.fetchFileLines(bundleForContent, selectedNode.rawId, {
-          start: lineStart,
-          limit: linePageSize
-        });
-        if (!ignore) {
-          setFileLines(content);
-        }
-      } catch (error) {
-        if (!ignore) {
-          setFileContentError(normalizeApiError(error));
-        }
-      } finally {
-        if (!ignore) {
-          setFileContentLoading(false);
-        }
-      }
-    };
-
-    fetchContent();
+    if (!owner || !request) return;
+    let active = true;
+    void cache.request(owner, request).catch((error: unknown) => {
+      if (!active || error instanceof RequestCancelledError || (error instanceof Error && error.name === 'AbortError')) return;
+      // The cache exposes this error in the next snapshot. Cancellation is
+      // intentionally invisible during tab changes.
+    });
     return () => {
-      ignore = true;
+      active = false;
     };
-  }, [
-    bundleId,
-    selectedNode?.id,
-    selectedNode?.is_dir,
-    selectedNode?.preview_kind,
-    lineStart,
-    linePageSize
-  ]);
+  }, [cache, owner, request]);
+
+  const retryFileContent = useCallback(() => {
+    if (!owner || !request) return;
+    cache.reset(owner);
+    void cache.request(owner, request).catch(() => undefined);
+  }, [cache, owner, request]);
+
+  useEffect(() => {
+    if (owner) cache.activate(owner);
+  }, [cache, owner, request]);
 
   return {
-    fileLines,
-    lineStart,
-    setLineStart,
-    linePageSize,
-    setLinePageSize,
-    fileContentLoading,
-    fileContentError,
-    targetLine,
-    setTargetLine
+    fileLines: snapshot.value,
+    fileContentLoading: Boolean(request && snapshot.value === null && snapshot.error === null),
+    fileContentError: snapshot.error === null ? null : normalizeApiError(snapshot.error),
+    retryFileContent
   };
 }
