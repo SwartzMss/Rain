@@ -69,12 +69,21 @@ jobs:
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          mkdir -p dist
-          cd artifacts/Rain-windows-x64
-          zip "../../dist/Rain-windows-x64-${TAG_NAME}.zip" Rain.exe .env VERSION
-          cd ../rain-linux-x64
-          chmod +x rain
-          tar -czf "../../dist/rain-linux-x64-${TAG_NAME}.tar.gz" rain .env VERSION
+          mkdir -p dist staging
+          windows_dir="Rain-${TAG_NAME}-windows-x64"
+          linux_dir="Rain-${TAG_NAME}-linux-x64"
+
+          mkdir -p "staging/${windows_dir}" "staging/${linux_dir}"
+          cp artifacts/Rain-windows-x64/Rain.exe "staging/${windows_dir}/Rain.exe"
+          cp artifacts/Rain-windows-x64/.env "staging/${windows_dir}/.env"
+          cp artifacts/Rain-windows-x64/VERSION "staging/${windows_dir}/VERSION"
+          cp artifacts/rain-linux-x64/rain "staging/${linux_dir}/rain"
+          cp artifacts/rain-linux-x64/.env "staging/${linux_dir}/.env"
+          cp artifacts/rain-linux-x64/VERSION "staging/${linux_dir}/VERSION"
+
+          chmod +x "staging/${linux_dir}/rain"
+          (cd staging && zip -r "../dist/Rain-windows-x64-${TAG_NAME}.zip" "${windows_dir}")
+          (cd staging && tar -czf "../dist/rain-linux-x64-${TAG_NAME}.tar.gz" "${linux_dir}")
 
       - name: Create or update release
         env:
