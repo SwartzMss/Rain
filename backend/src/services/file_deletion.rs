@@ -1,3 +1,4 @@
+use actix_web::http::StatusCode;
 use serde::Serialize;
 use sqlx::FromRow;
 use std::collections::HashSet;
@@ -153,8 +154,10 @@ pub async fn enqueue_file_deletion(
                 .await
                 .map_err(AppError::Database)?;
                 if !parent_ready {
-                    return Err(AppError::Conflict(
-                        "bundle is no longer ready for file deletion".into(),
+                    return Err(AppError::api(
+                        StatusCode::CONFLICT,
+                        "FILE_DELETE_BUNDLE_BUSY",
+                        "当前文件仍在处理中，暂不可删除，请等待处理完成后重试",
                     ));
                 }
 
@@ -169,10 +172,11 @@ pub async fn enqueue_file_deletion(
                     if existing.root_file_id == *root_file_id {
                         return Ok(EnqueueResult::Existing(existing));
                     }
-                    return Err(AppError::Conflict(format!(
-                        "bundle already has a file deletion job: {}",
-                        existing.id
-                    )));
+                    return Err(AppError::api(
+                        StatusCode::CONFLICT,
+                        "FILE_DELETE_ALREADY_RUNNING",
+                        "当前 Bundle 已有删除任务，请稍后重试",
+                    ));
                 }
 
                 let target_exists: bool = sqlx::query_scalar(
@@ -910,12 +914,61 @@ pub async fn delete_file_tree(
 
 #[cfg(test)]
 mod tests {
+    use actix_web::{ResponseError, body::to_bytes, http::StatusCode};
+
     use super::{
         FileDeletionBatchItemInput, delete_file_tree, enqueue_file_deletion,
         enqueue_file_deletion_batch, load_file_deletion_batch, process_file_deletion_batches,
         process_file_deletion_jobs,
     };
     use crate::search::publication::can_skip_visibility_snapshot;
+
+    async fn error_payload(
+        error: crate::error::AppError,
+    ) -> (StatusCode, serde_json::Value, String) {
+        let response = error.error_response();
+        let status = response.status();
+        let body = to_bytes(response.into_body()).await.expect("error body");
+        let body_text = String::from_utf8(body.to_vec()).expect("UTF-8 error body");
+        let payload = serde_json::from_str(&body_text).expect("JSON error body");
+        (status, payload, body_text)
+    }
+
+    #[tokio::test]
+    async fn rejects_file_deletion_for_a_busy_bundle_with_a_safe_public_error() {
+        let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");
+        crate::db::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues (code, name, status) VALUES ('BUSY', 'BUSY', 'ACTIVE')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query(
+            "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('busy-bundle', 'BUSY', 'busy-hash', 'busy', 'PROCESSING')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert processing bundle");
+        let root_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir) VALUES ('busy-bundle', 'root', '/root', 1) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert root");
+
+        let error = enqueue_file_deletion(&pool, "busy-bundle", root_id, "owner")
+            .await
+            .expect_err("a busy bundle must reject file deletion");
+        let (status, payload, _) = error_payload(error).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(payload["code"], "FILE_DELETE_BUNDLE_BUSY");
+        assert_eq!(
+            payload["message"],
+            "当前文件仍在处理中，暂不可删除，请等待处理完成后重试"
+        );
+    }
 
     #[tokio::test]
     async fn delete_file_tree_uses_cascade_for_a_large_tree() {
@@ -1077,11 +1130,14 @@ mod tests {
         .await
         .expect("search visibility revision");
         assert_eq!(rebuild, ("NEEDS_REBUILD".into(), 1, 0));
-        assert!(
-            enqueue_file_deletion(&pool, "async-bundle", child_id, "owner")
-                .await
-                .is_err()
-        );
+        let competing_error = enqueue_file_deletion(&pool, "async-bundle", child_id, "owner")
+            .await
+            .expect_err("a different root must not start a competing deletion");
+        let (status, payload, body) = error_payload(competing_error).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(payload["code"], "FILE_DELETE_ALREADY_RUNNING");
+        assert_eq!(payload["message"], "当前 Bundle 已有删除任务，请稍后重试");
+        assert!(!body.contains(&job.id));
         let visible: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM visible_files WHERE bundle_id='async-bundle'")
                 .fetch_one(&pool)
