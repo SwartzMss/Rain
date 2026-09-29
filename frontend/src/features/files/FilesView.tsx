@@ -13,6 +13,7 @@ import { getSearchHitSource } from './searchHitSource';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { uploadFailureMessage } from './uploadFailure';
 import {
+  assertSimpleSearchRepresentable,
   canFinalizeSearch,
   deserializeSimpleSearchTokens,
   finalizeSearchTokens,
@@ -265,7 +266,9 @@ export function BundleView() {
           options: { version: 1, editor_mode: 'advanced' }
         };
       }
-      const tokens = finalizeSearchTokens(searchTokens, searchDraft);
+      const tokens = assertSimpleSearchRepresentable(
+        finalizeSearchTokens(searchTokens, searchDraft)
+      );
       return {
         name: savedSearchName,
         search_type: 'DETAIL',
@@ -336,6 +339,8 @@ export function BundleView() {
   };
 
   const useSavedSearch = async (item: SavedSearch) => {
+    const requestGeneration = ++searchRequestGenerationRef.current;
+    const isCurrentSearch = () => requestGeneration === searchRequestGenerationRef.current;
     const editor = detailEditorState(item.query_text, item.options);
     setSearchTokens(editor.tokens);
     setDetailRawExpression(editor.rawExpression);
@@ -347,15 +352,37 @@ export function BundleView() {
       {
         scopeKey: `issue:${issueCode}`,
         onSuccess: (response) => {
-      const hits = response.lines.map((line) => ({ bundle_hash: line.bundle_hash, file_id: line.file_id ?? '', path: line.path, snippet: line.content, line_number: line.line_number }));
-      setSearchExecuted(true);
-      openViewerTab({ id: `search:${Date.now()}`, kind: 'search', resultId: response.result_id, title: item.name, pinned: false, scrollTop: 0, expression: item.query_text, hits, total: response.total, from: 0, pageSize: LINE_PAGE_SIZE_OPTIONS[0], pageHistory: [], source: { kind: 'issue', issueCode } });
+          if (!isCurrentSearch()) return;
+
+          const hits = response.lines.map((line) => ({
+            bundle_hash: line.bundle_hash,
+            file_id: line.file_id ?? '',
+            path: line.path,
+            snippet: line.content,
+            line_number: line.line_number
+          }));
+          setSearchExecuted(true);
+          openViewerTab({
+            id: `search:${Date.now()}`,
+            kind: 'search',
+            resultId: response.result_id,
+            title: item.name,
+            pinned: false,
+            scrollTop: 0,
+            expression: item.query_text,
+            hits,
+            total: response.total,
+            from: 0,
+            pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+            pageHistory: [],
+            source: { kind: 'issue', issueCode }
+          });
         }
       }
     );
-    if (!response) return;
+    if (!response || !isCurrentSearch()) return;
     await rainApi.markSavedSearchUsed(item.id);
-    setSavedSearchesOpen(false);
+    if (isCurrentSearch()) setSavedSearchesOpen(false);
   };
 
   const updateEditingSavedSearch = async () => {
@@ -369,7 +396,9 @@ export function BundleView() {
         await rainApi.validateSearchExpression(queryText);
         options = { version: 1, editor_mode: 'advanced' };
       } else {
-        const finalizedTokens = finalizeSearchTokens(editingSearchTokens, editingSearchDraft);
+        const finalizedTokens = assertSimpleSearchRepresentable(
+          finalizeSearchTokens(editingSearchTokens, editingSearchDraft)
+        );
         queryText = serializeSearchTokens(finalizedTokens);
         options = { version: 1, editor_mode: 'simple', tokens: finalizedTokens };
       }
@@ -533,7 +562,9 @@ export function BundleView() {
     } else {
       let finalizedTokens: SearchToken[];
       try {
-        finalizedTokens = finalizeSearchTokens(searchTokens, searchDraft);
+        finalizedTokens = assertSimpleSearchRepresentable(
+          finalizeSearchTokens(searchTokens, searchDraft)
+        );
       } catch (error) {
         setSearchError(error instanceof Error ? error.message : '搜索条件无效');
         return;

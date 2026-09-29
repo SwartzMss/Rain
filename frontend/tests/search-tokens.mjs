@@ -27,6 +27,7 @@ try {
     finalizeSearchTokens,
     isSimpleSearchRepresentable,
     removeSearchToken,
+    replaceSearchOperator,
     serializeSearchTokens,
     validateSearchTokens
   } = tokensModule;
@@ -69,6 +70,9 @@ try {
   assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('A AND NOT B')), true);
   assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('A OR NOT B')), false);
   assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('NOT A')), false);
+  const andNotTokens = deserializeSearchTokens('A AND NOT B');
+  assert.deepEqual(replaceSearchOperator(andNotTokens, 1, 'OR'), andNotTokens);
+  assert.deepEqual(removeSearchToken(andNotTokens, 0), [{ kind: 'term', value: 'B' }]);
   assert.deepEqual(
     deserializeSimpleSearchTokens('A AND NOT B'),
     deserializeSearchTokens('A AND NOT B')

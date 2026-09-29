@@ -8,6 +8,9 @@ const testMocks = vi.hoisted(() => ({
   execute: vi.fn(),
   cancel: vi.fn(),
   fetchSavedSearches: vi.fn(),
+  createSavedSearch: vi.fn(),
+  updateSavedSearch: vi.fn(),
+  markSavedSearchUsed: vi.fn(),
   fetchIssueBundles: vi.fn(),
   fetchFileNode: vi.fn(),
   fetchFileLines: vi.fn()
@@ -19,6 +22,9 @@ vi.mock('../src/api/client', () => ({
   rainApi: {
     validateSearchExpression: testMocks.validateSearchExpression,
     fetchSavedSearches: testMocks.fetchSavedSearches,
+    createSavedSearch: testMocks.createSavedSearch,
+    updateSavedSearch: testMocks.updateSavedSearch,
+    markSavedSearchUsed: testMocks.markSavedSearchUsed,
     fetchIssueBundles: testMocks.fetchIssueBundles,
     fetchFileNode: testMocks.fetchFileNode,
     fetchFileLines: testMocks.fetchFileLines,
@@ -78,6 +84,18 @@ function renderBundleView() {
   );
 }
 
+const savedAdvancedSearch = {
+  id: 'saved-1',
+  name: 'Saved B',
+  search_type: 'DETAIL' as const,
+  query_text: 'B AND (C OR D)',
+  options: { version: 1, editor_mode: 'advanced' },
+  is_pinned: false,
+  created_at: '2026-09-29T00:00:00Z',
+  updated_at: '2026-09-29T00:00:00Z',
+  last_used_at: null
+};
+
 describe('BundleView search expression flow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -85,6 +103,9 @@ describe('BundleView search expression flow', () => {
     testMocks.fetchIssueBundles.mockResolvedValue({ log_bundles: [] });
     testMocks.execute.mockResolvedValue({ result_id: 'result-1', total: 0, lines: [] });
     testMocks.cancel.mockResolvedValue(undefined);
+    testMocks.createSavedSearch.mockResolvedValue(undefined);
+    testMocks.updateSavedSearch.mockResolvedValue(undefined);
+    testMocks.markSavedSearchUsed.mockResolvedValue(undefined);
   });
 
   it('does not start a stale search after validation resolves out of order', async () => {
@@ -146,5 +167,146 @@ describe('BundleView search expression flow', () => {
     await act(async () => validation.resolve({ valid: true }));
 
     expect(testMocks.execute).not.toHaveBeenCalled();
+  });
+
+  it('does not start pending manual validation after using a saved search', async () => {
+    const validation = deferred<{ valid: true }>();
+    testMocks.fetchSavedSearches.mockResolvedValue([savedAdvancedSearch]);
+    testMocks.validateSearchExpression.mockReturnValue(validation.promise);
+
+    renderBundleView();
+    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
+    const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
+    fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
+    fireEvent.click(await screen.findByRole('button', { name: '使用' }));
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute.mock.calls[0][0].expression).toBe(savedAdvancedSearch.query_text);
+
+    await act(async () => validation.resolve({ valid: true }));
+    expect(testMocks.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps saved-search loading active when an earlier manual search finishes', async () => {
+    const manualExecution = deferred<{ result_id: string; total: number; lines: never[] }>();
+    const response = { result_id: 'result-1', total: 0, lines: [] };
+    testMocks.fetchSavedSearches.mockResolvedValue([savedAdvancedSearch]);
+    testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
+    testMocks.execute
+      .mockReturnValueOnce(manualExecution.promise)
+      .mockResolvedValueOnce(response);
+
+    renderBundleView();
+    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
+    const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
+    fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
+    fireEvent.click(await screen.findByRole('button', { name: '使用' }));
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(2));
+
+    await act(async () => manualExecution.resolve(response));
+    await waitFor(() => expect(screen.getByRole('button', { name: '搜索日志内容' })).toBeDisabled());
+  });
+
+  it('round-trips an advanced saved search as raw advanced expression', async () => {
+    let savedSearches: typeof savedAdvancedSearch[] = [];
+    testMocks.fetchSavedSearches.mockImplementation(async () => savedSearches);
+    testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
+    testMocks.createSavedSearch.mockImplementation(async (payload) => {
+      const item = {
+        ...payload,
+        id: 'saved-advanced',
+        is_pinned: false,
+        created_at: '2026-09-29T00:00:00Z',
+        updated_at: '2026-09-29T00:00:00Z',
+        last_used_at: null
+      };
+      savedSearches = [item];
+      return item;
+    });
+
+    renderBundleView();
+    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'A AND (B OR C)' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存条件' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), {
+      target: { value: 'Advanced search' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存', exact: true }));
+
+    await waitFor(() => expect(testMocks.createSavedSearch).toHaveBeenCalledTimes(1));
+    expect(testMocks.createSavedSearch.mock.calls[0][0]).toMatchObject({
+      query_text: 'A AND (B OR C)',
+      options: { version: 1, editor_mode: 'advanced' }
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
+    fireEvent.click(await screen.findByRole('button', { name: '使用' }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: '高级表达式' })).toHaveAttribute('aria-selected', 'true'));
+    expect(screen.getByRole('textbox', { name: '日志内容搜索条件' })).toHaveValue('A AND (B OR C)');
+
+    fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    expect(screen.getAllByRole('tab', { name: '高级表达式' })).toHaveLength(2);
+    expect(screen.getAllByRole('tab', { name: '高级表达式' }).every((tab) => tab.getAttribute('aria-selected') === 'true')).toBe(true);
+    expect(screen.getByRole('textbox', { name: '编辑详细搜索条件' })).toHaveValue('A AND (B OR C)');
+  });
+
+  it('round-trips a simple saved search with AND NOT in simple mode', async () => {
+    let savedSearches: typeof savedAdvancedSearch[] = [];
+    testMocks.fetchSavedSearches.mockImplementation(async () => savedSearches);
+    testMocks.createSavedSearch.mockImplementation(async (payload) => {
+      const item = {
+        ...payload,
+        id: 'saved-simple',
+        is_pinned: false,
+        created_at: '2026-09-29T00:00:00Z',
+        updated_at: '2026-09-29T00:00:00Z',
+        last_used_at: null
+      };
+      savedSearches = [item];
+      return item;
+    });
+
+    renderBundleView();
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'A' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
+    fireEvent.click(screen.getByRole('button', { name: 'AND NOT' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'B' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存条件' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '名称' }), {
+      target: { value: 'Simple search' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存', exact: true }));
+
+    await waitFor(() => expect(testMocks.createSavedSearch).toHaveBeenCalledTimes(1));
+    expect(testMocks.createSavedSearch.mock.calls[0][0]).toMatchObject({
+      query_text: '"A" AND NOT "B"',
+      options: { version: 1, editor_mode: 'simple' }
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
+    fireEvent.click(await screen.findByRole('button', { name: '使用' }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: '简单模式' })).toHaveAttribute('aria-selected', 'true'));
+    expect(screen.getByRole('button', { name: '编辑关键词 A' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '编辑关键词 B' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '我的搜索条件' }));
+    fireEvent.click(await screen.findByRole('button', { name: '编辑' }));
+    expect(screen.getByRole('tab', { name: '简单模式' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getAllByRole('button', { name: '编辑关键词 A' })).toHaveLength(2);
   });
 });

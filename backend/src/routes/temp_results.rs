@@ -108,11 +108,11 @@ pub(crate) fn register_read_lease(
     })
 }
 
-fn invalid_expression(error: log_expression::ParseError) -> AppError {
+fn invalid_expression(expression: &str, error: log_expression::ParseError) -> AppError {
     AppError::public(
         StatusCode::BAD_REQUEST,
         "SEARCH_EXPRESSION_INVALID",
-        log_expression::parse_error_message(&error),
+        log_expression::parse_error_message(expression, &error),
     )
 }
 

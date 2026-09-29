@@ -30,7 +30,7 @@ fn normalize_and_validate(payload: &SavedSearchPayload) -> Result<SavedSearchPay
         return Err(AppError::public(
             StatusCode::BAD_REQUEST,
             "SAVED_SEARCH_EXPRESSION_INVALID",
-            crate::log_expression::parse_error_message(&error),
+            crate::log_expression::parse_error_message(&payload.query_text, &error),
         ));
     }
     Ok(payload.clone())

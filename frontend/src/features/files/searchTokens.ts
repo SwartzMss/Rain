@@ -57,6 +57,13 @@ export function replaceSearchOperator(
 ): SearchToken[] {
   const current = tokens[index];
   if (!current || current.kind !== 'operator' || current.value === 'NOT') return tokens;
+  if (
+    current.value === 'AND'
+    && tokens[index + 1]?.kind === 'operator'
+    && tokens[index + 1].value === 'NOT'
+  ) {
+    return tokens;
+  }
   return tokens.map((token, tokenIndex) =>
     tokenIndex === index ? { kind: 'operator', value: operator } : token
   );
@@ -94,6 +101,13 @@ export function removeSearchToken(tokens: SearchToken[], index: number): SearchT
       start -= 1;
     } else if (end + 1 < tokens.length && tokens[end + 1].kind === 'operator') {
       end += 1;
+      if (
+        tokens[end].value === 'AND'
+        && tokens[end + 1]?.kind === 'operator'
+        && tokens[end + 1].value === 'NOT'
+      ) {
+        end += 1;
+      }
     }
   }
   return tokens.filter((_, tokenIndex) => tokenIndex < start || tokenIndex > end);
@@ -217,12 +231,20 @@ export function isSimpleSearchRepresentable(tokens: SearchToken[]): boolean {
   return true;
 }
 
-export function deserializeSimpleSearchTokens(expression: string): SearchToken[] {
-  const tokens = deserializeSearchTokens(expression);
+export function assertSimpleSearchRepresentable(tokens: SearchToken[]): SearchToken[] {
   if (!isSimpleSearchRepresentable(tokens)) {
-    throw new Error('该表达式无法由简单模式无损编辑，请保留高级表达式');
+    throw new Error('该搜索条件无法由简单模式无损编辑，请切换高级表达式');
   }
   return tokens;
+}
+
+export function deserializeSimpleSearchTokens(expression: string): SearchToken[] {
+  const tokens = deserializeSearchTokens(expression);
+  try {
+    return assertSimpleSearchRepresentable(tokens);
+  } catch {
+    throw new Error('该表达式无法由简单模式无损编辑，请保留高级表达式');
+  }
 }
 
 export function formatSearchTokens(tokens: SearchToken[]): string {

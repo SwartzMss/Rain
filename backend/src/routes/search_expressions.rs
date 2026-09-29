@@ -13,11 +13,11 @@ struct ValidateSearchExpressionResponse {
     valid: bool,
 }
 
-fn invalid_expression(error: log_expression::ParseError) -> AppError {
+fn invalid_expression(expression: &str, error: log_expression::ParseError) -> AppError {
     AppError::public(
         StatusCode::BAD_REQUEST,
         "SEARCH_EXPRESSION_INVALID",
-        log_expression::parse_error_message(&error),
+        log_expression::parse_error_message(expression, &error),
     )
 }
 
@@ -26,7 +26,8 @@ pub async fn validate_expression(
     _user: OptionalUser,
     payload: web::Json<ValidateSearchExpressionRequest>,
 ) -> Result<HttpResponse, AppError> {
-    log_expression::parse(payload.expression.trim()).map_err(invalid_expression)?;
+    let expression = payload.expression.trim();
+    log_expression::parse(expression).map_err(|error| invalid_expression(expression, error))?;
     Ok(HttpResponse::Ok().json(ValidateSearchExpressionResponse { valid: true }))
 }
 

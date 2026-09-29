@@ -717,7 +717,8 @@ async fn create_preview_result_inner(
         })?;
     ensure_temp_result_budget(state).await?;
     let expression_text = payload.expression.trim();
-    let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
+    let expression = log_expression::parse(expression_text)
+        .map_err(|error| invalid_expression(expression_text, error))?;
     let start = payload.from.unwrap_or(0).max(0);
     let limit = preview_page_size(
         payload.size,
@@ -794,7 +795,8 @@ pub(crate) async fn create_full_result(
         })?;
     ensure_temp_result_budget(&state).await?;
     let expression_text = payload.expression.trim();
-    let expression = log_expression::parse(expression_text).map_err(invalid_expression)?;
+    let expression = log_expression::parse(expression_text)
+        .map_err(|error| invalid_expression(expression_text, error))?;
     let resolved = resolve_sources(&payload, &state).await?;
     let source_label = source_label(&resolved.sources);
     let outcome = materialize_result(
