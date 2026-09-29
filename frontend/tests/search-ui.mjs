@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [filesView, expressionEditor] = await Promise.all([
+const [filesView, expressionEditor, searchResultViewer] = await Promise.all([
   readFile(new URL('../src/features/files/FilesView.tsx', import.meta.url), 'utf8'),
-  readFile(new URL('../src/features/files/SearchExpressionEditor.tsx', import.meta.url), 'utf8')
+  readFile(new URL('../src/features/files/SearchExpressionEditor.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/features/files/components/SearchResultViewer.tsx', import.meta.url), 'utf8')
 ]);
 
 assert.match(filesView, /ariaLabel="日志内容搜索条件"/);
@@ -14,6 +15,11 @@ const fileSearchEditor = filesView.match(
 );
 assert.ok(fileSearchEditor, 'file search should use the shared token editor');
 assert.match(fileSearchEditor[0], /allowOperators=\{false\}/);
+const resultFilterEditor = searchResultViewer.match(
+  /ariaLabel="当前结果筛选条件"[\s\S]*?\/>/
+);
+assert.ok(resultFilterEditor, 'result filter should use the shared token editor');
+assert.match(resultFilterEditor[0], /allowOperators=\{false\}/);
 assert.doesNotMatch(expressionEditor, /简单模式|高级表达式|支持 AND|优先于/);
 assert.match(expressionEditor, /SearchTokenEditor/);
 assert.match(filesView, /<FileTreeNode/);

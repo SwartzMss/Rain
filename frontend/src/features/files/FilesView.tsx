@@ -1315,7 +1315,7 @@ export function BundleView() {
     if (!activeViewerTab || (activeViewerTab.kind !== 'search' && activeViewerTab.kind !== 'temp')) return;
     let finalizedTokens: SearchToken[];
     try {
-      finalizedTokens = finalizeSearchTokens(resultFilterTokens, resultFilterDraft);
+      finalizedTokens = finalizeSearchTokens(resultFilterTokens, resultFilterDraft, false);
     } catch (error) {
       setSearchError(error instanceof Error ? error.message : '搜索条件无效');
       return;
@@ -1528,7 +1528,7 @@ export function BundleView() {
     || Boolean(searchError)
   );
   const canRunFileSearch = canFinalizeSearch(fileSearchTokens, fileSearchDraft, false);
-  const canRunResultFilter = canFinalizeSearch(resultFilterTokens, resultFilterDraft);
+  const canRunResultFilter = canFinalizeSearch(resultFilterTokens, resultFilterDraft, false);
 
   return (
     <div className="space-y-5">
