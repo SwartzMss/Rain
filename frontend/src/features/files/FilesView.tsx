@@ -717,6 +717,7 @@ export function BundleView() {
         : viewerTabsRef.current;
 
       if (isContextChange) {
+        searchRequestGenerationRef.current += 1;
         void issueSearchExecution.cancel();
         void fileSearchExecution.cancel();
         void viewerSearchExecution.cancel();

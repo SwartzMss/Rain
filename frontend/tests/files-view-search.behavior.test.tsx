@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BundleView } from '../src/features/files/FilesView';
 
@@ -58,9 +58,19 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function NavigationProbe() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate('/issues/ISSUE-2/bundles')}>
+      切换到 ISSUE-2
+    </button>
+  );
+}
+
 function renderBundleView() {
   return render(
     <MemoryRouter initialEntries={['/issues/ISSUE-1/bundles']}>
+      <NavigationProbe />
       <Routes>
         <Route path="/issues/:issueCode/bundles" element={<BundleView />} />
       </Routes>
@@ -115,6 +125,24 @@ describe('BundleView search expression flow', () => {
     await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole('button', { name: '清除日志内容搜索' }));
+    await act(async () => validation.resolve({ valid: true }));
+
+    expect(testMocks.execute).not.toHaveBeenCalled();
+  });
+
+  it('invalidates pending validation when the issue context changes', async () => {
+    const validation = deferred<{ valid: true }>();
+    testMocks.validateSearchExpression.mockReturnValue(validation.promise);
+
+    renderBundleView();
+    fireEvent.click(await screen.findByRole('tab', { name: '高级表达式' }));
+    const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
+    fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: '切换到 ISSUE-2' }));
+    await screen.findByText('ISSUE-2');
     await act(async () => validation.resolve({ valid: true }));
 
     expect(testMocks.execute).not.toHaveBeenCalled();
