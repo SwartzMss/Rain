@@ -169,6 +169,28 @@ struct PreparedDirectoryEntry {
     blob_id: Option<i64>,
 }
 
+struct PreparedDirectoryNode {
+    entry: PreparedDirectoryEntry,
+    record_id: i64,
+    nested: Option<Box<PreparedDirectory>>,
+}
+
+struct PreparedDirectory {
+    entries: Vec<PreparedDirectoryNode>,
+}
+
+impl PreparedDirectory {
+    fn has_text(&self) -> bool {
+        self.entries.iter().any(|node| {
+            node.entry.preview_kind == PreviewKind::Text
+                || node
+                    .nested
+                    .as_deref()
+                    .is_some_and(PreparedDirectory::has_text)
+        })
+    }
+}
+
 pub async fn preflight_uploaded_file(options: PreflightFileOptions<'_>) -> Result<(), AppError> {
     let PreflightFileOptions {
         pool,
@@ -454,15 +476,7 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         )
         .await?;
 
-        update_process_stage(pool, bundle_id, "INDEXING").await?;
-        drop(processing_permit.take());
-        let _index_permit = match index_semaphore.clone() {
-            Some(semaphore) => Some(semaphore.acquire_owned().await.map_err(|_| {
-                AppError::Conflict("SQLite index admission is shutting down".into())
-            })?),
-            None => None,
-        };
-        ingest_directory(
+        let prepared = prepare_directory(
             pool,
             bundle_id,
             dir_id,
@@ -470,13 +484,25 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
             format!("{}/{extracted_dir_name}", bundle_hash),
             archive_budget,
             issue_quota,
-            indexing,
-            blob_store.clone(),
+            blob_store,
             1,
-            search_index.clone(),
             preflighted,
         )
         .await?;
+
+        update_process_stage(pool, bundle_id, "INDEXING").await?;
+        drop(processing_permit.take());
+        let _index_permit = if prepared.has_text() {
+            match index_semaphore.clone() {
+                Some(semaphore) => Some(semaphore.acquire_owned().await.map_err(|_| {
+                    AppError::Conflict("SQLite index admission is shutting down".into())
+                })?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        index_directory(bundle_id, &prepared, indexing, search_index.clone()).await?;
     }
 
     Ok(())
@@ -527,7 +553,7 @@ async fn is_preflight_archive_output(path: &Path) -> Result<bool, AppError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ingest_directory<'a>(
+fn prepare_directory<'a>(
     pool: &'a sqlx::SqlitePool,
     bundle_id: &'a str,
     parent_id: i64,
@@ -535,12 +561,10 @@ fn ingest_directory<'a>(
     relative_root: String,
     archive_budget: ArchiveBudget,
     issue_quota: IssueQuota,
-    indexing: &'a IndexingConfig,
     blob_store: std::sync::Arc<dyn BlobStore>,
     archive_depth: usize,
-    search_index: Arc<dyn IngestIndex>,
     preflighted: bool,
-) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<PreparedDirectory, AppError>> + Send + 'a>> {
     Box::pin(async move {
         let mut read_dir = fs::read_dir(&dir_path)
             .await
@@ -631,52 +655,32 @@ fn ingest_directory<'a>(
             )
             .await?;
         }
+
+        let mut nodes = Vec::with_capacity(prepared.len());
         for (entry, record_id) in prepared.into_iter().zip(record_ids) {
-            let PreparedDirectoryEntry {
-                disk_path,
-                name,
-                db_path,
-                is_dir,
-                size_bytes,
-                preview_kind,
-                ..
-            } = entry;
+            let disk_path = entry.disk_path.clone();
+            let name = entry.name.clone();
+            let db_path = entry.db_path.clone();
+            let is_dir = entry.is_dir;
+            let preview_kind = entry.preview_kind;
 
-            if is_dir {
-                ingest_directory(
-                    pool,
-                    bundle_id,
-                    record_id,
-                    disk_path,
-                    format!("{relative_root}/{name}"),
-                    archive_budget.clone(),
-                    issue_quota.clone(),
-                    indexing,
-                    blob_store.clone(),
-                    archive_depth,
-                    search_index.clone(),
-                    preflighted,
-                )
-                .await?;
-                continue;
-            }
-
-            if preview_kind == PreviewKind::Text
-                && let Some(size) = size_bytes
-            {
-                ingest_text_file(
-                    bundle_id,
-                    record_id,
-                    &db_path,
-                    &disk_path,
-                    size as u64,
-                    indexing,
-                    search_index.clone(),
-                )
-                .await?;
-            }
-
-            if preview_kind == PreviewKind::Archive {
+            let nested = if is_dir {
+                Some(Box::new(
+                    prepare_directory(
+                        pool,
+                        bundle_id,
+                        record_id,
+                        disk_path.clone(),
+                        format!("{relative_root}/{name}"),
+                        archive_budget.clone(),
+                        issue_quota.clone(),
+                        blob_store.clone(),
+                        archive_depth,
+                        preflighted,
+                    )
+                    .await?,
+                ))
+            } else if preview_kind == PreviewKind::Archive {
                 let extracted_dir_name = format!("{name}_extracted");
                 let extracted_dir = dir_path.join(&extracted_dir_name);
                 validate_extracted_path(
@@ -727,21 +731,62 @@ fn ingest_directory<'a>(
                     None,
                 )
                 .await?;
-                ingest_directory(
-                    pool,
+                Some(Box::new(
+                    prepare_directory(
+                        pool,
+                        bundle_id,
+                        dir_id,
+                        extracted_dir,
+                        extracted_db_path.trim_start_matches('/').to_string(),
+                        archive_budget.clone(),
+                        issue_quota.clone(),
+                        blob_store.clone(),
+                        archive_depth + 1,
+                        preflighted,
+                    )
+                    .await?,
+                ))
+            } else {
+                None
+            };
+
+            nodes.push(PreparedDirectoryNode {
+                entry,
+                record_id,
+                nested,
+            });
+        }
+
+        Ok(PreparedDirectory { entries: nodes })
+    })
+}
+
+fn index_directory<'a>(
+    bundle_id: &'a str,
+    prepared: &'a PreparedDirectory,
+    indexing: &'a IndexingConfig,
+    search_index: Arc<dyn IngestIndex>,
+) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+    Box::pin(async move {
+        for node in &prepared.entries {
+            let entry = &node.entry;
+            if entry.preview_kind == PreviewKind::Text
+                && let Some(size) = entry.size_bytes
+            {
+                ingest_text_file(
                     bundle_id,
-                    dir_id,
-                    extracted_dir,
-                    extracted_db_path.trim_start_matches('/').to_string(),
-                    archive_budget.clone(),
-                    issue_quota.clone(),
+                    node.record_id,
+                    &entry.db_path,
+                    &entry.disk_path,
+                    size as u64,
                     indexing,
-                    blob_store.clone(),
-                    archive_depth + 1,
                     search_index.clone(),
-                    preflighted,
                 )
                 .await?;
+            }
+
+            if let Some(nested) = node.nested.as_deref() {
+                index_directory(bundle_id, nested, indexing, search_index.clone()).await?;
             }
         }
 
