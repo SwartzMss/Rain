@@ -507,7 +507,6 @@ describe('BundleView search expression flow', () => {
     fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
       target: { value: 'ERROR' }
     });
-    fireEvent.click(screen.getByRole('button', { name: '添加关键词' }));
     fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
 
     await waitFor(() => expect(screen.getByText('ERROR from nested source')).toBeInTheDocument());

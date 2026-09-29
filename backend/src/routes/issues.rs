@@ -157,17 +157,6 @@ pub async fn list_issues(
         .into_iter()
         .map(IssueListRow::into_summary)
         .collect::<Vec<_>>();
-    let authenticated = user.0.is_some();
-    let rows = rows
-        .into_iter()
-        .map(|mut row| {
-            if !authenticated {
-                row.owner_username = None;
-            }
-            row
-        })
-        .collect::<Vec<_>>();
-
     Ok(HttpResponse::Ok().json(IssueListResponse {
         items: rows,
         next_cursor,
@@ -378,7 +367,7 @@ pub async fn get_issue_bundles(
 
     let response = IssueBundlesResponse {
         name: issue.name,
-        owner_username: user.0.as_ref().and_then(|_| issue.owner_username.clone()),
+        owner_username: issue.owner_username,
         can_write,
         inactivity_expiry,
         log_bundles: rows
