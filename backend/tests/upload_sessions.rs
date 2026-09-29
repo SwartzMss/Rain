@@ -517,19 +517,40 @@ async fn chunk_endpoint_requires_sequential_offsets_and_verifies_hashes() {
     )
     .await
     .unwrap();
-    let app = actix_test::init_service(
-        App::new()
-            .app_data(web::Data::new(AppState::new(
-                pool.clone(),
-                data_root.clone(),
-                AppLimits::default(),
-            )))
-            .configure(routes::register),
-    )
-    .await;
+    let mut limits = AppLimits::default();
+    limits.upload.concurrent_receive_tasks = 1;
+    let state = web::Data::new(AppState::new(pool.clone(), data_root.clone(), limits));
+    let held_receive_permit = state
+        .upload
+        .receive_permits
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let app =
+        actix_test::init_service(App::new().app_data(state).configure(routes::register)).await;
     let cookie = Cookie::new(SESSION_COOKIE_NAME, token);
     let first_chunk = vec![b'a'; CHUNK_SIZE_BYTES as usize];
     let first_hash = format_digest(&first_chunk);
+    let busy = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::put()
+            .uri(&format!("/api/upload-sessions/{session_id}/chunks/0"))
+            .cookie(cookie.clone())
+            .insert_header(("X-Upload-Offset", "0"))
+            .insert_header(("X-Chunk-SHA256", first_hash.as_str()))
+            .insert_header(("Content-Length", first_chunk.len().to_string()))
+            .set_payload(first_chunk.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        busy.status(),
+        actix_web::http::StatusCode::TOO_MANY_REQUESTS
+    );
+    let busy_body: serde_json::Value = actix_test::read_body_json(busy).await;
+    assert_eq!(busy_body["code"], "UPLOAD_RECEIVE_BUSY");
+    drop(held_receive_permit);
     let first = actix_test::call_service(
         &app,
         actix_test::TestRequest::put()

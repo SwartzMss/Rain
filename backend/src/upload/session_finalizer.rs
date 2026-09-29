@@ -188,6 +188,7 @@ async fn finalize_one_locked(state: &AppState, session_id: &str) -> Result<(), A
         temp_dir: temp_dir.clone(),
         staging_root: temp_dir.join("staging"),
         processing_permits: state.upload.processing_permits.clone(),
+        sqlite_index_permits: state.upload.sqlite_index_permits.clone(),
         archive_config: crate::config::ArchiveConfig::for_content_limit_with_working_size(
             settings_snapshot.effective.issue_max_content_size,
             settings_snapshot.effective.archive_max_working_size,

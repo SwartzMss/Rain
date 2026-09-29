@@ -203,6 +203,7 @@ pub async fn upload_logs(
             temp_dir,
             staging_root,
             processing_permits: state.upload.processing_permits.clone(),
+            sqlite_index_permits: state.upload.sqlite_index_permits.clone(),
             archive_config: crate::config::ArchiveConfig::for_content_limit_with_working_size(
                 settings.effective.issue_max_content_size,
                 settings.effective.archive_max_working_size,

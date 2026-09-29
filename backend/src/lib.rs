@@ -108,6 +108,9 @@ pub struct StorageContext {
 pub struct UploadRuntime {
     pub processing_permits: Arc<Semaphore>,
     pub receive_permits: Arc<Semaphore>,
+    /// SQLite FTS has a single writer path. Keep this admission separate from
+    /// upload preparation so a busy index does not consume processing slots.
+    pub sqlite_index_permits: Arc<Semaphore>,
     pub tmp_bytes: Arc<AtomicU64>,
     pub tmp_max_bytes: Arc<AtomicU64>,
     pub temp_cleanup_queue: crate::upload::job::TempCleanupQueue,
@@ -140,6 +143,7 @@ impl UploadRuntime {
         Self {
             processing_permits: Arc::new(Semaphore::new(processing)),
             receive_permits: Arc::new(Semaphore::new(receiving)),
+            sqlite_index_permits: Arc::new(Semaphore::new(1)),
             tmp_bytes: Arc::new(AtomicU64::new(0)),
             tmp_max_bytes: Arc::new(AtomicU64::new(u64::MAX)),
             temp_cleanup_queue: crate::upload::job::TempCleanupQueue::default(),
@@ -586,6 +590,7 @@ mod tests {
         let upload = super::UploadRuntime::new(3, 2);
         assert_eq!(upload.processing_permits.available_permits(), 3);
         assert_eq!(upload.receive_permits.available_permits(), 2);
+        assert_eq!(upload.sqlite_index_permits.available_permits(), 1);
 
         let temp_results = super::TempResultRuntime::new(4);
         assert_eq!(temp_results.permits.available_permits(), 4);

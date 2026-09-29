@@ -9,8 +9,8 @@ use std::{
     pin::Pin,
     sync::Arc,
 };
-use tokio::fs;
 use tokio::io::BufReader;
+use tokio::{fs, sync::OwnedSemaphorePermit};
 
 use crate::{
     blob_store::{BlobStore, mark_blob_ready, persist_blob},
@@ -105,6 +105,12 @@ pub struct ProcessFileOptions<'a> {
     pub indexing: &'a IndexingConfig,
     pub search_index: Option<Arc<dyn IngestIndex>>,
     pub preflighted: bool,
+    /// Permit held only while preparing this file. The ingest/index phase
+    /// takes ownership of the resource boundary and releases it before any
+    /// potentially queued index work begins.
+    pub processing_permit: Option<OwnedSemaphorePermit>,
+    /// Independent SQLite FTS admission, acquired only after preparation.
+    pub index_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 pub struct PreflightFileOptions<'a> {
@@ -331,6 +337,8 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         indexing,
         search_index,
         preflighted,
+        mut processing_permit,
+        index_semaphore,
     } = options;
     let search_index: Arc<dyn IngestIndex> =
         search_index.unwrap_or_else(|| Arc::new(SqliteFtsSearchIndex::new(pool.clone())));
@@ -382,6 +390,13 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
     }
     if preview_kind == PreviewKind::Text {
         update_process_stage(pool, bundle_id, "INDEXING").await?;
+        drop(processing_permit.take());
+        let _index_permit = match index_semaphore.clone() {
+            Some(semaphore) => Some(semaphore.acquire_owned().await.map_err(|_| {
+                AppError::Conflict("SQLite index admission is shutting down".into())
+            })?),
+            None => None,
+        };
         ingest_text_file(
             bundle_id,
             file_id,
@@ -440,6 +455,13 @@ pub async fn process_uploaded_file(options: ProcessFileOptions<'_>) -> Result<()
         .await?;
 
         update_process_stage(pool, bundle_id, "INDEXING").await?;
+        drop(processing_permit.take());
+        let _index_permit = match index_semaphore.clone() {
+            Some(semaphore) => Some(semaphore.acquire_owned().await.map_err(|_| {
+                AppError::Conflict("SQLite index admission is shutting down".into())
+            })?),
+            None => None,
+        };
         ingest_directory(
             pool,
             bundle_id,
