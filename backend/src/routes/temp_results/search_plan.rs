@@ -41,6 +41,9 @@ pub(crate) struct PreviewSearchPlan {
     pub candidate_count: usize,
     pub query_elapsed_ms: u128,
     pub fallback_reasons: Vec<&'static str>,
+    pub candidate_strategy: &'static str,
+    pub candidate_term_count: usize,
+    pub boolean_node_count: usize,
 }
 
 impl PreviewSearchPlan {
@@ -68,16 +71,15 @@ pub(crate) async fn build_source_search_plans_with_context(
 ) -> Result<PreviewSearchPlan, AppError> {
     checkpoint(context)?;
     let started = Instant::now();
-    let (term, fallback_reason) = match classify_expression(expression) {
-        SearchPlanKind::IndexedTerm => {
-            let Expression::Term(term) = expression else {
-                return Err(AppError::Config(
-                    "indexed expression classification lost its term".into(),
-                ));
-            };
-            (Some(term.clone()), None)
-        }
-        SearchPlanKind::RawFallback(reason) => (None, Some(reason)),
+    let boolean_node_count = expression_node_count(expression);
+    let (terms, fallback_reason) = match candidate_plan(expression) {
+        Some(CandidatePlan::Terms(terms)) => (terms, None),
+        None => (Vec::new(), Some(expression_fallback_reason(expression))),
+    };
+    let candidate_strategy = match (fallback_reason, terms.len()) {
+        (Some(_), _) => "full_scan",
+        (None, 1) => "anchor_term",
+        (None, _) => "union",
     };
     let mut pending: Vec<Option<SourcePlanResult>> =
         (0..indexed_sources.len()).map(|_| None).collect();
@@ -88,9 +90,6 @@ pub(crate) async fn build_source_search_plans_with_context(
             *slot = Some(Err(reason));
         }
     } else {
-        let term = term
-            .as_deref()
-            .ok_or_else(|| AppError::Config("indexed term is missing".into()))?;
         let mut bundles: BTreeMap<String, Vec<(usize, IndexedSource)>> = BTreeMap::new();
         for (index, indexed_source) in indexed_sources.iter().enumerate() {
             checkpoint(context)?;
@@ -106,7 +105,8 @@ pub(crate) async fn build_source_search_plans_with_context(
         let bundle_count = bundles.len();
         let mut bundle_plans = futures_util::stream::iter(bundles.into_values().map(|sources| {
             let state = state.clone();
-            async move { build_indexed_bundle_plans(&state, &sources, term, context).await }
+            let terms = terms.clone();
+            async move { build_indexed_bundle_plans(&state, &sources, &terms, context).await }
         }))
         .buffer_unordered(crate::search::parallel::issue_search_parallelism(
             bundle_count,
@@ -142,10 +142,37 @@ pub(crate) async fn build_source_search_plans_with_context(
         candidate_count,
         query_elapsed_ms: started.elapsed().as_millis(),
         fallback_reasons,
+        candidate_strategy,
+        candidate_term_count: terms.len(),
+        boolean_node_count,
     })
 }
 
 type SourcePlanResult = Result<(SourceSearchPlan, usize), &'static str>;
+
+async fn acquire_query_permit(
+    state: &web::Data<AppState>,
+    context: Option<&SearchExecutionContext>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, AppError> {
+    if let Some(context) = context {
+        let cancellation = context.cancellation_token();
+        let remaining = context.remaining();
+        tokio::select! {
+            permit = state.search.query_permits.clone().acquire_owned() => permit
+                .map_err(|_| AppError::Config("query admission unavailable".into())),
+            _ = cancellation.cancelled() => Err(StopReason::Cancelled.into_error()),
+            _ = tokio::time::sleep(remaining) => Err(StopReason::TimedOut.into_error()),
+        }
+    } else {
+        state
+            .search
+            .query_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AppError::Config("query admission unavailable".into()))
+    }
+}
 
 fn fallback_bundle_plans(
     sources: &[(usize, IndexedSource)],
@@ -160,7 +187,7 @@ fn fallback_bundle_plans(
 async fn build_indexed_bundle_plans(
     state: &web::Data<AppState>,
     sources: &[(usize, IndexedSource)],
-    term: &str,
+    terms: &[String],
     context: Option<&SearchExecutionContext>,
 ) -> Result<Vec<(usize, SourcePlanResult)>, AppError> {
     let Some((_, first_source)) = sources.first() else {
@@ -207,102 +234,70 @@ async fn build_indexed_bundle_plans(
         Ok(artifact) => artifact,
         Err(_) => return Ok(fallback_bundle_plans(sources, "index_artifact_invalid")),
     };
-    let permit = if let Some(context) = context {
-        let cancellation = context.cancellation_token();
-        let remaining = context.remaining();
-        tokio::select! {
-            permit = state.search.query_permits.clone().acquire_owned() => match permit {
-                Ok(permit) => permit,
-                Err(_) => return Ok(fallback_bundle_plans(sources, "query_admission_unavailable")),
-            },
-            _ = cancellation.cancelled() => {
-                return Err(StopReason::Cancelled.into_error());
+    let visible_file_ids =
+        if can_skip_visibility_snapshot(&state_name, visibility_revision, compacted_revision) {
+            None
+        } else {
+            match snapshot_file_ids(&state.db.pool, &first_source.bundle_id).await {
+                Ok(visible_file_ids) => Some(visible_file_ids),
+                Err(_) => {
+                    return Ok(fallback_bundle_plans(
+                        sources,
+                        "visibility_snapshot_unavailable",
+                    ));
+                }
             }
-            _ = tokio::time::sleep(remaining) => {
-                return Err(StopReason::TimedOut.into_error());
-            }
-        }
-    } else {
-        match state.search.query_permits.clone().acquire_owned().await {
+        };
+    // Every positive branch is queried independently. Each query owns its
+    // permit and generation lease, while the rows are unioned before they are
+    // converted into file-scoped ranges. If any branch is incomplete, the
+    // whole Bundle falls back so the union can never miss a match.
+    let mut candidate_rows = Vec::new();
+    let mut candidate_total = 0_i64;
+    for term in terms {
+        checkpoint(context)?;
+        let permit = match acquire_query_permit(state, context).await {
             Ok(permit) => permit,
+            Err(error) if is_stop_error(&error) => return Err(error),
             Err(_) => {
                 return Ok(fallback_bundle_plans(
                     sources,
                     "query_admission_unavailable",
                 ));
             }
-        }
-    };
-    checkpoint(context)?;
-    let lease = match acquire_generation_lease_with_registry(
-        &state.search.generation_leases,
-        &state.db.pool,
-        &first_source.bundle_id,
-        generation,
-    )
-    .await
-    {
-        Ok(lease) => lease,
-        Err(_) => {
-            return Ok(fallback_bundle_plans(
-                sources,
-                "generation_lease_unavailable",
-            ));
-        }
-    };
-    // Search the immutable Bundle generation once, then partition the returned
-    // candidate rows by file. Publication and visibility state are shared by
-    // every source file in this Bundle.
-    let request = ContentSearchRequest {
-        scope: ContentSearchScope::Bundle {
-            bundle_id: first_source.bundle_id.clone(),
-            timeline: None,
-            file_id: (sources.len() == 1).then_some(first_source.file_id),
-        },
-        query: term.to_owned(),
-        path_like: None,
-        from: 0,
-        size: HARD_MAX_SEARCH_WINDOW as i64,
-        include_content: false,
-    };
-    let result =
-        if can_skip_visibility_snapshot(&state_name, visibility_revision, compacted_revision) {
-            if let Some(context) = context {
-                search_tantivy_bundle_with_lease_and_permit_and_context(
-                    state.storage.data_root.join(artifact),
-                    request,
-                    first_source.bundle_id.clone(),
-                    generation,
-                    lease,
-                    permit,
-                    context.clone(),
-                )
-                .await
-            } else {
-                search_tantivy_bundle_with_lease_and_permit(
-                    state.storage.data_root.join(artifact),
-                    request,
-                    first_source.bundle_id.clone(),
-                    generation,
-                    lease,
-                    permit,
-                )
-                .await
+        };
+        let lease = match acquire_generation_lease_with_registry(
+            &state.search.generation_leases,
+            &state.db.pool,
+            &first_source.bundle_id,
+            generation,
+        )
+        .await
+        {
+            Ok(lease) => lease,
+            Err(_) => {
+                return Ok(fallback_bundle_plans(
+                    sources,
+                    "generation_lease_unavailable",
+                ));
             }
-        } else {
-            let visible_file_ids =
-                match snapshot_file_ids(&state.db.pool, &first_source.bundle_id).await {
-                    Ok(visible_file_ids) => visible_file_ids,
-                    Err(_) => {
-                        return Ok(fallback_bundle_plans(
-                            sources,
-                            "visibility_snapshot_unavailable",
-                        ));
-                    }
-                };
+        };
+        let request = ContentSearchRequest {
+            scope: ContentSearchScope::Bundle {
+                bundle_id: first_source.bundle_id.clone(),
+                timeline: None,
+                file_id: (sources.len() == 1).then_some(first_source.file_id),
+            },
+            query: term.clone(),
+            path_like: None,
+            from: 0,
+            size: HARD_MAX_SEARCH_WINDOW as i64,
+            include_content: false,
+        };
+        let result = if let Some(visible_file_ids) = visible_file_ids.clone() {
             if let Some(context) = context {
                 search_tantivy_bundle_visible_with_lease_and_permit_and_context(
-                    state.storage.data_root.join(artifact),
+                    state.storage.data_root.join(&artifact),
                     request,
                     visible_file_ids,
                     first_source.bundle_id.clone(),
@@ -314,7 +309,7 @@ async fn build_indexed_bundle_plans(
                 .await
             } else {
                 search_tantivy_bundle_visible_with_lease_and_permit(
-                    state.storage.data_root.join(artifact),
+                    state.storage.data_root.join(&artifact),
                     request,
                     visible_file_ids,
                     first_source.bundle_id.clone(),
@@ -324,26 +319,54 @@ async fn build_indexed_bundle_plans(
                 )
                 .await
             }
+        } else if let Some(context) = context {
+            search_tantivy_bundle_with_lease_and_permit_and_context(
+                state.storage.data_root.join(&artifact),
+                request,
+                first_source.bundle_id.clone(),
+                generation,
+                lease,
+                permit,
+                context.clone(),
+            )
+            .await
+        } else {
+            search_tantivy_bundle_with_lease_and_permit(
+                state.storage.data_root.join(&artifact),
+                request,
+                first_source.bundle_id.clone(),
+                generation,
+                lease,
+                permit,
+            )
+            .await
         };
-    let result = match result {
-        Ok(result) => result,
-        Err(error) if is_stop_error(&error) => return Err(error),
-        Err(_) => return Ok(fallback_bundle_plans(sources, "tantivy_query_failed")),
-    };
-    checkpoint(context)?;
-    // A truncated Bundle-wide page cannot produce complete per-file ranges.
-    // Fall back to the raw scan rather than risk silently dropping matches.
-    if result.total < 0
-        || result.total > HARD_MAX_SEARCH_WINDOW as i64
-        || usize::try_from(result.total)
-            .ok()
-            .is_none_or(|total| total > result.rows.len())
-    {
-        return Ok(fallback_bundle_plans(sources, "candidate_window_overflow"));
+        let result = match result {
+            Ok(result) => result,
+            Err(error) if is_stop_error(&error) => return Err(error),
+            Err(_) => return Ok(fallback_bundle_plans(sources, "tantivy_query_failed")),
+        };
+        checkpoint(context)?;
+        if result.total < 0
+            || result.total > HARD_MAX_SEARCH_WINDOW as i64
+            || result.truncated
+            || usize::try_from(result.total)
+                .ok()
+                .is_none_or(|total| total > result.rows.len())
+        {
+            return Ok(fallback_bundle_plans(sources, "candidate_window_overflow"));
+        }
+        candidate_total = candidate_total
+            .checked_add(result.total)
+            .ok_or_else(|| AppError::Config("candidate total overflow".into()))?;
+        if candidate_total > HARD_MAX_SEARCH_WINDOW as i64 {
+            return Ok(fallback_bundle_plans(sources, "candidate_window_overflow"));
+        }
+        candidate_rows.extend(result.rows);
     }
 
     let mut rows_by_file: HashMap<i64, Vec<ContentSearchRow>> = HashMap::new();
-    for row in result.rows {
+    for row in candidate_rows {
         rows_by_file.entry(row.file_id).or_default().push(row);
     }
     let mut plans = Vec::with_capacity(sources.len());
@@ -420,6 +443,72 @@ fn is_stop_error(error: &AppError) -> bool {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CandidatePlan {
+    Terms(Vec<String>),
+}
+
+fn candidate_plan(expression: &Expression) -> Option<CandidatePlan> {
+    match expression {
+        Expression::Term(term) => match classify_expression(expression) {
+            SearchPlanKind::IndexedTerm => Some(CandidatePlan::Terms(vec![term.clone()])),
+            SearchPlanKind::RawFallback(_) => None,
+        },
+        Expression::Not(_) => None,
+        Expression::And(left, right) => {
+            let left = candidate_plan(left);
+            let right = candidate_plan(right);
+            match (left, right) {
+                (Some(left), Some(right)) => Some(prefer_candidate(left, right)),
+                (Some(plan), None) | (None, Some(plan)) => Some(plan),
+                (None, None) => None,
+            }
+        }
+        Expression::Or(left, right) => match (candidate_plan(left), candidate_plan(right)) {
+            (Some(CandidatePlan::Terms(left)), Some(CandidatePlan::Terms(right))) => {
+                let mut terms = left;
+                for term in right {
+                    if !terms.contains(&term) {
+                        terms.push(term);
+                    }
+                }
+                Some(CandidatePlan::Terms(terms))
+            }
+            _ => None,
+        },
+    }
+}
+
+fn prefer_candidate(left: CandidatePlan, right: CandidatePlan) -> CandidatePlan {
+    let left_len = match &left {
+        CandidatePlan::Terms(terms) => terms.len(),
+    };
+    let right_len = match &right {
+        CandidatePlan::Terms(terms) => terms.len(),
+    };
+    if left_len <= right_len { left } else { right }
+}
+
+fn expression_fallback_reason(expression: &Expression) -> &'static str {
+    match expression {
+        Expression::Term(_) => match classify_expression(expression) {
+            SearchPlanKind::RawFallback(reason) => reason,
+            SearchPlanKind::IndexedTerm => "expression_not_indexable",
+        },
+        _ => "expression_not_indexable",
+    }
+}
+
+fn expression_node_count(expression: &Expression) -> usize {
+    match expression {
+        Expression::Term(_) => 1,
+        Expression::Not(child) => 1 + expression_node_count(child),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            1 + expression_node_count(left) + expression_node_count(right)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SearchPlanKind {
     IndexedTerm,
@@ -475,7 +564,10 @@ pub(crate) fn candidate_ranges_from_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{LineRange, SearchPlanKind, candidate_ranges_from_rows, classify_expression};
+    use super::{
+        CandidatePlan, LineRange, SearchPlanKind, candidate_plan, candidate_ranges_from_rows,
+        classify_expression,
+    };
     use crate::log_expression::parse;
     use crate::search::ContentSearchRow;
     use crate::services::temp_results::{CandidateScanPlan, SourceSearchPlan};
@@ -499,9 +591,31 @@ mod tests {
             SearchPlanKind::RawFallback("term_too_short")
         );
         assert_eq!(
-            classify_expression(&parse("ERROR AND timeout").unwrap()),
-            SearchPlanKind::RawFallback("expression_not_a_term")
+            candidate_plan(&parse("ERROR AND timeout").unwrap()),
+            Some(CandidatePlan::Terms(vec!["error".into()]))
         );
+        assert_eq!(
+            candidate_plan(&parse("ERROR AND NOT timeout").unwrap()),
+            Some(CandidatePlan::Terms(vec!["error".into()]))
+        );
+        assert_eq!(
+            candidate_plan(&parse("ERROR AND (timeout OR latency)").unwrap()),
+            Some(CandidatePlan::Terms(vec!["error".into()]))
+        );
+        let parenthesized = parse("(ERROR OR timeout) AND latency").unwrap();
+        assert_eq!(
+            candidate_plan(&parenthesized),
+            Some(CandidatePlan::Terms(vec!["latency".into()]))
+        );
+        assert_eq!(
+            candidate_plan(&parse("ERROR OR timeout").unwrap()),
+            Some(CandidatePlan::Terms(vec!["error".into(), "timeout".into()]))
+        );
+        assert_eq!(
+            candidate_plan(&parse("ERROR OR NOT timeout").unwrap()),
+            None
+        );
+        assert_eq!(candidate_plan(&parse("NOT ERROR").unwrap()), None);
         assert_eq!(
             classify_expression(&parse("错误标记").unwrap()),
             SearchPlanKind::RawFallback("term_not_ascii")
@@ -585,6 +699,9 @@ mod tests {
             candidate_count: 1,
             query_elapsed_ms: 0,
             fallback_reasons: vec!["source_identity_missing"],
+            candidate_strategy: "anchor_term",
+            candidate_term_count: 1,
+            boolean_node_count: 1,
         };
 
         assert_eq!(plan.backend_label(), "mixed");
