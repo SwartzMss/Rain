@@ -1,7 +1,7 @@
 use actix_web::{HttpResponse, http::StatusCode, post, web};
 use serde::{Deserialize, Serialize};
 
-use crate::{auth::extractor::RequireUser, error::AppError, log_expression};
+use crate::{auth::extractor::OptionalUser, error::AppError, log_expression};
 
 #[derive(Deserialize)]
 pub struct ValidateSearchExpressionRequest {
@@ -23,7 +23,7 @@ fn invalid_expression(error: log_expression::ParseError) -> AppError {
 
 #[post("/search/validate-expression")]
 pub async fn validate_expression(
-    _user: RequireUser,
+    _user: OptionalUser,
     payload: web::Json<ValidateSearchExpressionRequest>,
 ) -> Result<HttpResponse, AppError> {
     log_expression::parse(payload.expression.trim()).map_err(invalid_expression)?;
@@ -79,15 +79,17 @@ mod tests {
         )
         .await;
 
-        let unauthenticated = test::call_service(
+        let guest = test::call_service(
             &app,
             test::TestRequest::post()
                 .uri("/search/validate-expression")
-                .set_json(json!({ "expression": "ping" }))
+                .set_json(json!({ "expression": "ping AND (error OR timeout)" }))
                 .to_request(),
         )
         .await;
-        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(guest.status(), StatusCode::OK);
+        let guest_body: Value = test::read_body_json(guest).await;
+        assert_eq!(guest_body["valid"], true);
 
         let valid = test::call_service(
             &app,
