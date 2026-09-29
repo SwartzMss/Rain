@@ -1,7 +1,7 @@
 use actix_web::{HttpResponse, http::StatusCode, post, web};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::AppError, log_expression};
+use crate::{auth::extractor::RequireUser, error::AppError, log_expression};
 
 #[derive(Deserialize)]
 pub struct ValidateSearchExpressionRequest {
@@ -23,6 +23,7 @@ fn invalid_expression(error: log_expression::ParseError) -> AppError {
 
 #[post("/search/validate-expression")]
 pub async fn validate_expression(
+    _user: RequireUser,
     payload: web::Json<ValidateSearchExpressionRequest>,
 ) -> Result<HttpResponse, AppError> {
     log_expression::parse(payload.expression.trim()).map_err(invalid_expression)?;
@@ -31,19 +32,68 @@ pub async fn validate_expression(
 
 #[cfg(test)]
 mod tests {
-    use actix_web::{App, http::StatusCode, test};
+    use actix_web::{App, cookie::Cookie, http::StatusCode, test, web};
+    use chrono::{Duration, Utc};
     use serde_json::{Value, json};
+
+    use crate::{
+        AppState,
+        auth::session::{SESSION_COOKIE_NAME, hash_session_token},
+        config::AppLimits,
+        db,
+        repositories::{sessions, users},
+    };
 
     use super::validate_expression;
 
     #[actix_web::test]
     async fn validates_full_boolean_expressions_and_reports_parser_location() {
-        let app = test::init_service(App::new().service(validate_expression)).await;
+        let pool = db::init_pool("sqlite::memory:").expect("pool");
+        db::prepare_schema(&pool, true).await.expect("schema");
+        let user = match users::create_user(&pool, "Search validator", "hash")
+            .await
+            .expect("user")
+        {
+            users::CreateUserOutcome::Created(user) => user,
+            users::CreateUserOutcome::DuplicateUsername => panic!("duplicate user"),
+        };
+        let token = "search-validator-session";
+        sessions::create_session(
+            &pool,
+            &user.id,
+            &hash_session_token(token),
+            Utc::now() + Duration::hours(1),
+            None,
+            None,
+        )
+        .await
+        .expect("session");
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(AppState::new(
+                    pool,
+                    std::path::PathBuf::from("data"),
+                    AppLimits::default(),
+                )))
+                .service(validate_expression),
+        )
+        .await;
+
+        let unauthenticated = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/search/validate-expression")
+                .set_json(json!({ "expression": "ping" }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
         let valid = test::call_service(
             &app,
             test::TestRequest::post()
                 .uri("/search/validate-expression")
+                .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
                 .set_json(json!({ "expression": "ping AND (error OR timeout) AND NOT retry" }))
                 .to_request(),
         )
@@ -56,6 +106,7 @@ mod tests {
             &app,
             test::TestRequest::post()
                 .uri("/search/validate-expression")
+                .cookie(Cookie::new(SESSION_COOKIE_NAME, token))
                 .set_json(json!({ "expression": "ping AND (error OR" }))
                 .to_request(),
         )

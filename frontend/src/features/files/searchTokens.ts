@@ -197,6 +197,34 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
   return tokens;
 }
 
+export function isSimpleSearchRepresentable(tokens: SearchToken[]): boolean {
+  if (tokens.length === 0) return true;
+  if (tokens[0].kind !== 'term') return false;
+
+  let index = 1;
+  while (index < tokens.length) {
+    const operator = tokens[index];
+    if (operator.kind !== 'operator' || (operator.value !== 'AND' && operator.value !== 'OR')) {
+      return false;
+    }
+    index += 1;
+    if (operator.value === 'AND' && tokens[index]?.kind === 'operator' && tokens[index].value === 'NOT') {
+      index += 1;
+    }
+    if (tokens[index]?.kind !== 'term') return false;
+    index += 1;
+  }
+  return true;
+}
+
+export function deserializeSimpleSearchTokens(expression: string): SearchToken[] {
+  const tokens = deserializeSearchTokens(expression);
+  if (!isSimpleSearchRepresentable(tokens)) {
+    throw new Error('该表达式无法由简单模式无损编辑，请保留高级表达式');
+  }
+  return tokens;
+}
+
 export function formatSearchTokens(tokens: SearchToken[]): string {
   return tokens.map((token) => token.value).join(' ');
 }

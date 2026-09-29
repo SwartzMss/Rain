@@ -23,7 +23,9 @@ try {
     appendSearchTerm,
     combineSearchExpressions,
     deserializeSearchTokens,
+    deserializeSimpleSearchTokens,
     finalizeSearchTokens,
+    isSimpleSearchRepresentable,
     removeSearchToken,
     serializeSearchTokens,
     validateSearchTokens
@@ -64,6 +66,15 @@ try {
     { kind: 'operator', value: 'NOT' },
     { kind: 'term', value: 'timeout' }
   ]);
+  assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('A AND NOT B')), true);
+  assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('A OR NOT B')), false);
+  assert.equal(isSimpleSearchRepresentable(deserializeSearchTokens('NOT A')), false);
+  assert.deepEqual(
+    deserializeSimpleSearchTokens('A AND NOT B'),
+    deserializeSearchTokens('A AND NOT B')
+  );
+  assert.throws(() => deserializeSimpleSearchTokens('A OR NOT B'), /简单模式无损编辑/);
+  assert.throws(() => deserializeSimpleSearchTokens('NOT A'), /简单模式无损编辑/);
   assert.throws(() => deserializeSearchTokens('A AND (B OR C)'), /括号表达式/);
 
   const assertSearchRoundTrip = (expression, expectedValue) => {

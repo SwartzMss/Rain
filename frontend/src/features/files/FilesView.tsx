@@ -14,7 +14,7 @@ import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { uploadFailureMessage } from './uploadFailure';
 import {
   canFinalizeSearch,
-  deserializeSearchTokens,
+  deserializeSimpleSearchTokens,
   finalizeSearchTokens,
   formatSearchTokens,
   getSearchTerms,
@@ -107,7 +107,7 @@ function detailEditorState(queryText: string | undefined, options?: Record<strin
     return { tokens: [], rawExpression: queryText };
   }
   try {
-    return { tokens: deserializeSearchTokens(queryText), rawExpression: null };
+    return { tokens: deserializeSimpleSearchTokens(queryText), rawExpression: null };
   } catch {
     return { tokens: [], rawExpression: queryText };
   }
@@ -504,6 +504,8 @@ export function BundleView() {
   );
 
   const runSearch = useCallback(async () => {
+    const requestGeneration = ++searchRequestGenerationRef.current;
+    const isCurrentSearch = () => requestGeneration === searchRequestGenerationRef.current;
     const issue = issueCode;
     if (!issue) {
       setSearchError(null);
@@ -524,9 +526,10 @@ export function BundleView() {
       try {
         await rainApi.validateSearchExpression(keyword);
       } catch (error) {
-        setSearchError(normalizeApiError(error));
+        if (isCurrentSearch()) setSearchError(normalizeApiError(error));
         return;
       }
+      if (!isCurrentSearch()) return;
     } else {
       let finalizedTokens: SearchToken[];
       try {
@@ -540,7 +543,6 @@ export function BundleView() {
       setSearchTokens(finalizedTokens);
       setSearchDraft('');
     }
-    const requestGeneration = ++searchRequestGenerationRef.current;
     setSearchLoading(true);
     setSearchError(null);
     setSearchExecuted(true);
@@ -630,7 +632,7 @@ export function BundleView() {
       return;
     }
     try {
-      const tokens = deserializeSearchTokens(expression);
+      const tokens = deserializeSimpleSearchTokens(expression);
       setSearchTokens(tokens);
       setSearchDraft('');
       setDetailRawExpression(null);
@@ -668,7 +670,7 @@ export function BundleView() {
       return;
     }
     try {
-      const tokens = deserializeSearchTokens(expression);
+      const tokens = deserializeSimpleSearchTokens(expression);
       setEditingSearchTokens(tokens);
       setEditingSearchDraft('');
       setEditingRawExpression(null);

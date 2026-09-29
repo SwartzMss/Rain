@@ -24,14 +24,14 @@ fn normalize_and_validate(payload: &SavedSearchPayload) -> Result<SavedSearchPay
             "搜索条件无效",
         ));
     }
-    if payload.search_type == "DETAIL" {
-        if let Err(error) = crate::log_expression::parse(&payload.query_text) {
-            return Err(AppError::public(
-                StatusCode::BAD_REQUEST,
-                "SAVED_SEARCH_EXPRESSION_INVALID",
-                crate::log_expression::parse_error_message(&error),
-            ));
-        }
+    if payload.search_type == "DETAIL"
+        && let Err(error) = crate::log_expression::parse(&payload.query_text)
+    {
+        return Err(AppError::public(
+            StatusCode::BAD_REQUEST,
+            "SAVED_SEARCH_EXPRESSION_INVALID",
+            crate::log_expression::parse_error_message(&error),
+        ));
     }
     Ok(payload.clone())
 }
