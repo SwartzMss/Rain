@@ -88,7 +88,11 @@ export function reconcileViewerTabs(
 export function openOrActivateTab(tabs: ViewerTab[], incoming: ViewerTab): ViewerTab[] {
   const existingIndex = tabs.findIndex((tab) => tab.id === incoming.id);
   if (existingIndex >= 0) {
-    return tabs.map((tab, index) => (index === existingIndex ? { ...incoming, pinned: tab.pinned } : tab));
+    return tabs.map((tab, index) => {
+      if (index !== existingIndex) return tab;
+      if (tab.kind !== incoming.kind) return tab;
+      return { ...tab, title: incoming.title };
+    });
   }
   return [...tabs, incoming];
 }

@@ -284,12 +284,14 @@ export const rainApi = {
   fetchFileContent(bundleId: string, fileId: string) {
     return request<FileContentResponse>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}/content`);
   },
-  fetchFileLines(bundleId: string, fileId: string, options?: { start?: number; limit?: number }) {
+  fetchFileLines(bundleId: string, fileId: string, options?: { start?: number; limit?: number; signal?: AbortSignal }) {
     const params = new URLSearchParams();
     if (typeof options?.start === 'number') params.set('start', String(options.start));
     if (typeof options?.limit === 'number') params.set('limit', String(options.limit));
     const query = params.toString();
-    return request<FileLinesResponse>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}/lines${query ? `?${query}` : ''}`);
+    return request<FileLinesResponse>(`/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}/lines${query ? `?${query}` : ''}`, {
+      signal: options?.signal
+    });
   },
   fileDownloadUrl(bundleId: string, fileId: string) {
     return `${API_BASE_URL}/api/files/v1/${encodePathSegment(bundleId)}/files/${encodePathSegment(fileId)}/download`;
