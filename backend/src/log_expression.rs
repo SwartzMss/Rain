@@ -14,6 +14,36 @@ pub struct ParseError {
     pub message: String,
 }
 
+pub fn parse_error_message(input: &str, error: &ParseError) -> String {
+    let character_offset = input
+        .char_indices()
+        .take_while(|(offset, _)| *offset < error.offset)
+        .count();
+    format!(
+        "搜索条件无效（位置 {}（从 1 开始）：{}）",
+        character_offset + 1,
+        localized_parse_message(&error.message)
+    )
+}
+
+fn localized_parse_message(message: &str) -> &str {
+    match message {
+        "expression is required" => "请输入搜索条件",
+        "expression exceeds the byte limit" => "搜索条件超过字节长度限制",
+        "expression exceeds the character limit" => "搜索条件超过字符长度限制",
+        "expression has too many tokens" => "搜索条件包含过多词元",
+        "expression has too many AST nodes" => "搜索条件过于复杂",
+        "unterminated quoted phrase" => "引号短语未闭合",
+        "quoted phrase cannot be empty" => "引号短语不能为空",
+        "expected a term or parenthesized expression" => "应为关键词或括号表达式",
+        "missing closing parenthesis" => "缺少右括号",
+        "expected closing parenthesis" => "应为右括号",
+        "unexpected token" => "存在多余内容",
+        "expression nesting is too deep" => "搜索条件嵌套层级过深",
+        _ => message,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TokenKind {
     Term(String),
@@ -279,6 +309,7 @@ pub fn parse(input: &str) -> Result<Expression, ParseError> {
         tokens,
         cursor: 0,
         nesting_depth: 0,
+        input_len: input.len(),
     };
     let expression = parser.parse_or()?;
     if let Some(token) = parser.peek() {
@@ -392,6 +423,7 @@ struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
     nesting_depth: usize,
+    input_len: usize,
 }
 
 impl Parser {
@@ -437,7 +469,7 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expression, ParseError> {
         let Some(token) = self.take() else {
             return Err(ParseError {
-                offset: self.tokens.last().map_or(0, |token| token.offset + 1),
+                offset: self.input_len,
                 message: "expected a term or parenthesized expression".into(),
             });
         };
@@ -450,7 +482,7 @@ impl Parser {
                 let expression = expression?;
                 let Some(closing) = self.take() else {
                     return Err(ParseError {
-                        offset: token.offset,
+                        offset: self.input_len,
                         message: "missing closing parenthesis".into(),
                     });
                 };
@@ -493,7 +525,7 @@ fn ast_node_count(expression: &Expression) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{parse, parse_error_message};
 
     #[test]
     fn applies_not_then_and_then_or_precedence() {
@@ -508,6 +540,23 @@ mod tests {
         let expression = parse("(ERROR OR WARN) AND \"tracking point\"").expect("parse expression");
         assert!(expression.matches("warn Interaction Tracking Point moved"));
         assert!(!expression.matches("warn tracking stopped"));
+    }
+
+    #[test]
+    fn preserves_parentheses_and_boolean_precedence_for_issue_queries() {
+        let grouped = parse("ping AND (error OR timeout)").expect("grouped expression");
+        let lines = ["ping error", "ping timeout", "timeout only"];
+        let matching_lines = lines
+            .iter()
+            .filter(|line| grouped.matches(line))
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(matching_lines, ["ping error", "ping timeout"]);
+
+        let precedence = parse("A OR B AND C").expect("precedence expression");
+        assert!(precedence.matches("A"));
+        assert!(precedence.matches("B C"));
+        assert!(!precedence.matches("B"));
     }
 
     #[test]
@@ -686,5 +735,24 @@ mod tests {
         assert_eq!(error.offset, 10);
         let error = parse("ERROR WARN").expect_err("missing operator");
         assert_eq!(error.offset, 6);
+    }
+
+    #[test]
+    fn reports_character_positions_and_localized_messages() {
+        let expression = "ping AND";
+        let error = parse(expression).expect_err("missing term");
+        assert_eq!(error.offset, expression.len());
+        assert_eq!(
+            parse_error_message(expression, &error),
+            "搜索条件无效（位置 9（从 1 开始）：应为关键词或括号表达式）"
+        );
+
+        let expression = "中文 AND (";
+        let error = parse(expression).expect_err("missing term");
+        assert_eq!(error.offset, expression.len());
+        assert_eq!(
+            parse_error_message(expression, &error),
+            "搜索条件无效（位置 9（从 1 开始）：应为关键词或括号表达式）"
+        );
     }
 }

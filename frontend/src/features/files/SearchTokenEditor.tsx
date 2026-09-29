@@ -213,7 +213,7 @@ export function SearchTokenEditor({
               onTokensChange(appendSearchOperator(withAnd, 'NOT'));
             }}
           >
-            NOT
+            AND NOT
           </button>
         </>
       ) : null}

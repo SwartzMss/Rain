@@ -28,6 +28,7 @@ import type {
   FileDeletionBatchResponse,
   ResourceMode,
   SearchReservationResponse,
+  SearchExpressionValidationResponse,
   } from './types';
 
 const API_BASE_URL = '';
@@ -325,6 +326,12 @@ export const rainApi = {
     if (typeof options?.from === 'number') params.set('from', String(options.from));
     if (typeof options?.size === 'number') params.set('size', String(options.size));
     return request<LogSearchResponse>(`/api/log/v2/${encodePathSegment(bundleId)}/search?${params.toString()}`);
+  },
+  validateSearchExpression(expression: string) {
+    return request<SearchExpressionValidationResponse>('/api/search/validate-expression', {
+      method: 'POST',
+      body: JSON.stringify({ expression })
+    });
   },
   createTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string }) {
     return request<TempResultInfo>('/api/temp-results', {

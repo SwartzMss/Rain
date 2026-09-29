@@ -57,6 +57,13 @@ export function replaceSearchOperator(
 ): SearchToken[] {
   const current = tokens[index];
   if (!current || current.kind !== 'operator' || current.value === 'NOT') return tokens;
+  if (
+    current.value === 'AND'
+    && tokens[index + 1]?.kind === 'operator'
+    && tokens[index + 1].value === 'NOT'
+  ) {
+    return tokens;
+  }
   return tokens.map((token, tokenIndex) =>
     tokenIndex === index ? { kind: 'operator', value: operator } : token
   );
@@ -94,6 +101,13 @@ export function removeSearchToken(tokens: SearchToken[], index: number): SearchT
       start -= 1;
     } else if (end + 1 < tokens.length && tokens[end + 1].kind === 'operator') {
       end += 1;
+      if (
+        tokens[end].value === 'AND'
+        && tokens[end + 1]?.kind === 'operator'
+        && tokens[end + 1].value === 'NOT'
+      ) {
+        end += 1;
+      }
     }
   }
   return tokens.filter((_, tokenIndex) => tokenIndex < start || tokenIndex > end);
@@ -185,8 +199,9 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
     if (fragment.includes('(') || fragment.includes(')')) {
       throw new Error('括号表达式需要使用原始文本编辑器');
     }
-    if (['AND', 'OR', 'NOT'].includes(fragment)) {
-      tokens.push({ kind: 'operator', value: fragment as SearchOperator });
+    const normalizedFragment = fragment.toUpperCase();
+    if (['AND', 'OR', 'NOT'].includes(normalizedFragment)) {
+      tokens.push({ kind: 'operator', value: normalizedFragment as SearchOperator });
     } else if (fragment) {
       tokens.push({ kind: 'term', value: fragment });
     }
@@ -194,6 +209,42 @@ export function deserializeSearchTokens(expression: string): SearchToken[] {
   const validation = validateSearchTokens(tokens);
   if (!validation.valid) throw new Error(validation.message);
   return tokens;
+}
+
+export function isSimpleSearchRepresentable(tokens: SearchToken[]): boolean {
+  if (tokens.length === 0) return true;
+  if (tokens[0].kind !== 'term') return false;
+
+  let index = 1;
+  while (index < tokens.length) {
+    const operator = tokens[index];
+    if (operator.kind !== 'operator' || (operator.value !== 'AND' && operator.value !== 'OR')) {
+      return false;
+    }
+    index += 1;
+    if (operator.value === 'AND' && tokens[index]?.kind === 'operator' && tokens[index].value === 'NOT') {
+      index += 1;
+    }
+    if (tokens[index]?.kind !== 'term') return false;
+    index += 1;
+  }
+  return true;
+}
+
+export function assertSimpleSearchRepresentable(tokens: SearchToken[]): SearchToken[] {
+  if (!isSimpleSearchRepresentable(tokens)) {
+    throw new Error('该搜索条件无法由简单模式无损编辑，请切换高级表达式');
+  }
+  return tokens;
+}
+
+export function deserializeSimpleSearchTokens(expression: string): SearchToken[] {
+  const tokens = deserializeSearchTokens(expression);
+  try {
+    return assertSimpleSearchRepresentable(tokens);
+  } catch {
+    throw new Error('该表达式无法由简单模式无损编辑，请保留高级表达式');
+  }
 }
 
 export function formatSearchTokens(tokens: SearchToken[]): string {
