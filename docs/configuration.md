@@ -16,13 +16,13 @@ Issue 非活跃自动过期默认启用，阈值为 7 天；设置为 0 可以�
 
 管理接口返回 `configured`、`effective`、`revision` 和 `pending_restart_fields`。认证阈值、Issue 策略、上传/临时结果容量和查询边界等热字段影响后续操作；已开始的单次搜索、上传或扫描会继续使用开始时捕获的策略。下调共享容量不会删除存量，但运行中任务后续申请空间可能被拒绝。
 
-上传/处理并发、全局行读取并发、Tantivy writer、Argon2 和临时结果物化并发属于重启生效字段。保存后页面会显示待重启字段；Rain 不会自动重启进程，运维按部署方式手动重启即可。重启时数据库中的 configured 值成为新的 effective 值。
+上传/处理并发、全局行读取并发、Tantivy writer heap、Argon2 和临时结果物化并发属于重启生效字段。保存后页面会显示待重启字段；Rain 不会自动重启进程，运维按部署方式手动重启即可。重启时数据库中的 configured 值成为新的 effective 值。
 
 ## 资源并发模式
 
-管理员页面的运行时资源卡片展示启动探测到的 CPU、内存，以及当前生效的 3 项自适应参数：上传处理并发、Tantivy writer 并发和单个 writer heap。三项参数支持 `Manual`/`Auto`；在 `Auto` 下，runtime adaptive engine 只在进程启动时依据 CPU 与内存快照计算 effective 值，保存配置后需要重启才会应用新的计划。
+管理员页面的运行时资源卡片展示启动探测到的 CPU、内存，以及当前生效的 2 项自适应参数：上传处理并发和单个 writer heap。两项参数支持 `Manual`/`Auto`；在 `Auto` 下，runtime adaptive engine 只在进程启动时依据 CPU 与内存快照计算 effective 值，保存配置后需要重启才会应用新的计划。Tantivy writer admission 固定为每个进程一个 writer，不再作为管理员配置项。
 
-上传接收、行读取和临时结果物化等其他并发字段仍属于持久化保护参数，不会出现在当前 3 项 RuntimeDecision 中。查询并发由系统内部保护逻辑派生，不开放配置，也不出现在管理员 resource modes 或 RuntimeDecision 中。Argon2id 同样由系统安全策略管理，管理员只能看到“Argon2id 已启用”状态。
+上传接收、行读取和临时结果物化等其他并发字段仍属于持久化保护参数，不会出现在当前 RuntimeDecision 中。查询并发由系统内部保护逻辑派生，不开放配置，也不出现在管理员 resource modes 或 RuntimeDecision 中。Argon2id 同样由系统安全策略管理，管理员只能看到“Argon2id 已启用”状态。
 
 管理设置会同时返回 `configured`、`effective`、`revision` 和 `pending_restart_fields`；页面只在资源探测失败时显示对应的 fallback 原因。Rain 不会在线调整已经创建的 semaphore 或 writer，也不会自动重启进程。
 

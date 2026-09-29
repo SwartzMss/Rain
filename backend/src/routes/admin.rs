@@ -541,7 +541,7 @@ async fn settings_response_with_metadata(
             "policy_version": "v1",
             "resources": plan.resources,
             "upload_concurrent_processing_tasks": plan.upload_processing_tasks,
-            "search_tantivy_max_writers": plan.tantivy_max_writers,
+            "tantivy_writer_capacity": plan.tantivy_max_writers,
             "search_tantivy_writer_heap_size": plan.tantivy_writer_heap_size,
             "estimated_bytes": plan.estimated_bytes,
             "memory_estimate": plan.memory_estimate,
@@ -618,7 +618,6 @@ fn settings_response(
         "upload_concurrent_processing_tasks",
         "upload_concurrent_receive_tasks",
         "indexing_max_indexed_line_size",
-        "search_tantivy_max_writers",
         "search_tantivy_writer_heap_size",
         "api_concurrent_line_reads",
         "temp_results_concurrent_materializations",
@@ -666,6 +665,9 @@ fn public_settings_map(values: &SettingsValues) -> serde_json::Value {
     let mut value = serde_json::to_value(values).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(object) = value.as_object_mut() {
         object.remove("argon2_concurrency");
+        // Keep the legacy database column internal.  Writer admission is a
+        // fixed process policy and is reported through `runtime` instead.
+        object.remove("search_tantivy_max_writers");
     }
     value
 }

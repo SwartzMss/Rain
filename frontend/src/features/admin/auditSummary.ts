@@ -40,7 +40,6 @@ const FIELD_METADATA: Record<string, { label: string; unit?: string }> = {
   upload_concurrent_receive_tasks: { label: "上传接收并发数", unit: "个" },
   upload_max_tmp_bytes: { label: "上传临时空间上限", unit: "bytes" },
   indexing_max_indexed_line_size: { label: "索引单行最大大小", unit: "bytes" },
-  search_tantivy_max_writers: { label: "Tantivy writer 并发数", unit: "个" },
   search_tantivy_writer_heap_size: { label: "Tantivy writer 堆预算", unit: "bytes" },
   api_file_preview_size: { label: "文件预览大小", unit: "bytes" },
   api_max_preview_line_size: { label: "预览单行最大大小", unit: "bytes" },
@@ -68,7 +67,6 @@ const FIELD_METADATA: Record<string, { label: string; unit?: string }> = {
 const RESOURCE_MODE_LABELS: Record<string, string> = {
   upload_concurrent_processing_tasks: "上传并发模式",
   upload_concurrent_receive_tasks: "上传接收模式",
-  search_tantivy_max_writers: "Tantivy writer 模式",
   search_tantivy_writer_heap_size: "Tantivy writer 堆预算模式",
   api_concurrent_line_reads: "行读取并发模式",
   temp_results_concurrent_materializations: "临时结果物化模式",

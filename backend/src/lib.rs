@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn state_uses_configured_tantivy_writer_admission() {
+    async fn state_uses_fixed_tantivy_writer_admission() {
         let pool = SqlitePoolOptions::new()
             .connect_lazy("sqlite::memory:")
             .unwrap();
@@ -535,7 +535,7 @@ mod tests {
 
         let state = AppState::new(pool, PathBuf::from("data"), limits);
 
-        assert_eq!(state.search.tantivy_budget.available_writers(), 2);
+        assert_eq!(state.search.tantivy_budget.available_writers(), 1);
         assert_eq!(
             state.search.tantivy_budget.writer_heap_size_bytes(),
             8 * 1024 * 1024

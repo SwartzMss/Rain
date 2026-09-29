@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AppLimits, AuthConfig, DEFAULT_ISSUE_INACTIVE_DAYS};
+use crate::{
+    config::{AppLimits, AuthConfig, DEFAULT_ISSUE_INACTIVE_DAYS},
+    search::resource::TANTIVY_WRITER_CONCURRENCY,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -153,7 +156,7 @@ impl SettingsValues {
             upload_concurrent_receive_tasks: limits.upload.concurrent_receive_tasks,
             upload_max_tmp_bytes: limits.upload.max_tmp_bytes,
             indexing_max_indexed_line_size: limits.indexing.max_indexed_line_size,
-            search_tantivy_max_writers: limits.search.tantivy_max_writers,
+            search_tantivy_max_writers: TANTIVY_WRITER_CONCURRENCY,
             search_tantivy_writer_heap_size: limits.search.tantivy_writer_heap_size,
             api_file_preview_size: limits.api.file_preview_size,
             api_max_preview_line_size: limits.api.max_preview_line_size,
@@ -189,7 +192,7 @@ impl SettingsValues {
         limits.upload.concurrent_receive_tasks = self.upload_concurrent_receive_tasks;
         limits.upload.max_tmp_bytes = self.upload_max_tmp_bytes;
         limits.indexing.max_indexed_line_size = self.indexing_max_indexed_line_size;
-        limits.search.tantivy_max_writers = self.search_tantivy_max_writers;
+        limits.search.tantivy_max_writers = TANTIVY_WRITER_CONCURRENCY;
         limits.search.tantivy_writer_heap_size = self.search_tantivy_writer_heap_size;
         limits.api.file_preview_size = self.api_file_preview_size;
         limits.api.max_preview_line_size = self.api_max_preview_line_size;

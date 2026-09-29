@@ -8,18 +8,20 @@ use crate::{
     config::{AppLimits, AuthConfig},
     db,
     error::AppError,
+    search::resource::TANTIVY_WRITER_CONCURRENCY,
 };
 
 use super::{ResourceMode, ResourceModes, SaveResult, SettingsSnapshot, SettingsValues, metadata};
 
-const RESOURCE_MODE_KEYS: [&str; 6] = [
+const RESOURCE_MODE_KEYS: [&str; 5] = [
     "upload_concurrent_processing_tasks",
     "upload_concurrent_receive_tasks",
-    "search_tantivy_max_writers",
     "search_tantivy_writer_heap_size",
     "api_concurrent_line_reads",
     "temp_results_concurrent_materializations",
 ];
+
+const LEGACY_RESOURCE_MODE_KEYS: [&str; 1] = ["search_tantivy_max_writers"];
 
 fn resource_mode_defaults() -> ResourceModes {
     RESOURCE_MODE_KEYS
@@ -39,6 +41,10 @@ fn resource_metadata(key: &str) -> Option<&'static metadata::FieldMetadata> {
 }
 
 fn normalize_resource_modes(modes: ResourceModes) -> Result<ResourceModes, AppError> {
+    let modes: ResourceModes = modes
+        .into_iter()
+        .filter(|(key, _)| !LEGACY_RESOURCE_MODE_KEYS.contains(&key.as_str()))
+        .collect();
     if let Some(key) = modes
         .keys()
         .find(|key| !RESOURCE_MODE_KEYS.contains(&key.as_str()))
@@ -100,7 +106,6 @@ fn is_restart_required(field: &str) -> bool {
             | "upload_concurrent_processing_tasks"
             | "upload_concurrent_receive_tasks"
             | "indexing_max_indexed_line_size"
-            | "search_tantivy_max_writers"
             | "search_tantivy_writer_heap_size"
             | "api_concurrent_line_reads"
             | "temp_results_concurrent_materializations"
@@ -677,10 +682,12 @@ impl SettingsService {
             "indexing_max_indexed_line_size",
             values.indexing_max_indexed_line_size,
         )?;
-        values.search_tantivy_max_writers = u64_value(
-            "search_tantivy_max_writers",
-            values.search_tantivy_max_writers as u64,
-        )? as usize;
+        // The column is retained for upgrades from older releases, but its
+        // value is no longer part of the runtime or administrator API.
+        let _legacy_tantivy_max_writers: i64 = row
+            .try_get("search_tantivy_max_writers")
+            .map_err(AppError::Database)?;
+        values.search_tantivy_max_writers = TANTIVY_WRITER_CONCURRENCY;
         values.search_tantivy_writer_heap_size = u64_value(
             "search_tantivy_writer_heap_size",
             values.search_tantivy_writer_heap_size,

@@ -51,10 +51,12 @@ rows but avoid duplicating every chunk into SQLite FTS during ingest; legacy and
 SQLite-owned Bundles retain the original trigger path.
 
 Tantivy writers pass through a process-wide `SearchResourceBudget`. The
-defaults allow one writer with a 64 MiB heap; `RAIN_SEARCH_TANTIVY_MAX_WRITERS`
-and `RAIN_SEARCH_TANTIVY_WRITER_HEAP` set the aggregate writer budget for
-larger machines. The budget is held from writer creation through publication
-verification, and releases on success, failure, or cancellation. Build metrics
+process admits one writer with a configurable heap; `RAIN_SEARCH_TANTIVY_WRITER_HEAP`
+sets that heap budget. Writer admission is intentionally fixed at one writer
+per process, so the old `RAIN_SEARCH_TANTIVY_MAX_WRITERS` value is retained
+only for database upgrade compatibility. The budget is held from writer
+creation through publication verification, and releases on success, failure,
+or cancellation. Build metrics
 report admission wait, active/queued writers, heap reservation, and total build
 time. Startup and the periodic cleanup task remove unpublished generations and
 artifacts for deleted Bundles.

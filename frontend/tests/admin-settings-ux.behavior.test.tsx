@@ -131,7 +131,7 @@ it('presents metadata settings by visibility and reveals expert settings explici
         warnings: ['cpu_probe_fallback', 'memory_probe_fallback'],
       },
       upload_concurrent_processing_tasks: 1,
-      search_tantivy_max_writers: 1,
+      tantivy_writer_capacity: 1,
       search_tantivy_writer_heap_size: 16 * 1024 * 1024,
       estimated_bytes: 112 * 1024 * 1024,
       memory_estimate: {
@@ -145,7 +145,6 @@ it('presents metadata settings by visibility and reveals expert settings explici
       warnings: ['adaptive_memory_target_is_heuristic'],
       decisions: [
         ['upload_concurrent_processing_tasks', { value: 1, mode: 'auto', reason: 'cpu_capacity' }],
-        ['search_tantivy_max_writers', { value: 1, mode: 'auto', reason: 'cpu_capacity_and_memory_budget' }],
         ['search_tantivy_writer_heap_size', { value: 16 * 1024 * 1024, mode: 'auto', reason: 'memory_budget' }],
       ],
     },
@@ -168,11 +167,10 @@ it('presents metadata settings by visibility and reveals expert settings explici
   expect(screen.getByTestId('runtime-resource-summary')).toBeInTheDocument();
   expect(screen.queryByText('计划内存预算')).not.toBeInTheDocument();
   expect(screen.queryByText('当前进程 RSS')).not.toBeInTheDocument();
-  expect(screen.getByText('当前自适应参数（3 项）')).toBeInTheDocument();
+  expect(screen.getByText('当前自适应参数（2 项）')).toBeInTheDocument();
   expect(screen.queryByText('查询并发由系统内部保护，不开放配置')).not.toBeInTheDocument();
   expect(screen.queryByText('手动')).not.toBeInTheDocument();
   expect(screen.getByText('上传处理并发')).toBeInTheDocument();
-  expect(screen.getByText('Tantivy writer 并发')).toBeInTheDocument();
   expect(screen.getByText('writer 堆大小')).toBeInTheDocument();
   expect(screen.getByText('16 MiB')).toBeInTheDocument();
   expect(screen.getByLabelText('免于自动清理：alice')).toBeChecked();
@@ -318,7 +316,7 @@ it('renders proc meminfo as the memory source without a fallback reason', async 
         warnings: [],
       },
       upload_concurrent_processing_tasks: 8,
-      search_tantivy_max_writers: 4,
+      tantivy_writer_capacity: 1,
       search_tantivy_writer_heap_size: 256 * 1024 * 1024,
       estimated_bytes: 1920 * 1024 * 1024,
       adaptive_memory_target_bytes: 16 * 1024 * 1024 * 1024,
