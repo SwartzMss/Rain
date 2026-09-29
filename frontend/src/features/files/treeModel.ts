@@ -110,6 +110,30 @@ export const attachTreeChild = (
   };
 };
 
+export const mergeLoadedTreeNode = (
+  existing: TreeNode | undefined,
+  incoming: TreeNode
+): TreeNode => {
+  if (
+    !existing
+    || !existing.hasLoadedChildren
+    || incoming.hasLoadedChildren
+    || incoming.childrenLoadError
+  ) {
+    return incoming;
+  }
+
+  return {
+    ...incoming,
+    childrenIds: existing.childrenIds,
+    hasLoadedChildren: existing.hasLoadedChildren,
+    hasMoreChildren: existing.hasMoreChildren,
+    childrenCursor: existing.childrenCursor,
+    childrenSourceId: existing.childrenSourceId,
+    childrenLoadError: existing.childrenLoadError
+  };
+};
+
 export const formatHitPath = (raw: string) => {
   const parts = raw.replace(/^\//, '').split('/');
   if (parts.length === 0) return raw;

@@ -30,6 +30,7 @@ import {
   attachTreeChild,
   hydrateTreeNode,
   isExtractionFolder,
+  mergeLoadedTreeNode,
   mergeFlattenedExtractionChildren,
   toTreeNode,
   type TreeNode
@@ -503,9 +504,9 @@ export function BundleView() {
         if (canCommit()) {
           setTreeNodes((prev) => {
             const next = { ...prev };
-            next[normalized.id] = normalized;
+            next[normalized.id] = mergeLoadedTreeNode(prev[normalized.id], normalized);
             childrenNodes.forEach((child) => {
-              next[child.id] = child;
+              next[child.id] = mergeLoadedTreeNode(prev[child.id], child);
             });
             return next;
           });
@@ -1008,8 +1009,14 @@ export function BundleView() {
 
     const knownNodes = new Map(Object.entries(treeNodesRef.current));
     const remember = (node: TreeNode, children: TreeNode[]) => {
-      knownNodes.set(node.id, node);
-      children.forEach((child) => knownNodes.set(child.id, child));
+      const rememberNode = (candidate: TreeNode) => {
+        knownNodes.set(
+          candidate.id,
+          mergeLoadedTreeNode(knownNodes.get(candidate.id), candidate)
+        );
+      };
+      rememberNode(node);
+      children.forEach(rememberNode);
     };
     const updateTreeNodes = (nodes: TreeNode[]) => {
       nodes.forEach((node) => knownNodes.set(node.id, node));
