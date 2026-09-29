@@ -59,7 +59,18 @@ export const mergeFlattenedExtractionChildren = (
 
 const compareTreeNodes = (left: TreeNode, right: TreeNode) => {
   if (left.is_dir !== right.is_dir) return left.is_dir ? -1 : 1;
-  const nameOrder = left.name.localeCompare(right.name);
+  const leftName = new TextEncoder().encode(left.name);
+  const rightName = new TextEncoder().encode(right.name);
+  const nameLength = Math.min(leftName.length, rightName.length);
+  let nameOrder = 0;
+  for (let index = 0; index < nameLength; index += 1) {
+    if (leftName[index] === rightName[index]) continue;
+    nameOrder = leftName[index] < rightName[index] ? -1 : 1;
+    break;
+  }
+  if (nameOrder === 0 && leftName.length !== rightName.length) {
+    nameOrder = leftName.length < rightName.length ? -1 : 1;
+  }
   if (nameOrder !== 0) return nameOrder;
 
   const leftRawId = Number(left.rawId);
@@ -67,7 +78,7 @@ const compareTreeNodes = (left: TreeNode, right: TreeNode) => {
   if (Number.isSafeInteger(leftRawId) && Number.isSafeInteger(rightRawId)) {
     return leftRawId - rightRawId;
   }
-  return left.rawId.localeCompare(right.rawId);
+  return left.rawId < right.rawId ? -1 : left.rawId > right.rawId ? 1 : 0;
 };
 
 export const attachTreeChild = (

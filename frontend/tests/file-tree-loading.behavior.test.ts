@@ -14,16 +14,16 @@ describe('file tree loading', () => {
     const firstPageChild = toTreeNode('bundle', {
       id: 1,
       parent_id: null,
-      name: 'first.log',
-      path: '/first.log',
+      name: 'Z.log',
+      path: '/Z.log',
       is_dir: false,
       preview_kind: 'text'
     }, root.id);
     const target = toTreeNode('bundle', {
       id: 101,
       parent_id: null,
-      name: 'target.log',
-      path: '/target.log',
+      name: 'a.log',
+      path: '/a.log',
       is_dir: false,
       preview_kind: 'text'
     }, null);
