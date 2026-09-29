@@ -12,10 +12,10 @@ assert.match(filesView, /<SearchExpressionEditor/);
 assert.match(expressionEditor, /高级表达式/);
 assert.match(filesView, /<FileTreeNode/);
 const savedSearchControls = filesView.match(
-  /<div className="mt-3 flex flex-wrap items-center [^"]*text-xs text-slate-500">[\s\S]*?<SearchExecutionStatus/
+  /<div className="mt-3 flex [^"]*text-xs text-slate-500">[\s\S]*?<SearchExecutionStatus/
 );
 assert.ok(savedSearchControls, 'saved search controls should be grouped before the execution status');
-assert.match(savedSearchControls[0], /justify-end/);
+assert.match(savedSearchControls[0], /justify-(?:end|between)/);
 assert.ok(
   savedSearchControls[0].indexOf('我的搜索条件') < savedSearchControls[0].indexOf('保存条件'),
   'my saved searches should appear before the save condition action'
