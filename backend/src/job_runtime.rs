@@ -352,40 +352,39 @@ impl JobRuntime {
             if !scheduler {
                 state.metrics.entry(kind).or_default().queued += 1;
             }
-        }
-
-        let runtime = self.clone();
-        let task = self.spawn_future(async move {
-            runtime.mark_running(id);
-            let mut completion_guard = CompletionGuard::new(runtime.clone(), id);
-            let future = factory(context.clone());
-            tokio::pin!(future);
-            let outcome = if let Some(timeout) = timeout {
-                tokio::select! {
-                    result = &mut future => result,
-                    _ = tokio::time::sleep(timeout) => {
-                        runtime.request_stop(id, StopReason::TimedOut);
-                        future.await
+            let runtime = self.clone();
+            let task = self.spawn_future(async move {
+                runtime.mark_running(id);
+                let mut completion_guard = CompletionGuard::new(runtime.clone(), id);
+                let future = factory(context.clone());
+                tokio::pin!(future);
+                let outcome = if let Some(timeout) = timeout {
+                    tokio::select! {
+                        result = &mut future => result,
+                        _ = tokio::time::sleep(timeout) => {
+                            runtime.request_stop(id, StopReason::TimedOut);
+                            future.await
+                        }
                     }
-                }
-            } else {
-                future.await
-            };
-            let status = runtime.finish(id, outcome.is_ok());
-            tracing::info!(
-                job_id = %id,
-                job_type = kind.as_str(),
-                status = ?status,
-                "background job finished"
-            );
-            completion_guard.disarm();
-            let _ = sender.send(outcome);
-        });
-        if let Ok(mut state) = self.inner.state.lock()
-            && let Some(entry) = state.jobs.get_mut(&id)
-        {
-            entry.abort = Some(task.abort_handle());
-        }
+                } else {
+                    future.await
+                };
+                let status = runtime.finish(id, outcome.is_ok());
+                tracing::info!(
+                    job_id = %id,
+                    job_type = kind.as_str(),
+                    status = ?status,
+                    "background job finished"
+                );
+                completion_guard.disarm();
+                let _ = sender.send(outcome);
+            });
+            // Keep registration and abort-handle publication under the same lock.
+            // Shutdown cannot observe a live job without also being able to abort it.
+            if let Some(entry) = state.jobs.get_mut(&id) {
+                entry.abort = Some(task.abort_handle());
+            }
+        };
         Ok(JobHandle { id, receiver })
     }
 

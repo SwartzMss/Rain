@@ -1,4 +1,11 @@
-use std::{future::pending, time::Duration};
+use std::{
+    future::pending,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use backend::job_runtime::{JobRuntime, JobStatus, JobType, SubmitError};
 
@@ -109,4 +116,28 @@ async fn forced_shutdown_records_aborted_jobs_without_leaking_active_metrics() {
     assert_eq!(metrics.failed_total, 1);
     assert_eq!(metrics.active, 0);
     assert!(handle.await.is_err());
+}
+
+#[tokio::test]
+async fn forced_shutdown_aborts_running_task_before_it_can_finish() {
+    let runtime = JobRuntime::new();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let completed = Arc::new(AtomicBool::new(false));
+    let started_ref = started.clone();
+    let completed_ref = completed.clone();
+    let handle = runtime
+        .spawn(JobType::Cleanup, move |_context| async move {
+            started_ref.notify_one();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            completed_ref.store(true, Ordering::Release);
+            Ok::<_, String>(())
+        })
+        .expect("job accepted");
+
+    started.notified().await;
+    let report = runtime.shutdown(Duration::ZERO).await;
+
+    assert!(!report.graceful);
+    assert!(handle.await.is_err());
+    assert!(!completed.load(Ordering::Acquire));
 }
