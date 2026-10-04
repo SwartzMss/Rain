@@ -830,6 +830,7 @@ async fn insert_file_record_in_tx(
     parent_id: Option<i64>,
     entry: &PreparedDirectoryEntry,
 ) -> Result<i64, AppError> {
+    ensure_blob_reference_allowed(tx, entry.blob_id).await?;
     sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO files (
@@ -852,6 +853,26 @@ async fn insert_file_record_in_tx(
     .fetch_one(tx)
     .await
     .map_err(AppError::Database)
+}
+
+async fn ensure_blob_reference_allowed(
+    tx: &mut sqlx::SqliteConnection,
+    blob_id: Option<i64>,
+) -> Result<(), AppError> {
+    let Some(blob_id) = blob_id else {
+        return Ok(());
+    };
+    let state: Option<String> = sqlx::query_scalar("SELECT state FROM blobs WHERE id = ?")
+        .bind(blob_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+    if matches!(state.as_deref(), Some("PENDING_DELETE" | "DELETING")) {
+        return Err(AppError::Conflict(format!(
+            "blob {blob_id} is pending deletion"
+        )));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -886,6 +907,7 @@ async fn insert_file_record(
                     meta,
                     blob_id,
                 ) = input;
+                ensure_blob_reference_allowed(conn, *blob_id).await?;
                 let record_id = sqlx::query_scalar::<_, i64>(
                     r#"
         INSERT INTO files (
@@ -1382,8 +1404,8 @@ mod tests {
         ArchiveBudget, IndexBatchBudget, IssueQuota, LogChunk, PreparedDirectoryEntry,
         archive_parent_depth, event_time_range, extract_gzip_file, extracted_directory_meta,
         extracted_entry_meta, flush_log_chunks, gzip_output_name, insert_directory_children,
-        insert_line_offsets, parse_event_time_ms, sanitize_archive_path, uploaded_file_meta,
-        validate_extracted_path,
+        insert_file_record, insert_line_offsets, parse_event_time_ms, sanitize_archive_path,
+        uploaded_file_meta, validate_extracted_path,
     };
 
     #[test]
@@ -1546,6 +1568,47 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn file_reference_rejects_blob_pending_deletion() {
+        let pool = quota_fixture("BLOBDELETE", &["bundle"]).await;
+        let blob_id: i64 = sqlx::query_scalar(
+            "INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES ('blob-delete', 1, 'local', 'blobs/b/blob-delete', 'PENDING_DELETE') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut entry = prepared_entry("pending.log", "/bundle-hash/pending.log");
+        entry.blob_id = Some(blob_id);
+
+        let result = insert_directory_children(&pool, "bundle", None, &[entry]).await;
+        assert!(
+            matches!(result, Err(AppError::Conflict(message)) if message.contains("pending deletion"))
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE blob_id = ?")
+            .bind(blob_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        let direct_result = insert_file_record(
+            &pool,
+            "bundle",
+            None,
+            "pending.log",
+            "/bundle-hash/pending.log",
+            false,
+            Some(1),
+            Some("text/plain"),
+            None,
+            Some(blob_id),
+        )
+        .await;
+        assert!(
+            matches!(direct_result, Err(AppError::Conflict(message)) if message.contains("pending deletion"))
+        );
     }
 
     #[tokio::test]

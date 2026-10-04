@@ -286,13 +286,13 @@ pub async fn persist_blob(
     let stored = store.put(source).await?;
     let size_bytes = i64::try_from(stored.size_bytes)
         .map_err(|_| AppError::BadRequest("blob is too large".into()))?;
-    let blob_id: i64 = crate::db::write::run(
+    let (blob_id, state): (i64, String) = crate::db::write::run(
         pool,
         "persist blob",
         &(&stored, size_bytes),
         |conn, &(stored, size_bytes)| {
             Box::pin(async move {
-                sqlx::query_scalar(
+                sqlx::query_as(
                     r#"
         INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state)
         VALUES (?, ?, ?, ?, 'STAGING')
@@ -301,11 +301,18 @@ pub async fn persist_blob(
             storage_backend = excluded.storage_backend,
             storage_key = excluded.storage_key,
             state = CASE
-                WHEN blobs.state = 'READY' THEN 'READY'
+                WHEN blobs.state IN ('READY', 'PENDING_DELETE', 'DELETING') THEN blobs.state
                 ELSE 'STAGING'
             END,
-            unreferenced_at = NULL
-        RETURNING id
+            unreferenced_at = CASE
+                WHEN blobs.state IN ('PENDING_DELETE', 'DELETING') THEN blobs.unreferenced_at
+                ELSE NULL
+            END,
+            last_attempt_at = CASE
+                WHEN blobs.state IN ('PENDING_DELETE', 'DELETING') THEN blobs.last_attempt_at
+                ELSE NULL
+            END
+        RETURNING id, state
         "#,
                 )
                 .bind(&stored.content_hash)
@@ -319,6 +326,11 @@ pub async fn persist_blob(
         },
     )
     .await?;
+    if matches!(state.as_str(), "PENDING_DELETE" | "DELETING") {
+        return Err(AppError::Conflict(format!(
+            "blob {blob_id} is pending deletion"
+        )));
+    }
 
     // `put` has already verified or published the content. After the database
     // claim, recheck presence and size to close the upload/GC race without
@@ -434,7 +446,7 @@ pub async fn mark_blob_ready(
         &(blob_id,),
         |conn, &(blob_id,)| {
             Box::pin(async move {
-                sqlx::query("UPDATE blobs SET state = 'READY', verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'STAGING'")
+                sqlx::query("UPDATE blobs SET state = 'READY', unreferenced_at = NULL, last_attempt_at = NULL, verified_at = CURRENT_TIMESTAMP WHERE id = ? AND state = 'STAGING'")
                     .bind(blob_id)
                     .execute(conn)
                     .await
@@ -773,173 +785,253 @@ pub async fn garbage_collect_unreferenced_blobs(
     garbage_collect_unreferenced_blobs_with_grace(pool, store, 24).await
 }
 
+const BLOB_GC_BATCH_SIZE: i64 = 100;
+
+async fn requeue_stale_blob_deletions(pool: &SqlitePool, backend: &str) -> Result<u64, AppError> {
+    crate::db::write::run(
+        pool,
+        "requeue stale blob deletions",
+        &backend,
+        |conn, backend| {
+            Box::pin(async move {
+                sqlx::query(
+                    r#"
+                    UPDATE blobs
+                    SET state = 'PENDING_DELETE'
+                    WHERE storage_backend = ?
+                      AND state = 'DELETING'
+                      AND (
+                          last_attempt_at IS NULL
+                          OR datetime(last_attempt_at) <= datetime('now', '-1 hour')
+                      )
+                    "#,
+                )
+                .bind(*backend)
+                .execute(conn)
+                .await
+                .map(|result| result.rows_affected())
+                .map_err(AppError::Database)
+            })
+        },
+    )
+    .await
+}
+
+async fn collect_missing_blob_batch(pool: &SqlitePool, backend: &str) -> Result<u64, AppError> {
+    crate::db::write::run(
+        pool,
+        "collect missing blob batch",
+        &(backend, BLOB_GC_BATCH_SIZE),
+        |conn, &(backend, batch_size)| {
+            Box::pin(async move {
+                let ids: Vec<i64> = sqlx::query_scalar(
+                    r#"
+                    SELECT b.id
+                    FROM blobs b
+                    WHERE b.storage_backend = ?
+                      AND b.state = 'MISSING'
+                      AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
+                    ORDER BY b.id
+                    LIMIT ?
+                    "#,
+                )
+                .bind(backend)
+                .bind(batch_size)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                let mut removed = 0;
+                for id in ids {
+                    removed += sqlx::query(
+                        "DELETE FROM blobs WHERE id = ? AND state = 'MISSING' AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)",
+                    )
+                    .bind(id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?
+                    .rows_affected();
+                }
+                Ok(removed)
+            })
+        },
+    )
+    .await
+}
+
+async fn claim_blob_deletion_batch(
+    pool: &SqlitePool,
+    backend: &str,
+    grace: &str,
+) -> Result<Vec<(i64, String)>, AppError> {
+    crate::db::write::run(
+        pool,
+        "claim blob deletion batch",
+        &(backend, grace, BLOB_GC_BATCH_SIZE),
+        |conn, &(backend, grace, batch_size)| {
+            Box::pin(async move {
+                // Keep marker maintenance bounded too. The transaction only
+                // changes DB state; filesystem work happens after it commits.
+                sqlx::query(
+                    r#"
+                    UPDATE blobs
+                    SET unreferenced_at = NULL
+                    WHERE id IN (
+                        SELECT b.id
+                        FROM blobs b
+                        WHERE b.storage_backend = ?
+                          AND b.unreferenced_at IS NOT NULL
+                          AND EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
+                        ORDER BY b.id
+                        LIMIT ?
+                    )
+                    "#,
+                )
+                .bind(backend)
+                .bind(batch_size)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                sqlx::query(
+                    r#"
+                    UPDATE blobs
+                    SET unreferenced_at = CURRENT_TIMESTAMP
+                    WHERE id IN (
+                        SELECT b.id
+                        FROM blobs b
+                        WHERE b.storage_backend = ?
+                          AND b.state = 'READY'
+                          AND b.unreferenced_at IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
+                        ORDER BY b.id
+                        LIMIT ?
+                    )
+                    "#,
+                )
+                .bind(backend)
+                .bind(batch_size)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+
+                let candidates: Vec<(i64, String, String)> = sqlx::query_as(
+                    r#"
+                    SELECT b.id, b.storage_key, b.state
+                    FROM blobs b
+                    WHERE b.storage_backend = ?
+                      AND b.state IN ('CORRUPTED', 'READY', 'PENDING_DELETE')
+                      AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
+                      AND (
+                          b.state IN ('CORRUPTED', 'PENDING_DELETE')
+                          OR datetime(b.unreferenced_at) <= datetime('now', ?)
+                      )
+                    ORDER BY b.id
+                    LIMIT ?
+                    "#,
+                )
+                .bind(backend)
+                .bind(grace)
+                .bind(batch_size)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+
+                let mut claimed = Vec::with_capacity(candidates.len());
+                for (id, storage_key, state) in candidates {
+                    let changed = sqlx::query(
+                        r#"
+                        UPDATE blobs
+                        SET state = 'DELETING', last_attempt_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                          AND storage_backend = ?
+                          AND state = ?
+                          AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)
+                        "#,
+                    )
+                    .bind(id)
+                    .bind(backend)
+                    .bind(&state)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                    if changed.rows_affected() == 1 {
+                        claimed.push((id, storage_key));
+                    }
+                }
+                Ok(claimed)
+            })
+        },
+    )
+    .await
+}
+
+async fn finalize_blob_deletion(
+    pool: &SqlitePool,
+    blob_id: i64,
+    delete_succeeded: bool,
+) -> Result<bool, AppError> {
+    if delete_succeeded {
+        return crate::db::write::run(
+            pool,
+            "finalize blob deletion",
+            &(blob_id,),
+            |conn, &(blob_id,)| {
+                Box::pin(async move {
+                    let result = sqlx::query(
+                        "DELETE FROM blobs WHERE id = ? AND state = 'DELETING' AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)",
+                    )
+                    .bind(blob_id)
+                    .execute(conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                    Ok(result.rows_affected() == 1)
+                })
+            },
+        )
+        .await;
+    }
+
+    crate::db::write::run(
+        pool,
+        "retry failed blob deletion",
+        &(blob_id,),
+        |conn, &(blob_id,)| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE blobs SET state = 'PENDING_DELETE' WHERE id = ? AND state = 'DELETING'",
+                )
+                .bind(blob_id)
+                .execute(conn)
+                .await
+                .map(|_| false)
+                .map_err(AppError::Database)
+            })
+        },
+    )
+    .await
+}
+
 pub async fn garbage_collect_unreferenced_blobs_with_grace(
     pool: &SqlitePool,
     store: &dyn BlobStore,
     grace_hours: u64,
 ) -> Result<u64, AppError> {
-    let anomalies: Vec<(i64, String, String)> = sqlx::query_as(
-        r#"
-        SELECT id, storage_key, state
-        FROM blobs b
-        WHERE storage_backend = ?
-          AND state IN ('MISSING', 'CORRUPTED')
-          AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
-        "#,
-    )
-    .bind(store.backend_name())
-    .fetch_all(pool)
-    .await
-    .map_err(AppError::Database)?;
-    let mut removed = 0u64;
-    for (id, storage_key, state) in anomalies {
-        if state == "MISSING" {
-            removed += crate::db::write::run(
-                pool,
-                "collect missing blob",
-                &(id,),
-                |conn, &(id,)| {
-                    Box::pin(async move {
-                        sqlx::query(
-                            "DELETE FROM blobs WHERE id = ? AND state = 'MISSING' AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)",
-                        )
-                                .bind(id)
-                                .execute(conn)
-                                .await
-                                .map(|result| result.rows_affected())
-                                .map_err(AppError::Database)
-                    })
-                },
-            )
-            .await?;
-            continue;
-        }
-
-        // Keep the DB claim locked through deletion: releasing it before filesystem
-        // I/O would allow publication/reference creation to race with removal.
-        // This operation must not be replayed by the DB-only retry helper.
-        let _write_guard = crate::db::write::acquire(pool).await;
-        let mut delete_tx = crate::db::write::begin_immediate(pool).await?;
-        let claimed = sqlx::query(
-            r#"
-            UPDATE blobs SET state = 'PENDING_DELETE'
-            WHERE id = ? AND state = 'CORRUPTED'
-              AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)
-            "#,
-        )
-        .bind(id)
-        .execute(&mut *delete_tx)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
-        if claimed == 0 {
-            delete_tx.rollback().await.map_err(AppError::Database)?;
-            continue;
-        }
-        if let Err(error) = store.delete(&storage_key).await {
-            delete_tx.rollback().await.map_err(AppError::Database)?;
-            tracing::warn!(storage_key, %error, "failed to remove unreferenced corrupted blob");
-            continue;
-        }
-        sqlx::query("DELETE FROM blobs WHERE id = ? AND state = 'PENDING_DELETE'")
-            .bind(id)
-            .execute(&mut *delete_tx)
-            .await
-            .map_err(AppError::Database)?;
-        delete_tx.commit().await.map_err(AppError::Database)?;
-        removed += 1;
-    }
-
     let grace = format!("-{grace_hours} hours");
-    let rows = crate::db::write::run(
-        pool,
-        "claim unreferenced blobs",
-        &(store.backend_name(), grace.as_str()),
-        |conn, &(backend, grace)| {
-            Box::pin(async move {
-                sqlx::query(
-                    r#"
-        UPDATE blobs AS b SET unreferenced_at = NULL
-        WHERE unreferenced_at IS NOT NULL
-          AND EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
-        "#,
-                )
-                .execute(&mut *conn)
-                .await
-                .map_err(AppError::Database)?;
-                sqlx::query(
-                    r#"
-        UPDATE blobs AS b SET unreferenced_at = CURRENT_TIMESTAMP
-        WHERE state = 'READY' AND unreferenced_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
-        "#,
-                )
-                .execute(&mut *conn)
-                .await
-                .map_err(AppError::Database)?;
-                let rows: Vec<(i64, String)> = sqlx::query_as(
-                    r#"
-        SELECT id, storage_key FROM blobs b
-        WHERE storage_backend = ?
-          AND state IN ('READY', 'PENDING_DELETE')
-          AND NOT EXISTS (SELECT 1 FROM files f WHERE f.blob_id = b.id)
-          AND (state = 'PENDING_DELETE' OR datetime(unreferenced_at) <= datetime('now', ?))
-        "#,
-                )
-                .bind(backend)
-                .bind(grace)
-                .fetch_all(&mut *conn)
-                .await
-                .map_err(AppError::Database)?;
-                for (id, _) in &rows {
-                    sqlx::query("UPDATE blobs SET state = 'PENDING_DELETE' WHERE id = ?")
-                        .bind(id)
-                        .execute(&mut *conn)
-                        .await
-                        .map_err(AppError::Database)?;
-                }
-                Ok(rows)
-            })
-        },
-    )
-    .await?;
+    requeue_stale_blob_deletions(pool, store.backend_name()).await?;
+    let mut removed = collect_missing_blob_batch(pool, store.backend_name()).await?;
+    let claimed = claim_blob_deletion_batch(pool, store.backend_name(), &grace).await?;
 
-    for (id, storage_key) in &rows {
-        // As above, retain the reference check and filesystem deletion in the
-        // same manually coordinated transaction; never retry the filesystem I/O.
-        let _write_guard = crate::db::write::acquire(pool).await;
-        let mut delete_tx = crate::db::write::begin_immediate(pool).await?;
-        let claimed = sqlx::query(
-            r#"
-            UPDATE blobs SET state = 'PENDING_DELETE'
-            WHERE id = ? AND state = 'PENDING_DELETE'
-              AND NOT EXISTS (SELECT 1 FROM files WHERE files.blob_id = blobs.id)
-            "#,
-        )
-        .bind(id)
-        .execute(&mut *delete_tx)
-        .await
-        .map_err(AppError::Database)?
-        .rows_affected();
-        if claimed == 0 {
-            delete_tx.rollback().await.map_err(AppError::Database)?;
-            continue;
-        }
-        match store.delete(storage_key).await {
-            Ok(()) => {}
+    for (id, storage_key) in claimed {
+        match store.delete(&storage_key).await {
+            Ok(()) => {
+                if finalize_blob_deletion(pool, id, true).await? {
+                    removed += 1;
+                }
+            }
             Err(error) => {
-                delete_tx.rollback().await.map_err(AppError::Database)?;
+                finalize_blob_deletion(pool, id, false).await?;
                 tracing::warn!(storage_key, %error, "failed to remove unused blob");
-                continue;
             }
         }
-        sqlx::query("DELETE FROM blobs WHERE id = ? AND state = 'PENDING_DELETE'")
-            .bind(id)
-            .execute(&mut *delete_tx)
-            .await
-            .map_err(AppError::Database)?;
-        delete_tx.commit().await.map_err(AppError::Database)?;
-        removed += 1;
     }
     Ok(removed)
 }
@@ -975,6 +1067,8 @@ pub fn spawn_blob_gc(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -1054,7 +1148,7 @@ mod tests {
     struct DeleteAfterFirstPutStore {
         inner: LocalCasBlobStore,
         puts: AtomicUsize,
-        delete_gate_pool: Option<SqlitePool>,
+        fail_deletes: bool,
     }
 
     #[async_trait]
@@ -1103,21 +1197,68 @@ mod tests {
         }
 
         async fn delete(&self, storage_key: &str) -> Result<(), AppError> {
-            if let Some(pool) = &self.delete_gate_pool {
-                assert!(
-                    tokio::time::timeout(
-                        std::time::Duration::from_millis(10),
-                        crate::db::write::acquire(pool),
-                    )
-                    .await
-                    .is_err(),
-                    "GC must hold admission through filesystem deletion"
-                );
+            if self.fail_deletes {
                 return Err(AppError::Io(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "simulated deletion failure",
                 )));
             }
+            self.inner.delete(storage_key).await
+        }
+    }
+
+    struct BlockingDeleteStore {
+        inner: LocalCasBlobStore,
+        delete_started: Notify,
+        allow_delete: Notify,
+        delete_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl BlobStore for BlockingDeleteStore {
+        fn backend_name(&self) -> &'static str {
+            self.inner.backend_name()
+        }
+
+        async fn put(&self, source: &Path) -> Result<StoredBlob, AppError> {
+            self.inner.put(source).await
+        }
+
+        async fn open(&self, storage_key: &str) -> Result<BlobReader, AppError> {
+            self.inner.open(storage_key).await
+        }
+
+        async fn materialize(&self, storage_key: &str) -> Result<PathBuf, AppError> {
+            self.inner.materialize(storage_key).await
+        }
+
+        async fn exists(&self, storage_key: &str) -> Result<bool, AppError> {
+            self.inner.exists(storage_key).await
+        }
+
+        async fn verify_size(
+            &self,
+            storage_key: &str,
+            expected_size: u64,
+        ) -> Result<bool, AppError> {
+            self.inner.verify_size(storage_key, expected_size).await
+        }
+
+        async fn verify(
+            &self,
+            storage_key: &str,
+            expected_hash: &str,
+            expected_size: u64,
+        ) -> Result<bool, AppError> {
+            self.inner
+                .verify(storage_key, expected_hash, expected_size)
+                .await
+        }
+
+        async fn delete(&self, storage_key: &str) -> Result<(), AppError> {
+            self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            self.delete_started.notify_waiters();
+            self.allow_delete.notified().await;
             self.inner.delete(storage_key).await
         }
     }
@@ -1133,7 +1274,7 @@ mod tests {
         let store = DeleteAfterFirstPutStore {
             inner: LocalCasBlobStore::new(root.clone()),
             puts: AtomicUsize::new(0),
-            delete_gate_pool: None,
+            fail_deletes: false,
         };
 
         let blob_id = persist_blob(&pool, &store, &source).await.unwrap();
@@ -1151,7 +1292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_holds_gate_during_delete_and_rolls_back_failed_deletions() {
+    async fn gc_records_failed_deletions_for_retry() {
         let root = std::env::temp_dir().join(format!("rain-gc-gate-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(&root).await.unwrap();
         let pool = crate::db::init_pool("sqlite::memory:").unwrap();
@@ -1159,7 +1300,7 @@ mod tests {
         let store = DeleteAfterFirstPutStore {
             inner: LocalCasBlobStore::new(root.clone()),
             puts: AtomicUsize::new(1),
-            delete_gate_pool: Some(pool.clone()),
+            fail_deletes: true,
         };
         for state in ["CORRUPTED", "READY"] {
             sqlx::query("INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES (?, 1, 'local', ?, ?)")
@@ -1176,10 +1317,9 @@ mod tests {
             .fetch_all(&pool)
             .await
             .unwrap();
-        // Corrupted claims roll back; normal GC's separately committed claim
-        // remains pending so a later maintenance pass can retry deletion.
-        assert_eq!(states, ["CORRUPTED", "PENDING_DELETE"]);
-        // Both manual transactions must release the gate on the error path.
+        // Failed filesystem work leaves a durable retry marker for the next
+        // maintenance pass, regardless of the original blob state.
+        assert_eq!(states, ["PENDING_DELETE", "PENDING_DELETE"]);
         let guard = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             crate::db::write::acquire(&pool),
@@ -1188,6 +1328,87 @@ mod tests {
         .unwrap();
         drop(guard);
         fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_releases_writer_gate_during_delete_and_claims_once() {
+        let root =
+            std::env::temp_dir().join(format!("rain-gc-concurrency-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.log");
+        fs::write(&source, b"foreground-safe content")
+            .await
+            .unwrap();
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        let store = Arc::new(BlockingDeleteStore {
+            inner: LocalCasBlobStore::new(root.clone()),
+            delete_started: Notify::new(),
+            allow_delete: Notify::new(),
+            delete_calls: AtomicUsize::new(0),
+        });
+        let stored = store.put(&source).await.unwrap();
+        sqlx::query(
+            "INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state, unreferenced_at) VALUES (?, ?, 'local', ?, 'READY', datetime('now', '-1 hour'))",
+        )
+        .bind(&stored.content_hash)
+        .bind(stored.size_bytes as i64)
+        .bind(&stored.storage_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let delete_started = store.delete_started.notified();
+        let gc_pool = pool.clone();
+        let gc_store = store.clone();
+        let gc = tokio::spawn(async move {
+            garbage_collect_unreferenced_blobs_with_grace(&gc_pool, gc_store.as_ref(), 0).await
+        });
+        delete_started.await;
+
+        let state: String = sqlx::query_scalar("SELECT state FROM blobs LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "DELETING");
+
+        let duplicate = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            garbage_collect_unreferenced_blobs_with_grace(&pool, store.as_ref(), 0),
+        )
+        .await
+        .expect("a duplicate GC must not wait on filesystem deletion")
+        .unwrap();
+        assert_eq!(duplicate, 0);
+
+        let foreground = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            crate::db::write::run(&pool, "foreground blob GC test write", &(), |conn, _| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO issues (code, name) VALUES ('GC-FOREGROUND', 'GC foreground')",
+                    )
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(AppError::Database)
+                })
+            }),
+        )
+        .await
+        .expect("foreground DB work must not wait on filesystem deletion")
+        .unwrap();
+        let _ = foreground;
+
+        store.allow_delete.notify_waiters();
+        assert_eq!(gc.await.unwrap().unwrap(), 1);
+        assert_eq!(store.delete_calls.load(Ordering::SeqCst), 1);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+        let _ = fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]
@@ -1310,6 +1531,43 @@ mod tests {
             .unwrap();
         assert_eq!(remaining, 0);
         let _ = fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn gc_limits_missing_blob_cleanup_to_one_batch() {
+        let pool = crate::db::init_pool("sqlite::memory:").unwrap();
+        crate::db::prepare_schema(&pool, true).await.unwrap();
+        for index in 0..=BLOB_GC_BATCH_SIZE {
+            let content_hash = format!("{index:064x}");
+            let storage_key = format!("blobs/{:02x}/{content_hash}", index % 256);
+            sqlx::query(
+                "INSERT INTO blobs (content_hash, size_bytes, storage_backend, storage_key, state) VALUES (?, 1, 'local', ?, 'MISSING')",
+            )
+            .bind(content_hash)
+            .bind(storage_key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let store = LocalCasBlobStore::new(std::env::temp_dir());
+
+        assert_eq!(
+            garbage_collect_unreferenced_blobs(&pool, &store)
+                .await
+                .unwrap(),
+            100
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(
+            garbage_collect_unreferenced_blobs(&pool, &store)
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
