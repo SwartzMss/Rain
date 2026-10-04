@@ -62,7 +62,7 @@ pub(crate) struct SearchPage {
 #[derive(Debug)]
 struct RankedHit {
     key: (i64, i64, i64),
-    hit: SearchHit,
+    address: DocAddress,
 }
 
 impl PartialEq for RankedHit {
@@ -207,16 +207,14 @@ impl CandidateSearch {
                 let file_matches = options.file_id.is_none_or(|expected| expected == file_id);
                 let timeline = document
                     .get_first(self.index.fields.timeline)
-                    .and_then(|value| value.as_str())
-                    .map(ToOwned::to_owned);
+                    .and_then(|value| value.as_str());
                 let timeline_matches = options
                     .timeline
-                    .is_none_or(|expected| timeline.as_deref() == Some(expected));
+                    .is_none_or(|expected| timeline == Some(expected));
                 let path = document
                     .get_first(self.index.fields.path)
                     .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .to_owned();
+                    .unwrap_or_default();
                 let path_matches = options
                     .path_like
                     .is_none_or(|expected| path.contains(expected));
@@ -230,33 +228,18 @@ impl CandidateSearch {
                         continue;
                     };
                     if content.to_lowercase().contains(&needle) {
-                        let hit = SearchHit {
-                            file_id,
-                            chunk_index: document
-                                .get_first(self.index.fields.chunk_index)
-                                .and_then(|value| value.as_u64())
-                                .unwrap_or_default()
-                                as i64,
-                            line_start: document
-                                .get_first(self.index.fields.line_start)
-                                .and_then(|value| value.as_i64()),
-                            line_end: document
-                                .get_first(self.index.fields.line_end)
-                                .and_then(|value| value.as_i64()),
-                            timeline,
-                            content: if options.include_content.unwrap_or(true) {
-                                content.to_owned()
-                            } else {
-                                String::new()
-                            },
-                            path,
-                            doc_address: address,
-                        };
+                        let chunk_index = document
+                            .get_first(self.index.fields.chunk_index)
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or_default() as i64;
+                        let line_start = document
+                            .get_first(self.index.fields.line_start)
+                            .and_then(|value| value.as_i64());
                         total += 1;
                         if window_limit > 0 {
                             let ranked = RankedHit {
-                                key: sort_key(&hit),
-                                hit,
+                                key: sort_key(line_start, file_id, chunk_index),
+                                address,
                             };
                             if retained.len() < window_limit {
                                 retained.push(ranked);
@@ -277,16 +260,20 @@ impl CandidateSearch {
         }
 
         metrics.exact_hits = total;
-        let mut ordered_hits = retained
-            .into_iter()
-            .map(|ranked| ranked.hit)
-            .collect::<Vec<_>>();
-        ordered_hits.sort_by_key(sort_key);
-        let hits: Vec<SearchHit> = ordered_hits
+        let mut ordered_hits = retained.into_iter().collect::<Vec<_>>();
+        ordered_hits.sort_by_key(|ranked| ranked.key);
+        let selected = ordered_hits
             .into_iter()
             .skip(window.from)
             .take(window.size)
-            .collect();
+            .collect::<Vec<_>>();
+        let include_content = options.include_content.unwrap_or(true);
+        let mut hits = Vec::with_capacity(selected.len());
+        for ranked in selected {
+            checkpoint(context)?;
+            hits.push(self.load_hit(&searcher, ranked.address, include_content)?);
+        }
+        metrics.stored_doc_reads += hits.len() as u64;
         Ok(SearchPage {
             hits,
             total: total as i64,
@@ -299,22 +286,73 @@ impl CandidateSearch {
         addresses
             .iter()
             .map(|(segment_ord, doc_id)| {
-                let document: TantivyDocument = searcher
-                    .doc(DocAddress {
-                        segment_ord: *segment_ord,
-                        doc_id: *doc_id,
-                    })
-                    .map_err(|error| {
-                        AppError::Config(format!("read Tantivy document content: {error}"))
-                    })?;
-                document
-                    .get_first(self.index.fields.content)
-                    .and_then(|value| value.as_str())
-                    .map(ToOwned::to_owned)
-                    .ok_or_else(|| AppError::Config("Tantivy document content is missing".into()))
+                let address = DocAddress {
+                    segment_ord: *segment_ord,
+                    doc_id: *doc_id,
+                };
+                let document = searcher.doc(address).map_err(|error| {
+                    AppError::Config(format!("read Tantivy document content: {error}"))
+                })?;
+                document_content(&document, self.index.fields.content)
             })
             .collect()
     }
+
+    fn load_hit(
+        &self,
+        searcher: &tantivy::Searcher,
+        address: DocAddress,
+        include_content: bool,
+    ) -> Result<SearchHit, AppError> {
+        let document: TantivyDocument = searcher
+            .doc(address)
+            .map_err(|error| AppError::Config(format!("read Tantivy search hit: {error}")))?;
+        let file_id = document
+            .get_first(self.index.fields.file_id)
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default() as i64;
+        let chunk_index = document
+            .get_first(self.index.fields.chunk_index)
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default() as i64;
+        let line_start = document
+            .get_first(self.index.fields.line_start)
+            .and_then(|value| value.as_i64());
+        Ok(SearchHit {
+            file_id,
+            chunk_index,
+            line_start,
+            line_end: document
+                .get_first(self.index.fields.line_end)
+                .and_then(|value| value.as_i64()),
+            timeline: document
+                .get_first(self.index.fields.timeline)
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+            content: if include_content {
+                document_content(&document, self.index.fields.content)?
+            } else {
+                String::new()
+            },
+            path: document
+                .get_first(self.index.fields.path)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            doc_address: address,
+        })
+    }
+}
+
+fn document_content(
+    document: &TantivyDocument,
+    content_field: tantivy::schema::Field,
+) -> Result<String, AppError> {
+    document
+        .get_first(content_field)
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| AppError::Config("Tantivy document content is missing".into()))
 }
 
 fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> {
@@ -324,12 +362,8 @@ fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> 
     Ok(())
 }
 
-fn sort_key(hit: &SearchHit) -> (i64, i64, i64) {
-    (
-        hit.line_start.unwrap_or(i64::MIN),
-        hit.file_id,
-        hit.chunk_index,
-    )
+fn sort_key(line_start: Option<i64>, file_id: i64, chunk_index: i64) -> (i64, i64, i64) {
+    (line_start.unwrap_or(i64::MIN), file_id, chunk_index)
 }
 
 pub(crate) fn unique_ngrams(value: &str, min: usize, max: usize) -> Vec<String> {

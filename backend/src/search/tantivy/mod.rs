@@ -646,7 +646,7 @@ mod tests {
                     event_time_start_ms: None,
                     event_time_end_ms: None,
                     timeline: Some("all".into()),
-                    content: "marker".into(),
+                    content: format!("marker chunk {line_start}"),
                     path: "/app.log".into(),
                 })
                 .unwrap();
@@ -669,6 +669,13 @@ mod tests {
                 .map(|hit| hit.chunk_index)
                 .collect::<Vec<_>>(),
             vec![10, 11, 12]
+        );
+        assert_eq!(
+            page.hits
+                .iter()
+                .map(|hit| hit.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["marker chunk 10", "marker chunk 11", "marker chunk 12"]
         );
         assert_eq!(page.metrics.max_retained_hits, 13);
         let count_only = CandidateSearch::new(writer::open_committed(&path).unwrap())
