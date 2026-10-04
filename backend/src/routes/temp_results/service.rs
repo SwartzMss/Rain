@@ -6,7 +6,7 @@ use super::lifecycle::{
 use super::lifecycle::{check_temp_result_rate_limit, preview_page_size, to_response};
 use super::repository::{
     TransitionResult, claim_active_for_delete, delete_deleting_record, ensure_temp_result_budget,
-    insert_staging_temp_result_with_retention, publish_temp_result_with_retention,
+    insert_staging_temp_result_with_retention, publish_temp_result_with_retention, release_lease,
 };
 use super::search_plan::{
     IndexedSource, PreviewSearchPlan, build_source_search_plans_with_context,
@@ -233,7 +233,7 @@ async fn materialize_result_with_timeout_and_context(
     let staging_index_path = staging_path(&index_path);
     let _staging_lease = register_staging_lease(state, &id);
     let retention = mode.retention();
-    insert_staging_temp_result_with_retention(
+    let materialization_lease = insert_staging_temp_result_with_retention(
         state,
         &id,
         expression_text,
@@ -344,6 +344,9 @@ async fn materialize_result_with_timeout_and_context(
     match result {
         Ok(total) => Ok(MaterializeOutcome { id, total }),
         Err(error) => {
+            if let Err(lease_error) = release_lease(&state.db.pool, &materialization_lease).await {
+                tracing::warn!(result_id = %id, %lease_error, "failed to release temporary result materialization lease during cleanup");
+            }
             abort_staging_result(state, &id, &output_path).await;
             Err(error)
         }

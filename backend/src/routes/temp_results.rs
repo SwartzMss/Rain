@@ -10,7 +10,7 @@ use actix_web::{
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{FromRow, SqlitePool};
 use std::time::Duration as StdDuration;
 use tokio::{
     fs::File,
@@ -40,6 +40,9 @@ const ORPHAN_GRACE_PERIOD: StdDuration = StdDuration::from_secs(10 * 60);
 const TEMP_RESULT_RATE_LIMIT: usize = 10;
 const TEMP_RESULT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 const TEMP_RESULT_IP_MAX_BUCKETS: usize = 1024;
+pub(crate) const TEMP_RESULT_READ_LEASE_KIND: &str = "READ";
+pub(crate) const TEMP_RESULT_MATERIALIZATION_LEASE_KIND: &str = "MATERIALIZATION";
+pub(crate) const TEMP_RESULT_LEASE_TTL: Duration = Duration::minutes(15);
 
 pub(crate) fn request_client_key(request: &HttpRequest) -> String {
     request
@@ -74,6 +77,8 @@ fn register_staging_lease(state: &web::Data<AppState>, id: &str) -> StagingLease
 pub(crate) struct TempResultReadLease {
     id: String,
     registry: std::sync::Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    lease_id: Option<String>,
+    pool: Option<SqlitePool>,
 }
 
 impl Drop for TempResultReadLease {
@@ -86,6 +91,18 @@ impl Drop for TempResultReadLease {
                 reads.remove(&self.id);
             }
         }
+        let (Some(lease_id), Some(pool)) = (self.lease_id.take(), self.pool.take()) else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            if let Err(error) = super::temp_results::repository::release_lease(&pool, &lease_id).await
+            {
+                tracing::debug!(%error, lease_id, "temporary result read lease release deferred to expiry");
+            }
+        });
     }
 }
 
@@ -105,7 +122,20 @@ pub(crate) fn register_read_lease(
     Ok(TempResultReadLease {
         id: id.to_string(),
         registry: state.temp_results.reads.clone(),
+        lease_id: None,
+        pool: None,
     })
+}
+
+pub(crate) fn register_durable_read_lease(
+    state: &web::Data<AppState>,
+    id: &str,
+    lease_id: String,
+) -> Result<TempResultReadLease, AppError> {
+    let mut lease = register_read_lease(state, id)?;
+    lease.lease_id = Some(lease_id);
+    lease.pool = Some(state.db.pool.clone());
+    Ok(lease)
 }
 
 fn invalid_expression(expression: &str, error: log_expression::ParseError) -> AppError {
