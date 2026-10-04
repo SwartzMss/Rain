@@ -77,6 +77,7 @@ impl BlobAuditActivity {
     }
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     fn backend_name(&self) -> &'static str;

@@ -219,6 +219,7 @@ pub struct IndexChunk {
     pub content: String,
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SearchIndex: Send + Sync {
     async fn search_content(
@@ -237,6 +238,7 @@ pub trait SearchIndex: Send + Sync {
 /// The sink owns the backend-specific write path. SQLite writes the legacy
 /// segment content and FTS shadow rows; Tantivy streams the cleaned content to
 /// its bounded writer and persists only sparse metadata in SQLite.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait IngestIndex: Send + Sync {
     async fn commit_ingest_batch(&self, batch: IndexBatch) -> Result<(), AppError>;
