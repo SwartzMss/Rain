@@ -1538,6 +1538,7 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "DROP TABLE IF EXISTS saved_searches",
         "DROP TABLE IF EXISTS user_sessions",
         "DROP TABLE IF EXISTS users",
+        "DROP TABLE IF EXISTS temp_result_leases",
         "DROP TABLE IF EXISTS temp_results",
         "DROP TABLE IF EXISTS rain_ready_probe",
         "DROP TABLE IF EXISTS file_deletion_batch_items",

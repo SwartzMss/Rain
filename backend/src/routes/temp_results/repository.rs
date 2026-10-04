@@ -67,6 +67,7 @@ pub(crate) async fn insert_staging_temp_result(
         Duration::days(RETENTION_DAYS),
     )
     .await
+    .map(|_| ())
 }
 
 pub(crate) async fn insert_staging_temp_result_with_retention(
@@ -76,7 +77,7 @@ pub(crate) async fn insert_staging_temp_result_with_retention(
     source_label: &str,
     output_path: &Path,
     retention: Duration,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     let _capacity_guard = state.temp_results.capacity_lock.lock().await;
     let settings = state.settings.snapshot().await;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM temp_results")
@@ -92,6 +93,8 @@ pub(crate) async fn insert_staging_temp_result_with_retention(
     }
     let created_at = Utc::now();
     let expires_at = created_at + retention;
+    let lease_id = Uuid::new_v4().simple().to_string();
+    let lease_expires_at = (created_at + TEMP_RESULT_LEASE_TTL).to_rfc3339();
     let name = format!("filtered-{}.log", &id[..8]);
     let input = (
         id,
@@ -101,29 +104,46 @@ pub(crate) async fn insert_staging_temp_result_with_retention(
         name,
         created_at.to_rfc3339(),
         expires_at.to_rfc3339(),
+        lease_id,
+        lease_expires_at,
     );
-    crate::db::write::run(&state.db.pool, "insert staging temp result", &input, |conn, (id, expression, source_label, output_path, name, created_at, expires_at)| Box::pin(async move {
-    sqlx::query(
-        r#"
+    crate::db::write::run(
+        &state.db.pool,
+        "insert staging temp result",
+        &input,
+        |conn, (id, expression, source_label, output_path, name, created_at, expires_at, lease_id, lease_expires_at)| Box::pin(async move {
+            sqlx::query(
+                r#"
         INSERT INTO temp_results
             (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
         "#,
+            )
+            .bind(id)
+            .bind(TempResultStatus::Staging.as_str())
+            .bind(name)
+            .bind(expression)
+            .bind(source_label)
+            .bind(output_path)
+            .bind(created_at)
+            .bind(expires_at)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            sqlx::query(
+                "INSERT INTO temp_result_leases (id, temp_result_id, kind, expires_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(lease_id)
+            .bind(id)
+            .bind(TEMP_RESULT_MATERIALIZATION_LEASE_KIND)
+            .bind(lease_expires_at)
+            .execute(conn)
+            .await
+            .map_err(AppError::Database)?;
+            Ok(lease_id.to_owned())
+        }),
     )
-    .bind(id)
-    .bind(TempResultStatus::Staging.as_str())
-    .bind(name)
-    .bind(expression)
-    .bind(source_label)
-    .bind(output_path)
-    .bind(created_at)
-    .bind(expires_at)
-    .execute(conn)
     .await
-    .map_err(AppError::Database)?;
-    Ok(())
-    })).await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -179,7 +199,7 @@ pub(crate) async fn publish_temp_result_with_retention(
         &input,
         |conn, (id, expression, source_label, output_path, line_count, size_bytes, expires_at)| {
             Box::pin(async move {
-                Ok(sqlx::query(
+                let updated = sqlx::query(
                     r#"
         UPDATE temp_results
         SET status = ?, expression = ?, source_label = ?, storage_path = ?,
@@ -196,10 +216,21 @@ pub(crate) async fn publish_temp_result_with_retention(
                 .bind(expires_at)
                 .bind(id)
                 .bind(TempResultStatus::Staging.as_str())
-                .execute(conn)
+                .execute(&mut *conn)
                 .await
                 .map_err(AppError::Database)?
-                .rows_affected())
+                .rows_affected();
+                if updated == 1 {
+                    sqlx::query(
+                        "DELETE FROM temp_result_leases WHERE temp_result_id = ? AND kind = ?",
+                    )
+                    .bind(id)
+                    .bind(TEMP_RESULT_MATERIALIZATION_LEASE_KIND)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                }
+                Ok(updated)
             })
         },
     )
@@ -225,16 +256,27 @@ pub(crate) async fn claim_staging_for_delete(
         &input,
         |conn, (id, deleting, staging)| {
             Box::pin(async move {
-                Ok(
-                    sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
-                        .bind(deleting)
-                        .bind(id)
-                        .bind(staging)
-                        .execute(conn)
-                        .await
-                        .map_err(AppError::Database)?
-                        .rows_affected(),
+                let updated = sqlx::query(
+                    "UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM temp_result_leases WHERE temp_result_id = temp_results.id AND datetime(expires_at) >= datetime('now'))",
                 )
+                .bind(deleting)
+                .bind(id)
+                .bind(staging)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?
+                .rows_affected();
+                if updated == 1 {
+                    sqlx::query(
+                        "DELETE FROM temp_result_leases WHERE temp_result_id = ? AND kind = ?",
+                    )
+                    .bind(id)
+                    .bind(TEMP_RESULT_MATERIALIZATION_LEASE_KIND)
+                    .execute(conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                }
+                Ok(updated)
             })
         },
     )
@@ -270,7 +312,9 @@ pub(crate) async fn claim_active_for_delete(
         |conn, (id, deleting, active)| {
             Box::pin(async move {
                 Ok(
-                    sqlx::query("UPDATE temp_results SET status = ? WHERE id = ? AND status = ?")
+                    sqlx::query(
+                        "UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM temp_result_leases WHERE temp_result_id = temp_results.id AND datetime(expires_at) >= datetime('now'))",
+                    )
                         .bind(deleting)
                         .bind(id)
                         .bind(active)
@@ -302,7 +346,7 @@ pub(crate) async fn delete_deleting_record(
         |conn, (id, deleting)| {
             Box::pin(async move {
                 Ok(
-                    sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = ?")
+                    sqlx::query("DELETE FROM temp_results WHERE id = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM temp_result_leases WHERE temp_result_id = temp_results.id AND datetime(expires_at) >= datetime('now'))")
                         .bind(id)
                         .bind(deleting)
                         .execute(conn)
@@ -389,6 +433,97 @@ pub(crate) async fn ensure_temp_result_capacity(
     Ok(())
 }
 
+pub(crate) async fn acquire_active_read_lease(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<(TempResultRecord, String), AppError> {
+    let lease_id = Uuid::new_v4().simple().to_string();
+    let expires_at = (Utc::now() + TEMP_RESULT_LEASE_TTL).to_rfc3339();
+    let input = (id.to_owned(), lease_id.clone(), expires_at);
+    let record = crate::db::write::run(
+        &state.db.pool,
+        "acquire temporary result read lease",
+        &input,
+        |conn, (id, lease_id, expires_at)| {
+            Box::pin(async move {
+                let record = sqlx::query_as::<_, TempResultRecord>(
+                    "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) >= datetime('now') LIMIT 1",
+                )
+                .bind(id)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(AppError::Database)?
+                .ok_or_else(|| AppError::NotFound(format!("temporary result {id}")))?;
+                sqlx::query(
+                    "INSERT INTO temp_result_leases (id, temp_result_id, kind, expires_at) VALUES (?, ?, ?, ?)",
+                )
+                .bind(lease_id)
+                .bind(id)
+                .bind(TEMP_RESULT_READ_LEASE_KIND)
+                .bind(expires_at)
+                .execute(conn)
+                .await
+                .map_err(AppError::Database)?;
+                Ok(record)
+            })
+        },
+    )
+    .await?;
+    Ok((record, lease_id))
+}
+
+pub(crate) async fn release_lease(pool: &SqlitePool, lease_id: &str) -> Result<(), AppError> {
+    crate::db::write::run(
+        pool,
+        "release temporary result lease",
+        &lease_id,
+        |conn, lease_id| {
+            Box::pin(async move {
+                sqlx::query("DELETE FROM temp_result_leases WHERE id = ?")
+                    .bind(*lease_id)
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(AppError::Database)
+            })
+        },
+    )
+    .await
+}
+
+pub(crate) async fn purge_expired_leases(state: &web::Data<AppState>) -> Result<u64, AppError> {
+    crate::db::write::run(
+        &state.db.pool,
+        "purge expired temporary result leases",
+        &(),
+        |conn, _| {
+            Box::pin(async move {
+                sqlx::query(
+                    "DELETE FROM temp_result_leases WHERE datetime(expires_at) < datetime('now')",
+                )
+                .execute(conn)
+                .await
+                .map(|result| result.rows_affected())
+                .map_err(AppError::Database)
+            })
+        },
+    )
+    .await
+}
+
+pub(crate) async fn has_active_lease(
+    state: &web::Data<AppState>,
+    id: &str,
+) -> Result<bool, AppError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM temp_result_leases WHERE temp_result_id = ? AND datetime(expires_at) >= datetime('now'))",
+    )
+    .bind(id)
+    .fetch_one(&state.db.pool)
+    .await
+    .map_err(AppError::Database)
+}
+
 pub(crate) async fn find_by_id(
     state: &web::Data<AppState>,
     id: &str,
@@ -443,7 +578,7 @@ pub(crate) async fn claim_expired_active(
         &input,
         |conn, (id, expires_at, deleting, active)| {
             Box::pin(async move {
-                sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') RETURNING storage_path")
+                sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') AND NOT EXISTS (SELECT 1 FROM temp_result_leases WHERE temp_result_id = temp_results.id AND datetime(expires_at) >= datetime('now')) RETURNING storage_path")
                     .bind(deleting)
                     .bind(id)
                     .bind(active)
@@ -487,7 +622,7 @@ pub(crate) async fn claim_stale_staging(
         &input,
         |conn, (id, created_at, deleting, staging)| {
             Box::pin(async move {
-                sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? RETURNING storage_path")
+                sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND created_at = ? AND NOT EXISTS (SELECT 1 FROM temp_result_leases WHERE temp_result_id = temp_results.id AND datetime(expires_at) >= datetime('now')) RETURNING storage_path")
                     .bind(deleting)
                     .bind(id)
                     .bind(staging)
@@ -514,14 +649,16 @@ mod tests {
     use std::path::PathBuf;
 
     use actix_web::web;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use sqlx::sqlite::SqlitePoolOptions;
 
     use crate::{AppState, config::AppLimits, db};
 
     use super::{
-        TempResultStatus, TransitionResult, claim_active_for_delete, claim_staging_for_delete,
-        delete_deleting_record, insert_staging_temp_result, publish_temp_result,
+        TempResultStatus, TransitionResult, acquire_active_read_lease, claim_active_for_delete,
+        claim_staging_for_delete, delete_deleting_record, has_active_lease,
+        insert_staging_temp_result, insert_staging_temp_result_with_retention, publish_temp_result,
+        purge_expired_leases, release_lease,
     };
 
     #[test]
@@ -650,6 +787,130 @@ mod tests {
                 .await
                 .unwrap(),
             TransitionResult::StateMismatch
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_read_lease_blocks_delete_until_released() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('leased-active', 'ACTIVE', 'leased.log', 'x', 'x', 'data/temp-results/leased.log', 0, 0, ?, ?)",
+        )
+        .bind(&expires_at)
+        .bind(&expires_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (record, lease_id) = acquire_active_read_lease(&state, "leased-active")
+            .await
+            .unwrap();
+        assert_eq!(record.id, "leased-active");
+        assert!(has_active_lease(&state, "leased-active").await.unwrap());
+        assert_eq!(
+            claim_active_for_delete(&state, "leased-active")
+                .await
+                .unwrap(),
+            TransitionResult::StateMismatch
+        );
+
+        release_lease(&pool, &lease_id).await.unwrap();
+        assert!(!has_active_lease(&state, "leased-active").await.unwrap());
+        assert_eq!(
+            claim_active_for_delete(&state, "leased-active")
+                .await
+                .unwrap(),
+            TransitionResult::Applied(())
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_leases_are_purged_before_cleanup_can_claim_records() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let expired = (Utc::now() - Duration::minutes(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at) VALUES ('expired-lease', 'ACTIVE', 'expired.log', 'x', 'x', 'data/temp-results/expired.log', 0, 0, ?, ?)",
+        )
+        .bind(&expired)
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO temp_result_leases (id, temp_result_id, kind, expires_at) VALUES ('expired-lease-ref', 'expired-lease', 'READ', ?)",
+        )
+        .bind(&expired)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(purge_expired_leases(&state).await.unwrap(), 1);
+        assert!(!has_active_lease(&state, "expired-lease").await.unwrap());
+        assert_eq!(
+            claim_active_for_delete(&state, "expired-lease")
+                .await
+                .unwrap(),
+            TransitionResult::Applied(())
+        );
+    }
+
+    #[tokio::test]
+    async fn materialization_lease_blocks_staging_cleanup_until_publish_or_expiry() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            PathBuf::from("data"),
+            AppLimits::default(),
+        ));
+        let lease_id = insert_staging_temp_result_with_retention(
+            &state,
+            "staging-lease",
+            "x",
+            "x",
+            &PathBuf::from("data/temp-results/staging-lease.log"),
+            Duration::hours(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            claim_staging_for_delete(&state, "staging-lease")
+                .await
+                .unwrap(),
+            TransitionResult::StateMismatch
+        );
+        release_lease(&pool, &lease_id).await.unwrap();
+        assert_eq!(
+            claim_staging_for_delete(&state, "staging-lease")
+                .await
+                .unwrap(),
+            TransitionResult::Applied(())
         );
     }
 }

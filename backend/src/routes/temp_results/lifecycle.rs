@@ -102,9 +102,16 @@ pub(crate) async fn acquire_active_result(
     id: &str,
 ) -> Result<(TempResultRecord, TempResultReadLease), AppError> {
     validate_temp_result_id(id)?;
-    repository::find_active_unexpired_by_id(state, id).await?;
-    let lease = register_read_lease(state, id)?;
-    let record = repository::find_active_unexpired_by_id(state, id).await?;
+    let (record, lease_id) = repository::acquire_active_read_lease(state, id).await?;
+    let lease = match register_durable_read_lease(state, id, lease_id.clone()) {
+        Ok(lease) => lease,
+        Err(error) => {
+            if let Err(lease_error) = repository::release_lease(&state.db.pool, &lease_id).await {
+                tracing::warn!(result_id = %id, %lease_error, "failed to release temporary result read lease after local registration failure");
+            }
+            return Err(error);
+        }
+    };
     Ok((record, lease))
 }
 
@@ -116,6 +123,7 @@ pub(crate) fn validate_temp_result_id(id: &str) -> Result<(), AppError> {
 }
 
 pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
+    repository::purge_expired_leases(state).await?;
     for record in repository::list_deleting(state).await? {
         if is_read_lease_active(state, &record.id) {
             continue;
@@ -159,6 +167,14 @@ pub(crate) async fn finish_deleting_temp_result(
 ) {
     if is_read_lease_active(state, &record.id) {
         return;
+    }
+    match repository::has_active_lease(state, &record.id).await {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(result_id = %record.id, %error, "could not verify temporary result leases; keeping DELETING record");
+            return;
+        }
     }
     let path = match checked_temp_path(state, &record.storage_path) {
         Ok(path) => path,
