@@ -196,6 +196,9 @@ export function BundleView() {
   const [targetLine, setTargetLine] = useState<number | null>(null);
   const [nonReadyBundles, setNonReadyBundles] = useState<UploadSummary[]>([]);
   const [sourceActionMessage, setSourceActionMessage] = useState<string | null>(null);
+  const [shareDialogUrl, setShareDialogUrl] = useState<string | null>(null);
+  const [shareDialogCopied, setShareDialogCopied] = useState(false);
+  const [shareDialogError, setShareDialogError] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const fileTreeContainerRef = useRef<HTMLDivElement | null>(null);
   const restoredPendingSearchRef = useRef(Boolean(pendingSavedSearch));
@@ -968,19 +971,43 @@ export function BundleView() {
     }
   };
 
-  const shareTab = async (tab: ViewerTab) => {
+  const shareTab = (tab: ViewerTab) => {
     const url = buildTabShareUrl(tab, issueCode, window.location.origin);
     if (!url) {
       setSourceActionMessage('当前标签缺少可恢复的来源，无法生成分享链接');
       return;
     }
+    setSourceActionMessage(null);
+    setShareDialogUrl(url);
+    setShareDialogCopied(false);
+    setShareDialogError(null);
+  };
+
+  const closeShareDialog = () => {
+    setShareDialogUrl(null);
+    setShareDialogCopied(false);
+    setShareDialogError(null);
+  };
+
+  const copyShareDialogUrl = async () => {
+    if (!shareDialogUrl) return;
     try {
-      await copyText(url);
-      setSourceActionMessage('当前标签分享链接已复制');
+      await copyText(shareDialogUrl);
+      setShareDialogCopied(true);
+      setShareDialogError(null);
     } catch (error) {
-      setSourceActionMessage(error instanceof Error ? error.message : '链接复制失败，请手动复制地址');
+      setShareDialogError(error instanceof Error ? error.message : '链接复制失败，请手动复制地址');
     }
   };
+
+  useEffect(() => {
+    if (!shareDialogUrl) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeShareDialog();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [shareDialogUrl]);
 
   useEffect(() => {
     if (viewerInitializedRef.current) return;
@@ -1546,9 +1573,7 @@ export function BundleView() {
               activeTabId={activeViewerTabId}
               onActivate={activateViewerTabWithState}
               onTogglePinned={togglePinnedViewerTab}
-              onShare={(tab) => {
-                void shareTab(tab);
-              }}
+              onShare={shareTab}
               onClose={closeTab}
               onCloseMany={closeTabs}
             />
@@ -1848,6 +1873,47 @@ export function BundleView() {
               {savedSearch.error ? <p className="mr-auto self-center text-sm text-rose-600">{savedSearch.error}</p> : null}
               <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { savedSearch.bumpEditingGeneration(); savedSearch.setEditingSavedSearch(null); }}>取消</button>
               <button className="rounded-lg bg-slate-950 px-4 py-2 font-semibold text-white" type="button" onClick={() => void savedSearch.updateEditingSavedSearch()}>保存修改</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {shareDialogUrl ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/45 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="share-dialog-title"
+            className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <h3 id="share-dialog-title" className="text-xl font-semibold text-slate-950">分享当前标签</h3>
+              <button
+                type="button"
+                aria-label="关闭分享窗口"
+                className="-mr-2 -mt-2 flex h-8 w-8 items-center justify-center rounded-lg text-2xl font-light leading-none text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                onClick={closeShareDialog}
+              >
+                ×
+              </button>
+            </div>
+            <label htmlFor="share-dialog-url" className="mt-5 block text-sm font-medium text-slate-700">分享链接</label>
+            <input
+              id="share-dialog-url"
+              className="mt-2 w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
+              type="text"
+              readOnly
+              value={shareDialogUrl}
+              onFocus={(event) => event.currentTarget.select()}
+            />
+            {shareDialogError ? <p className="mt-3 text-sm text-rose-600" role="alert">{shareDialogError}</p> : null}
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                className="rounded-lg bg-sky-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
+                onClick={() => void copyShareDialogUrl()}
+              >
+                {shareDialogCopied ? '已复制' : '复制链接'}
+              </button>
             </div>
           </div>
         </div>
