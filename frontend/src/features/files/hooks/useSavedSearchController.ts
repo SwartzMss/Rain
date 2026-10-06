@@ -143,7 +143,11 @@ export function useSavedSearchController({
           from: 0,
           pageSize: LINE_PAGE_SIZE_OPTIONS[0],
           pageHistory: [],
-          source: { kind: 'issue', issueCode }
+          source: { kind: 'issue', issueCode },
+          queryPlan: {
+            root: { kind: 'issue', issueCode },
+            expressions: [item.query_text]
+          }
         });
       }
     });

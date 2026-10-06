@@ -54,6 +54,7 @@ import { useViewerSearchController } from './hooks/useViewerSearchController';
 import { currentExpression } from './hooks/useSearchController';
 import { useViewerPaginationController } from './hooks/useViewerPaginationController';
 import { useSavedSearchController } from './hooks/useSavedSearchController';
+import { buildTabShareUrl, parseSharedTabSearch, type SharedTabDescriptor } from './tabShareLink';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
@@ -115,6 +116,28 @@ function highlightText(text: string, keyword: string): React.ReactNode {
   return parts;
 }
 
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall through to the legacy copy path for an internal HTTP deployment.
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('链接复制失败，请手动复制地址');
+}
+
 function detailEditorState(queryText: string | undefined, options?: Record<string, unknown>): {
   tokens: SearchToken[];
   error: string | null;
@@ -137,6 +160,10 @@ export function BundleView() {
   const location = useLocation();
   const locationState = location.state as { issue?: string; bundleName?: string } | null;
   const issueCode = issueCodeFromRoute || locationState?.issue || '';
+  const sharedTab = useMemo<SharedTabDescriptor | null>(
+    () => parseSharedTabSearch(location.search, issueCode),
+    [issueCode, location.search]
+  );
   const [pendingSavedSearch] = useState(() => takePendingSavedSearch(
     sessionStorage,
     auth.state.status === 'AUTHENTICATED'
@@ -172,6 +199,7 @@ export function BundleView() {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const fileTreeContainerRef = useRef<HTMLDivElement | null>(null);
   const restoredPendingSearchRef = useRef(Boolean(pendingSavedSearch));
+  const restoredSharedRouteRef = useRef<string | null>(null);
   const contextKeyRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
   const viewerTabsRef = useRef<ViewerTab[]>([]);
@@ -421,7 +449,11 @@ export function BundleView() {
           from: 0,
           pageSize: LINE_PAGE_SIZE_OPTIONS[0],
           pageHistory: [],
-          source: { kind: 'issue', issueCode: issue }
+          source: { kind: 'issue', issueCode: issue },
+          queryPlan: {
+            root: { kind: 'issue', issueCode: issue },
+            expressions: [expression]
+          }
         });
       }
     });
@@ -492,6 +524,13 @@ export function BundleView() {
         } catch (error) {
           loadFailed = true;
           if (error instanceof ApiError && (error.code === 'RESOURCE_NOT_FOUND' || error.status === 404)) {
+            if (sharedTab) {
+              if (isCurrentRefresh()) {
+                setTreeError('该 Issue 不存在或已被删除。');
+                setTreeLoading(false);
+              }
+              return;
+            }
             if (isCurrentRefresh()) {
               navigate('/', { replace: true });
             }
@@ -929,8 +968,23 @@ export function BundleView() {
     }
   };
 
+  const shareTab = async (tab: ViewerTab) => {
+    const url = buildTabShareUrl(tab, issueCode, window.location.origin);
+    if (!url) {
+      setSourceActionMessage('当前标签缺少可恢复的来源，无法生成分享链接');
+      return;
+    }
+    try {
+      await copyText(url);
+      setSourceActionMessage('当前标签分享链接已复制');
+    } catch (error) {
+      setSourceActionMessage(error instanceof Error ? error.message : '链接复制失败，请手动复制地址');
+    }
+  };
+
   useEffect(() => {
     if (viewerInitializedRef.current) return;
+    if (sharedTab) return;
     if (!selectedNode || selectedNode.is_dir || isArchiveNode(selectedNode)) return;
     openViewerTab({
       id: `file:${selectedNode.id}`,
@@ -944,7 +998,7 @@ export function BundleView() {
       pageHistory: [],
       targetLine
     });
-  }, [linePageSize, lineStart, openViewerTab, selectedNode, targetLine]);
+  }, [linePageSize, lineStart, openViewerTab, selectedNode, sharedTab, targetLine]);
 
   useEffect(() => {
     const pending = pendingFilePageRef.current;
@@ -1022,7 +1076,7 @@ export function BundleView() {
             setFileSearchResults(hits);
             setFileSearchTotal(response.total);
             setFileSearchFrom(from);
-            if (from === 0 && hits.length > 0) {
+            if (from === 0) {
               const id = `search:${response.result_id}`;
               openViewerTab({
                 id,
@@ -1037,7 +1091,11 @@ export function BundleView() {
                 from: 0,
                 pageSize: LINE_PAGE_SIZE_OPTIONS[0],
                 pageHistory: [],
-                source: { kind: 'file', bundleHash: selectedBundleId, fileId: selectedNode.rawId }
+                source: { kind: 'file', bundleHash: selectedBundleId, fileId: selectedNode.rawId },
+                queryPlan: {
+                  root: { kind: 'file', bundleHash: selectedBundleId, fileId: selectedNode.rawId },
+                  expressions: [expression]
+                }
               });
               setFileSearchResults([]);
               fileSearch.clear();
@@ -1096,12 +1154,124 @@ export function BundleView() {
             from: 0,
             pageSize: LINE_PAGE_SIZE_OPTIONS[0],
             pageHistory: [],
-            source
+          source,
+          queryPlan: activeViewerTab.kind === 'search'
+            ? {
+                root: activeViewerTab.queryPlan?.root ?? (
+                  activeViewerTab.source.kind === 'issue'
+                    ? { kind: 'issue', issueCode: activeViewerTab.source.issueCode }
+                    : activeViewerTab.source.kind === 'file'
+                      ? { kind: 'file', bundleHash: activeViewerTab.source.bundleHash, fileId: activeViewerTab.source.fileId }
+                      : { kind: 'issue', issueCode }
+                ),
+                expressions: [...(activeViewerTab.queryPlan?.expressions ?? [activeViewerTab.expression]), nestedExpression]
+              }
+            : undefined
           });
         }
     });
     if (!response) return;
   }, [activeViewerTab, openViewerTab, viewerSearch]);
+
+  const restoreSharedTab = useCallback(async (descriptor: SharedTabDescriptor) => {
+    if (descriptor.kind === 'file') {
+      try {
+        const loaded = await loadNode(descriptor.bundleHash, descriptor.fileId, null);
+        if (!loaded?.node || loaded.node.is_dir || isArchiveNode(loaded.node)) {
+          throw new Error('分享来源文件不存在或无法预览');
+        }
+        setSelectedNodeId(loaded.node.id);
+        await handleNodeClick(loaded.node.id, null, { node: loaded.node });
+        return;
+      } catch (error) {
+        setSourceActionMessage(error instanceof Error ? error.message : '分享来源文件无法打开');
+        return;
+      }
+    }
+
+    const { plan } = descriptor;
+    const firstExpression = plan.expressions[0];
+    if (!firstExpression) return;
+    try {
+      const firstTokens = deserializeSearchTokens(firstExpression);
+      const rootController = plan.root.kind === 'issue' ? issueSearch : fileSearch;
+      rootController.setEditor(firstTokens);
+      let response = await rootController.run({
+        expression: firstExpression,
+        payload: plan.root.kind === 'issue'
+          ? { expression: firstExpression, issue_code: plan.root.issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] }
+          : { expression: firstExpression, bundle_hash: plan.root.bundleHash, file_id: plan.root.fileId, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
+        scopeKey: plan.root.kind === 'issue'
+          ? `issue:${plan.root.issueCode}:shared`
+          : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`
+      });
+      if (!response) return;
+
+      for (const expression of plan.expressions.slice(1)) {
+        response = await viewerSearch.run({
+          expression,
+          payload: {
+            expression,
+            source_temp_id: response.result_id,
+            from: 0,
+            size: LINE_PAGE_SIZE_OPTIONS[0]
+          },
+          scopeKey: `shared:${response.result_id}`
+        });
+        if (!response) return;
+      }
+
+      const lastExpression = plan.expressions[plan.expressions.length - 1] ?? firstExpression;
+      const hits = response.lines.map((line) => ({
+        bundle_hash: line.bundle_hash,
+        file_id: line.file_id ?? '',
+        path: line.path,
+        snippet: line.content,
+        line_number: line.line_number
+      }));
+      openViewerTab({
+        id: `search:${response.result_id}`,
+        kind: 'search',
+        resultId: response.result_id,
+        title: formatSearchTokens(deserializeSearchTokens(lastExpression)),
+        pinned: false,
+        scrollTop: 0,
+        expression: lastExpression,
+        hits,
+        total: response.total,
+        from: 0,
+        pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+        pageHistory: [],
+        source: plan.root.kind === 'issue'
+          ? { kind: 'issue', issueCode: plan.root.issueCode }
+          : { kind: 'file', bundleHash: plan.root.bundleHash, fileId: plan.root.fileId },
+        queryPlan: plan
+      });
+      issueSearch.clear();
+      fileSearch.clear();
+      viewerSearch.clear();
+    } catch (error) {
+      setSourceActionMessage(error instanceof Error ? error.message : '分享搜索无法恢复');
+    }
+  }, [fileSearch, handleNodeClick, issueSearch, loadNode, openViewerTab, viewerSearch]);
+
+  const sharedRouteKey = `${location.pathname}${location.search}`;
+  useEffect(() => {
+    if (!sharedTab) {
+      restoredSharedRouteRef.current = null;
+      return;
+    }
+    if (
+      restoredSharedRouteRef.current === sharedRouteKey
+      || treeLoading
+      || treeError
+      || (hasFileContext && rootIds.length === 0)
+    ) return;
+    if (sharedTab.kind === 'file' && bundleId && sharedTab.bundleHash !== bundleId) return;
+    if (sharedTab.kind === 'search' && sharedTab.plan.root.kind === 'file' && bundleId && sharedTab.plan.root.bundleHash !== bundleId) return;
+    restoredSharedRouteRef.current = sharedRouteKey;
+    void restoreSharedTab(sharedTab);
+  }, [bundleId, hasFileContext, restoreSharedTab, rootIds.length, sharedRouteKey, sharedTab, treeError, treeLoading]);
 
   const loadViewerPage = viewerPagination.loadPage;
 
@@ -1376,6 +1546,9 @@ export function BundleView() {
               activeTabId={activeViewerTabId}
               onActivate={activateViewerTabWithState}
               onTogglePinned={togglePinnedViewerTab}
+              onShare={(tab) => {
+                void shareTab(tab);
+              }}
               onClose={closeTab}
               onCloseMany={closeTabs}
             />

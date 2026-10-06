@@ -8,6 +8,7 @@ type ViewerTabBarProps = {
   activeTabId: string | null;
   onActivate: (tab: ViewerTab) => void;
   onTogglePinned: (id: string) => void;
+  onShare: (tab: ViewerTab) => void;
   onClose: (id: string) => void;
   onCloseMany: (ids: string[]) => void;
 };
@@ -46,6 +47,7 @@ export function ViewerTabBar({
   activeTabId,
   onActivate,
   onTogglePinned,
+  onShare,
   onClose,
   onCloseMany
 }: ViewerTabBarProps) {
@@ -142,6 +144,15 @@ export function ViewerTabBar({
             >
               <button type="button" role="menuitem" className="flex w-full px-3 py-2 text-left hover:bg-sky-50 hover:text-sky-800" onClick={() => runAndDismiss(() => onTogglePinned(contextTab.id))}>
                 {contextTab.pinned ? '取消固定标签' : '固定标签'}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={contextTab.kind === 'temp'}
+                className="flex w-full px-3 py-2 text-left hover:bg-sky-50 hover:text-sky-800 disabled:cursor-not-allowed disabled:text-slate-300 disabled:hover:bg-transparent"
+                onClick={() => runAndDismiss(() => onShare(contextTab))}
+              >
+                分享当前标签
               </button>
               <div className="my-1 border-t border-slate-100" />
               <button type="button" role="menuitem" className="flex w-full px-3 py-2 text-left hover:bg-sky-50 hover:text-sky-800" onClick={() => runAndDismiss(() => onClose(contextTab.id))}>

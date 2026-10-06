@@ -7,6 +7,15 @@ type ViewerTabBase = {
   scrollTop: number;
 };
 
+export type SearchQueryRoot =
+  | { kind: 'issue'; issueCode: string }
+  | { kind: 'file'; bundleHash: string; fileId: string };
+
+export type SearchQueryPlan = {
+  root: SearchQueryRoot;
+  expressions: string[];
+};
+
 export type FileViewerTab = ViewerTabBase & {
   kind: 'file';
   nodeId: string;
@@ -29,6 +38,7 @@ export type SearchViewerTab = ViewerTabBase & {
     | { kind: 'issue'; issueCode: string }
     | { kind: 'file'; bundleHash: string; fileId: string }
     | { kind: 'temp'; resultId: string };
+  queryPlan?: SearchQueryPlan;
 };
 
 export type TempViewerTab = ViewerTabBase & {
