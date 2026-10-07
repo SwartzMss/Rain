@@ -1,12 +1,13 @@
 use actix_web::http::StatusCode;
 use serde::Serialize;
-use sqlx::FromRow;
+use sqlx::{FromRow, QueryBuilder, Sqlite};
 use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::error::{AppError, codes};
 
 const FILE_DELETION_BATCH_SIZE: i64 = 100;
+const FILE_DELETION_SQL_BATCH_SIZE: usize = 200;
 const FILE_DELETION_MAX_STEPS_PER_TURN: usize = 24;
 const FILE_DELETE_BUNDLE_BUSY_MESSAGE: &str =
     "当前文件仍在处理中，暂不可删除，请等待处理完成后重试";
@@ -105,6 +106,15 @@ struct FileDeletionBatchItemView {
     root_file_id: i64,
     state: String,
     error_code: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct DeletionTargetRow {
+    bundle_id: String,
+    file_id: i64,
+    bundle_status: Option<String>,
+    issue_status: Option<String>,
+    file_exists: i64,
 }
 
 impl From<FileDeletionJob> for FileDeletionJobResponse {
@@ -288,28 +298,44 @@ pub async fn enqueue_file_deletion_batch(
         &input,
         |conn, (batch_id, requested_by_user_id, parsed_items)| {
             Box::pin(async move {
+                let mut rows = std::collections::HashMap::new();
+                for parsed_batch in parsed_items.chunks(FILE_DELETION_SQL_BATCH_SIZE) {
+                    let mut validation =
+                        QueryBuilder::<Sqlite>::new("WITH requested(bundle_id,file_id) AS (");
+                    for (index, (bundle_id, file_id)) in parsed_batch.iter().enumerate() {
+                        if index > 0 {
+                            validation.push(" UNION ALL ");
+                        }
+                        validation
+                            .push("SELECT ")
+                            .push_bind(bundle_id)
+                            .push(" AS bundle_id, ")
+                            .push_bind(file_id)
+                            .push(" AS file_id");
+                    }
+                    validation.push(
+                        ") SELECT r.bundle_id,r.file_id,b.status AS bundle_status,i.status AS issue_status,CASE WHEN f.id IS NOT NULL AND f.status IS NOT 'DELETING' THEN 1 ELSE 0 END AS file_exists FROM requested r LEFT JOIN bundles b ON b.id=r.bundle_id LEFT JOIN issues i ON i.code=b.issue_code LEFT JOIN files f ON f.bundle_id=r.bundle_id AND f.id=r.file_id",
+                    );
+                    for row in validation
+                        .build_query_as::<DeletionTargetRow>()
+                        .fetch_all(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?
+                    {
+                        rows.insert((row.bundle_id.clone(), row.file_id), row);
+                    }
+                }
                 for (bundle_id, file_id) in parsed_items.iter() {
-                    let parent_ready: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE b.id=? AND b.status='READY' AND i.status='ACTIVE')",
-                    )
-                    .bind(bundle_id)
-                    .fetch_one(&mut *conn)
-                    .await
-                    .map_err(AppError::Database)?;
-                    if !parent_ready {
+                    let row = rows.get(&(bundle_id.clone(), *file_id));
+                    if row.is_none_or(|row| {
+                        row.bundle_status.as_deref() != Some("READY")
+                            || row.issue_status.as_deref() != Some("ACTIVE")
+                    }) {
                         return Err(AppError::Conflict(format!(
                             "bundle is no longer ready for file deletion: {bundle_id}"
                         )));
                     }
-                    let target_exists: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM files WHERE bundle_id=? AND id=? AND status IS NOT 'DELETING')",
-                    )
-                    .bind(bundle_id)
-                    .bind(file_id)
-                    .fetch_one(&mut *conn)
-                    .await
-                    .map_err(AppError::Database)?;
-                    if !target_exists {
+                    if row.is_none_or(|row| row.file_exists != 1) {
                         return Err(AppError::NotFound(format!("file {file_id}")));
                     }
                 }
@@ -324,39 +350,56 @@ pub async fn enqueue_file_deletion_batch(
                 .await
                 .map_err(AppError::Database)?;
 
-                for (bundle_id, file_id) in parsed_items.iter() {
-                    sqlx::query(
-                        "INSERT INTO file_deletion_batch_items(id,batch_id,bundle_id,root_file_id) VALUES(?,?,?,?)",
-                    )
-                    .bind(Uuid::new_v4().to_string())
-                    .bind(batch_id)
-                    .bind(bundle_id)
-                    .bind(file_id)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(AppError::Database)?;
+                for parsed_batch in parsed_items.chunks(FILE_DELETION_SQL_BATCH_SIZE) {
+                    let mut item_insert = QueryBuilder::<Sqlite>::new(
+                        "INSERT INTO file_deletion_batch_items(id,batch_id,bundle_id,root_file_id) ",
+                    );
+                    item_insert.push_values(
+                        parsed_batch.iter(),
+                        |mut row, (bundle_id, file_id)| {
+                            row.push_bind(Uuid::new_v4().to_string())
+                                .push_bind(batch_id)
+                                .push_bind(bundle_id)
+                                .push_bind(file_id);
+                        },
+                    );
+                    item_insert
+                        .build()
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(AppError::Database)?;
                 }
 
                 let affected_bundle_ids: HashSet<String> = parsed_items
                     .iter()
                     .map(|(bundle_id, _)| bundle_id.clone())
                     .collect();
-                for bundle_id in affected_bundle_ids {
-                    sqlx::query(
-                        "INSERT OR IGNORE INTO bundle_search_indexes (bundle_id, backend, state) VALUES (?, 'sqlite_fts', 'LEGACY')",
-                    )
-                    .bind(&bundle_id)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(AppError::Database)?;
-                    sqlx::query(
-                        "UPDATE bundle_search_indexes SET visibility_revision = visibility_revision + 1, state = CASE WHEN backend = 'tantivy' AND generation > 0 THEN 'NEEDS_REBUILD' ELSE state END, updated_at = CURRENT_TIMESTAMP WHERE bundle_id = ?",
-                    )
-                    .bind(&bundle_id)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(AppError::Database)?;
+                let mut index_insert = QueryBuilder::<Sqlite>::new(
+                    "INSERT OR IGNORE INTO bundle_search_indexes (bundle_id, backend, state) SELECT id, 'sqlite_fts', 'LEGACY' FROM bundles WHERE id IN (",
+                );
+                let mut separated = index_insert.separated(", ");
+                for bundle_id in &affected_bundle_ids {
+                    separated.push_bind(bundle_id);
                 }
+                separated.push_unseparated(")");
+                index_insert
+                    .build()
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+                let mut index_update = QueryBuilder::<Sqlite>::new(
+                    "UPDATE bundle_search_indexes SET visibility_revision = visibility_revision + 1, state = CASE WHEN backend = 'tantivy' AND generation > 0 THEN 'NEEDS_REBUILD' ELSE state END, updated_at = CURRENT_TIMESTAMP WHERE bundle_id IN (",
+                );
+                let mut separated = index_update.separated(", ");
+                for bundle_id in &affected_bundle_ids {
+                    separated.push_bind(bundle_id);
+                }
+                separated.push_unseparated(")");
+                index_update
+                    .build()
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
                 Ok(())
             })
         },
@@ -442,8 +485,19 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
         .fetch_all(pool)
         .await
         .map_err(AppError::Database)?;
+        let mut active_bundles: HashSet<String> = sqlx::query_scalar(
+            "SELECT bundle_id FROM file_deletion_jobs WHERE state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?
+        .into_iter()
+        .collect();
         for item in items {
             if item.state == "QUEUED" {
+                if active_bundles.contains(&item.bundle_id) {
+                    continue;
+                }
                 match enqueue_file_deletion(
                     pool,
                     &item.bundle_id,
@@ -453,6 +507,7 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
                 .await
                 {
                     Ok(job) => {
+                        active_bundles.insert(item.bundle_id.clone());
                         let input = (job.id, item.id.clone());
                         crate::db::write::run(
                             pool,
@@ -473,7 +528,9 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
                         .await?;
                         changed += 1;
                     }
-                    Err(error) if is_retryable_enqueue_conflict(&error) => {}
+                    Err(error) if is_retryable_enqueue_conflict(&error) => {
+                        active_bundles.insert(item.bundle_id.clone());
+                    }
                     Err(error) => {
                         let input = (error_code(&error), item.id.clone());
                         crate::db::write::run(
