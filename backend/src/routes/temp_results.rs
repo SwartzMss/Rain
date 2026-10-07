@@ -23,7 +23,7 @@ use crate::{
     auth::extractor::{OptionalUser, RequireBusinessUser, RequireUser},
     error::AppError,
     log_expression,
-    repositories::files::{FileRow, ensure_text_preview, fetch_file, resolve_file_path},
+    repositories::files::{ensure_text_preview, fetch_file, resolve_file_path},
     services::temp_results::{
         MatchMetadata, SPARSE_CHECKPOINT_INDEX_MAGIC, SPARSE_CHECKPOINT_RECORD_BYTES,
         SparseCheckpoint, TempResultExecutor, TempSource, select_checkpoint,
