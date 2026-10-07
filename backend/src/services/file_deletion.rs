@@ -1,7 +1,7 @@
 use actix_web::http::StatusCode;
 use serde::Serialize;
 use sqlx::{FromRow, QueryBuilder, Sqlite};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::error::{AppError, codes};
@@ -452,6 +452,31 @@ pub async fn load_file_deletion_batch(
     })
 }
 
+async fn start_file_deletion_batch_item(
+    pool: &sqlx::SqlitePool,
+    item_id: &str,
+    job_id: &str,
+) -> Result<(), AppError> {
+    let input = (job_id.to_owned(), item_id.to_owned());
+    crate::db::write::run(
+        pool,
+        "start file deletion batch item",
+        &input,
+        |conn, (job_id, item_id)| {
+            Box::pin(async move {
+                sqlx::query("UPDATE file_deletion_batch_items SET state='RUNNING', job_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
+                    .bind(job_id)
+                    .bind(item_id)
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(AppError::Database)
+            })
+        },
+    )
+    .await
+}
+
 pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<usize, AppError> {
     let batches: Vec<(String, String)> = sqlx::query_as(
         "SELECT id,requested_by_user_id FROM file_deletion_batches WHERE state IN ('QUEUED','RUNNING') ORDER BY created_at,id LIMIT 32",
@@ -485,16 +510,27 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
         .fetch_all(pool)
         .await
         .map_err(AppError::Database)?;
-        let mut active_bundles: HashSet<String> = sqlx::query_scalar(
-            "SELECT bundle_id FROM file_deletion_jobs WHERE state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+        let active_jobs: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT id,bundle_id,root_file_id FROM file_deletion_jobs WHERE state IN ('QUEUED','RUNNING','RETRY_WAIT')",
         )
         .fetch_all(pool)
         .await
-        .map_err(AppError::Database)?
-        .into_iter()
-        .collect();
+        .map_err(AppError::Database)?;
+        let mut active_bundles = HashSet::with_capacity(active_jobs.len());
+        let mut active_jobs_by_bundle = HashMap::with_capacity(active_jobs.len());
+        for (job_id, bundle_id, root_file_id) in active_jobs {
+            active_bundles.insert(bundle_id.clone());
+            active_jobs_by_bundle.insert(bundle_id, (root_file_id, job_id));
+        }
         for item in items {
             if item.state == "QUEUED" {
+                if let Some((root_file_id, job_id)) = active_jobs_by_bundle.get(&item.bundle_id)
+                    && *root_file_id == item.root_file_id
+                {
+                    start_file_deletion_batch_item(pool, &item.id, job_id).await?;
+                    changed += 1;
+                    continue;
+                }
                 if active_bundles.contains(&item.bundle_id) {
                     continue;
                 }
@@ -508,24 +544,7 @@ pub async fn process_file_deletion_batches(pool: &sqlx::SqlitePool) -> Result<us
                 {
                     Ok(job) => {
                         active_bundles.insert(item.bundle_id.clone());
-                        let input = (job.id, item.id.clone());
-                        crate::db::write::run(
-                            pool,
-                            "start file deletion batch item",
-                            &input,
-                            |conn, (job_id, item_id)| {
-                                Box::pin(async move {
-                                    sqlx::query("UPDATE file_deletion_batch_items SET state='RUNNING', job_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='QUEUED'")
-                                        .bind(job_id)
-                                        .bind(item_id)
-                                        .execute(conn)
-                                        .await
-                                        .map(|_| ())
-                                        .map_err(AppError::Database)
-                                })
-                            },
-                        )
-                        .await?;
+                        start_file_deletion_batch_item(pool, &item.id, &job.id).await?;
                         changed += 1;
                     }
                     Err(error) if is_retryable_enqueue_conflict(&error) => {
@@ -1333,6 +1352,75 @@ mod tests {
         assert_eq!(finished.status, "SUCCEEDED");
         assert_eq!(finished.total_items, 2);
         assert_eq!(finished.completed_items, 2);
+        assert_eq!(finished.failed_items, 0);
+    }
+
+    #[tokio::test]
+    async fn batch_coordinator_recovers_a_job_created_before_item_link() {
+        let pool = crate::db::init_pool("sqlite::memory:").expect("init pool");
+        crate::db::prepare_schema(&pool, true)
+            .await
+            .expect("prepare schema");
+        sqlx::query("INSERT INTO issues (code, name) VALUES ('RECOVER', 'RECOVER')")
+            .execute(&pool)
+            .await
+            .expect("insert issue");
+        sqlx::query("INSERT INTO users(id,username,username_normalized,password_hash) VALUES('recover-owner','recover-owner','recover-owner','hash')")
+            .execute(&pool)
+            .await
+            .expect("insert owner");
+        sqlx::query(
+            "INSERT INTO bundles (id, issue_code, hash, name, status) VALUES ('recover-bundle', 'RECOVER', 'recover-hash', 'recover', 'READY')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bundle");
+        let file_id: i64 = sqlx::query_scalar(
+            "INSERT INTO files (bundle_id, name, path, is_dir, size_bytes) VALUES ('recover-bundle', 'recover.log', '/recover.log', 0, 1) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert file");
+
+        let batch = enqueue_file_deletion_batch(
+            &pool,
+            "recover-owner",
+            &[FileDeletionBatchItemInput {
+                bundle_id: "recover-bundle".into(),
+                file_id: file_id.to_string(),
+            }],
+        )
+        .await
+        .expect("enqueue batch");
+        let job = enqueue_file_deletion(&pool, "recover-bundle", file_id, "recover-owner")
+            .await
+            .expect("enqueue job before linking batch item");
+
+        let changed = process_file_deletion_batches(&pool)
+            .await
+            .expect("recover batch item");
+        assert_eq!(changed, 1);
+        let linked: (String, String) =
+            sqlx::query_as("SELECT state,job_id FROM file_deletion_batch_items WHERE batch_id=?")
+                .bind(&batch.batch_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load recovered batch item");
+        assert_eq!(linked, ("RUNNING".into(), job.id));
+
+        for _ in 0..4 {
+            process_file_deletion_jobs(&pool)
+                .await
+                .expect("process recovered deletion job");
+        }
+        process_file_deletion_batches(&pool)
+            .await
+            .expect("finish recovered batch");
+        let finished = load_file_deletion_batch(&pool, &batch.batch_id, "recover-owner")
+            .await
+            .expect("load recovered batch");
+        assert_eq!(finished.status, "SUCCEEDED");
+        assert_eq!(finished.completed_items, 1);
         assert_eq!(finished.failed_items, 0);
     }
 
