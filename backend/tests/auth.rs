@@ -11,11 +11,31 @@ use backend::{
     AppState, RecoveryRuntime, config::AppLimits, db, repositories::bootstrap_admin, routes,
 };
 use serde_json::{Value, json};
+use sqlx::SqlitePool;
+
+async fn set_registration_mode(pool: &SqlitePool, allowed: bool, requires_invite: bool) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO system_settings(id,allow_registration,issue_inactive_days) VALUES(1,?,0)",
+    )
+    .bind(allowed as i64)
+    .execute(pool)
+    .await
+    .expect("seed registration settings");
+    sqlx::query(
+        "UPDATE system_settings SET allow_registration=?,registration_requires_invite=? WHERE id=1",
+    )
+    .bind(allowed as i64)
+    .bind(requires_invite as i64)
+    .execute(pool)
+    .await
+    .expect("set registration mode");
+}
 
 #[actix_web::test]
 async fn recovery_gate_blocks_api_but_allows_health_endpoints() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, false).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let mut app_state = AppState::new(pool, PathBuf::from("data"), AppLimits::default());
     app_state.recovery = Arc::new(RecoveryRuntime::default());
     let state = web::Data::new(app_state);
@@ -114,6 +134,7 @@ async fn recovery_gate_blocks_api_but_allows_health_endpoints() {
 async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     bootstrap_admin::bootstrap_admin(&pool, "admin", "strong-password")
         .await
         .expect("bootstrap");
@@ -240,6 +261,7 @@ async fn administrator_login_failures_are_exempt_but_other_users_are_limited() {
 async fn session_dependent_responses_are_not_cacheable() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
@@ -337,6 +359,7 @@ async fn session_dependent_responses_are_not_cacheable() {
 async fn registration_login_me_and_logout_follow_the_public_contract() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let state = web::Data::new(AppState::new(
         pool.clone(),
         PathBuf::from("data"),
@@ -501,6 +524,7 @@ async fn registration_login_me_and_logout_follow_the_public_contract() {
 async fn unsafe_cross_origin_requests_are_rejected() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let app = test::init_service(
         App::new()
             .wrap(from_fn(backend::auth::same_origin::enforce_same_origin))
@@ -533,6 +557,7 @@ async fn unsafe_cross_origin_requests_are_rejected() {
 async fn same_origin_browser_requests_forwarded_by_the_dev_proxy_are_allowed() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let app = test::init_service(
         App::new()
             .wrap(from_fn(backend::auth::same_origin::enforce_same_origin))
@@ -601,6 +626,7 @@ async fn guest_write_routes_are_rejected() {
 async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(AppState::new(
@@ -842,6 +868,7 @@ async fn saved_searches_are_private_and_owned_mutations_cannot_be_bypassed() {
 async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let state = web::Data::new(AppState::new(
         pool.clone(),
         PathBuf::from("data"),
@@ -994,6 +1021,7 @@ async fn changing_password_revokes_all_old_sessions_and_issues_a_new_cookie() {
 async fn password_change_in_flight_and_attempt_limit_reject_before_password_verification() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let state = web::Data::new(AppState::new(
         pool.clone(),
         PathBuf::from("data"),
@@ -1094,6 +1122,7 @@ async fn password_change_in_flight_and_attempt_limit_reject_before_password_veri
 async fn password_change_preserves_argon2_capacity_errors() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, true, false).await;
     let state = web::Data::new(AppState::new(
         pool,
         PathBuf::from("data"),
@@ -1179,6 +1208,7 @@ async fn password_change_preserves_argon2_capacity_errors() {
 async fn registration_switch_does_not_block_existing_user_login() {
     let pool = db::init_pool("sqlite::memory:").expect("pool");
     db::prepare_schema(&pool, true).await.expect("schema");
+    set_registration_mode(&pool, false, false).await;
     let password_hash = backend::auth::password::hash_password("password123").expect("hash");
     backend::repositories::users::create_user(&pool, "existing-user", &password_hash)
         .await

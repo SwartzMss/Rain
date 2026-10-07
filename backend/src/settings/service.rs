@@ -400,9 +400,9 @@ impl SettingsService {
             let resource_modes_json = resource_modes_json.clone();
             Box::pin(async move {
                 let updated = sqlx::query(
-                    "UPDATE system_settings SET allow_registration=?,login_ip_limit_per_minute=?,login_username_failure_limit_per_5_minutes=?,argon2_concurrency=?,issue_inactive_days=?,issue_max_content_size=?,archive_max_working_size=?,upload_concurrent_processing_tasks=?,upload_concurrent_receive_tasks=?,upload_max_tmp_bytes=?,indexing_max_indexed_line_size=?,search_tantivy_max_writers=?,search_tantivy_writer_heap_size=?,api_file_preview_size=?,api_max_preview_line_size=?,api_default_line_page_size=?,api_max_line_page_size=?,api_max_line_page_bytes=?,api_concurrent_line_reads=?,api_concurrent_line_reads_per_client=?,api_max_search_results=?,api_max_search_window=?,temp_results_max_result_size=?,temp_results_max_total_size=?,temp_results_max_records=?,temp_results_concurrent_materializations=?,temp_results_max_scan_duration_seconds=?,cleanup_exempt_usernames_json=?,resource_modes_json=?,cleanup_exempt_users_initialized=1,updated_by_user_id=?,updated_at=CURRENT_TIMESTAMP,revision=revision+1 WHERE id=1 AND revision=?",
+                    "UPDATE system_settings SET allow_registration=?,registration_requires_invite=?,login_ip_limit_per_minute=?,login_username_failure_limit_per_5_minutes=?,argon2_concurrency=?,issue_inactive_days=?,issue_max_content_size=?,archive_max_working_size=?,upload_concurrent_processing_tasks=?,upload_concurrent_receive_tasks=?,upload_max_tmp_bytes=?,indexing_max_indexed_line_size=?,search_tantivy_max_writers=?,search_tantivy_writer_heap_size=?,api_file_preview_size=?,api_max_preview_line_size=?,api_default_line_page_size=?,api_max_line_page_size=?,api_max_line_page_bytes=?,api_concurrent_line_reads=?,api_concurrent_line_reads_per_client=?,api_max_search_results=?,api_max_search_window=?,temp_results_max_result_size=?,temp_results_max_total_size=?,temp_results_max_records=?,temp_results_concurrent_materializations=?,temp_results_max_scan_duration_seconds=?,cleanup_exempt_usernames_json=?,resource_modes_json=?,cleanup_exempt_users_initialized=1,updated_by_user_id=?,updated_at=CURRENT_TIMESTAMP,revision=revision+1 WHERE id=1 AND revision=?",
                 )
-                .bind(values.allow_registration as i64).bind(values.login_ip_limit_per_minute as i64).bind(values.login_username_failure_limit_per_5_minutes as i64).bind(values.argon2_concurrency as i64).bind(values.issue_inactive_days as i64).bind(values.issue_max_content_size as i64).bind(values.archive_max_working_size as i64).bind(values.upload_concurrent_processing_tasks as i64).bind(values.upload_concurrent_receive_tasks as i64).bind(values.upload_max_tmp_bytes as i64).bind(values.indexing_max_indexed_line_size as i64).bind(values.search_tantivy_max_writers as i64).bind(values.search_tantivy_writer_heap_size as i64).bind(values.api_file_preview_size as i64).bind(values.api_max_preview_line_size as i64).bind(values.api_default_line_page_size).bind(values.api_max_line_page_size).bind(values.api_max_line_page_bytes as i64).bind(values.api_concurrent_line_reads as i64).bind(values.api_concurrent_line_reads_per_client as i64).bind(values.api_max_search_results).bind(values.api_max_search_window).bind(values.temp_results_max_result_size as i64).bind(values.temp_results_max_total_size as i64).bind(values.temp_results_max_records).bind(values.temp_results_concurrent_materializations as i64).bind(values.temp_results_max_scan_duration_seconds as i64).bind(serde_json::to_string(&values.cleanup_exempt_usernames).map_err(|error| AppError::Config(error.to_string()))?).bind(resource_modes_json).bind(input.1.as_deref()).bind(input.0)
+                .bind(values.allow_registration as i64).bind(values.registration_requires_invite as i64).bind(values.login_ip_limit_per_minute as i64).bind(values.login_username_failure_limit_per_5_minutes as i64).bind(values.argon2_concurrency as i64).bind(values.issue_inactive_days as i64).bind(values.issue_max_content_size as i64).bind(values.archive_max_working_size as i64).bind(values.upload_concurrent_processing_tasks as i64).bind(values.upload_concurrent_receive_tasks as i64).bind(values.upload_max_tmp_bytes as i64).bind(values.indexing_max_indexed_line_size as i64).bind(values.search_tantivy_max_writers as i64).bind(values.search_tantivy_writer_heap_size as i64).bind(values.api_file_preview_size as i64).bind(values.api_max_preview_line_size as i64).bind(values.api_default_line_page_size).bind(values.api_max_line_page_size).bind(values.api_max_line_page_bytes as i64).bind(values.api_concurrent_line_reads as i64).bind(values.api_concurrent_line_reads_per_client as i64).bind(values.api_max_search_results).bind(values.api_max_search_window).bind(values.temp_results_max_result_size as i64).bind(values.temp_results_max_total_size as i64).bind(values.temp_results_max_records).bind(values.temp_results_concurrent_materializations as i64).bind(values.temp_results_max_scan_duration_seconds as i64).bind(serde_json::to_string(&values.cleanup_exempt_usernames).map_err(|error| AppError::Config(error.to_string()))?).bind(resource_modes_json).bind(input.1.as_deref()).bind(input.0)
                     .execute(&mut *conn).await.map_err(AppError::Database)?
                     .rows_affected();
                 if updated != 1 {
@@ -422,11 +422,11 @@ impl SettingsService {
                         .iter()
                         .any(|changed_field| changed_field == field)
                 };
-                if changed("allow_registration") || changed("login_ip_limit_per_minute") || changed("login_username_failure_limit_per_5_minutes") {
+        if changed("allow_registration") || changed("registration_requires_invite") || changed("login_ip_limit_per_minute") || changed("login_username_failure_limit_per_5_minutes") {
                     sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,action,old_value,new_value,client_ip,user_agent,operation_id,details_json) VALUES(?,'USER',?,'AUTH_SETTINGS_UPDATED',?,?,?,?,?,?)")
                         .bind(uuid::Uuid::new_v4().to_string()).bind(input.1.as_deref())
-                        .bind(format!("registration={};ip_limit={};username_limit={}", old_values.allow_registration, old_values.login_ip_limit_per_minute, old_values.login_username_failure_limit_per_5_minutes))
-                        .bind(format!("registration={};ip_limit={};username_limit={}", values.allow_registration, values.login_ip_limit_per_minute, values.login_username_failure_limit_per_5_minutes))
+                        .bind(format!("registration={};requires_invite={};ip_limit={};username_limit={}", old_values.allow_registration, old_values.registration_requires_invite, old_values.login_ip_limit_per_minute, old_values.login_username_failure_limit_per_5_minutes))
+                        .bind(format!("registration={};requires_invite={};ip_limit={};username_limit={}", values.allow_registration, values.registration_requires_invite, values.login_ip_limit_per_minute, values.login_username_failure_limit_per_5_minutes))
                         .bind(input.5.as_deref()).bind(input.6.as_deref()).bind(&input.2).bind(&details)
                         .execute(&mut *conn).await.map_err(AppError::Database)?;
                 }
@@ -505,6 +505,7 @@ impl SettingsService {
                 .map_err(AppError::Database)?;
                 sqlx::query(
                     "UPDATE system_settings SET
+                    registration_requires_invite=COALESCE(registration_requires_invite,?),
                     session_ttl_seconds=COALESCE(session_ttl_seconds,?),
                     register_ip_limit_per_hour=COALESCE(register_ip_limit_per_hour,?),
                     argon2_concurrency=COALESCE(argon2_concurrency,?),
@@ -534,8 +535,9 @@ impl SettingsService {
                     temp_results_max_scan_duration_seconds=COALESCE(temp_results_max_scan_duration_seconds,?),
                     cleanup_exempt_usernames_json=CASE WHEN cleanup_exempt_users_initialized=0 THEN ? ELSE cleanup_exempt_usernames_json END,
                     cleanup_exempt_users_initialized=CASE WHEN cleanup_exempt_users_initialized=0 THEN 1 ELSE cleanup_exempt_users_initialized END
-                    WHERE id=1 AND (session_ttl_seconds IS NULL OR register_ip_limit_per_hour IS NULL OR argon2_concurrency IS NULL OR issue_inactive_days IS NULL OR issue_max_content_size IS NULL OR archive_max_working_size IS NULL OR upload_concurrent_processing_tasks IS NULL OR upload_concurrent_receive_tasks IS NULL OR upload_max_tmp_bytes IS NULL OR indexing_max_indexed_line_size IS NULL OR search_tantivy_max_writers IS NULL OR search_tantivy_writer_heap_size IS NULL OR api_file_preview_size IS NULL OR api_max_preview_line_size IS NULL OR api_default_line_page_size IS NULL OR api_max_line_page_size IS NULL OR api_max_line_page_bytes IS NULL OR api_concurrent_line_reads IS NULL OR api_concurrent_line_reads_per_client IS NULL OR api_default_search_results IS NULL OR api_max_search_results IS NULL OR api_max_search_window IS NULL OR temp_results_max_result_size IS NULL OR temp_results_max_total_size IS NULL OR temp_results_max_records IS NULL OR temp_results_concurrent_materializations IS NULL OR temp_results_max_scan_duration_seconds IS NULL OR cleanup_exempt_users_initialized=0)",
+                    WHERE id=1 AND (registration_requires_invite IS NULL OR session_ttl_seconds IS NULL OR register_ip_limit_per_hour IS NULL OR argon2_concurrency IS NULL OR issue_inactive_days IS NULL OR issue_max_content_size IS NULL OR archive_max_working_size IS NULL OR upload_concurrent_processing_tasks IS NULL OR upload_concurrent_receive_tasks IS NULL OR upload_max_tmp_bytes IS NULL OR indexing_max_indexed_line_size IS NULL OR search_tantivy_max_writers IS NULL OR search_tantivy_writer_heap_size IS NULL OR api_file_preview_size IS NULL OR api_max_preview_line_size IS NULL OR api_default_line_page_size IS NULL OR api_max_line_page_size IS NULL OR api_max_line_page_bytes IS NULL OR api_concurrent_line_reads IS NULL OR api_concurrent_line_reads_per_client IS NULL OR api_default_search_results IS NULL OR api_max_search_results IS NULL OR api_max_search_window IS NULL OR temp_results_max_result_size IS NULL OR temp_results_max_total_size IS NULL OR temp_results_max_records IS NULL OR temp_results_concurrent_materializations IS NULL OR temp_results_max_scan_duration_seconds IS NULL OR cleanup_exempt_users_initialized=0)",
                 )
+                .bind(values.registration_requires_invite as i64)
                 .bind(values.session_ttl_seconds as i64)
                 .bind(values.register_ip_limit_per_hour as i64)
                 .bind(values.argon2_concurrency as i64)
@@ -640,6 +642,10 @@ impl SettingsService {
         let mut values = fallback.clone();
         values.allow_registration = row
             .try_get::<i64, _>("allow_registration")
+            .map_err(AppError::Database)?
+            != 0;
+        values.registration_requires_invite = row
+            .try_get::<i64, _>("registration_requires_invite")
             .map_err(AppError::Database)?
             != 0;
         values.session_ttl_seconds = u64_value("session_ttl_seconds", values.session_ttl_seconds)?;

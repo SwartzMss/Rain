@@ -9,7 +9,7 @@ import {
   type ReactNode
 } from 'react';
 import { rainApi } from '../api/client';
-import type { Credentials, User } from '../api/types';
+import type { Credentials, RegisterPayload, User } from '../api/types';
 import { AuthOperationGeneration } from './AuthOperationGeneration';
 import {
   authStateAfterRefreshFailure,
@@ -20,7 +20,7 @@ import {
 interface AuthContextValue {
   state: AuthState;
   login(credentials: Credentials): Promise<User>;
-  register(credentials: Credentials): Promise<User>;
+  register(credentials: RegisterPayload): Promise<User>;
   changePassword(payload: { current_password: string; new_password: string }): Promise<void>;
   logout(): Promise<void>;
   refresh(): Promise<void>;
@@ -66,7 +66,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return user;
   }, []);
 
-  const register = useCallback((credentials: Credentials) => {
+  const register = useCallback((credentials: RegisterPayload) => {
     return rainApi.register(credentials);
   }, []);
 

@@ -8,6 +8,13 @@ pub struct CredentialsRequest {
     pub password: String,
 }
 
+#[derive(Deserialize)]
+pub struct RegisterRequest {
+    pub username: String,
+    pub password: String,
+    pub invite_code: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChangePasswordRequest {
     pub current_password: String,

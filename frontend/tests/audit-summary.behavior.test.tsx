@@ -24,6 +24,8 @@ function auditLog(overrides: Partial<AuditLog>): AuditLog {
 
 it("labels settings audit actions and hides the initialization snapshot", () => {
   expect(auditActionLabel("SETTINGS_UPDATED")).toBe("系统配置变更");
+  expect(auditActionLabel("AUTH_SETTINGS_UPDATED")).toBe("认证设置变更");
+  expect(auditActionLabel("INVITATION_REDEEMED")).toBe("使用邀请码注册");
   expect(auditActionLabel("SYSTEM_SETTINGS_INITIALIZED")).toBe("系统配置初始化");
 
   const summary = formatAuditSummary(
@@ -35,6 +37,15 @@ it("labels settings audit actions and hides the initialization snapshot", () => 
   expect(summary.summary).toBe("系统配置已初始化");
   expect(summary.changes).toEqual([]);
   expect(summary.summary).not.toContain("must-not-display");
+});
+
+it("summarizes the invite-only registration setting without exposing secrets", () => {
+  const summary = formatAuditSummary(auditLog({
+    details_json: JSON.stringify({ changes: [{ field: "registration_requires_invite", old_value: false, new_value: true }] }),
+  }));
+
+  expect(summary.allChanges).toEqual(["邀请码注册：否 → 是"]);
+  expect(summary.allChanges.join(" ")).not.toContain("code_hash");
 });
 
 it("formats structured settings changes, units, booleans, resource modes and redaction", () => {

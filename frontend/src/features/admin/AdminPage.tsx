@@ -9,6 +9,7 @@ import type {
   AuthRateLimitEntry,
   RegistrationSettingField,
   RegistrationSettings,
+  RegistrationMode,
   ResourceMode,
 } from "../../api/types";
 import { useAuth } from "../../auth/AuthContext";
@@ -31,6 +32,7 @@ import {
   settingHelpText,
   settingInputValue,
 } from "./settingsFields";
+import { InvitationsPage } from "./InvitationsPage";
 
 function formatRuntimeBytes(value: number | null): string {
   if (value === null) return "未知";
@@ -116,6 +118,9 @@ function AdminShell({ children }: { children: ReactNode }) {
       <nav className="flex overflow-x-auto rounded-xl border border-slate-200/90 bg-white/90 px-3 shadow-sm backdrop-blur">
         <NavLink className={navClass} to="/admin/users">
           用户管理
+        </NavLink>
+        <NavLink className={navClass} to="/admin/invitations">
+          邀请码
         </NavLink>
         <NavLink className={navClass} to="/admin/audit-logs">
           审计日志
@@ -386,6 +391,10 @@ function AdminGuard({ children }: { children: ReactNode }) {
   return <AdminShell>{children}</AdminShell>;
 }
 
+export function InvitationsAdminPage() {
+  return <AdminGuard><InvitationsPage /></AdminGuard>;
+}
+
 const legacySettingKeys = new Set([
   "allow_registration",
   "session_ttl_seconds",
@@ -519,7 +528,7 @@ export function AdminPage() {
 }
 
 export function AdminSettingsPage() {
-  const [allowed, setAllowed] = useState(true);
+  const [registrationMode, setRegistrationMode] = useState<RegistrationMode>("INVITE_ONLY");
   const [ipLimit, setIpLimit] = useState(20);
   const [usernameLimit, setUsernameLimit] = useState(10);
   const [issueInactiveDays, setIssueInactiveDays] = useState<number | "">(7);
@@ -555,7 +564,7 @@ export function AdminSettingsPage() {
     setLoadError(null);
     try {
       const value = await rainApi.fetchAdminSettings();
-      setAllowed(value.allow_registration);
+      setRegistrationMode(value.registration_mode ?? (!value.allow_registration ? "CLOSED" : value.registration_requires_invite ? "INVITE_ONLY" : "OPEN"));
       setIpLimit(value.login_ip_limit_per_minute);
       setUsernameLimit(value.login_username_failure_limit_per_5_minutes);
       setIssueInactiveDays(value.issue_inactive_days);
@@ -609,7 +618,7 @@ export function AdminSettingsPage() {
     void load();
     void loadCleanupUsers();
   }, [load, loadCleanupUsers]);
-  const save = async (value?: boolean, thresholds = false) => {
+  const save = async (mode?: RegistrationMode, thresholds = false) => {
     setFeedbackSection(thresholds ? "rate-limits" : "registration");
     setSaving(true);
     setMessage(null);
@@ -617,8 +626,11 @@ export function AdminSettingsPage() {
     try {
       const result = thresholds
         ? await rainApi.updateAdminSettings(undefined, ipLimit, usernameLimit)
-        : await rainApi.updateAdminSettings(value);
-      setAllowed(result.allow_registration);
+        : await rainApi.updateAdminSettingsV2(revision ?? "0", {
+            allow_registration: mode !== "CLOSED",
+            registration_requires_invite: mode === "INVITE_ONLY",
+          });
+      setRegistrationMode(result.registration_mode ?? (!result.allow_registration ? "CLOSED" : result.registration_requires_invite ? "INVITE_ONLY" : "OPEN"));
       setIpLimit(result.login_ip_limit_per_minute);
       setUsernameLimit(result.login_username_failure_limit_per_5_minutes);
       setIssueInactiveDays(result.issue_inactive_days);
@@ -982,29 +994,21 @@ export function AdminSettingsPage() {
         <SettingsSection
           icon="registration"
           title="用户注册"
-          description="控制新用户是否可以注册。关闭后，将无法注册新用户，但已有用户仍可正常登录和使用系统。"
+          description="选择新用户注册方式。邀请码模式需要管理员发放的邀请码；关闭后已有账户仍可登录。"
         >
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-4">
-            <span className="text-sm font-medium text-slate-600">用户注册</span>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                aria-label="用户注册"
-                aria-pressed={allowed}
-                disabled={controlsDisabled}
-                onClick={() => void save(!allowed)}
-                className={`relative h-7 w-12 rounded-full transition-colors ${allowed ? "bg-cyan-600" : "bg-slate-300"} disabled:cursor-not-allowed disabled:opacity-50`}
-              >
-                <span
-                  className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm transition-all ${allowed ? "left-6" : "left-1"}`}
-                />
-              </button>
-              <span
-                className={`min-w-10 text-sm font-medium ${allowed ? "text-slate-700" : "text-slate-500"}`}
-              >
-                {allowed ? "已启用" : "已关闭"}
-              </span>
-            </div>
+          <div className="mt-4 border-t border-slate-100 pt-4">
+            <label className="block text-sm font-medium text-slate-700" htmlFor="registration-mode">注册方式</label>
+            <select
+              id="registration-mode"
+              className="mt-2 w-full max-w-md rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-900 shadow-sm outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100 disabled:bg-slate-50"
+              value={registrationMode}
+              disabled={controlsDisabled || saving}
+              onChange={(event) => void save(event.target.value as RegistrationMode)}
+            >
+              <option value="INVITE_ONLY">仅允许邀请码注册</option>
+              <option value="OPEN">开放注册</option>
+              <option value="CLOSED">关闭注册</option>
+            </select>
           </div>
           {sectionFeedback("registration")}
         </SettingsSection>

@@ -1533,6 +1533,7 @@ async fn reset_schema(pool: &SqlitePool) -> Result<(), AppError> {
         "DROP TABLE IF EXISTS skill_reviews",
         "DROP TABLE IF EXISTS user_skills",
         "DROP TABLE IF EXISTS ai_provider_settings",
+        "DROP TABLE IF EXISTS invitations",
         "DROP TABLE IF EXISTS admin_audit_logs",
         "DROP TABLE IF EXISTS system_settings",
         "DROP TABLE IF EXISTS saved_searches",

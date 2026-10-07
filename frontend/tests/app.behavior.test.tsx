@@ -6,7 +6,7 @@ import { rainApi } from '../src/api/client';
 import App from '../src/App';
 
 vi.mock('../src/api/client', () => ({
-  rainApi: { me: vi.fn(), login: vi.fn(), register: vi.fn(), logout: vi.fn(), changePassword: vi.fn() }
+  rainApi: { me: vi.fn(), login: vi.fn(), register: vi.fn(), logout: vi.fn(), changePassword: vi.fn(), fetchRegistrationStatus: vi.fn() }
 }));
 
 vi.mock('../src/features/auth/AuthPage', () => ({ AuthPage: () => <p>auth page</p> }));
@@ -19,7 +19,8 @@ vi.mock('../src/features/admin/AdminPage', () => ({
   AdminUsersPage: () => <p>admin users page</p>,
   AuditLogsPage: () => <p>audit logs</p>,
   AdminSettingsPage: () => <p>admin settings</p>,
-  AuthRateLimitsPage: () => <p>auth rate limits</p>
+  AuthRateLimitsPage: () => <p>auth rate limits</p>,
+  InvitationsAdminPage: () => <p>admin invitations</p>
 }));
 
 function renderApp(path = '/') {
@@ -33,6 +34,7 @@ function renderApp(path = '/') {
 describe('application behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(rainApi.fetchRegistrationStatus).mockResolvedValue({ allow_registration: true });
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
   });
 
@@ -47,6 +49,14 @@ describe('application behavior', () => {
     expect(screen.getByRole('link', { name: '报告问题（新窗口打开）' })).toHaveAttribute('href', 'https://github.com/SwartzMss/Rain/issues');
     expect(screen.queryByText('日志分析工具')).not.toBeInTheDocument();
     expect(screen.getByText('服务正常')).toBeInTheDocument();
+  });
+
+  it('hides the global registration entry when registration is closed', async () => {
+    vi.mocked(rainApi.me).mockResolvedValueOnce({ authenticated: false, user: null });
+    vi.mocked(rainApi.fetchRegistrationStatus).mockResolvedValueOnce({ allow_registration: false });
+    renderApp();
+    await waitFor(() => expect(screen.getByText('访客模式')).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('link', { name: '注册' })).not.toBeInTheDocument());
   });
 
   it('keeps the readiness indicator in checking state until the request settles', async () => {

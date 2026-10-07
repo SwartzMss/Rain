@@ -646,6 +646,7 @@ fn settings_response(
         "schema_version": 2,
         "revision": snapshot.revision.to_string(),
         "allow_registration": snapshot.configured.allow_registration,
+        "registration_requires_invite": snapshot.configured.registration_requires_invite,
         "login_ip_limit_per_minute": snapshot.configured.login_ip_limit_per_minute,
         "login_username_failure_limit_per_5_minutes": snapshot.configured.login_username_failure_limit_per_5_minutes,
         "issue_inactive_days": snapshot.configured.issue_inactive_days,
