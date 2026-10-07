@@ -10,6 +10,7 @@ use actix_web::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::{FromRow, QueryBuilder, Sqlite};
 
 use crate::{
     AppState,
@@ -103,6 +104,15 @@ struct FileDeletionBatchRequest {
     items: Vec<FileDeletionBatchItemInput>,
 }
 
+#[derive(Debug, FromRow)]
+struct DeletionBundleRow {
+    hash: String,
+    id: String,
+    status: String,
+    issue_code: String,
+    owner_user_id: Option<String>,
+}
+
 async fn normalize_file_deletion_batch_items(
     pool: &sqlx::SqlitePool,
     user_id: &str,
@@ -114,17 +124,56 @@ async fn normalize_file_deletion_batch_items(
     ),
     AppError,
 > {
+    if items.is_empty() {
+        return Ok((Vec::new(), std::collections::HashSet::new()));
+    }
+    let mut hashes = std::collections::HashSet::new();
+    for item in items {
+        hashes.insert(item.bundle_id.as_str());
+    }
+    let mut bundle_query = QueryBuilder::<Sqlite>::new(
+        "SELECT b.hash,b.id,b.status,b.issue_code,i.owner_user_id FROM bundles b JOIN issues i ON i.code=b.issue_code WHERE b.deleted_at IS NULL AND i.status='ACTIVE' AND b.hash IN (",
+    );
+    let mut separated = bundle_query.separated(", ");
+    for hash in hashes {
+        separated.push_bind(hash);
+    }
+    separated.push_unseparated(")");
+    let bundles = bundle_query
+        .build_query_as::<DeletionBundleRow>()
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+    let bundles = bundles
+        .into_iter()
+        .map(|bundle| (bundle.hash.clone(), bundle))
+        .collect::<std::collections::HashMap<_, _>>();
+
     let mut normalized_items = Vec::with_capacity(items.len());
     let mut issue_codes = std::collections::HashSet::new();
     for item in items {
         // The public file APIs address bundles by hash, while the deletion
         // service stores the internal bundle id in file_deletion_batch_items.
-        let bundle = load_bundle(pool, &item.bundle_id).await?;
-        require_issue_owner(pool, &bundle.issue_code, user_id).await?;
-        ensure_bundle_ready(&bundle)?;
-        issue_codes.insert(bundle.issue_code);
+        let bundle = bundles
+            .get(&item.bundle_id)
+            .ok_or_else(|| AppError::NotFound(format!("bundle {}", item.bundle_id)))?;
+        if bundle.owner_user_id.as_deref() != Some(user_id) {
+            return Err(AppError::api(
+                StatusCode::FORBIDDEN,
+                "ISSUE_WRITE_FORBIDDEN",
+                "无权修改此 Issue",
+            ));
+        }
+        ensure_bundle_ready(&super::helpers::BundleRow {
+            id: bundle.id.clone(),
+            hash: bundle.hash.clone(),
+            name: String::new(),
+            status: bundle.status.clone(),
+            issue_code: bundle.issue_code.clone(),
+        })?;
+        issue_codes.insert(bundle.issue_code.clone());
         normalized_items.push(FileDeletionBatchItemInput {
-            bundle_id: bundle.id,
+            bundle_id: bundle.id.clone(),
             file_id: item.file_id.clone(),
         });
     }
