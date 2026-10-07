@@ -48,6 +48,113 @@ pub struct MaterializedPreview {
     pub lines: Vec<PreviewLine>,
 }
 
+/// Cursor carried across bounded source batches during one materialization.
+///
+/// The output files are opened once by the caller. Keeping these counters out
+/// of a per-batch function prevents each batch from resetting the sparse index,
+/// result offsets, quota accounting, or pagination count.
+pub(crate) struct MaterializeState {
+    matched: i64,
+    log_offset: u64,
+    meta_offset: u64,
+    total_output_bytes: u64,
+}
+
+impl MaterializeState {
+    pub(crate) async fn initialize(
+        index_output: &mut File,
+        max_output_bytes: u64,
+    ) -> Result<Self, AppError> {
+        Ok(Self {
+            matched: 0,
+            log_offset: 0,
+            meta_offset: 0,
+            total_output_bytes: initialize_sparse_checkpoint_index(index_output, max_output_bytes)
+                .await?,
+        })
+    }
+
+    pub(crate) fn total(&self) -> i64 {
+        self.matched
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn append_match(
+        &mut self,
+        metadata: &MatchMetadata,
+        content: String,
+        from: i64,
+        page_end: i64,
+        max_output_bytes: u64,
+        output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
+    ) -> Result<Option<PreviewLine>, AppError> {
+        if self.matched % 1_000 == 0 {
+            let checkpoint = SparseCheckpoint {
+                result_line: self.matched,
+                log_offset: self.log_offset,
+                meta_offset: self.meta_offset,
+            };
+            write_sparse_checkpoint(
+                index_output,
+                &checkpoint,
+                max_output_bytes,
+                &mut self.total_output_bytes,
+            )
+            .await?;
+        }
+        let line_bytes = content.len() as u64 + 1;
+        let next_output_size = self
+            .log_offset
+            .checked_add(line_bytes)
+            .ok_or_else(too_large)?;
+        ensure_output_capacity(self.total_output_bytes, line_bytes, max_output_bytes)?;
+        output
+            .write_all(content.as_bytes())
+            .await
+            .map_err(AppError::Io)?;
+        self.log_offset = next_output_size;
+        self.total_output_bytes = self
+            .total_output_bytes
+            .checked_add(line_bytes)
+            .ok_or_else(too_large)?;
+        output.write_all(b"\n").await.map_err(AppError::Io)?;
+        self.meta_offset += write_json_line(
+            metadata_output,
+            metadata,
+            max_output_bytes,
+            &mut self.total_output_bytes,
+        )
+        .await?;
+        let preview = if self.matched >= from && self.matched < page_end {
+            Some(PreviewLine {
+                bundle_hash: metadata.bundle_hash.clone(),
+                file_id: metadata.file_id.clone(),
+                path: metadata.path.clone(),
+                line_number: metadata.line_number,
+                content,
+            })
+        } else {
+            None
+        };
+        self.matched += 1;
+        Ok(preview)
+    }
+
+    pub(crate) async fn flush(
+        &self,
+        output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
+    ) -> Result<(), AppError> {
+        output.flush().await.map_err(AppError::Io)?;
+        metadata_output.flush().await.map_err(AppError::Io)?;
+        index_output.flush().await.map_err(AppError::Io)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct MatchMetadata {
     pub bundle_hash: Option<String>,
@@ -529,6 +636,334 @@ impl TempResultExecutor {
         checkpoint(context)?;
         Ok(MaterializedPreview {
             total: matched,
+            lines,
+        })
+    }
+
+    /// Materialize one raw source batch into already initialized output files.
+    /// The caller owns `state` and can continue with the next batch without
+    /// resetting result offsets or the sparse checkpoint index.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn materialize_preview_batch_with_context(
+        sources: &[TempSource],
+        expression: &Expression,
+        from: i64,
+        size: i64,
+        max_output_bytes: u64,
+        state: &mut MaterializeState,
+        output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
+        context: Option<&SearchExecutionContext>,
+    ) -> Result<MaterializedPreview, AppError> {
+        let page_end = from
+            .checked_add(size)
+            .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
+        let mut lines = Vec::new();
+        let max_logical_line_bytes =
+            usize::try_from(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES).map_err(|_| {
+                AppError::Config(
+                    "MAX_TEMP_RESULT_LOGICAL_LINE_BYTES cannot be represented on this platform"
+                        .into(),
+                )
+            })?;
+        let mut matcher = expression.chunk_matcher();
+        for source in sources {
+            checkpoint(context)?;
+            let file = File::open(&source.path).await.map_err(AppError::Io)?;
+            let mut reader = BufReader::new(file);
+            let mut source_metadata_reader = match source.metadata_path.as_ref() {
+                Some(path) => Some(BufReader::new(
+                    File::open(path).await.map_err(AppError::Io)?,
+                )),
+                None => None,
+            };
+            let mut bytes = Vec::new();
+            let mut source_metadata_line = String::new();
+            let mut source_line = 0_i64;
+            loop {
+                checkpoint(context)?;
+                bytes.clear();
+                matcher.reset();
+                let truncated = match read_line_bytes_limited_with_budget_and_callback_result(
+                    &mut reader,
+                    &mut bytes,
+                    max_logical_line_bytes,
+                    usize::MAX,
+                    |chunk| {
+                        matcher.feed_bytes(chunk);
+                        checkpoint(context)
+                    },
+                )
+                .await?
+                {
+                    LimitedLine::EndOfFile => break,
+                    LimitedLine::Line { truncated, .. } => truncated,
+                    LimitedLine::ScanLimit { .. } => {
+                        return Err(AppError::Io(std::io::Error::other(
+                            "logical line exceeds platform size",
+                        )));
+                    }
+                };
+                checkpoint(context)?;
+                matcher.finish();
+                let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
+                    source_metadata_line.clear();
+                    if reader
+                        .read_line(&mut source_metadata_line)
+                        .await
+                        .map_err(AppError::Io)?
+                        == 0
+                    {
+                        return Err(invalid_sidecar(
+                            "temporary result metadata ended before its content",
+                        ));
+                    }
+                    Some(decode_json_line::<MatchMetadata>(
+                        source_metadata_line.trim_end(),
+                    )?)
+                } else {
+                    None
+                };
+                if matcher.matches(expression) {
+                    checkpoint(context)?;
+                    let content = decode_log_line(&bytes, truncated);
+                    let mut metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
+                        bundle_hash: source.bundle_hash.clone(),
+                        file_id: source.file_id.clone(),
+                        path: source.label.clone(),
+                        line_number: source_line,
+                        truncated,
+                    });
+                    metadata.truncated |= truncated;
+                    if let Some(line) = state
+                        .append_match(
+                            &metadata,
+                            content,
+                            from,
+                            page_end,
+                            max_output_bytes,
+                            output,
+                            metadata_output,
+                            index_output,
+                        )
+                        .await?
+                    {
+                        lines.push(line);
+                    }
+                }
+                source_line += 1;
+            }
+            if let Some(reader) = source_metadata_reader.as_mut() {
+                source_metadata_line.clear();
+                if reader
+                    .read_line(&mut source_metadata_line)
+                    .await
+                    .map_err(AppError::Io)?
+                    != 0
+                {
+                    return Err(invalid_sidecar(
+                        "temporary result metadata contains more records than its content",
+                    ));
+                }
+            }
+        }
+        state.flush(output, metadata_output, index_output).await?;
+        checkpoint(context)?;
+        Ok(MaterializedPreview {
+            total: state.total(),
+            lines,
+        })
+    }
+
+    /// Materialize one indexed source batch into already initialized output
+    /// files. It mirrors the regular planned path while carrying state across
+    /// batches.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn materialize_preview_batch_with_plans_and_context(
+        sources: &[TempSource],
+        plans: &[SourceSearchPlan],
+        expression: &Expression,
+        from: i64,
+        size: i64,
+        max_output_bytes: u64,
+        state: &mut MaterializeState,
+        output: &mut File,
+        metadata_output: &mut File,
+        index_output: &mut File,
+        context: Option<&SearchExecutionContext>,
+    ) -> Result<MaterializedPreview, AppError> {
+        if sources.len() != plans.len() {
+            return Err(AppError::Config(
+                "temporary result source and search plan counts differ".into(),
+            ));
+        }
+        let page_end = from
+            .checked_add(size)
+            .ok_or_else(|| AppError::BadRequest("分页参数超出支持范围".into()))?;
+        let mut lines = Vec::new();
+        let max_logical_line_bytes =
+            usize::try_from(MAX_TEMP_RESULT_LOGICAL_LINE_BYTES).map_err(|_| {
+                AppError::Config(
+                    "MAX_TEMP_RESULT_LOGICAL_LINE_BYTES cannot be represented on this platform"
+                        .into(),
+                )
+            })?;
+        let mut matcher = expression.chunk_matcher();
+        for (source, plan) in sources.iter().zip(plans) {
+            checkpoint(context)?;
+            let (candidate_ranges, seek_line, seek_offset) = match plan {
+                SourceSearchPlan::Raw { .. } => (None, 0_i64, 0_u64),
+                SourceSearchPlan::Tantivy(candidate) if candidate.ranges.is_empty() => {
+                    continue;
+                }
+                SourceSearchPlan::Tantivy(candidate) => (
+                    Some(candidate.ranges.as_slice()),
+                    candidate.seek_line.min(candidate.ranges[0].start),
+                    candidate.seek_offset,
+                ),
+            };
+            let mut file = File::open(&source.path).await.map_err(AppError::Io)?;
+            if candidate_ranges.is_some() {
+                file.seek(SeekFrom::Start(seek_offset))
+                    .await
+                    .map_err(AppError::Io)?;
+            }
+            let mut reader = BufReader::new(file);
+            let mut source_metadata_reader = match source.metadata_path.as_ref() {
+                Some(path) => Some(BufReader::new(
+                    File::open(path).await.map_err(AppError::Io)?,
+                )),
+                None => None,
+            };
+            let mut bytes = Vec::new();
+            let mut source_metadata_line = String::new();
+            let mut source_line = seek_line;
+            let mut range_index = 0_usize;
+            loop {
+                checkpoint(context)?;
+                if let Some(ranges) = candidate_ranges {
+                    while ranges
+                        .get(range_index)
+                        .is_some_and(|range| source_line > range.end)
+                    {
+                        range_index += 1;
+                    }
+                    if range_index == ranges.len() {
+                        break;
+                    }
+                }
+                let selected = candidate_ranges.is_none_or(|ranges| {
+                    ranges
+                        .get(range_index)
+                        .is_some_and(|range| source_line >= range.start)
+                });
+                bytes.clear();
+                let line = if selected {
+                    matcher.reset();
+                    read_line_bytes_limited_with_budget_and_callback_result(
+                        &mut reader,
+                        &mut bytes,
+                        max_logical_line_bytes,
+                        usize::MAX,
+                        |chunk| {
+                            matcher.feed_bytes(chunk);
+                            checkpoint(context)
+                        },
+                    )
+                    .await?
+                } else {
+                    read_line_bytes_limited_with_budget_and_callback_result(
+                        &mut reader,
+                        &mut bytes,
+                        max_logical_line_bytes,
+                        usize::MAX,
+                        |_| checkpoint(context),
+                    )
+                    .await?
+                };
+                let truncated = match line {
+                    LimitedLine::EndOfFile => break,
+                    LimitedLine::Line { truncated, .. } => truncated,
+                    LimitedLine::ScanLimit { .. } => {
+                        return Err(AppError::Io(std::io::Error::other(
+                            "logical line exceeds platform size",
+                        )));
+                    }
+                };
+                checkpoint(context)?;
+                let inherited_metadata = if let Some(reader) = source_metadata_reader.as_mut() {
+                    source_metadata_line.clear();
+                    if reader
+                        .read_line(&mut source_metadata_line)
+                        .await
+                        .map_err(AppError::Io)?
+                        == 0
+                    {
+                        return Err(invalid_sidecar(
+                            "temporary result metadata ended before its content",
+                        ));
+                    }
+                    if selected {
+                        Some(decode_json_line::<MatchMetadata>(
+                            source_metadata_line.trim_end(),
+                        )?)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if selected {
+                    matcher.finish();
+                }
+                if selected && matcher.matches(expression) {
+                    checkpoint(context)?;
+                    let content = decode_log_line(&bytes, truncated);
+                    let mut metadata = inherited_metadata.unwrap_or_else(|| MatchMetadata {
+                        bundle_hash: source.bundle_hash.clone(),
+                        file_id: source.file_id.clone(),
+                        path: source.label.clone(),
+                        line_number: source_line,
+                        truncated,
+                    });
+                    metadata.truncated |= truncated;
+                    if let Some(line) = state
+                        .append_match(
+                            &metadata,
+                            content,
+                            from,
+                            page_end,
+                            max_output_bytes,
+                            output,
+                            metadata_output,
+                            index_output,
+                        )
+                        .await?
+                    {
+                        lines.push(line);
+                    }
+                }
+                source_line += 1;
+            }
+            if let Some(reader) = source_metadata_reader.as_mut() {
+                source_metadata_line.clear();
+                if reader
+                    .read_line(&mut source_metadata_line)
+                    .await
+                    .map_err(AppError::Io)?
+                    != 0
+                {
+                    return Err(invalid_sidecar(
+                        "temporary result metadata contains more records than its content",
+                    ));
+                }
+            }
+        }
+        state.flush(output, metadata_output, index_output).await?;
+        checkpoint(context)?;
+        Ok(MaterializedPreview {
+            total: state.total(),
             lines,
         })
     }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use serde_json::json;
 use sqlx::{FromRow, QueryBuilder, Sqlite};
@@ -125,6 +125,67 @@ pub async fn nearest_line_offset(
 }
 
 #[derive(FromRow)]
+pub struct LineOffsetLookupRow {
+    pub file_id: i64,
+    pub line_number: i64,
+    pub byte_offset: i64,
+}
+
+/// Resolve one seek offset per file with a single SQLite read.
+///
+/// Temporary-result planning commonly has one candidate range per many files;
+/// issuing the same lookup serially turns that fan-out into an avoidable N+1
+/// sequence. The request list is bounded by the caller's source batch.
+pub async fn nearest_line_offsets(
+    pool: &sqlx::SqlitePool,
+    requests: &[(i64, i64)],
+) -> Result<HashMap<i64, (i64, i64)>, AppError> {
+    if requests.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut query = QueryBuilder::<Sqlite>::new("WITH requested(file_id, start_line) AS (VALUES ");
+    for (index, (file_id, start_line)) in requests.iter().enumerate() {
+        if index > 0 {
+            query.push(", ");
+        }
+        query
+            .push("(")
+            .push_bind(file_id)
+            .push(", ")
+            .push_bind(start_line)
+            .push(")");
+    }
+    query.push(
+        r#")
+        SELECT requested.file_id,
+               COALESCE((
+                   SELECT line_number
+                   FROM log_line_offsets
+                   WHERE file_id = requested.file_id AND line_number <= requested.start_line
+                   ORDER BY line_number DESC
+                   LIMIT 1
+               ), 0) AS line_number,
+               COALESCE((
+                   SELECT byte_offset
+                   FROM log_line_offsets
+                   WHERE file_id = requested.file_id AND line_number <= requested.start_line
+                   ORDER BY line_number DESC
+                   LIMIT 1
+               ), 0) AS byte_offset
+        FROM requested"#,
+    );
+    let rows = query
+        .build_query_as::<LineOffsetLookupRow>()
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.file_id, (row.line_number, row.byte_offset)))
+        .collect())
+}
+
+#[derive(FromRow)]
 struct LineOffsetRow {
     line_number: i64,
     byte_offset: i64,
@@ -219,7 +280,9 @@ pub async fn resolve_file_path(
 mod tests {
     use crate::blob_store::LocalCasBlobStore;
 
-    use super::{FileChildrenCursor, FileRow, fetch_children, resolve_file_path};
+    use super::{
+        FileChildrenCursor, FileRow, fetch_children, nearest_line_offsets, resolve_file_path,
+    };
 
     fn row(path: &str, meta: Option<&str>) -> FileRow {
         FileRow {
@@ -314,5 +377,38 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["c.log", "d.log"]
         );
+    }
+
+    #[tokio::test]
+    async fn nearest_line_offsets_resolves_multiple_files_in_one_query() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("init pool");
+        sqlx::query(
+            "CREATE TABLE log_line_offsets (file_id INTEGER, line_number INTEGER, byte_offset INTEGER)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create offsets");
+        for (file_id, line_number, byte_offset) in [(1, 0, 0), (1, 100, 4096), (2, 20, 512)] {
+            sqlx::query(
+                "INSERT INTO log_line_offsets(file_id,line_number,byte_offset) VALUES(?,?,?)",
+            )
+            .bind(file_id)
+            .bind(line_number)
+            .bind(byte_offset)
+            .execute(&pool)
+            .await
+            .expect("insert offset");
+        }
+
+        let offsets = nearest_line_offsets(&pool, &[(1, 120), (2, 10), (3, 10)])
+            .await
+            .expect("lookup offsets");
+        assert_eq!(offsets.get(&1), Some(&(100, 4096)));
+        assert_eq!(offsets.get(&2), Some(&(0, 0)));
+        assert_eq!(offsets.get(&3), Some(&(0, 0)));
     }
 }

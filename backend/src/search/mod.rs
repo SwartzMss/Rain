@@ -134,6 +134,9 @@ pub struct ContentSearchRequest {
     pub scope: ContentSearchScope,
     pub query: String,
     pub path_like: Option<String>,
+    /// Optional bounded file set used by Issue fan-out planning. The normal
+    /// public search routes leave this unset.
+    pub file_ids: Option<Vec<i64>>,
     pub from: i64,
     pub size: i64,
     pub include_content: bool,

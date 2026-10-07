@@ -10,7 +10,7 @@ use crate::{
     AppState,
     error::AppError,
     log_expression::Expression,
-    repositories::files::nearest_line_offset,
+    repositories::files::nearest_line_offsets,
     search::{
         ContentSearchRequest, ContentSearchRow, ContentSearchScope, HARD_MAX_SEARCH_WINDOW,
         publication::{
@@ -290,6 +290,7 @@ async fn build_indexed_bundle_plans(
             },
             query: term.clone(),
             path_like: None,
+            file_ids: Some(sources.iter().map(|(_, source)| source.file_id).collect()),
             from: 0,
             size: HARD_MAX_SEARCH_WINDOW as i64,
             include_content: false,
@@ -369,24 +370,38 @@ async fn build_indexed_bundle_plans(
     for row in candidate_rows {
         rows_by_file.entry(row.file_id).or_default().push(row);
     }
+    let offset_requests = sources
+        .iter()
+        .filter_map(|(_, source)| {
+            rows_by_file
+                .get(&source.file_id)
+                .and_then(|rows| candidate_ranges_from_rows(rows).ok())
+                .and_then(|ranges| ranges.first().map(|range| (source.file_id, range.start)))
+        })
+        .collect::<Vec<_>>();
+    let offsets = match nearest_line_offsets(&state.db.pool, &offset_requests).await {
+        Ok(offsets) => offsets,
+        Err(_) => return Ok(fallback_bundle_plans(sources, "line_offset_lookup_failed")),
+    };
     let mut plans = Vec::with_capacity(sources.len());
     for (index, source) in sources {
         checkpoint(context)?;
         let rows = rows_by_file.remove(&source.file_id).unwrap_or_default();
-        let plan = match build_source_plan_from_rows(state, source, rows, context).await {
-            Ok(plan) => Ok(plan),
-            Err(SearchPlanFailure::Fallback(reason)) => Err(reason),
-            Err(SearchPlanFailure::Stopped(error)) => return Err(error),
-        };
+        let plan =
+            match build_source_plan_from_rows(rows, offsets.get(&source.file_id).copied(), context)
+            {
+                Ok(plan) => Ok(plan),
+                Err(SearchPlanFailure::Fallback(reason)) => Err(reason),
+                Err(SearchPlanFailure::Stopped(error)) => return Err(error),
+            };
         plans.push((*index, plan));
     }
     Ok(plans)
 }
 
-async fn build_source_plan_from_rows(
-    state: &web::Data<AppState>,
-    source: &IndexedSource,
+fn build_source_plan_from_rows(
     rows: Vec<ContentSearchRow>,
+    seek: Option<(i64, i64)>,
     context: Option<&SearchExecutionContext>,
 ) -> Result<(SourceSearchPlan, usize), SearchPlanFailure> {
     checkpoint(context).map_err(SearchPlanFailure::Stopped)?;
@@ -402,9 +417,7 @@ async fn build_source_plan_from_rows(
         ));
     }
     let (seek_line, seek_offset) =
-        nearest_line_offset(&state.db.pool, source.file_id, ranges[0].start)
-            .await
-            .map_err(|_| SearchPlanFailure::Fallback("line_offset_lookup_failed"))?;
+        seek.ok_or(SearchPlanFailure::Fallback("line_offset_lookup_failed"))?;
     let seek_offset = u64::try_from(seek_offset)
         .map_err(|_| SearchPlanFailure::Fallback("line_offset_invalid"))?;
     checkpoint(context).map_err(SearchPlanFailure::Stopped)?;

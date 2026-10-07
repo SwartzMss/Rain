@@ -186,6 +186,9 @@ async fn search_bundle_inner_with_permit(
     let timeline = timeline.clone();
     let file_id = *file_id;
     let path_like = request.path_like.clone();
+    let file_ids = request
+        .file_ids
+        .map(|ids| ids.into_iter().collect::<HashSet<_>>());
     let from = request.from.max(0) as usize;
     let size = request.size.max(0) as usize;
     let include_content = request.include_content;
@@ -210,6 +213,7 @@ async fn search_bundle_inner_with_permit(
                 file_id,
                 timeline: timeline.as_deref(),
                 path_like: path_like.as_deref(),
+                file_ids: file_ids.as_ref(),
                 visible_file_ids: visible_file_ids.as_ref(),
                 from,
                 size,
@@ -527,6 +531,46 @@ mod tests {
     }
 
     #[test]
+    fn bounded_page_pushes_a_file_id_set_into_candidate_scan() {
+        let path = temp_index_path();
+        let mut writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();
+        for (file_id, chunk_index) in [(7, 0), (8, 1), (9, 2)] {
+            writer
+                .add_chunk(&IndexedChunk {
+                    file_id,
+                    chunk_index,
+                    line_start: Some(chunk_index),
+                    line_end: Some(chunk_index),
+                    event_time_start_ms: None,
+                    event_time_end_ms: None,
+                    timeline: Some("all".into()),
+                    content: "marker".into(),
+                    path: "/app.log".into(),
+                })
+                .unwrap();
+        }
+        let committed = writer.commit().unwrap();
+        let file_ids = HashSet::from([7_i64, 9]);
+        let page = CandidateSearch::new(committed)
+            .search_page(
+                "marker",
+                SearchOptions {
+                    file_ids: Some(&file_ids),
+                    size: 10,
+                    ..SearchOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.metrics.candidate_docs, 2);
+        assert_eq!(
+            page.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>(),
+            vec![7, 9]
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn content_can_be_deferred_without_changing_hit_metadata() {
         let path = temp_index_path();
         let mut writer = BundleIndexWriter::create(&path, 16 * 1024 * 1024).unwrap();
@@ -559,6 +603,8 @@ mod tests {
         assert_eq!(page.hits[0].content, "");
         assert_eq!(page.hits[0].path, "/app.log");
         assert_eq!(page.hits[0].line_start, Some(12));
+        assert_eq!(page.metrics.candidate_docs, 1);
+        assert_eq!(page.metrics.stored_doc_reads, 1);
 
         let address = page.hits[0].doc_address;
         assert_eq!(

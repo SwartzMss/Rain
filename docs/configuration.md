@@ -1,5 +1,7 @@
 # Rain 配置说明
 
+[返回使用指南](../README.md) · [部署与维护](operations.md) · [技术说明](technical-reference.md)
+
 ## 配置来源
 
 Rain 将配置分成三类：

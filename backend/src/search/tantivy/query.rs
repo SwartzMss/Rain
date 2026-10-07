@@ -36,6 +36,7 @@ pub struct SearchHit {
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct SearchOptions<'a> {
     pub file_id: Option<i64>,
+    pub file_ids: Option<&'a HashSet<i64>>,
     pub timeline: Option<&'a str>,
     pub path_like: Option<&'a str>,
     pub visible_file_ids: Option<&'a HashSet<i64>>,
@@ -63,6 +64,17 @@ pub(crate) struct SearchPage {
 struct RankedHit {
     key: (i64, i64, i64),
     address: DocAddress,
+    metadata: Option<HitMetadata>,
+}
+
+#[derive(Debug)]
+struct HitMetadata {
+    file_id: i64,
+    chunk_index: i64,
+    line_start: Option<i64>,
+    line_end: Option<i64>,
+    timeline: Option<String>,
+    path: String,
 }
 
 impl PartialEq for RankedHit {
@@ -142,6 +154,7 @@ impl CandidateSearch {
             || options
                 .visible_file_ids
                 .is_some_and(|visible_file_ids| visible_file_ids.is_empty())
+            || options.file_ids.is_some_and(|file_ids| file_ids.is_empty())
         {
             return Ok(SearchPage {
                 hits: Vec::new(),
@@ -169,12 +182,26 @@ impl CandidateSearch {
                 Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
             ));
         }
+        if let Some(file_ids) = options.file_ids {
+            let file_terms: Vec<(Occur, Box<dyn Query>)> = file_ids
+                .iter()
+                .map(|file_id| {
+                    let term = Term::from_field_u64(self.index.fields.file_id, *file_id as u64);
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>,
+                    )
+                })
+                .collect();
+            must.push((Occur::Must, Box::new(BooleanQuery::from(file_terms))));
+        }
         let candidate_query = BooleanQuery::from(must);
         let searcher = self.index.reader.searcher();
         let weight = candidate_query
             .weight(EnableScoring::disabled_from_searcher(&searcher))
             .map_err(|error| AppError::Config(format!("prepare Tantivy query: {error}")))?;
         let window_limit = window.limit;
+        let include_content = options.include_content.unwrap_or(true);
         let mut retained = BinaryHeap::new();
         let mut metrics = SearchMetrics::default();
         let mut total = 0_u64;
@@ -227,7 +254,7 @@ impl CandidateSearch {
                         doc_id = scorer.advance();
                         continue;
                     };
-                    if content.to_lowercase().contains(&needle) {
+                    if contains_case_insensitive(content, &needle) {
                         let chunk_index = document
                             .get_first(self.index.fields.chunk_index)
                             .and_then(|value| value.as_u64())
@@ -240,6 +267,16 @@ impl CandidateSearch {
                             let ranked = RankedHit {
                                 key: sort_key(line_start, file_id, chunk_index),
                                 address,
+                                metadata: (!include_content).then(|| HitMetadata {
+                                    file_id,
+                                    chunk_index,
+                                    line_start,
+                                    line_end: document
+                                        .get_first(self.index.fields.line_end)
+                                        .and_then(|value| value.as_i64()),
+                                    timeline: timeline.map(ToOwned::to_owned),
+                                    path: path.to_owned(),
+                                }),
                             };
                             if retained.len() < window_limit {
                                 retained.push(ranked);
@@ -267,13 +304,27 @@ impl CandidateSearch {
             .skip(window.from)
             .take(window.size)
             .collect::<Vec<_>>();
-        let include_content = options.include_content.unwrap_or(true);
         let mut hits = Vec::with_capacity(selected.len());
         for ranked in selected {
             checkpoint(context)?;
-            hits.push(self.load_hit(&searcher, ranked.address, include_content)?);
+            if let Some(metadata) = ranked.metadata {
+                hits.push(SearchHit {
+                    file_id: metadata.file_id,
+                    chunk_index: metadata.chunk_index,
+                    line_start: metadata.line_start,
+                    line_end: metadata.line_end,
+                    timeline: metadata.timeline,
+                    content: String::new(),
+                    path: metadata.path,
+                    doc_address: ranked.address,
+                });
+            } else {
+                hits.push(self.load_hit(&searcher, ranked.address, true)?);
+            }
         }
-        metrics.stored_doc_reads += hits.len() as u64;
+        if include_content {
+            metrics.stored_doc_reads += hits.len() as u64;
+        }
         Ok(SearchPage {
             hits,
             total: total as i64,
@@ -364,6 +415,16 @@ fn checkpoint(context: Option<&SearchExecutionContext>) -> Result<(), AppError> 
 
 fn sort_key(line_start: Option<i64>, file_id: i64, chunk_index: i64) -> (i64, i64, i64) {
     (line_start.unwrap_or(i64::MIN), file_id, chunk_index)
+}
+
+fn contains_case_insensitive(content: &str, needle: &str) -> bool {
+    if needle.is_ascii() && content.is_ascii() {
+        return content
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()));
+    }
+    content.to_lowercase().contains(needle)
 }
 
 pub(crate) fn unique_ngrams(value: &str, min: usize, max: usize) -> Vec<String> {
