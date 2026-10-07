@@ -16,10 +16,13 @@ use crate::{
         },
     },
     error::AppError,
-    models::auth::{AuthMeResponse, ChangePasswordRequest, CredentialsRequest, PublicUser},
+    models::auth::{
+        AuthMeResponse, ChangePasswordRequest, CredentialsRequest, PublicUser, RegisterRequest,
+    },
     repositories::{
+        invitations,
         sessions::{self, ReplacementSession},
-        users::{self, CreateUserOutcome},
+        users::{self, RegistrationOutcome},
     },
 };
 
@@ -264,15 +267,8 @@ fn dummy_password_for_credentials(password: &str, credentials_valid: bool) -> St
 pub async fn register_user(
     request: HttpRequest,
     state: web::Data<AppState>,
-    payload: web::Json<CredentialsRequest>,
+    payload: web::Json<RegisterRequest>,
 ) -> Result<HttpResponse, AppError> {
-    if !state.auth_runtime.registration_allowed() {
-        return Err(AppError::api(
-            StatusCode::FORBIDDEN,
-            "REGISTRATION_DISABLED",
-            "当前未开放注册",
-        ));
-    }
     check_rate_limit(
         &state,
         AuthRateLimitPolicy::RegisterIp,
@@ -288,26 +284,64 @@ pub async fn register_user(
     validate_password(&payload.password).map_err(validation_error)?;
     let password = payload.password.clone();
     let password_hash = run_argon2(&state, move || hash_password(&password)).await?;
+    let invite_code_hash = payload.invite_code.as_deref().map(|code| {
+        invitations::code_hash(code).unwrap_or_else(|| "invalid-invitation-code".into())
+    });
+    let user_id = uuid::Uuid::new_v4().to_string();
+    let client_ip = request.peer_addr().map(|address| address.ip().to_string());
+    let user_agent = request
+        .headers()
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
 
-    match users::create_user(&state.db.pool, &payload.username, &password_hash).await? {
-        CreateUserOutcome::Created(user) => Ok(HttpResponse::Created().json(PublicUser {
-            id: user.id,
-            username: user.username,
+    match users::register_user(
+        &state.db.pool,
+        &user_id,
+        &payload.username,
+        &password_hash,
+        invite_code_hash.as_deref(),
+        client_ip.as_deref(),
+        user_agent.as_deref(),
+    )
+    .await?
+    {
+        RegistrationOutcome::Created { user_id } => Ok(HttpResponse::Created().json(PublicUser {
+            id: user_id,
+            username: payload.username.clone(),
             role: crate::auth::UserRole::User,
         })),
-        CreateUserOutcome::DuplicateUsername => Err(AppError::api(
+        RegistrationOutcome::DuplicateUsername => Err(AppError::api(
             StatusCode::CONFLICT,
             "USERNAME_ALREADY_EXISTS",
             "用户名已存在",
+        )),
+        RegistrationOutcome::RegistrationDisabled => Err(AppError::api(
+            StatusCode::FORBIDDEN,
+            "REGISTRATION_DISABLED",
+            "当前未开放注册",
+        )),
+        RegistrationOutcome::InviteRequired => Err(AppError::api(
+            StatusCode::BAD_REQUEST,
+            "INVITE_CODE_REQUIRED",
+            "请输入邀请码",
         )),
     }
 }
 
 #[get("/auth/registration-status")]
 pub async fn registration_status(state: web::Data<AppState>) -> Result<HttpResponse, AppError> {
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "allow_registration": state.auth_runtime.registration_allowed()
-    })))
+    let settings = state.settings.snapshot().await;
+    let allow_registration = settings.configured.allow_registration;
+    let requires_invite_code =
+        allow_registration && settings.configured.registration_requires_invite;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(serde_json::json!({
+            "allow_registration": allow_registration,
+            "registration_mode": if !allow_registration { "CLOSED" } else if requires_invite_code { "INVITE_ONLY" } else { "OPEN" },
+            "requires_invite_code": requires_invite_code
+        })))
 }
 
 #[post("/auth/login")]

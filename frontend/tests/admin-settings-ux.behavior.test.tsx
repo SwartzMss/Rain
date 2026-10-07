@@ -67,6 +67,46 @@ it('formats configured and effective values separately', () => {
   expect(effectiveSettingLabel(4, 4, false)).toBe('已配置 4；当前生效 4');
 });
 
+it('switches registration modes by atomically saving both policy fields', async () => {
+  vi.mocked(rainApi.me).mockResolvedValueOnce({
+    authenticated: true,
+    user: { id: 'admin', username: 'admin', role: 'ADMIN' },
+  });
+  vi.mocked(rainApi.fetchAdminSettings).mockResolvedValueOnce({
+    allow_registration: true,
+    registration_requires_invite: true,
+    registration_mode: 'INVITE_ONLY',
+    updated_at: '',
+    updated_by_username: 'admin',
+    login_ip_limit_per_minute: 20,
+    login_username_failure_limit_per_5_minutes: 10,
+    issue_inactive_days: 0,
+    revision: '3',
+    configured: {}, effective: {}, resource_modes: {}, auto_values: {},
+    pending_restart_fields: [], fields: [],
+  } as never);
+  vi.mocked(rainApi.updateAdminSettingsV2).mockResolvedValueOnce({
+    allow_registration: true,
+    registration_requires_invite: false,
+    registration_mode: 'OPEN',
+    revision: '4',
+    login_ip_limit_per_minute: 20,
+    login_username_failure_limit_per_5_minutes: 10,
+    issue_inactive_days: 0,
+  } as never);
+  const user = userEvent.setup();
+  render(<MemoryRouter initialEntries={['/admin/settings']}><AuthProvider><AdminSettingsPage /></AuthProvider></MemoryRouter>);
+
+  const mode = await screen.findByLabelText('注册方式');
+  expect(mode).toHaveValue('INVITE_ONLY');
+  await user.selectOptions(mode, 'OPEN');
+  await waitFor(() => expect(rainApi.updateAdminSettingsV2).toHaveBeenCalledWith('3', {
+    allow_registration: true,
+    registration_requires_invite: false,
+  }));
+  expect(await screen.findByText('设置已保存')).toBeInTheDocument();
+});
+
 it('serializes resource mode patches without changing legacy values', () => {
   expect(serializeResourceModePatch('upload_concurrent_processing_tasks', 'auto'))
     .toEqual({ upload_concurrent_processing_tasks: 'auto' });

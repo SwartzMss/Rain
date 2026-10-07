@@ -106,6 +106,8 @@ pub enum SettingValue {
 #[serde(deny_unknown_fields)]
 pub struct SettingsValues {
     pub allow_registration: bool,
+    #[serde(default = "default_registration_requires_invite")]
+    pub registration_requires_invite: bool,
     pub session_ttl_seconds: u64,
     pub register_ip_limit_per_hour: usize,
     pub login_ip_limit_per_minute: usize,
@@ -142,6 +144,7 @@ impl SettingsValues {
     pub fn from_config(limits: &AppLimits, auth: &AuthConfig) -> Self {
         Self {
             allow_registration: auth.allow_registration,
+            registration_requires_invite: true,
             session_ttl_seconds: auth.session_ttl_seconds,
             register_ip_limit_per_hour: auth.register_ip_limit_per_hour,
             login_ip_limit_per_minute: auth.login_ip_limit_per_minute,
@@ -215,6 +218,10 @@ impl SettingsValues {
     pub fn validate(&self) -> Result<(), Vec<ValidationError>> {
         crate::settings::validation::validate(self)
     }
+}
+
+fn default_registration_requires_invite() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

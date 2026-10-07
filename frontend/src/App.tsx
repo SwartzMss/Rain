@@ -8,14 +8,16 @@ import { TempResultRoute } from './features/files/TempResultView';
 import { APP_VERSION } from './version';
 import './App.css';
 import { isAdmin } from './auth/permissions';
-import { AdminPage, AdminUsersPage, AuditLogsPage, AdminSettingsPage, AuthRateLimitsPage } from './features/admin/AdminPage';
+import { AdminPage, AdminUsersPage, AuditLogsPage, AdminSettingsPage, AuthRateLimitsPage, InvitationsAdminPage } from './features/admin/AdminPage';
 import { useEffect, useState } from 'react';
+import { rainApi } from './api/client';
 
 function App() {
   const auth = useAuth();
   const location = useLocation();
   const returnPath = `${location.pathname}${location.search}`;
   const [serviceStatus, setServiceStatus] = useState<'checking' | 'healthy' | 'unhealthy'>('checking');
+  const [registrationAvailable, setRegistrationAvailable] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -33,6 +35,18 @@ function App() {
       active = false;
       window.clearInterval(timer);
     };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void rainApi.fetchRegistrationStatus()
+      .then((status) => {
+        if (active) setRegistrationAvailable(status.allow_registration);
+      })
+      .catch(() => {
+        if (active) setRegistrationAvailable(false);
+      });
+    return () => { active = false; };
   }, []);
 
   return (
@@ -70,13 +84,15 @@ function App() {
                 >
                   登录
                 </Link>
-                <Link
-                  className="rounded-full bg-cyan-300 px-3 py-1.5 font-semibold text-slate-950 no-underline hover:bg-cyan-200"
-                  state={{ from: returnPath }}
-                  to="/register"
-                >
-                  注册
-                </Link>
+                {registrationAvailable ? (
+                  <Link
+                    className="rounded-full bg-cyan-300 px-3 py-1.5 font-semibold text-slate-950 no-underline hover:bg-cyan-200"
+                    state={{ from: returnPath }}
+                    to="/register"
+                  >
+                    注册
+                  </Link>
+                ) : null}
               </>
             )}
             {auth.state.status === 'AUTHENTICATED' && (
@@ -110,6 +126,7 @@ function App() {
           <Route path="/account" element={<AccountPage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/admin/users" element={<AdminUsersPage />} />
+          <Route path="/admin/invitations" element={<InvitationsAdminPage />} />
           <Route path="/admin/audit-logs" element={<AuditLogsPage />} />
           <Route path="/admin/settings" element={<AdminSettingsPage />} />
           <Route path="/admin/auth-rate-limits" element={<AuthRateLimitsPage />} />

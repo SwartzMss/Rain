@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +7,8 @@ import { rainApi } from '../src/api/client';
 import { AuthPage } from '../src/features/auth/AuthPage';
 
 vi.mock('../src/api/client', () => ({
+  ApiError: class ApiError extends Error { status?: number; },
+  normalizeApiError: (error: unknown) => error instanceof Error ? error.message : String(error),
   rainApi: { me: vi.fn(), login: vi.fn(), register: vi.fn(), logout: vi.fn(), changePassword: vi.fn(), fetchRegistrationStatus: vi.fn() }
 }));
 
@@ -64,8 +66,60 @@ describe('authentication behavior', () => {
     vi.mocked(rainApi.fetchRegistrationStatus).mockReturnValueOnce(new Promise((resolve) => { resolveStatus = resolve; }));
     render(<MemoryRouter><AuthProvider><AuthPage mode="login" /></AuthProvider></MemoryRouter>);
     expect(screen.queryByRole('link', { name: '注册' })).not.toBeInTheDocument();
-    resolveStatus({ allow_registration: true });
+    await act(async () => resolveStatus({ allow_registration: true }));
     expect(await screen.findByRole('link', { name: '注册' })).toBeInTheDocument();
+  });
+
+  it('requires and submits an invitation code in invite-only mode', async () => {
+    vi.mocked(rainApi.me).mockResolvedValue({ authenticated: false, user: null });
+    vi.mocked(rainApi.fetchRegistrationStatus).mockResolvedValue({
+      allow_registration: true,
+      registration_mode: 'INVITE_ONLY',
+      requires_invite_code: true
+    });
+    vi.mocked(rainApi.register).mockResolvedValue({ id: 'new-user', username: 'alice', role: 'USER' });
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={['/register']}><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter>);
+
+    const inviteInput = await screen.findByLabelText('邀请码');
+    await user.type(screen.getByLabelText('用户名'), 'alice');
+    await user.type(screen.getByLabelText('邀请码'), 'RAIN-ABCD');
+    await user.type(screen.getByLabelText('密码'), 'password123');
+    expect(inviteInput).toBeRequired();
+    await user.click(screen.getByRole('button', { name: '注册' }));
+
+    await waitFor(() => expect(rainApi.register).toHaveBeenCalledWith({
+      username: 'alice',
+      password: 'password123',
+      invite_code: 'RAIN-ABCD'
+    }));
+  });
+
+  it('offers a retry when registration status cannot be loaded', async () => {
+    vi.mocked(rainApi.me).mockResolvedValue({ authenticated: false, user: null });
+    vi.mocked(rainApi.fetchRegistrationStatus)
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ allow_registration: true, registration_mode: 'INVITE_ONLY' });
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={['/register']}><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter>);
+
+    expect(await screen.findByText('注册状态不可用')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重新检查' }));
+    expect(await screen.findByLabelText('邀请码')).toBeInTheDocument();
+  });
+
+  it('explains that a network failure may have an uncertain registration result', async () => {
+    vi.mocked(rainApi.me).mockResolvedValue({ authenticated: false, user: null });
+    vi.mocked(rainApi.fetchRegistrationStatus).mockResolvedValue({ allow_registration: true, registration_mode: 'OPEN' });
+    vi.mocked(rainApi.register).mockRejectedValueOnce(new Error('无法连接 Rain 后端'));
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={['/register']}><AuthProvider><AuthPage mode="register" /></AuthProvider></MemoryRouter>);
+    await user.type(await screen.findByLabelText('用户名'), 'alice');
+    await user.type(screen.getByLabelText('密码'), 'password123');
+    await user.click(screen.getByRole('button', { name: '注册' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('先尝试使用该账号登录');
+    expect(screen.getByRole('button', { name: '注册' })).toBeInTheDocument();
   });
 
   it('ignores a stale registration status response after switching routes', async () => {

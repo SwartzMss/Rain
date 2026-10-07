@@ -15,6 +15,10 @@ import type {
   UploadTaskResponse,
   AuthMeResponse,
   Credentials,
+  RegisterPayload,
+  CreatedInvitationBatch,
+  InvitationPage,
+  InvitationStatus,
   User,
   SavedSearch,
   SavedSearchPayload,
@@ -204,17 +208,25 @@ export const rainApi = {
     return value;
   },
   fetchAuthRateLimits() { return request<AuthRateLimitsResponse>('/api/admin/auth-rate-limits'); },
+  fetchInvitations(params: { status?: InvitationStatus; batch_id?: string; cursor?: string; limit?: number } = {}) {
+    const query = new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => Boolean(entry[1])));
+    return request<InvitationPage>(`/api/admin/invitations?${query}`);
+  },
+  createInvitations(payload: { count: number; validity_days: number | null; note: string }) {
+    return request<CreatedInvitationBatch>('/api/admin/invitations', { method: 'POST', body: JSON.stringify(payload) });
+  },
+  revokeInvitation(id: string) { return request<void>(`/api/admin/invitations/${encodePathSegment(id)}/revoke`, { method: 'POST' }); },
   clearAuthRateLimit(type: 'usernames' | 'ips', key: string) { return request<void>(`/api/admin/auth-rate-limits/${type}/${encodePathSegment(key)}`, { method: 'DELETE' }); },
   clearAllAuthRateLimits(type: 'usernames' | 'ips') { return request<void>(`/api/admin/auth-rate-limits/${type}`, { method: 'DELETE' }); },
   changeUserStatus(id: string, status: UserStatus) { return request(`/api/admin/users/${encodePathSegment(id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }); },
   revokeUserSessions(id: string) { return request<{ revoked_sessions: number }>(`/api/admin/users/${encodePathSegment(id)}/revoke-sessions`, { method: 'POST' }); },
-  register(payload: Credentials) {
+  register(payload: RegisterPayload) {
     return request<User>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify(payload)
     });
   },
-  fetchRegistrationStatus() { return request<RegistrationStatus>('/api/auth/registration-status'); },
+  fetchRegistrationStatus() { return request<RegistrationStatus>('/api/auth/registration-status', { cache: 'no-store' }); },
   login(payload: Credentials) {
     return request<User>('/api/auth/login', {
       method: 'POST',

@@ -12,6 +12,7 @@ mod auth;
 mod files;
 mod health;
 mod helpers;
+mod invitations;
 mod issues;
 #[cfg(test)]
 pub(crate) use issues::cleanup_inactive_issues;
@@ -259,6 +260,9 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(admin::change_status)
                 .service(admin::revoke_sessions)
                 .service(admin::list_audit)
+                .service(invitations::create)
+                .service(invitations::list)
+                .service(invitations::revoke)
                 .service(auth::login)
                 .service(auth::me)
                 .service(auth::logout)

@@ -24,6 +24,7 @@ export interface AuditSummary {
 const FIELD_METADATA: Record<string, { label: string; unit?: string }> = {
   provider_api_key: { label: "API 密钥" },
   allow_registration: { label: "允许注册" },
+  registration_requires_invite: { label: "邀请码注册" },
   session_ttl_seconds: { label: "会话有效期", unit: "秒" },
   register_ip_limit_per_hour: { label: "单 IP 每小时注册上限", unit: "次" },
   login_ip_limit_per_minute: { label: "每分钟登录失败上限", unit: "次" },
@@ -74,6 +75,10 @@ const RESOURCE_MODE_LABELS: Record<string, string> = {
 
 const ACTION_LABELS: Record<string, string> = {
   ADMIN_BOOTSTRAPPED: "初始化管理员",
+  INVITATION_CREATED: "生成邀请码",
+  INVITATION_REVOKED: "撤销邀请码",
+  INVITATION_REDEEMED: "使用邀请码注册",
+  AUTH_SETTINGS_UPDATED: "认证设置变更",
   USER_STATUS_CHANGED: "变更用户状态",
   USER_SESSIONS_REVOKED: "注销用户 Session",
   SETTINGS_UPDATED: "系统配置变更",

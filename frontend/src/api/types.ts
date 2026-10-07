@@ -14,7 +14,8 @@ export interface AdminUser { id: string; username: string; status: UserStatus; c
 export interface AdminUserPage { items: AdminUser[]; next_cursor: string | null; }
 export interface AuditLog { id: string; actor_type: 'USER' | 'SYSTEM'; actor_user_id: string | null; target_user_id: string | null; target_username: string | null; action: string; old_value: string | null; new_value: string | null; details_json?: string | null; client_ip: string | null; user_agent?: string | null; created_at: string; }
 export interface AuditLogPage { items: AuditLog[]; next_cursor: string | null; }
-export interface RegistrationStatus { allow_registration: boolean; }
+export type RegistrationMode = 'CLOSED' | 'INVITE_ONLY' | 'OPEN';
+export interface RegistrationStatus { allow_registration: boolean; registration_mode?: RegistrationMode; requires_invite_code?: boolean; }
 export type SettingCategory = 'common' | 'advanced' | 'expert';
 export type SettingVisibility = 'default' | 'collapsed' | 'expert';
 export type ResourceMode = 'auto' | 'manual';
@@ -46,6 +47,7 @@ export interface RegistrationSettingField {
 }
 
 export interface RegistrationSettings extends RegistrationStatus {
+  registration_requires_invite?: boolean;
   schema_version?: number;
   revision?: string;
   updated_at: string;
@@ -95,6 +97,25 @@ export interface Credentials {
   username: string;
   password: string;
 }
+
+export interface RegisterPayload extends Credentials {
+  invite_code?: string;
+}
+
+export type InvitationStatus = 'ACTIVE' | 'USED' | 'REVOKED' | 'EXPIRED';
+export interface InvitationItem {
+  id: string;
+  batch_id: string;
+  note: string;
+  created_by_username: string;
+  created_at: string;
+  expires_at: string | null;
+  status: InvitationStatus;
+  used_by_username: string | null;
+  used_at: string | null;
+}
+export interface InvitationPage { items: InvitationItem[]; next_cursor: string | null; }
+export interface CreatedInvitationBatch { batch_id: string; invitations: Array<{ id: string; code: string; expires_at: string | null }>; }
 
 export interface AuthMeResponse {
   authenticated: boolean;

@@ -20,6 +20,135 @@ pub enum CreateUserOutcome {
     DuplicateUsername,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationOutcome {
+    Created { user_id: String },
+    DuplicateUsername,
+    RegistrationDisabled,
+    InviteRequired,
+}
+
+/// Creates the account and redeems its invitation in one replayable SQLite
+/// transaction. The persisted setting row is the source of truth for policy.
+pub async fn register_user(
+    pool: &SqlitePool,
+    user_id: &str,
+    username: &str,
+    password_hash: &str,
+    invite_code_hash: Option<&str>,
+    client_ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<RegistrationOutcome, AppError> {
+    let user_id = user_id.to_owned();
+    let username = username.to_owned();
+    let username_normalized = normalize_username(&username);
+    let password_hash = password_hash.to_owned();
+    let invite_code_hash = invite_code_hash.map(str::to_owned);
+    let client_ip = client_ip.map(str::to_owned);
+    let user_agent = user_agent.map(str::to_owned);
+    let operation_id = Uuid::new_v4().to_string();
+    let audit_id = Uuid::new_v4().to_string();
+
+    crate::db::write::transaction(pool, "register user", move |conn| {
+        let user_id = user_id.clone();
+        let username = username.clone();
+        let username_normalized = username_normalized.clone();
+        let password_hash = password_hash.clone();
+        let invite_code_hash = invite_code_hash.clone();
+        let client_ip = client_ip.clone();
+        let user_agent = user_agent.clone();
+        let operation_id = operation_id.clone();
+        let audit_id = audit_id.clone();
+        Box::pin(async move {
+            let (allow_registration, requires_invite): (i64, i64) = sqlx::query_as(
+                "SELECT allow_registration,registration_requires_invite FROM system_settings WHERE id=1",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            if allow_registration == 0 {
+                return Ok(RegistrationOutcome::RegistrationDisabled);
+            }
+            if requires_invite != 0 && invite_code_hash.is_none() {
+                return Ok(RegistrationOutcome::InviteRequired);
+            }
+
+            let invitation_id: Option<String> = if requires_invite != 0 {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM invitations WHERE code_hash=? AND used_at IS NULL AND revoked_at IS NULL AND (expires_at IS NULL OR datetime(expires_at)>CURRENT_TIMESTAMP)",
+                )
+                .bind(invite_code_hash.as_deref().unwrap_or_default())
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(AppError::Database)?
+                .ok_or_else(|| {
+                    AppError::api(
+                        actix_web::http::StatusCode::BAD_REQUEST,
+                        "INVITE_CODE_INVALID",
+                        "邀请码无效或已失效，请联系管理员",
+                    )
+                })?
+                .into()
+            } else {
+                None
+            };
+
+            let inserted = sqlx::query(
+                "INSERT INTO users(id,username,username_normalized,password_hash) VALUES(?,?,?,?) ON CONFLICT(username_normalized) DO NOTHING",
+            )
+            .bind(&user_id)
+            .bind(&username)
+            .bind(&username_normalized)
+            .bind(&password_hash)
+            .execute(&mut *conn)
+            .await
+            .map_err(AppError::Database)?
+            .rows_affected();
+            if inserted == 0 {
+                return Ok(RegistrationOutcome::DuplicateUsername);
+            }
+
+            if let Some(invitation_id) = invitation_id {
+                let redeemed = sqlx::query(
+                    "UPDATE invitations SET used_at=CURRENT_TIMESTAMP,used_by=? WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND (expires_at IS NULL OR datetime(expires_at)>CURRENT_TIMESTAMP)",
+                )
+                .bind(&user_id)
+                .bind(&invitation_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(AppError::Database)?
+                .rows_affected();
+                if redeemed != 1 {
+                    return Err(AppError::api(
+                        actix_web::http::StatusCode::BAD_REQUEST,
+                        "INVITE_CODE_INVALID",
+                        "邀请码无效或已失效，请联系管理员",
+                    ));
+                }
+
+                let details = serde_json::json!({
+                    "invitation_id": invitation_id,
+                    "user_id": user_id,
+                })
+                .to_string();
+                sqlx::query("INSERT INTO admin_audit_logs(id,actor_type,actor_user_id,target_user_id,action,operation_id,details_json,client_ip,user_agent) VALUES(?,'USER',?,?, 'INVITATION_REDEEMED',?,?,?,?)")
+                    .bind(&audit_id)
+                    .bind(&user_id)
+                    .bind(&user_id)
+                    .bind(&operation_id)
+                    .bind(details)
+                    .bind(client_ip.as_deref())
+                    .bind(user_agent.as_deref())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(AppError::Database)?;
+            }
+            Ok(RegistrationOutcome::Created { user_id })
+        })
+    })
+    .await
+}
+
 pub async fn create_user(
     pool: &SqlitePool,
     username: &str,
