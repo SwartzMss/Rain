@@ -28,6 +28,52 @@ pub enum RegistrationOutcome {
     InviteRequired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationPreflight {
+    Ready,
+    RegistrationDisabled,
+    InviteRequired,
+    InviteInvalid,
+}
+
+/// Performs inexpensive registration checks before password hashing. This is
+/// only a preflight: `register_user` repeats every policy and invite check in
+/// its write transaction to remain safe against concurrent changes.
+pub async fn registration_preflight(
+    pool: &SqlitePool,
+    invite_code_hash: Option<&str>,
+) -> Result<RegistrationPreflight, AppError> {
+    let (allow_registration, requires_invite): (i64, i64) = sqlx::query_as(
+        "SELECT allow_registration,registration_requires_invite FROM system_settings WHERE id=1",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    if allow_registration == 0 {
+        return Ok(RegistrationPreflight::RegistrationDisabled);
+    }
+    if requires_invite == 0 {
+        return Ok(RegistrationPreflight::Ready);
+    }
+
+    let Some(invite_code_hash) = invite_code_hash else {
+        return Ok(RegistrationPreflight::InviteRequired);
+    };
+    let valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM invitations WHERE code_hash=? AND used_at IS NULL AND revoked_at IS NULL AND (expires_at IS NULL OR datetime(expires_at)>CURRENT_TIMESTAMP))",
+    )
+    .bind(invite_code_hash)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+    if !valid {
+        return Ok(RegistrationPreflight::InviteInvalid);
+    }
+
+    Ok(RegistrationPreflight::Ready)
+}
+
 /// Creates the account and redeems its invitation in one replayable SQLite
 /// transaction. The persisted setting row is the source of truth for policy.
 pub async fn register_user(

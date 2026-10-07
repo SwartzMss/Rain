@@ -21,6 +21,102 @@ async fn initialized_pool() -> SqlitePool {
 }
 
 #[actix_web::test]
+async fn registration_preflight_rejects_invalid_requests_before_argon2() {
+    let pool = initialized_pool().await;
+    let state = web::Data::new(AppState::new(
+        pool.clone(),
+        PathBuf::from("data"),
+        AppLimits::default(),
+    ));
+    state
+        .settings
+        .initialize(&AppLimits::default(), &AuthConfig::default(), 0, None)
+        .await
+        .expect("initialize settings");
+
+    let valid_code = "PREFLIGHT-VALID-CODE";
+    let admin_id: String =
+        sqlx::query_scalar("SELECT id FROM users WHERE username_normalized='admin'")
+            .fetch_one(&pool)
+            .await
+            .expect("bootstrap admin id");
+    sqlx::query("INSERT INTO invitations(id,batch_id,code_hash,created_by) VALUES(?,?,?,?)")
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(invitations::code_hash(valid_code).expect("valid code hash"))
+        .bind(admin_id)
+        .execute(&pool)
+        .await
+        .expect("insert invitation");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(state.clone())
+            .configure(routes::register),
+    )
+    .await;
+    let _argon2_permits = state
+        .auth_runtime
+        .hash_permits
+        .clone()
+        .acquire_many_owned(state.auth_runtime.config.argon2_concurrency as u32)
+        .await
+        .expect("acquire all argon2 permits");
+
+    let missing = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username":"preflight-missing","password":"password123"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    let missing: Value = test::read_body_json(missing).await;
+    assert_eq!(missing["code"], "INVITE_CODE_REQUIRED");
+
+    let invalid = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username":"preflight-invalid","password":"password123","invite_code":"not-a-valid-code"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let invalid: Value = test::read_body_json(invalid).await;
+    assert_eq!(invalid["code"], "INVITE_CODE_INVALID");
+
+    let valid = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username":"preflight-valid","password":"password123","invite_code":valid_code}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(valid.status(), StatusCode::TOO_MANY_REQUESTS);
+    let valid: Value = test::read_body_json(valid).await;
+    assert_eq!(valid["code"], "TOO_MANY_REQUESTS");
+
+    sqlx::query("UPDATE system_settings SET allow_registration=0 WHERE id=1")
+        .execute(&pool)
+        .await
+        .expect("close registration");
+    let closed = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/api/auth/register")
+            .set_json(json!({"username":"preflight-closed","password":"password123"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(closed.status(), StatusCode::FORBIDDEN);
+    let closed: Value = test::read_body_json(closed).await;
+    assert_eq!(closed["code"], "REGISTRATION_DISABLED");
+}
+
+#[actix_web::test]
 async fn invitation_registration_is_one_time_and_failures_do_not_consume_codes() {
     let pool = initialized_pool().await;
     let state = web::Data::new(AppState::new(

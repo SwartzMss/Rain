@@ -282,11 +282,35 @@ pub async fn register_user(
     )?;
     validate_username(&payload.username).map_err(validation_error)?;
     validate_password(&payload.password).map_err(validation_error)?;
-    let password = payload.password.clone();
-    let password_hash = run_argon2(&state, move || hash_password(&password)).await?;
     let invite_code_hash = payload.invite_code.as_deref().map(|code| {
         invitations::code_hash(code).unwrap_or_else(|| "invalid-invitation-code".into())
     });
+    match users::registration_preflight(&state.db.pool, invite_code_hash.as_deref()).await? {
+        users::RegistrationPreflight::Ready => {}
+        users::RegistrationPreflight::RegistrationDisabled => {
+            return Err(AppError::api(
+                StatusCode::FORBIDDEN,
+                "REGISTRATION_DISABLED",
+                "当前未开放注册",
+            ));
+        }
+        users::RegistrationPreflight::InviteRequired => {
+            return Err(AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVITE_CODE_REQUIRED",
+                "请输入邀请码",
+            ));
+        }
+        users::RegistrationPreflight::InviteInvalid => {
+            return Err(AppError::api(
+                StatusCode::BAD_REQUEST,
+                "INVITE_CODE_INVALID",
+                "邀请码无效或已失效，请联系管理员",
+            ));
+        }
+    }
+    let password = payload.password.clone();
+    let password_hash = run_argon2(&state, move || hash_password(&password)).await?;
     let user_id = uuid::Uuid::new_v4().to_string();
     let client_ip = request.peer_addr().map(|address| address.ip().to_string());
     let user_agent = request
