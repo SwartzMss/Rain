@@ -2,17 +2,19 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider } from '../src/auth/AuthContext';
-import { rainApi } from '../src/api/client';
+import { ApiError, rainApi } from '../src/api/client';
 import type { TempResultInfo, TempResultLinesResponse } from '../src/api/types';
 import { TempResultRoute } from '../src/features/files/TempResultView';
 
 vi.mock('../src/api/client', () => ({
   ApiError: class ApiError extends Error { status?: number; },
+  RequestCancelledError: class RequestCancelledError extends Error {},
   normalizeApiError: (error: unknown) => String(error),
   rainApi: {
     me: vi.fn(),
     fetchTempResult: vi.fn(),
     fetchTempResultLines: vi.fn(),
+    reserveSearchRequest: vi.fn(),
     previewTempResult: vi.fn(),
     keepAliveTempResults: vi.fn().mockResolvedValue({ unavailable_ids: [] }),
     deleteTempResult: vi.fn()
@@ -177,5 +179,23 @@ describe('standalone Temp Result view', () => {
     expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled();
     fireEvent.keyDown(screen.getByPlaceholderText('继续过滤'), { key: 'Enter' });
     expect(rainApi.previewTempResult).not.toHaveBeenCalled();
+  });
+
+  it('marks the result unavailable when filtering it returns 404', async () => {
+    vi.mocked(rainApi.fetchTempResult).mockResolvedValueOnce(result('A'));
+    vi.mocked(rainApi.fetchTempResultLines).mockResolvedValueOnce(lines(0, 2));
+    vi.mocked(rainApi.reserveSearchRequest).mockResolvedValueOnce({ cancel_token: 'token' });
+    const expired = new ApiError('Not Found');
+    expired.status = 404;
+    vi.mocked(rainApi.previewTempResult).mockRejectedValueOnce(expired);
+
+    renderRoute();
+    const filter = await screen.findByPlaceholderText('继续过滤');
+    fireEvent.change(filter, { target: { value: 'WARN' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }));
+
+    expect(await screen.findByText(/搜索结果已过期或被删除/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('继续过滤')).toBeDisabled();
+    expect(screen.getByText('line-0')).toBeInTheDocument();
   });
 });

@@ -133,7 +133,12 @@ export function TempResultView() {
         from: 0,
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
-      { scopeKey: `temp:${resultId}` }
+      {
+        scopeKey: `temp:${resultId}`,
+        onFailure: (searchError) => {
+          if (searchError instanceof ApiError && searchError.status === 404) setUnavailable(true);
+        }
+      }
     );
     setCreating(false);
     if (created) navigate(`/temp-results/${created.result_id}`);

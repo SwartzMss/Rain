@@ -7,6 +7,7 @@ import type { SearchViewerTab } from '../src/features/files/viewerTabs';
 const tab: SearchViewerTab = {
   id: 'tab', resultId: 'old', kind: 'search', title: 'ERROR', pinned: true,
   scrollTop: 0, expression: 'ERROR', hits: [], total: 100, from: 0,
+  queryPlan: { root: { kind: 'issue', issueCode: 'TEST' }, expressions: ['ERROR'] },
   pageSize: 10, pageHistory: [], source: { kind: 'issue', issueCode: 'TEST' }
 };
 
@@ -38,5 +39,16 @@ describe('unavailable search snapshot', () => {
       unavailable onReplay={vi.fn()} replayError="来源不可用，请检查原始文件" />);
     expect(screen.getByRole('button', { name: '重新搜索' })).toBeInTheDocument();
     expect(screen.getByText('来源不可用，请检查原始文件')).toBeInTheDocument();
+  });
+
+  it('shows source guidance instead of replay for a tab without a saved query plan', () => {
+    render(<SearchResultViewer activeViewerTab={{ ...tab, queryPlan: undefined }} results={[]}
+      resultFilterTokens={[]} resultFilterDraft="" onResultFilterTokensChange={vi.fn()}
+      onResultFilterDraftChange={vi.fn()} onClearResultFilter={vi.fn()} onSearchWithinResults={vi.fn()}
+      canRunResultFilter={false} searchLoading={false} contentRef={createRef()}
+      pageSizeOptions={[10]} onLoadPage={vi.fn()} highlightTerm="" renderHighlightedText={(text) => text}
+      unavailable onReplay={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: '重新搜索' })).not.toBeInTheDocument();
+    expect(screen.getByText('请返回原始文件或 Issue 重新搜索。')).toBeInTheDocument();
   });
 });

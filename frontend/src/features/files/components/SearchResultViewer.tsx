@@ -59,8 +59,11 @@ export function SearchResultViewer({
   renderHighlightedText,
   onOpenSource
 }: SearchResultViewerProps) {
+  const replayAction = activeViewerTab.kind === 'search' && activeViewerTab.queryPlan
+    ? onReplay
+    : undefined;
   const expiryNotice = unavailable
-    ? <ResultExpiryNotice onReplay={onReplay} replaying={replaying} error={replayError} />
+    ? <ResultExpiryNotice onReplay={replayAction} replaying={replaying} error={replayError} />
     : null;
   const pageHistory = activeViewerTab.pageHistory ?? [];
   const [contextMenu, setContextMenu] = useState<{
