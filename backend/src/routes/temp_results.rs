@@ -228,12 +228,14 @@ struct MaterializedPreviewResponse {
 mod common;
 mod lifecycle;
 mod repository;
+mod retention;
 mod routes;
 mod search_plan;
 mod service;
 mod storage;
 
 pub(crate) use lifecycle::{check_temp_result_rate_limit, cleanup_expired};
+pub(crate) use retention::keep_alive_temp_results;
 pub(crate) use routes::{
     create_temp_result, delete_temp_result, download_temp_result, get_temp_result,
     get_temp_result_lines, preview_temp_result,

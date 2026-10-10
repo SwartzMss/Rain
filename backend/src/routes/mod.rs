@@ -290,6 +290,7 @@ pub fn register(cfg: &mut web::ServiceConfig) {
                 .service(logs::search_logs)
                 .service(temp_results::create_temp_result)
                 .service(temp_results::preview_temp_result)
+                .service(temp_results::keep_alive_temp_results)
                 .service(search_requests::reserve_search_request)
                 .service(search_requests::cancel_search_request)
                 .service(temp_results::get_temp_result)
