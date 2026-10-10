@@ -1151,14 +1151,14 @@ export function BundleView() {
     }
   }, [clearFileSearch, fileSearch.draft, fileSearch.executed, fileSearch.tokens]);
 
-  const runFileSearch = useCallback(async (from = 0) => {
+  const runFileSearch = useCallback(async (from = 0, tokens = fileSearch.tokens, draft = fileSearch.draft) => {
     const workspaceGeneration = workspaceGenerationRef.current;
     if (!selectedNode || !canPreviewText(selectedNode)) return;
     const selectedBundleId = selectedNode.bundleId || bundleId;
     if (!selectedBundleId) return;
     let finalizedTokens: SearchToken[];
     try {
-      finalizedTokens = finalizeSearchTokens(fileSearch.tokens, fileSearch.draft, false);
+      finalizedTokens = finalizeSearchTokens(tokens, draft, false);
     } catch (error) {
       fileSearch.setError(error instanceof Error ? error.message : '搜索条件无效');
       return;
@@ -1876,6 +1876,11 @@ export function BundleView() {
                       className="min-w-[220px]"
                       tokens={fileSearch.tokens}
                       draft={fileSearch.draft}
+                      onSubmit={(tokens, draft) => {
+                        if (!fileSearch.busy && canFinalizeSearch(tokens, draft, false)) {
+                          runFileSearch(0, tokens, draft).catch(() => undefined);
+                        }
+                      }}
                       onTokensChange={fileSearch.setTokens}
                       onDraftChange={fileSearch.setDraft}
                       placeholder="输入关键词"
