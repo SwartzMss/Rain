@@ -651,6 +651,67 @@ describe('shared file search restoration', () => {
     expect(await screen.findByText('lpkey match')).toBeInTheDocument();
   });
 
+  it('keeps a new file search active when a shared search restore finishes later', async () => {
+    const restorationResponse = {
+      result_id: 'shared-result',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+        content: 'old shared match', line_number: 3
+      }]
+    };
+    const fileSearchResponse = {
+      result_id: 'file-result',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+        content: 'new file match', line_number: 8
+      }]
+    };
+    const restorationExecution = deferred<typeof restorationResponse>();
+    const fileSearchValidation = deferred<{ valid: true }>();
+    let completeRestoration: (() => void) | null = null;
+    testMocks.validateSearchExpression
+      .mockResolvedValueOnce({ valid: true })
+      .mockReturnValueOnce(fileSearchValidation.promise);
+    testMocks.execute
+      .mockImplementationOnce((_request, options) => {
+        completeRestoration = () => {
+          options?.onSuccess?.(restorationResponse);
+          restorationExecution.resolve(restorationResponse);
+        };
+        return restorationExecution.promise;
+      })
+      .mockImplementationOnce(async (_request, options) => {
+        options?.onSuccess?.(fileSearchResponse);
+        return fileSearchResponse;
+      });
+
+    renderSharedFileSearch();
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'target.log' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '当前文件搜索条件' }), {
+      target: { value: 'newterm' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '搜索', exact: true }));
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      completeRestoration?.();
+      await restorationExecution.promise;
+    });
+    expect(await screen.findByRole('button', { name: '编辑关键词 newterm' })).toBeInTheDocument();
+    expect(screen.queryByText('old shared match')).not.toBeInTheDocument();
+
+    await act(async () => fileSearchValidation.resolve({ valid: true }));
+    expect(await screen.findByText('new file match')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(2);
+    expect(testMocks.execute.mock.calls[1][0]).toMatchObject({
+      expression: '"newterm"', bundle_hash: 'bundle', file_id: '42'
+    });
+  });
+
   it('restores nested file filters in order using each prior temporary result', async () => {
     testMocks.execute.mockImplementation(async (request, options) => {
       const index = testMocks.execute.mock.calls.length;

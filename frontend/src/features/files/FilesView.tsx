@@ -84,7 +84,7 @@ type TreeLoadGuard = {
 
 type SharedRestoreState = {
   routeKey: string;
-  status: 'loading' | 'failed' | 'succeeded';
+  status: 'loading' | 'failed' | 'succeeded' | 'superseded';
   error: string | null;
 };
 
@@ -1081,6 +1081,17 @@ export function BundleView() {
     setFileSearchFrom(0);
   }, [fileSearch.clear]);
 
+  const supersedeSharedRestore = useCallback(() => {
+    const attempt = sharedRestoreAttemptRef.current;
+    if (attempt?.status !== 'loading') return;
+
+    sharedRestoreGenerationRef.current += 1;
+    sharedFileSearch.invalidate();
+    const superseded = { routeKey: attempt.routeKey, status: 'superseded' as const, error: null };
+    sharedRestoreAttemptRef.current = superseded;
+    setSharedRestoreState(superseded);
+  }, [sharedFileSearch.invalidate]);
+
   useEffect(() => {
     if (fileSearch.executed && isFileSearchConditionEmpty(fileSearch.tokens, fileSearch.draft)) {
       clearFileSearch();
@@ -1098,6 +1109,7 @@ export function BundleView() {
       fileSearch.setError(error instanceof Error ? error.message : '搜索条件无效');
       return;
     }
+    supersedeSharedRestore();
     const expression = serializeSearchTokens(finalizedTokens);
     const title = formatSearchTokens(finalizedTokens);
     fileSearch.setEditor(finalizedTokens);
@@ -1150,7 +1162,7 @@ export function BundleView() {
           }
     });
     if (!response) return;
-  }, [bundleId, fileSearch, openViewerTab, selectedNode]);
+  }, [bundleId, fileSearch, openViewerTab, selectedNode, supersedeSharedRestore]);
 
   const searchWithinActiveResults = useCallback(async (tokens: SearchToken[], draft: string) => {
     if (!activeViewerTab || (activeViewerTab.kind !== 'search' && activeViewerTab.kind !== 'temp')) return;
@@ -1321,17 +1333,20 @@ export function BundleView() {
         : { kind: 'file', bundleHash: plan.root.bundleHash, fileId: plan.root.fileId },
       queryPlan: plan
     });
-    issueSearch.clear();
-    fileSearch.clear();
-    viewerSearch.clear();
+    if (fileScoped) {
+      sharedFileSearch.clear();
+    } else {
+      issueSearch.clear();
+      viewerSearch.clear();
+    }
   }, [
-    fileSearch.clear,
     handleNodeClick,
     issueSearch.clear,
     issueSearch.run,
     issueSearch.setEditor,
     loadNode,
     openViewerTab,
+    sharedFileSearch.clear,
     sharedFileSearch.error,
     sharedFileSearch.run,
     sharedFileSearch.setEditor,
@@ -1730,7 +1745,9 @@ export function BundleView() {
               onClose={closeTab}
               onCloseMany={closeTabs}
             />
-            {sharedTab && currentSharedRestore?.status !== 'succeeded' ? (
+            {sharedTab
+            && currentSharedRestore?.status !== 'succeeded'
+            && currentSharedRestore?.status !== 'superseded' ? (
               <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-2 text-sm">
                 {currentSharedRestore?.status === 'failed' ? (
                   <>
