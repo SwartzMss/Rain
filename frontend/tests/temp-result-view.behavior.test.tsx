@@ -162,4 +162,20 @@ describe('standalone Temp Result view', () => {
     expect(screen.getByText('new-page-0')).toBeInTheDocument();
     expect(screen.queryByText('line-2')).not.toBeInTheDocument();
   });
+
+  it('disables actions on an expired result while keeping the loaded page visible', async () => {
+    vi.mocked(rainApi.fetchTempResult).mockResolvedValueOnce(result('A'));
+    vi.mocked(rainApi.fetchTempResultLines).mockResolvedValueOnce(lines(0, 2));
+    vi.mocked(rainApi.keepAliveTempResults).mockResolvedValueOnce({ unavailable_ids: ['A'] });
+
+    renderRoute();
+    expect(await screen.findByText(/搜索结果已过期或被删除/)).toBeInTheDocument();
+    expect(screen.getByText('line-0')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('继续过滤')).toBeDisabled();
+    expect(screen.getByRole('button', { name: '搜索' })).toBeDisabled();
+    expect(screen.getByRole('combobox')).toBeDisabled();
+    expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled();
+    fireEvent.keyDown(screen.getByPlaceholderText('继续过滤'), { key: 'Enter' });
+    expect(rainApi.previewTempResult).not.toHaveBeenCalled();
+  });
 });

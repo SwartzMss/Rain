@@ -30,6 +30,7 @@ export function TempResultView() {
   const searchExecution = useSearchExecution();
   const resultRetention = useResultRetention(resultId ? [resultId] : []);
   const [unavailable, setUnavailable] = useState(false);
+  const resultUnavailable = unavailable || resultRetention.unavailableIds.has(resultId);
 
   useEffect(() => {
     if (searchExecution.snapshot.status === 'FAILED') {
@@ -84,6 +85,7 @@ export function TempResultView() {
     navigation: PageNavigation,
     previousStart?: number
   ) => {
+    if (resultUnavailable) return;
     const generation = ++requestGeneration.current;
     setLoading(true);
     setError(null);
@@ -115,13 +117,13 @@ export function TempResultView() {
         setLoading(false);
       }
     }
-  }, [resultId]);
+  }, [resultId, resultUnavailable]);
 
   const visibleResult = result?.id === resultId ? result : null;
   const visibleLines = visibleResult ? lines : null;
 
   const createFromResult = async () => {
-    if (!expression.trim() || !resultId) return;
+    if (!expression.trim() || !resultId || resultUnavailable) return;
     setCreating(true);
     setError(null);
     const created = await searchExecution.execute(
@@ -155,7 +157,7 @@ export function TempResultView() {
   return (
     <section className="panel space-y-4">
       {error ? <p className="rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-600">{error}</p> : null}
-      {(unavailable || resultRetention.unavailableIds.has(resultId))
+      {resultUnavailable
         ? <ResultExpiryNotice />
         : null}
       {visibleResult ? (
@@ -165,7 +167,7 @@ export function TempResultView() {
               <p className="text-xs text-cyan-700">临时日志结果</p>
               <h2 className="truncate text-lg font-semibold text-slate-950">{visibleResult.name}</h2>
               <p className="mt-1 text-xs text-slate-500">
-                来源：{visibleResult.source_label} · 表达式：{visibleResult.expression} · 到期：{new Date(visibleResult.expires_at).toLocaleString()}
+                来源：{visibleResult.source_label} · 表达式：{visibleResult.expression} · 打开期间自动续期，不再使用后由后台清理
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
@@ -186,6 +188,7 @@ export function TempResultView() {
               className="min-w-[220px] flex-1 bg-transparent text-sm text-slate-950 outline-none placeholder:text-slate-500"
               placeholder="继续过滤"
               value={expression}
+              disabled={resultUnavailable}
               onChange={(event) => setExpression(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') createFromResult().catch(() => undefined);
@@ -194,7 +197,7 @@ export function TempResultView() {
             <button
               type="button"
               className="rounded bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
-              disabled={creating || !expression.trim()}
+              disabled={creating || resultUnavailable || !expression.trim()}
               onClick={() => createFromResult().catch(() => undefined)}
             >
               {creating ? '搜索中...' : '搜索'}
@@ -222,6 +225,7 @@ export function TempResultView() {
               <select
                 className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700"
                 value={pageSize}
+                disabled={resultUnavailable}
                 onChange={(event) => {
                   void loadPage(0, Number(event.target.value), 'reset');
                 }}
@@ -232,7 +236,7 @@ export function TempResultView() {
               <button
                 type="button"
                 className="rounded border border-slate-300 px-3 py-1 disabled:opacity-50"
-                disabled={pageHistory.length === 0 || loading}
+                disabled={pageHistory.length === 0 || loading || resultUnavailable}
                 onClick={() => {
                   const previousStart = pageHistory[pageHistory.length - 1];
                   if (previousStart === undefined) return;
@@ -242,7 +246,7 @@ export function TempResultView() {
               <button
                 type="button"
                 className="rounded border border-slate-300 px-3 py-1 disabled:opacity-50"
-                disabled={!visibleLines.next_start || loading}
+                disabled={!visibleLines.next_start || loading || resultUnavailable}
                 onClick={() => {
                   const nextStart = visibleLines.next_start ?? start + visibleLines.lines.length;
                   void loadPage(nextStart, pageSize, 'next', start);
