@@ -69,10 +69,12 @@ vi.mock('../src/hooks/useSearchExecution', () => ({
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function NavigationProbe() {
@@ -160,6 +162,53 @@ describe('BundleView search expression flow', () => {
 
     await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
     expect(testMocks.execute.mock.calls[0][1].workspaceSessionId).toBe('workspace-ready');
+  });
+
+  it('allows retrying a search after the Issue workspace connection fails', async () => {
+    const failedSession = deferred<{
+      session_id: string;
+      issue_code: string;
+      server_now: string;
+      last_activity_at: string;
+      expires_at: string;
+    }>();
+    testMocks.beginWorkspaceSession
+      .mockImplementationOnce((issueCode: string) => ({
+        issueCode,
+        consumers: 0,
+        promise: failedSession.promise
+      }))
+      .mockImplementation((issueCode: string) => ({
+        issueCode,
+        consumers: 0,
+        promise: Promise.resolve({
+          session_id: 'workspace-reconnected',
+          issue_code: issueCode,
+          server_now: '',
+          last_activity_at: '',
+          expires_at: ''
+        })
+      }));
+    testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
+
+    renderBundleView();
+    const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
+    const searchButton = screen.getByRole('button', { name: '搜索日志内容' });
+    fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(searchButton);
+
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
+    await act(async () => failedSession.reject(new Error('network unavailable')));
+
+    await waitFor(() => {
+      expect((editor as HTMLInputElement).disabled).toBe(false);
+      expect((searchButton as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getByText('Error: 工作会话连接失败，请操作页面后重试')).toBeInTheDocument();
+    });
+
+    fireEvent.click(searchButton);
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute.mock.calls[0][1].workspaceSessionId).toBe('workspace-reconnected');
   });
 
   it('waits for the Issue workspace before replaying a shared search', async () => {

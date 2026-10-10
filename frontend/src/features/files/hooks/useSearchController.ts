@@ -129,6 +129,7 @@ export function useSearchController(options: SearchControllerOptions = {}): Sear
       resolvedWorkspaceSessionId = sessionId;
     } catch (error) {
       if (mountedRef.current && intent === intentRef.current && !validationController.signal.aborted) {
+        setPhase('IDLE');
         setValidationError(normalizeApiError(error));
       }
       return undefined;
