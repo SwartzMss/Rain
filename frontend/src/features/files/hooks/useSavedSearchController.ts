@@ -17,7 +17,8 @@ export function useSavedSearchController({
   pendingSavedSearch,
   issueSearch,
   navigate,
-  openViewerTab
+  openViewerTab,
+  waitForWorkspaceSession
 }: {
   authenticated: boolean;
   issueCode: string;
@@ -26,6 +27,7 @@ export function useSavedSearchController({
   issueSearch: SearchController;
   navigate: (path: string, options?: { state?: unknown }) => void;
   openViewerTab: OpenViewerTab;
+  waitForWorkspaceSession: () => Promise<string | null>;
 }) {
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [savedSearchesOpen, setSavedSearchesOpen] = useState(false);
@@ -122,6 +124,7 @@ export function useSavedSearchController({
       expression: item.query_text,
       payload: { expression: item.query_text, issue_code: issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
       scopeKey: `issue:${issueCode}`,
+      workspaceSessionId: waitForWorkspaceSession(),
       onSuccess: (result) => {
         const hits = result.lines.map((line) => ({
           bundle_hash: line.bundle_hash,
@@ -154,7 +157,7 @@ export function useSavedSearchController({
     if (!response) return;
     await rainApi.markSavedSearchUsed(item.id);
     setSavedSearchesOpen(false);
-  }, [issueCode, issueSearch, openViewerTab]);
+  }, [issueCode, issueSearch, openViewerTab, waitForWorkspaceSession]);
 
   const beginEditingSavedSearch = useCallback((item: SavedSearch) => {
     const editor = detailEditorState(item.query_text, item.options);

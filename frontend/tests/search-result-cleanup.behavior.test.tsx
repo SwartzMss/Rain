@@ -1,7 +1,7 @@
 import { StrictMode, type ReactNode } from 'react';
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, rainApi } from '../src/api/client';
+import { rainApi } from '../src/api/client';
 import { useViewerTabs } from '../src/features/files/hooks/useViewerTabs';
 import type { SearchViewerTab } from '../src/features/files/viewerTabs';
 
@@ -22,29 +22,28 @@ describe('search tab result cleanup', () => {
     vi.mocked(rainApi.deleteTempResult).mockResolvedValue(undefined);
   });
 
-  it('deletes only after the last tab referencing a result closes, including StrictMode', () => {
-    const { result } = renderHook(() => useViewerTabs(true), {
+  it('keeps result references with the workspace when tabs close, including StrictMode', () => {
+    const { result } = renderHook(() => useViewerTabs(), {
       wrapper: ({ children }: { children: ReactNode }) => <StrictMode>{children}</StrictMode>
     });
     act(() => result.current.setViewerTabsState([tab('a', 'shared'), tab('b', 'shared')], 'a'));
     act(() => result.current.closeViewerTab('a'));
     expect(rainApi.deleteTempResult).not.toHaveBeenCalled();
     act(() => result.current.closeViewerTab('b'));
-    expect(rainApi.deleteTempResult).toHaveBeenCalledTimes(1);
-    expect(rainApi.deleteTempResult).toHaveBeenCalledWith('shared');
+    expect(rainApi.deleteTempResult).not.toHaveBeenCalled();
   });
 
-  it('cleans batch closures while preserving the remaining pinned result', () => {
-    const { result } = renderHook(() => useViewerTabs(true));
+  it('does not release workspace results when a batch closes around a pinned tab', () => {
+    const { result } = renderHook(() => useViewerTabs());
     const pinned = { ...tab('keep'), pinned: true };
     act(() => result.current.setViewerTabsState([tab('a'), tab('b'), pinned], 'a'));
     act(() => result.current.setViewerTabsState([pinned], 'keep'));
-    expect(vi.mocked(rainApi.deleteTempResult).mock.calls).toEqual([['a'], ['b']]);
+    expect(rainApi.deleteTempResult).not.toHaveBeenCalled();
     expect(result.current.viewerTabs).toEqual([pinned]);
   });
 
-  it('does not delete a parent while a materialized result still has another tab for it', () => {
-    const { result } = renderHook(() => useViewerTabs(true));
+  it('keeps a result referenced by a parent and materialized tab for the workspace', () => {
+    const { result } = renderHook(() => useViewerTabs());
     act(() => result.current.setViewerTabsState([
       tab('a', 'shared'),
       { id: 'temp', kind: 'temp', resultId: 'shared', expression: '', lines: [], total: 0,
@@ -53,29 +52,26 @@ describe('search tab result cleanup', () => {
     act(() => result.current.closeViewerTab('a'));
     expect(rainApi.deleteTempResult).not.toHaveBeenCalled();
     act(() => result.current.closeViewerTab('temp'));
-    expect(rainApi.deleteTempResult).toHaveBeenCalledWith('shared');
+    expect(rainApi.deleteTempResult).not.toHaveBeenCalled();
   });
 
-  it('closes even when deletion fails and leaves expiry cleanup as fallback', async () => {
+  it('does not send per-tab deletion requests when a result tab closes', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.mocked(rainApi.deleteTempResult).mockRejectedValueOnce(new Error('offline'));
-    const { result } = renderHook(() => useViewerTabs(true));
+    const { result } = renderHook(() => useViewerTabs());
     act(() => result.current.openViewerTab(tab('a')));
     act(() => result.current.closeViewerTab('a'));
     expect(result.current.viewerTabs).toEqual([]);
-    await waitFor(() => expect(warn).toHaveBeenCalledOnce());
+    expect(rainApi.deleteTempResult).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 
-  it('accepts already expired results and never attempts guest deletion', async () => {
-    vi.mocked(rainApi.deleteTempResult).mockRejectedValueOnce(new ApiError('expired', 404));
-    const { result, rerender } = renderHook(({ allowed }) => useViewerTabs(allowed), { initialProps: { allowed: true } });
+  it('keeps tab closure independent of result deletion', () => {
+    const { result } = renderHook(() => useViewerTabs());
     act(() => result.current.openViewerTab(tab('expired')));
     act(() => result.current.closeViewerTab('expired'));
-    await act(async () => {});
-    rerender({ allowed: false });
     act(() => result.current.openViewerTab(tab('guest')));
     act(() => result.current.closeViewerTab('guest'));
-    expect(rainApi.deleteTempResult).toHaveBeenCalledTimes(1);
+    expect(rainApi.deleteTempResult).not.toHaveBeenCalled();
   });
 });

@@ -54,6 +54,7 @@ import { useViewerSearchController } from './hooks/useViewerSearchController';
 import { currentExpression, useSearchController } from './hooks/useSearchController';
 import { useViewerPaginationController } from './hooks/useViewerPaginationController';
 import { useSavedSearchController } from './hooks/useSavedSearchController';
+import { useIssueWorkspaceSession } from './hooks/useIssueWorkspaceSession';
 import { buildTabShareUrl, parseSharedTabSearch, type SharedTabDescriptor } from './tabShareLink';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
@@ -239,20 +240,11 @@ export function BundleView() {
     resetViewerTabs,
     updateViewerTabs,
     togglePinnedViewerTab
-  } = useViewerTabs(isBusinessUser);
+  } = useViewerTabs();
   const issueSearch = useIssueSearchController(pendingDetailEditor.tokens, pendingDetailEditor.error);
   const fileSearch = useFileSearchController();
   const viewerSearch = useViewerSearchController();
   const sharedFileSearch = useSearchController();
-  const savedSearch = useSavedSearchController({
-    authenticated: isBusinessUser,
-    issueCode,
-    locationPath: `${location.pathname}${location.search}`,
-    pendingSavedSearch,
-    issueSearch,
-    navigate,
-    openViewerTab
-  });
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const fileContextKey = `${issueCode}\u0000${bundleId}`;
   const viewerPagination = useViewerPaginationController(fileContextKey, updateViewerTabs);
@@ -269,6 +261,60 @@ export function BundleView() {
     }
   ), [fileContextKey]);
   useEffect(() => () => fileContentCache.reset(), [fileContentCache]);
+  const resetWorkspace = useCallback(() => {
+    refreshGenerationRef.current += 1;
+    sharedRestoreGenerationRef.current += 1;
+    sharedRestoreAttemptRef.current = null;
+    issueSearch.clear();
+    fileSearch.clear();
+    viewerSearch.clear();
+    sharedFileSearch.clear();
+    viewerPagination.invalidate();
+    fileContentCache.reset();
+    resetViewerTabs();
+    setExpandedNodes(new Set());
+    setSelectedNodeId(null);
+    setTreeError(null);
+    setSharedRestoreState(null);
+    setFileSearchResults([]);
+    setFileSearchTotal(0);
+    setFileSearchFrom(0);
+    setLineStart(0);
+    setLinePageSize(LINE_PAGE_SIZE_OPTIONS[0]);
+    setTargetLine(null);
+    setSourceActionMessage(null);
+    setShareDialogUrl(null);
+    setShareDialogCopied(false);
+    setShareDialogError(null);
+    pendingFilePageRef.current = null;
+    if (location.search) navigate(location.pathname, { replace: true });
+  }, [
+    fileContentCache,
+    fileSearch.clear,
+    issueSearch.clear,
+    location.pathname,
+    location.search,
+    navigate,
+    resetViewerTabs,
+    sharedFileSearch.clear,
+    viewerPagination.invalidate,
+    viewerSearch.clear
+  ]);
+  const { ready: workspaceReady, error: workspaceError, generationRef: workspaceGenerationRef, waitForWorkspaceSession } = useIssueWorkspaceSession(
+    issueCode,
+    auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest',
+    resetWorkspace
+  );
+  const savedSearch = useSavedSearchController({
+    authenticated: isBusinessUser,
+    issueCode,
+    locationPath: `${location.pathname}${location.search}`,
+    pendingSavedSearch,
+    issueSearch,
+    navigate,
+    openViewerTab,
+    waitForWorkspaceSession
+  });
   const activeFileNode = activeViewerTab?.kind === 'file'
     ? treeNodes[activeViewerTab.nodeId] ?? null
     : null;
@@ -322,11 +368,12 @@ export function BundleView() {
       guard?: TreeLoadGuard
     ): Promise<{ node: TreeNode; children: TreeNode[] } | null> => {
       if (!bundle) return null;
-      const canCommit = () => !guard || (
+      const workspaceGeneration = workspaceGenerationRef.current;
+      const canCommit = () => workspaceGeneration === workspaceGenerationRef.current && (!guard || (
         guard.generation === refreshGenerationRef.current
         && contextKeyRef.current === guard.contextKey
         && guard.isCurrent()
-      );
+      ));
       if (canCommit()) {
         setTreeLoading(true);
         setTreeError(null);
@@ -367,7 +414,7 @@ export function BundleView() {
         }
       }
     },
-    []
+    [workspaceGenerationRef]
   );
 
   const loadMoreNode = useCallback(
@@ -427,6 +474,7 @@ export function BundleView() {
   }, [sharedFileSearch.invalidate]);
 
   const runSearch = useCallback(async () => {
+    const workspaceGeneration = workspaceGenerationRef.current;
     const issue = issueCode;
     if (!issue) {
       issueSearch.clear();
@@ -456,7 +504,9 @@ export function BundleView() {
       expression,
       payload: { expression, issue_code: issue, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
       scopeKey: `issue:${issue}`,
+      workspaceSessionId: waitForWorkspaceSession(),
       onSuccess: (response) => {
+        if (workspaceGenerationRef.current !== workspaceGeneration) return;
         const hits = response.lines.map((line) => ({
           bundle_hash: line.bundle_hash,
           file_id: line.file_id ?? '',
@@ -485,7 +535,8 @@ export function BundleView() {
         });
       }
     });
-  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, supersedeSharedRestore, viewerSearch.clear]);
+    if (workspaceGenerationRef.current !== workspaceGeneration) return;
+  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, supersedeSharedRestore, viewerSearch.clear, waitForWorkspaceSession, workspaceGenerationRef]);
 
   const clearDetailedSearch = useCallback(() => {
     issueSearch.clear();
@@ -1101,6 +1152,7 @@ export function BundleView() {
   }, [clearFileSearch, fileSearch.draft, fileSearch.executed, fileSearch.tokens]);
 
   const runFileSearch = useCallback(async (from = 0) => {
+    const workspaceGeneration = workspaceGenerationRef.current;
     if (!selectedNode || !canPreviewText(selectedNode)) return;
     const selectedBundleId = selectedNode.bundleId || bundleId;
     if (!selectedBundleId) return;
@@ -1125,7 +1177,9 @@ export function BundleView() {
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
       scopeKey: `file:${selectedBundleId}:${selectedNode.rawId}`,
+      workspaceSessionId: waitForWorkspaceSession(),
       onSuccess: (response) => {
+        if (workspaceGenerationRef.current !== workspaceGeneration) return;
             const hits = response.lines.map((line) => ({
               bundle_hash: selectedBundleId,
               file_id: selectedNode.rawId,
@@ -1163,10 +1217,11 @@ export function BundleView() {
             }
           }
     });
-    if (!response) return;
-  }, [bundleId, fileSearch, openViewerTab, selectedNode, supersedeSharedRestore]);
+    if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
+  }, [bundleId, fileSearch, openViewerTab, selectedNode, supersedeSharedRestore, waitForWorkspaceSession, workspaceGenerationRef]);
 
   const searchWithinActiveResults = useCallback(async (tokens: SearchToken[], draft: string) => {
+    const workspaceGeneration = workspaceGenerationRef.current;
     if (!activeViewerTab || (activeViewerTab.kind !== 'search' && activeViewerTab.kind !== 'temp')) return;
     let finalizedTokens: SearchToken[];
     try {
@@ -1183,6 +1238,7 @@ export function BundleView() {
       resultId: activeViewerTab.resultId
     };
 
+    supersedeSharedRestore();
     viewerSearch.setEditor(finalizedTokens);
     const response = await viewerSearch.run({
       expression,
@@ -1193,7 +1249,9 @@ export function BundleView() {
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
       scopeKey: `viewer:${activeViewerTab.id}:${activeViewerTab.resultId}`,
+      workspaceSessionId: waitForWorkspaceSession(),
       onSuccess: (response) => {
+        if (workspaceGenerationRef.current !== workspaceGeneration) return;
           const hits = response.lines.map((line) => ({
             bundle_hash: line.bundle_hash,
             file_id: line.file_id ?? '',
@@ -1231,13 +1289,21 @@ export function BundleView() {
           });
         }
     });
-    if (!response) return;
-  }, [activeViewerTab, openViewerTab, viewerSearch]);
+    if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
+  }, [activeViewerTab, openViewerTab, supersedeSharedRestore, viewerSearch, waitForWorkspaceSession, workspaceGenerationRef]);
 
   const restoreSharedTab = useCallback(async (
     descriptor: SharedTabDescriptor,
     isCurrentAttempt: () => boolean
   ) => {
+    const workspaceGeneration = workspaceGenerationRef.current;
+    const ensureCurrent = () => {
+      if (!isCurrentAttempt()) return false;
+      if (workspaceGenerationRef.current !== workspaceGeneration) {
+        throw new Error('工作会话已重置，请重新操作页面');
+      }
+      return true;
+    };
     const loadSharedSource = (bundleHash: string, fileId: string) => loadNode(
       bundleHash,
       fileId,
@@ -1251,12 +1317,13 @@ export function BundleView() {
 
     if (descriptor.kind === 'file') {
       const loaded = await loadSharedSource(descriptor.bundleHash, descriptor.fileId);
+      if (!ensureCurrent()) return;
       if (!loaded?.node || loaded.node.is_dir || isArchiveNode(loaded.node)) {
         throw new Error('分享来源文件不存在或无法预览');
       }
-      if (!isCurrentAttempt()) return;
       setSelectedNodeId(loaded.node.id);
       await handleNodeClick(loaded.node.id, null, { node: loaded.node });
+      if (!ensureCurrent()) return;
       return;
     }
 
@@ -1267,13 +1334,14 @@ export function BundleView() {
     const fileScoped = plan.root.kind === 'file';
     if (plan.root.kind === 'file') {
       const loaded = await loadSharedSource(plan.root.bundleHash, plan.root.fileId);
+      if (!ensureCurrent()) return;
       if (!loaded?.node || loaded.node.is_dir || isArchiveNode(loaded.node)) {
         throw new Error('分享来源文件不存在或无法预览');
       }
-      if (!isCurrentAttempt()) return;
       setSelectedNodeId(loaded.node.id);
     }
 
+    const workspaceSessionId = waitForWorkspaceSession();
     const firstTokens = deserializeSearchTokens(firstExpression);
     const rootController = fileScoped ? sharedFileSearch : issueSearch;
     rootController.setEditor(firstTokens);
@@ -1284,9 +1352,10 @@ export function BundleView() {
         : { expression: firstExpression, bundle_hash: plan.root.bundleHash, file_id: plan.root.fileId, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
       scopeKey: plan.root.kind === 'issue'
         ? `issue:${plan.root.issueCode}:shared`
-        : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`
+        : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`,
+      workspaceSessionId
     });
-    if (!isCurrentAttempt()) return;
+    if (!ensureCurrent()) return;
     if (!response) {
       throw new Error(rootController.error ?? '搜索未完成，可能已取消。请重试。');
     }
@@ -1301,15 +1370,17 @@ export function BundleView() {
           from: 0,
           size: LINE_PAGE_SIZE_OPTIONS[0]
         },
-        scopeKey: `shared:${response.result_id}`
+        scopeKey: `shared:${response.result_id}`,
+        workspaceSessionId
       });
-      if (!isCurrentAttempt()) return;
+      if (!ensureCurrent()) return;
       if (!response) {
         throw new Error(nestedController.error ?? '后续筛选未完成，可能已取消。请重试。');
       }
     }
 
     const lastExpression = plan.expressions[plan.expressions.length - 1] ?? firstExpression;
+    if (!ensureCurrent()) return;
     const hits = response.lines.map((line) => ({
       bundle_hash: line.bundle_hash,
       file_id: line.file_id ?? '',
@@ -1352,8 +1423,10 @@ export function BundleView() {
     sharedFileSearch.error,
     sharedFileSearch.run,
     sharedFileSearch.setEditor,
+    waitForWorkspaceSession,
     viewerSearch.clear,
-    viewerSearch.run
+    viewerSearch.run,
+    workspaceGenerationRef
   ]);
 
   const sharedRouteKey = `${location.pathname}${location.search}`;
@@ -1624,6 +1697,9 @@ export function BundleView() {
                   搜索
                 </button>
               </form>
+              <p aria-live="polite" className={`mt-2 text-xs ${workspaceError ? 'text-rose-600' : 'text-slate-500'}`}>
+                {workspaceError ?? (issueCode && !workspaceReady ? '正在连接 Issue 工作区...' : '')}
+              </p>
               <div className="mt-3 flex w-full items-center justify-between gap-2 text-xs text-slate-500">
                 {isBusinessUser ? (
                   <>

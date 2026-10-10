@@ -124,6 +124,7 @@ pub(crate) fn validate_temp_result_id(id: &str) -> Result<(), AppError> {
 
 pub(crate) async fn cleanup_expired(state: &web::Data<AppState>) -> Result<(), AppError> {
     repository::purge_expired_leases(state).await?;
+    super::workspace::purge_inactive_sessions(state).await?;
     for record in repository::list_deleting(state).await? {
         if is_read_lease_active(state, &record.id) {
             continue;
@@ -257,6 +258,7 @@ pub(crate) fn to_response(record: TempResultRecord) -> TempResult {
         size_bytes: record.size_bytes,
         created_at: record.created_at,
         expires_at: record.expires_at,
+        issue_code: record.issue_code,
     }
 }
 

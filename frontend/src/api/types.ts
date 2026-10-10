@@ -347,6 +347,7 @@ export interface TempResultInfo {
   size_bytes: number;
   created_at: string;
   expires_at: string;
+  issue_code?: string | null;
 }
 
 export interface TempResultLinesResponse {
@@ -370,6 +371,14 @@ export interface TempResultPreviewResponse {
     file_id?: string;
     path: string;
   }>;
+}
+
+export interface WorkspaceSessionResponse {
+  session_id: string;
+  issue_code: string;
+  server_now: string;
+  last_activity_at: string;
+  expires_at: string;
 }
 
 export interface SearchReservationResponse {

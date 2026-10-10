@@ -8,6 +8,8 @@ import { PENDING_SAVED_SEARCH_KEY } from '../src/features/files/pendingSavedSear
 const testMocks = vi.hoisted(() => ({
   role: 'USER' as 'USER' | 'ADMIN',
   validateSearchExpression: vi.fn(),
+  beginWorkspaceSession: vi.fn(),
+  resumeWorkspaceSession: vi.fn(),
   execute: vi.fn(),
   cancel: vi.fn(),
   fetchSavedSearches: vi.fn(),
@@ -22,6 +24,12 @@ const testMocks = vi.hoisted(() => ({
 vi.mock('../src/api/client', () => ({
   ApiError: class ApiError extends Error {},
   normalizeApiError: (error: unknown) => String(error),
+  beginWorkspaceSession: testMocks.beginWorkspaceSession,
+  resumeWorkspaceSession: testMocks.resumeWorkspaceSession,
+  retainWorkspaceSessionRequest: vi.fn((request: { consumers: number }) => { request.consumers += 1; }),
+  releaseWorkspaceSessionRequest: vi.fn((request: { consumers: number }) => { request.consumers = Math.max(0, request.consumers - 1); }),
+  hasWorkspaceSessionConsumers: vi.fn((request: { consumers: number }) => request.consumers > 0),
+  clearWorkspaceSessionRequest: vi.fn(),
   rainApi: {
     validateSearchExpression: testMocks.validateSearchExpression,
     fetchSavedSearches: testMocks.fetchSavedSearches,
@@ -31,7 +39,10 @@ vi.mock('../src/api/client', () => ({
     fetchIssueBundles: testMocks.fetchIssueBundles,
     fetchFileNode: testMocks.fetchFileNode,
     fetchFileLines: testMocks.fetchFileLines,
-    deleteTempResult: vi.fn()
+    deleteTempResult: vi.fn(),
+    endWorkspaceSession: vi.fn().mockResolvedValue(undefined),
+    recordWorkspaceActivity: vi.fn().mockResolvedValue({}),
+    addWorkspaceResultRefs: vi.fn().mockResolvedValue(undefined)
   }
 }));
 
@@ -66,10 +77,12 @@ beforeEach(() => {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function NavigationProbe() {
@@ -81,9 +94,9 @@ function NavigationProbe() {
   );
 }
 
-function renderBundleView() {
+function renderBundleView(initialEntry = '/issues/ISSUE-1/bundles') {
   return render(
-    <MemoryRouter initialEntries={['/issues/ISSUE-1/bundles']}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <NavigationProbe />
       <Routes>
         <Route path="/issues/:issueCode/bundles" element={<BundleView />} />
@@ -120,6 +133,13 @@ const savedAdvancedSearch = {
 describe('BundleView search expression flow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const defaultSessionRequest = (issueCode: string) => ({
+      issueCode,
+      consumers: 0,
+      promise: Promise.resolve({ session_id: 'workspace-test', issue_code: issueCode, server_now: '', last_activity_at: '', expires_at: '' })
+    });
+    testMocks.beginWorkspaceSession.mockImplementation(defaultSessionRequest);
+    testMocks.resumeWorkspaceSession.mockImplementation(defaultSessionRequest);
     testMocks.fetchSavedSearches.mockResolvedValue([]);
     testMocks.fetchIssueBundles.mockResolvedValue({ log_bundles: [] });
     testMocks.execute.mockResolvedValue({ result_id: 'result-1', total: 0, lines: [] });
@@ -127,6 +147,137 @@ describe('BundleView search expression flow', () => {
     testMocks.createSavedSearch.mockResolvedValue(undefined);
     testMocks.updateSavedSearch.mockResolvedValue(undefined);
     testMocks.markSavedSearchUsed.mockResolvedValue(undefined);
+  });
+
+  it('waits for the Issue workspace before creating a search result', async () => {
+    const session = deferred<{
+      session_id: string;
+      issue_code: string;
+      server_now: string;
+      last_activity_at: string;
+      expires_at: string;
+    }>();
+    testMocks.beginWorkspaceSession.mockImplementation((issueCode: string) => ({
+      issueCode,
+      consumers: 0,
+      promise: session.promise
+    }));
+    testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
+
+    renderBundleView();
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'A' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute).not.toHaveBeenCalled();
+
+    await act(async () => session.resolve({
+      session_id: 'workspace-ready',
+      issue_code: 'ISSUE-1',
+      server_now: '',
+      last_activity_at: '',
+      expires_at: ''
+    }));
+
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute.mock.calls[0][1].workspaceSessionId).toBe('workspace-ready');
+  });
+
+  it('allows retrying a search after the Issue workspace connection fails', async () => {
+    const failedSession = deferred<{
+      session_id: string;
+      issue_code: string;
+      server_now: string;
+      last_activity_at: string;
+      expires_at: string;
+    }>();
+    testMocks.beginWorkspaceSession
+      .mockImplementationOnce((issueCode: string) => ({
+        issueCode,
+        consumers: 0,
+        promise: failedSession.promise
+      }))
+      .mockImplementation((issueCode: string) => ({
+        issueCode,
+        consumers: 0,
+        promise: Promise.resolve({
+          session_id: 'workspace-reconnected',
+          issue_code: issueCode,
+          server_now: '',
+          last_activity_at: '',
+          expires_at: ''
+        })
+      }));
+    testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
+
+    renderBundleView();
+    const editor = screen.getByRole('textbox', { name: '日志内容搜索条件' });
+    const searchButton = screen.getByRole('button', { name: '搜索日志内容' });
+    fireEvent.change(editor, { target: { value: 'A' } });
+    fireEvent.click(searchButton);
+
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
+    await act(async () => failedSession.reject(new Error('network unavailable')));
+
+    await waitFor(() => {
+      expect((editor as HTMLInputElement).disabled).toBe(false);
+      expect((searchButton as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getByText('Error: 工作会话连接失败，请操作页面后重试')).toBeInTheDocument();
+    });
+
+    fireEvent.click(searchButton);
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute.mock.calls[0][1].workspaceSessionId).toBe('workspace-reconnected');
+  });
+
+  it('waits for the Issue workspace before replaying a shared search', async () => {
+    const session = deferred<{
+      session_id: string;
+      issue_code: string;
+      server_now: string;
+      last_activity_at: string;
+      expires_at: string;
+    }>();
+    testMocks.beginWorkspaceSession.mockImplementation((issueCode: string) => ({
+      issueCode,
+      consumers: 0,
+      promise: session.promise
+    }));
+    testMocks.fetchIssueBundles.mockResolvedValue({
+      log_bundles: [{ hash: 'bundle', name: 'Bundle', status: { upload_status: 'READY' } }]
+    });
+    testMocks.fetchFileNode.mockResolvedValue({
+      node: {
+        id: 'bundle:root',
+        parent_id: null,
+        name: 'bundle_root',
+        path: '/',
+        is_dir: true,
+        preview_kind: 'directory'
+      },
+      children: [],
+      has_more: false,
+      next_cursor: null
+    });
+    testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
+
+    renderBundleView('/issues/ISSUE-1/bundles?share=1&v=1&scope=issue&view=search&issue=ISSUE-1&q=%22A%22');
+
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute).not.toHaveBeenCalled();
+
+    await act(async () => session.resolve({
+      session_id: 'workspace-ready',
+      issue_code: 'ISSUE-1',
+      server_now: '',
+      last_activity_at: '',
+      expires_at: ''
+    }));
+
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute.mock.calls[0][1].workspaceSessionId).toBe('workspace-ready');
   });
 
   it('does not start a stale search after validation resolves out of order', async () => {

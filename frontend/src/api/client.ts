@@ -33,11 +33,92 @@ import type {
   ResourceMode,
   SearchReservationResponse,
   SearchExpressionValidationResponse,
+  WorkspaceSessionResponse,
   } from './types';
 
 const API_BASE_URL = '';
 const ISSUE_CODE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 let adminSettingsRevision: string | undefined;
+export type ActiveWorkspaceRequest = {
+  issueCode: string;
+  principalKey: string;
+  promise: Promise<WorkspaceSessionResponse>;
+  consumers: number;
+  sessionId?: string;
+};
+const activeWorkspaceRequests = new Map<string, ActiveWorkspaceRequest>();
+
+function workspaceRequestKey(issueCode: string, principalKey: string): string {
+  return JSON.stringify([principalKey, issueCode]);
+}
+
+export function beginWorkspaceSession(issueCode: string, principalKey: string): ActiveWorkspaceRequest {
+  const normalizedIssueCode = normalizeIssueCode(issueCode);
+  const key = workspaceRequestKey(normalizedIssueCode, principalKey);
+  const current = activeWorkspaceRequests.get(key);
+  if (current) return current;
+  const promise = request<WorkspaceSessionResponse>(
+    `/api/issues/${encodePathSegment(normalizedIssueCode)}/workspace-sessions`,
+    { method: 'POST' }
+  );
+  const active: ActiveWorkspaceRequest = { issueCode: normalizedIssueCode, principalKey, promise, consumers: 0 };
+  activeWorkspaceRequests.set(key, active);
+  void promise.then(
+    (session) => { active.sessionId = session.session_id; },
+    () => {}
+  );
+  return active;
+}
+
+export function resumeWorkspaceSession(issueCode: string, sessionId: string, principalKey: string): ActiveWorkspaceRequest {
+  const normalizedIssueCode = normalizeIssueCode(issueCode);
+  const key = workspaceRequestKey(normalizedIssueCode, principalKey);
+  const current = activeWorkspaceRequests.get(key);
+  if (current && (!current.sessionId || current.sessionId === sessionId)) return current;
+  const promise = request<WorkspaceSessionResponse>(
+    `/api/workspace-sessions/${encodePathSegment(sessionId)}`
+  ).then((session) => {
+    if (normalizeIssueCode(session.issue_code) !== normalizedIssueCode) {
+      throw new ApiError('Issue 工作区与当前页面不匹配', 409, 'WORKSPACE_SESSION_MISMATCH');
+    }
+    return session;
+  });
+  const active = { issueCode: normalizedIssueCode, principalKey, promise, consumers: 0, sessionId };
+  activeWorkspaceRequests.set(key, active);
+  return active;
+}
+
+export function clearWorkspaceSessionRequest(active: ActiveWorkspaceRequest): void {
+  const key = workspaceRequestKey(active.issueCode, active.principalKey);
+  if (activeWorkspaceRequests.get(key) === active) {
+    activeWorkspaceRequests.delete(key);
+  }
+}
+
+export function retainWorkspaceSessionRequest(active: ActiveWorkspaceRequest): void {
+  active.consumers += 1;
+}
+
+export function releaseWorkspaceSessionRequest(active: ActiveWorkspaceRequest, preserveForHandoff = false): void {
+  active.consumers = Math.max(0, active.consumers - 1);
+  if (active.consumers > 0 || preserveForHandoff) return;
+  window.setTimeout(() => {
+    const key = workspaceRequestKey(active.issueCode, active.principalKey);
+    if (active.consumers === 0 && activeWorkspaceRequests.get(key) === active) {
+      activeWorkspaceRequests.delete(key);
+    }
+  }, 0);
+}
+
+export function hasWorkspaceSessionConsumers(active: ActiveWorkspaceRequest): boolean {
+  return active.consumers > 0;
+}
+
+function workspaceHeaders(workspaceSessionId: string | null): Record<string, string> {
+  return workspaceSessionId
+    ? { 'X-Issue-Workspace-Session': workspaceSessionId }
+    : {};
+}
 
 export class ApiError extends Error {
   constructor(
@@ -345,10 +426,14 @@ export const rainApi = {
       body: JSON.stringify({ expression })
     });
   },
-  createTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string }) {
+  createTempResult(
+    payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string },
+    options: { workspaceSessionId: string | null }
+  ) {
     return request<TempResultInfo>('/api/temp-results', {
       method: 'POST',
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      headers: workspaceHeaders(options.workspaceSessionId)
     });
   },
   reserveSearchRequest(searchId: string, signal?: AbortSignal) {
@@ -365,13 +450,34 @@ export const rainApi = {
       signal
     });
   },
-  previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }, options?: { searchId?: string; cancelToken?: string; signal?: AbortSignal }) {
-    const headers = options?.cancelToken ? { 'X-Search-Cancel-Token': options.cancelToken } : undefined;
+  async previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }, options: { searchId?: string; cancelToken?: string; signal?: AbortSignal; workspaceSessionId: string | null }) {
+    const headers = {
+      ...workspaceHeaders(options.workspaceSessionId),
+      ...(options?.cancelToken ? { 'X-Search-Cancel-Token': options.cancelToken } : {})
+    };
     return request<TempResultPreviewResponse>('/api/temp-results/preview', {
       method: 'POST',
       body: JSON.stringify({ ...payload, ...(options?.searchId ? { search_id: options.searchId } : {}) }),
       headers,
       signal: options?.signal
+    });
+  },
+  createWorkspaceSession(issueCode: string) {
+    return request<WorkspaceSessionResponse>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/workspace-sessions`, { method: 'POST' });
+  },
+  getWorkspaceSession(sessionId: string) {
+    return request<WorkspaceSessionResponse>(`/api/workspace-sessions/${encodePathSegment(sessionId)}`);
+  },
+  recordWorkspaceActivity(sessionId: string) {
+    return request<WorkspaceSessionResponse>(`/api/workspace-sessions/${encodePathSegment(sessionId)}/activity`, { method: 'POST' });
+  },
+  endWorkspaceSession(sessionId: string, keepalive = false) {
+    return request<void>(`/api/workspace-sessions/${encodePathSegment(sessionId)}/end`, { method: 'POST', keepalive });
+  },
+  addWorkspaceResultRefs(sessionId: string, resultIds: string[]) {
+    return request<void>(`/api/workspace-sessions/${encodePathSegment(sessionId)}/result-refs`, {
+      method: 'POST',
+      body: JSON.stringify({ add: resultIds })
     });
   },
   fetchTempResult(id: string) {

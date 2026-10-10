@@ -13,12 +13,12 @@ pub(crate) async fn preview_temp_result(
 
 #[post("/temp-results")]
 pub(crate) async fn create_temp_result(
-    _user: RequireUser,
+    user: RequireUser,
     request: HttpRequest,
     payload: web::Json<CreateTempResultRequest>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, AppError> {
-    service::create_full_result(request, payload, state).await
+    service::create_full_result(user, request, payload, state).await
 }
 
 #[get("/temp-results/{id}")]
