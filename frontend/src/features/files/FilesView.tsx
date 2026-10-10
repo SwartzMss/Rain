@@ -1132,11 +1132,11 @@ export function BundleView() {
     if (!response) return;
   }, [bundleId, fileSearch, openViewerTab, selectedNode]);
 
-  const searchWithinActiveResults = useCallback(async () => {
+  const searchWithinActiveResults = useCallback(async (tokens: SearchToken[], draft: string) => {
     if (!activeViewerTab || (activeViewerTab.kind !== 'search' && activeViewerTab.kind !== 'temp')) return;
     let finalizedTokens: SearchToken[];
     try {
-      finalizedTokens = finalizeSearchTokens(viewerSearch.tokens, viewerSearch.draft, false);
+      finalizedTokens = finalizeSearchTokens(tokens, draft, false);
     } catch (error) {
       viewerSearch.setError(error instanceof Error ? error.message : '搜索条件无效');
       return;
@@ -1695,7 +1695,7 @@ export function BundleView() {
                       onClearResultFilter={() => {
                         viewerSearch.clear();
                       }}
-                      onSearchWithinResults={() => searchWithinActiveResults().catch(() => undefined)}
+                      onSearchWithinResults={(tokens, draft) => searchWithinActiveResults(tokens, draft).catch(() => undefined)}
                       canRunResultFilter={canRunResultFilter}
                       searchLoading={viewerSearch.busy || viewerPagination.getState(activeViewerTabId).loading}
                       searchError={viewerSearch.error ?? viewerPagination.getState(activeViewerTabId).error}

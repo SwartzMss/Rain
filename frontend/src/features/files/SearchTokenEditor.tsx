@@ -18,6 +18,7 @@ type SearchTokenEditorProps = {
   draft: string;
   onTokensChange: (tokens: SearchToken[]) => void;
   onDraftChange: (draft: string) => void;
+  onSubmit?: (tokens: SearchToken[], draft: string) => void;
   placeholder: string;
   ariaLabel: string;
   allowOperators?: boolean;
@@ -30,6 +31,7 @@ export function SearchTokenEditor({
   draft,
   onTokensChange,
   onDraftChange,
+  onSubmit,
   placeholder,
   ariaLabel,
   allowOperators = true,
@@ -191,7 +193,10 @@ export function SearchTokenEditor({
         disabled={disabled}
         onChange={(event) => onDraftChange(event.target.value)}
         onKeyDown={(event) => {
-          if ((event.key === 'Enter' || event.key === 'Tab') && draft.trim()) {
+          if (event.key === 'Enter' && onSubmit) {
+            event.preventDefault();
+            onSubmit(tokens, draft);
+          } else if ((event.key === 'Enter' || event.key === 'Tab') && draft.trim()) {
             event.preventDefault();
             commitDraft();
           } else if (event.key === 'Backspace' && !draft && tokens.length > 0) {
