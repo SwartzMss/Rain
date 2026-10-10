@@ -17,7 +17,7 @@ export type SearchControllerRunOptions = {
   expression: string;
   payload: Parameters<typeof rainApi.previewTempResult>[0];
   scopeKey: string;
-  workspaceSessionId: string | null;
+  workspaceSessionId: string | null | Promise<string | null>;
   onSuccess?: (response: TempResultPreviewResponse) => void;
 };
 
@@ -120,8 +120,13 @@ export function useSearchController(options: SearchControllerOptions = {}): Sear
     setPhase('VALIDATING');
     setValidationError(null);
     setExecuted(true);
+    let resolvedWorkspaceSessionId: string | null;
     try {
-      await rainApi.validateSearchExpression(expression);
+      const [, sessionId] = await Promise.all([
+        rainApi.validateSearchExpression(expression),
+        Promise.resolve(workspaceSessionId)
+      ]);
+      resolvedWorkspaceSessionId = sessionId;
     } catch (error) {
       if (mountedRef.current && intent === intentRef.current && !validationController.signal.aborted) {
         setValidationError(normalizeApiError(error));
@@ -134,7 +139,7 @@ export function useSearchController(options: SearchControllerOptions = {}): Sear
     setPhase('RUNNING');
     const result = await execute(payload, {
       scopeKey,
-      workspaceSessionId,
+      workspaceSessionId: resolvedWorkspaceSessionId,
       onSuccess: (response) => {
         if (!mountedRef.current || intent !== intentRef.current) return;
         onSuccess?.(response);

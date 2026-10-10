@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   beginWorkspaceSession,
   clearWorkspaceSessionRequest,
@@ -17,6 +17,11 @@ const CHECK_INTERVAL_MS = 30_000;
 const PAGE_CLAIM_WINDOW_MS = 100;
 
 type StoredWorkspaceSession = { sessionId: string; lastActivityAt: number; pageInstanceId?: string };
+type WorkspaceSessionWaiter = {
+  contextKey: string;
+  resolve: (sessionId: string) => void;
+  reject: (error: Error) => void;
+};
 type WorkspacePageMessage = {
   type: 'probe' | 'presence';
   sessionId: string;
@@ -203,6 +208,9 @@ export function useIssueWorkspaceSession(
   const [sessionError, setSessionError] = useState<string | null>(null);
   const resetRef = useRef(onReset);
   const sessionIdRef = useRef<string | null>(null);
+  const sessionContextRef = useRef<string | null>(null);
+  const sessionWaitersRef = useRef<WorkspaceSessionWaiter[]>([]);
+  const sessionStarterRef = useRef<() => void>(() => {});
   const requestRef = useRef<ActiveWorkspaceRequest | null>(null);
   const lastActivityRef = useRef(Date.now());
   const lastStoredActivityRef = useRef(0);
@@ -210,8 +218,22 @@ export function useIssueWorkspaceSession(
   const generationRef = useRef(0);
   const disposedRef = useRef(false);
   const syncInFlightRef = useRef(false);
+  const activityRequestRef = useRef<object | null>(null);
   const syncTimerRef = useRef<number | null>(null);
   const blockFollowingClickRef = useRef(false);
+
+  const waitForWorkspaceSession = useCallback((): Promise<string | null> => {
+    if (!issueCode) return Promise.resolve(null);
+    const contextKey = `${principalKey}\u0000${issueCode.toUpperCase()}`;
+    if (sessionIdRef.current && sessionContextRef.current === contextKey) {
+      return Promise.resolve(sessionIdRef.current);
+    }
+    const promise = new Promise<string>((resolve, reject) => {
+      sessionWaitersRef.current.push({ contextKey, resolve, reject });
+    });
+    sessionStarterRef.current();
+    return promise;
+  }, [issueCode, principalKey]);
 
   resetRef.current = onReset;
 
@@ -225,10 +247,14 @@ export function useIssueWorkspaceSession(
     generationRef.current += 1;
     const effectGeneration = generationRef.current;
     const storageKey = `rain.issue-workspace:${encodeURIComponent(principalKey)}:${encodeURIComponent(issueCode.toUpperCase())}`;
+    const sessionContextKey = `${principalKey}\u0000${issueCode.toUpperCase()}`;
     const savedSession = readStoredSession(storageKey);
     let pageInstanceId = savedSession?.pageInstanceId ?? newInstanceId();
     let pageLease: WorkspaceSessionPageLease | null = null;
     sessionIdRef.current = null;
+    sessionContextRef.current = null;
+    syncInFlightRef.current = false;
+    activityRequestRef.current = null;
     lastActivityRef.current = savedSession?.lastActivityAt ?? Date.now();
     lastStoredActivityRef.current = Date.now();
     lastSentRef.current = 0;
@@ -236,6 +262,15 @@ export function useIssueWorkspaceSession(
     setSessionError(null);
     let preserveOnUnmount = false;
     let restorationPending = Boolean(savedSession);
+    const settleSessionWaiters = (error: Error | null, sessionId?: string) => {
+      const pending = sessionWaitersRef.current;
+      sessionWaitersRef.current = pending.filter((waiter) => waiter.contextKey !== sessionContextKey);
+      for (const waiter of pending) {
+        if (waiter.contextKey !== sessionContextKey) continue;
+        if (error) waiter.reject(error);
+        else if (sessionId) waiter.resolve(sessionId);
+      }
+    };
 
     const startSession = (sessionToResume?: string) => {
       if (requestRef.current || sessionIdRef.current) return;
@@ -272,12 +307,14 @@ export function useIssueWorkspaceSession(
           pageLease = nextLease;
         }
         sessionIdRef.current = session.session_id;
+        sessionContextRef.current = sessionContextKey;
         storeSession(storageKey, session.session_id, lastActivityRef.current, pageInstanceId);
         lastStoredActivityRef.current = Date.now();
         lastSentRef.current = sessionToResume
           ? Date.now() - ACTIVITY_SYNC_INTERVAL_MS
           : Date.now();
         setReady(true);
+        settleSessionWaiters(null, session.session_id);
       }).catch(() => {
         if (disposedRef.current || generationRef.current !== requestGeneration || requestRef.current !== workspaceRequest) return;
         releaseWorkspaceSessionRequest(workspaceRequest);
@@ -289,7 +326,9 @@ export function useIssueWorkspaceSession(
           return;
         }
         setReady(false);
-        setSessionError('工作会话连接失败，请操作页面后重试');
+        const error = new Error('工作会话连接失败，请操作页面后重试');
+        setSessionError(error.message);
+        settleSessionWaiters(error);
       });
     };
 
@@ -327,6 +366,10 @@ export function useIssueWorkspaceSession(
       const sessionId = sessionIdRef.current;
       requestRef.current = null;
       sessionIdRef.current = null;
+      sessionContextRef.current = null;
+      activityRequestRef.current = null;
+      syncInFlightRef.current = false;
+      settleSessionWaiters(new Error('工作会话已重置，请重新操作页面'));
       if (activeRequest) {
         releaseWorkspaceSessionRequest(activeRequest);
         clearWorkspaceSessionRequest(activeRequest);
@@ -353,18 +396,34 @@ export function useIssueWorkspaceSession(
       startSession();
     };
 
+    sessionStarterRef.current = () => {
+      if (!disposedRef.current && !restorationPending && !requestRef.current && !sessionIdRef.current) {
+        startSessionAfterReset();
+      }
+    };
+
     const sendActivity = () => {
       const sessionId = sessionIdRef.current;
       if (!sessionId || syncInFlightRef.current || disposedRef.current) return;
+      const requestGeneration = generationRef.current;
+      const activityRequest = {};
+      activityRequestRef.current = activityRequest;
       syncInFlightRef.current = true;
       lastSentRef.current = Date.now();
       void rainApi.recordWorkspaceActivity(sessionId).catch((error: unknown) => {
+        if (
+          disposedRef.current
+          || generationRef.current !== requestGeneration
+          || sessionIdRef.current !== sessionId
+          || activityRequestRef.current !== activityRequest
+        ) return;
         const code = typeof error === 'object' && error !== null && 'code' in error
           ? (error as { code?: unknown }).code
           : undefined;
         if (code === 'WORKSPACE_SESSION_EXPIRED') {
           clearStoredSession(storageKey, sessionId);
           sessionIdRef.current = null;
+          sessionContextRef.current = null;
           pageLease?.close();
           pageLease = null;
           const activeRequest = requestRef.current;
@@ -373,11 +432,15 @@ export function useIssueWorkspaceSession(
             releaseWorkspaceSessionRequest(activeRequest);
             clearWorkspaceSessionRequest(activeRequest);
           }
+          settleSessionWaiters(new Error('工作会话已结束，请再次操作页面以继续'));
           setReady(false);
           setSessionError('工作会话已结束，请再次操作页面以继续');
         }
       }).finally(() => {
-        syncInFlightRef.current = false;
+        if (activityRequestRef.current === activityRequest) {
+          activityRequestRef.current = null;
+          syncInFlightRef.current = false;
+        }
       });
     };
 
@@ -442,10 +505,15 @@ export function useIssueWorkspaceSession(
       window.removeEventListener('focus', checkOnResume);
       window.removeEventListener('pageshow', checkOnResume);
       document.removeEventListener('visibilitychange', checkOnResume);
+      sessionStarterRef.current = () => {};
+      settleSessionWaiters(new Error('工作会话页面已切换'));
       const sessionId = sessionIdRef.current;
       const activeRequest = requestRef.current;
       requestRef.current = null;
       sessionIdRef.current = null;
+      sessionContextRef.current = null;
+      activityRequestRef.current = null;
+      syncInFlightRef.current = false;
       preserveOnUnmount = window.location.pathname.startsWith('/temp-results/');
       if (activeRequest) releaseWorkspaceSessionRequest(activeRequest, preserveOnUnmount);
       pageLease?.close();
@@ -463,5 +531,5 @@ export function useIssueWorkspaceSession(
     };
   }, [issueCode, principalKey]);
 
-  return { ready, error: sessionError, generationRef, sessionIdRef };
+  return { ready, error: sessionError, generationRef, sessionIdRef, waitForWorkspaceSession };
 }

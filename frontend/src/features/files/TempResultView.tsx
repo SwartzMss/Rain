@@ -33,6 +33,7 @@ export function TempResultView() {
     void searchExecution.cancel();
     setResult(null);
     setLines(null);
+    setCreating(false);
     setStart(0);
     setPageHistory([]);
     setPageSize(DEFAULT_PAGE_SIZE);
@@ -41,7 +42,7 @@ export function TempResultView() {
     const issueCode = resultWorkspaceIssue;
     if (issueCode) navigate(`/issue/${encodeURIComponent(issueCode)}`, { replace: true });
   }, [navigate, resultWorkspaceIssue, searchExecution.cancel]);
-  const { ready: workspaceReady, error: workspaceError, sessionIdRef: workspaceSessionIdRef } = useIssueWorkspaceSession(
+  const { ready: workspaceReady, error: workspaceError, sessionIdRef: workspaceSessionIdRef, waitForWorkspaceSession } = useIssueWorkspaceSession(
     resultWorkspaceIssue,
     auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest',
     resetWorkspace
@@ -154,6 +155,18 @@ export function TempResultView() {
     if (!expression.trim() || !resultId) return;
     setCreating(true);
     setError(null);
+    const generation = requestGeneration.current;
+    let workspaceSessionId: string | null;
+    try {
+      workspaceSessionId = await waitForWorkspaceSession();
+    } catch (searchError) {
+      if (generation === requestGeneration.current) {
+        setCreating(false);
+        setError(normalizeApiError(searchError));
+      }
+      return;
+    }
+    if (generation !== requestGeneration.current) return;
     const created = await searchExecution.execute(
       {
         expression: expression.trim(),
@@ -161,9 +174,9 @@ export function TempResultView() {
         from: 0,
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
-      { scopeKey: `temp:${resultId}`, workspaceSessionId: workspaceSessionIdRef.current }
+      { scopeKey: `temp:${resultId}`, workspaceSessionId }
     );
-    setCreating(false);
+    if (generation === requestGeneration.current) setCreating(false);
     if (created) navigate(`/temp-results/${created.result_id}`);
   };
 

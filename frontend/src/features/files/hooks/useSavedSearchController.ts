@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { MutableRefObject } from 'react';
 import { normalizeApiError, rainApi } from '../../../api/client';
 import type { SavedSearch, SavedSearchPayload } from '../../../api/types';
 import { PENDING_SAVED_SEARCH_KEY, takePendingSavedSearch } from '../pendingSavedSearch';
@@ -19,7 +18,7 @@ export function useSavedSearchController({
   issueSearch,
   navigate,
   openViewerTab,
-  workspaceSessionIdRef
+  waitForWorkspaceSession
 }: {
   authenticated: boolean;
   issueCode: string;
@@ -28,7 +27,7 @@ export function useSavedSearchController({
   issueSearch: SearchController;
   navigate: (path: string, options?: { state?: unknown }) => void;
   openViewerTab: OpenViewerTab;
-  workspaceSessionIdRef: MutableRefObject<string | null>;
+  waitForWorkspaceSession: () => Promise<string | null>;
 }) {
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [savedSearchesOpen, setSavedSearchesOpen] = useState(false);
@@ -125,7 +124,7 @@ export function useSavedSearchController({
       expression: item.query_text,
       payload: { expression: item.query_text, issue_code: issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
       scopeKey: `issue:${issueCode}`,
-      workspaceSessionId: workspaceSessionIdRef.current,
+      workspaceSessionId: waitForWorkspaceSession(),
       onSuccess: (result) => {
         const hits = result.lines.map((line) => ({
           bundle_hash: line.bundle_hash,
@@ -158,7 +157,7 @@ export function useSavedSearchController({
     if (!response) return;
     await rainApi.markSavedSearchUsed(item.id);
     setSavedSearchesOpen(false);
-  }, [issueCode, issueSearch, openViewerTab, workspaceSessionIdRef]);
+  }, [issueCode, issueSearch, openViewerTab, waitForWorkspaceSession]);
 
   const beginEditingSavedSearch = useCallback((item: SavedSearch) => {
     const editor = detailEditorState(item.query_text, item.options);

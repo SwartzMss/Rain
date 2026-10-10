@@ -273,7 +273,7 @@ export function BundleView() {
     restoredSharedRouteRef.current = null;
     if (location.search) navigate(location.pathname, { replace: true });
   }, [fileContentCache, fileSearch.clear, issueSearch.clear, location.pathname, location.search, navigate, resetViewerTabs, viewerPagination.invalidate, viewerSearch.clear]);
-  const { ready: workspaceReady, error: workspaceError, generationRef: workspaceGenerationRef, sessionIdRef: workspaceSessionIdRef } = useIssueWorkspaceSession(
+  const { ready: workspaceReady, error: workspaceError, generationRef: workspaceGenerationRef, waitForWorkspaceSession } = useIssueWorkspaceSession(
     issueCode,
     auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest',
     resetWorkspace
@@ -286,7 +286,7 @@ export function BundleView() {
     issueSearch,
     navigate,
     openViewerTab,
-    workspaceSessionIdRef
+    waitForWorkspaceSession
   });
   const activeFileNode = activeViewerTab?.kind === 'file'
     ? treeNodes[activeViewerTab.nodeId] ?? null
@@ -465,7 +465,7 @@ export function BundleView() {
       expression,
       payload: { expression, issue_code: issue, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
       scopeKey: `issue:${issue}`,
-      workspaceSessionId: workspaceSessionIdRef.current,
+      workspaceSessionId: waitForWorkspaceSession(),
       onSuccess: (response) => {
         if (workspaceGenerationRef.current !== workspaceGeneration) return;
         const hits = response.lines.map((line) => ({
@@ -497,7 +497,7 @@ export function BundleView() {
       }
     });
     if (workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, viewerSearch.clear, workspaceGenerationRef, workspaceSessionIdRef]);
+  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, viewerSearch.clear, waitForWorkspaceSession, workspaceGenerationRef]);
 
   const clearDetailedSearch = useCallback(() => {
     issueSearch.clear();
@@ -1132,7 +1132,7 @@ export function BundleView() {
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
       scopeKey: `file:${selectedBundleId}:${selectedNode.rawId}`,
-      workspaceSessionId: workspaceSessionIdRef.current,
+      workspaceSessionId: waitForWorkspaceSession(),
       onSuccess: (response) => {
         if (workspaceGenerationRef.current !== workspaceGeneration) return;
             const hits = response.lines.map((line) => ({
@@ -1173,7 +1173,7 @@ export function BundleView() {
           }
     });
     if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [bundleId, fileSearch, openViewerTab, selectedNode, workspaceGenerationRef, workspaceSessionIdRef]);
+  }, [bundleId, fileSearch, openViewerTab, selectedNode, waitForWorkspaceSession, workspaceGenerationRef]);
 
   const searchWithinActiveResults = useCallback(async (tokens: SearchToken[], draft: string) => {
     const workspaceGeneration = workspaceGenerationRef.current;
@@ -1203,7 +1203,7 @@ export function BundleView() {
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
       scopeKey: `viewer:${activeViewerTab.id}:${activeViewerTab.resultId}`,
-      workspaceSessionId: workspaceSessionIdRef.current,
+      workspaceSessionId: waitForWorkspaceSession(),
       onSuccess: (response) => {
         if (workspaceGenerationRef.current !== workspaceGeneration) return;
           const hits = response.lines.map((line) => ({
@@ -1244,7 +1244,7 @@ export function BundleView() {
         }
     });
     if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [activeViewerTab, openViewerTab, viewerSearch, workspaceGenerationRef, workspaceSessionIdRef]);
+  }, [activeViewerTab, openViewerTab, viewerSearch, waitForWorkspaceSession, workspaceGenerationRef]);
 
   const restoreSharedTab = useCallback(async (descriptor: SharedTabDescriptor) => {
     const workspaceGeneration = workspaceGenerationRef.current;
@@ -1268,6 +1268,7 @@ export function BundleView() {
     const firstExpression = plan.expressions[0];
     if (!firstExpression) return;
     try {
+      const workspaceSessionId = waitForWorkspaceSession();
       const firstTokens = deserializeSearchTokens(firstExpression);
       const rootController = plan.root.kind === 'issue' ? issueSearch : fileSearch;
       rootController.setEditor(firstTokens);
@@ -1279,7 +1280,7 @@ export function BundleView() {
         scopeKey: plan.root.kind === 'issue'
           ? `issue:${plan.root.issueCode}:shared`
           : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`,
-        workspaceSessionId: workspaceSessionIdRef.current
+        workspaceSessionId
       });
       if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
 
@@ -1294,7 +1295,7 @@ export function BundleView() {
             size: LINE_PAGE_SIZE_OPTIONS[0]
           },
           scopeKey: `shared:${response.result_id}`,
-          workspaceSessionId: workspaceSessionIdRef.current
+          workspaceSessionId
         });
         if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
       }
@@ -1331,7 +1332,7 @@ export function BundleView() {
     } catch (error) {
       setSourceActionMessage(error instanceof Error ? error.message : '分享搜索无法恢复');
     }
-  }, [fileSearch, handleNodeClick, issueSearch, loadNode, openViewerTab, viewerSearch, workspaceGenerationRef]);
+  }, [fileSearch, handleNodeClick, issueSearch, loadNode, openViewerTab, viewerSearch, waitForWorkspaceSession, workspaceGenerationRef]);
 
   const sharedRouteKey = `${location.pathname}${location.search}`;
   useEffect(() => {
