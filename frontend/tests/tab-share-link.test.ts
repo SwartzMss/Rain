@@ -73,4 +73,23 @@ describe('tab share links', () => {
     expect(parseSharedTabSearch(new URL(url ?? '').search, 'CN013')?.kind).toBe('search');
     expect(url).not.toContain('pinned');
   });
+
+  it('preserves quoted expressions with spaces and URL-special characters in a file search link', () => {
+    const expressions = ['"lpkey & + % # 中文"', '"second filter"'];
+    const tab = searchTab({
+      root: { kind: 'file', bundleHash: 'bundle-1', fileId: '42' },
+      expressions
+    });
+
+    const url = buildTabShareUrl(tab, 'CN013', 'http://rain.local:8078');
+
+    expect(parseSharedTabSearch(new URL(url ?? '').search, 'CN013')).toEqual({
+      kind: 'search',
+      issueCode: 'CN013',
+      plan: {
+        root: { kind: 'file', bundleHash: 'bundle-1', fileId: '42' },
+        expressions
+      }
+    });
+  });
 });

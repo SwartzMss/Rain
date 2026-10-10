@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -82,6 +83,19 @@ function renderBundleView() {
       </Routes>
     </MemoryRouter>
   );
+}
+
+function renderSharedFileSearch(queries = ['"lpkey"'], strictMode = false) {
+  const params = new URLSearchParams('share=1&v=1&scope=file&view=search&bundle=bundle&file=42');
+  queries.forEach((query) => params.append('q', query));
+  const content = (
+    <MemoryRouter initialEntries={[`/issue/ISSUE-1/bundle/bundle?${params.toString()}`]}>
+      <Routes>
+        <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
+      </Routes>
+    </MemoryRouter>
+  );
+  return render(strictMode ? <StrictMode>{content}</StrictMode> : content);
 }
 
 const savedAdvancedSearch = {
@@ -570,5 +584,331 @@ describe('BundleView search expression flow', () => {
     ).toBeInTheDocument());
     expect(document.querySelector('[data-file-tree-node-id="bundle:30"]'))
       .toHaveAttribute('aria-current', 'true');
+  });
+});
+
+describe('shared file search restoration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    testMocks.fetchSavedSearches.mockResolvedValue([]);
+    testMocks.fetchIssueBundles.mockResolvedValue({
+      log_bundles: [{ hash: 'bundle', name: 'Bundle', status: { upload_status: 'READY' } }]
+    });
+    testMocks.fetchFileNode.mockImplementation(async (_bundleId, fileId) => {
+      if (fileId === 'root') {
+        return {
+          node: {
+            id: 'root', parent_id: null, name: 'bundle_root', path: '/',
+            is_dir: true, preview_kind: 'directory'
+          },
+          children: [{
+            id: 42, parent_id: null, name: 'target.log', path: '/target.log',
+            is_dir: false, preview_kind: 'text'
+          }],
+          has_more: false,
+          next_cursor: null
+        };
+      }
+      if (fileId === '42') {
+        return {
+          node: {
+            id: 42, parent_id: null, name: 'target.log', path: '/target.log',
+            is_dir: false, preview_kind: 'text'
+          },
+          children: [],
+          has_more: false,
+          next_cursor: null
+        };
+      }
+      throw new Error(`unexpected file node request: ${fileId}`);
+    });
+    testMocks.fetchFileLines.mockResolvedValue({
+      path: '/target.log',
+      start: 0,
+      limit: 1000,
+      lines: [{ line_number: 0, content: 'file contents' }]
+    });
+    testMocks.cancel.mockResolvedValue(undefined);
+    testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
+    testMocks.execute.mockImplementation(async (_request, options) => {
+      const response = {
+        result_id: 'shared-result',
+        total: 1,
+        lines: [{
+          bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+          content: 'lpkey match', line_number: 3
+        }]
+      };
+      options?.onSuccess?.(response);
+      return response;
+    });
+  });
+
+  it('runs a file-scoped shared search while the file tree selects its initial node', async () => {
+    renderSharedFileSearch();
+
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute).toHaveBeenCalledTimes(1);
+    expect(testMocks.execute.mock.calls[0][0]).toMatchObject({
+      expression: '"lpkey"',
+      bundle_hash: 'bundle',
+      file_id: '42',
+      from: 0
+    });
+    expect(await screen.findByText('lpkey match')).toBeInTheDocument();
+  });
+
+  it('keeps a new file search active when a shared search restore finishes later', async () => {
+    const restorationResponse = {
+      result_id: 'shared-result',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+        content: 'old shared match', line_number: 3
+      }]
+    };
+    const fileSearchResponse = {
+      result_id: 'file-result',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+        content: 'new file match', line_number: 8
+      }]
+    };
+    const restorationExecution = deferred<typeof restorationResponse>();
+    const fileSearchValidation = deferred<{ valid: true }>();
+    let completeRestoration: (() => void) | null = null;
+    testMocks.validateSearchExpression
+      .mockResolvedValueOnce({ valid: true })
+      .mockReturnValueOnce(fileSearchValidation.promise);
+    testMocks.execute
+      .mockImplementationOnce((_request, options) => {
+        completeRestoration = () => {
+          options?.onSuccess?.(restorationResponse);
+          restorationExecution.resolve(restorationResponse);
+        };
+        return restorationExecution.promise;
+      })
+      .mockImplementationOnce(async (_request, options) => {
+        options?.onSuccess?.(fileSearchResponse);
+        return fileSearchResponse;
+      });
+
+    renderSharedFileSearch();
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'target.log' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '当前文件搜索条件' }), {
+      target: { value: 'newterm' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '搜索', exact: true }));
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      completeRestoration?.();
+      await restorationExecution.promise;
+    });
+    expect(await screen.findByRole('button', { name: '编辑关键词 newterm' })).toBeInTheDocument();
+    expect(screen.queryByText('old shared match')).not.toBeInTheDocument();
+
+    await act(async () => fileSearchValidation.resolve({ valid: true }));
+    expect(await screen.findByText('new file match')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(2);
+    expect(testMocks.execute.mock.calls[1][0]).toMatchObject({
+      expression: '"newterm"', bundle_hash: 'bundle', file_id: '42'
+    });
+  });
+
+  it('keeps a new Issue search active when a shared search restore finishes later', async () => {
+    const restorationResponse = {
+      result_id: 'shared-result',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+        content: 'old shared match', line_number: 3
+      }]
+    };
+    const issueSearchResponse = {
+      result_id: 'issue-result',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+        content: 'new Issue match', line_number: 8
+      }]
+    };
+    const restorationExecution = deferred<typeof restorationResponse>();
+    let completeRestoration: (() => void) | null = null;
+    testMocks.validateSearchExpression
+      .mockResolvedValueOnce({ valid: true })
+      .mockResolvedValueOnce({ valid: true });
+    testMocks.execute
+      .mockImplementationOnce((_request, options) => {
+        completeRestoration = () => {
+          options?.onSuccess?.(restorationResponse);
+          restorationExecution.resolve(restorationResponse);
+        };
+        return restorationExecution.promise;
+      })
+      .mockImplementationOnce(async (_request, options) => {
+        options?.onSuccess?.(issueSearchResponse);
+        return issueSearchResponse;
+      });
+
+    renderSharedFileSearch();
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'issuequery' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+    expect(await screen.findByText('new Issue match')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      completeRestoration?.();
+      await restorationExecution.promise;
+    });
+    expect(screen.getByText('new Issue match')).toBeInTheDocument();
+    expect(screen.queryByText('old shared match')).not.toBeInTheDocument();
+  });
+
+  it('restores nested file filters in order using each prior temporary result', async () => {
+    testMocks.execute.mockImplementation(async (request, options) => {
+      const index = testMocks.execute.mock.calls.length;
+      const response = {
+        result_id: `shared-result-${index}`,
+        total: 1,
+        lines: [{
+          bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+          content: 'nested lpkey match', line_number: 4
+        }]
+      };
+      options?.onSuccess?.(response);
+      return response;
+    });
+
+    renderSharedFileSearch(['"lpkey"', '"timeout" AND NOT "ignore"']);
+
+    expect(await screen.findByText('nested lpkey match')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(2);
+    expect(testMocks.execute.mock.calls[0][0]).toMatchObject({
+      expression: '"lpkey"', bundle_hash: 'bundle', file_id: '42'
+    });
+    expect(testMocks.execute.mock.calls[1][0]).toMatchObject({
+      expression: '"timeout" AND NOT "ignore"', source_temp_id: 'shared-result-1'
+    });
+  });
+
+  it('opens an empty result tab when a shared file search has no hits', async () => {
+    testMocks.execute.mockImplementationOnce(async (_request, options) => {
+      const response = { result_id: 'empty-result', total: 0, lines: [] };
+      options?.onSuccess?.(response);
+      return response;
+    });
+
+    renderSharedFileSearch();
+
+    expect(await screen.findByRole('button', { name: 'lpkey' })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('does not launch duplicate restoration when StrictMode replays effects', async () => {
+    renderSharedFileSearch(['"lpkey"'], true);
+
+    expect(await screen.findByText('lpkey match')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole('button', { name: 'lpkey' })).toHaveLength(1);
+  });
+
+  it('lets a cancelled shared search be retried after its validation settles', async () => {
+    const validation = deferred<{ valid: true }>();
+    testMocks.validateSearchExpression
+      .mockReturnValueOnce(validation.promise)
+      .mockResolvedValue({ valid: true });
+    renderSharedFileSearch();
+
+    await waitFor(() => expect(testMocks.validateSearchExpression).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('搜索已取消');
+    await act(async () => validation.resolve({ valid: true }));
+
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(await screen.findByText('lpkey match')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a failed restore and retries it without duplicating the result tab', async () => {
+    testMocks.execute
+      .mockRejectedValueOnce(new Error('临时网络错误'))
+      .mockImplementationOnce(async (_request, options) => {
+        const response = {
+          result_id: 'retry-result',
+          total: 1,
+          lines: [{
+            bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+            content: 'restored after retry', line_number: 5
+          }]
+        };
+        options?.onSuccess?.(response);
+        return response;
+      });
+
+    renderSharedFileSearch();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('临时网络错误');
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+
+    expect(await screen.findByText('restored after retry')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByRole('button', { name: 'lpkey' })).toHaveLength(1);
+  });
+
+  it('keeps Issue search shares on the Issue search path', async () => {
+    testMocks.execute.mockImplementationOnce(async (_request, options) => {
+      const response = {
+        result_id: 'issue-result',
+        total: 1,
+        lines: [{
+          bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+          content: 'issue lpkey match', line_number: 6
+        }]
+      };
+      options?.onSuccess?.(response);
+      return response;
+    });
+    render(
+      <MemoryRouter initialEntries={[
+        '/issue/ISSUE-1?share=1&v=1&scope=issue&view=search&issue=ISSUE-1&q=%22lpkey%22'
+      ]}>
+        <Routes>
+          <Route path="/issue/:issueCode" element={<BundleView />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('issue lpkey match')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(1);
+    expect(testMocks.execute.mock.calls[0][0]).toMatchObject({
+      expression: '"lpkey"', issue_code: 'ISSUE-1'
+    });
+  });
+
+  it('keeps complete file shares on the file-opening path', async () => {
+    testMocks.fetchFileLines.mockResolvedValue({
+      path: '/target.log', start: 0, limit: 1000,
+      lines: [{ line_number: 1, content: 'complete file content' }]
+    });
+    render(
+      <MemoryRouter initialEntries={[
+        '/issue/ISSUE-1/bundle/bundle?share=1&v=1&view=file&bundle=bundle&file=42'
+      ]}>
+        <Routes>
+          <Route path="/issue/:issueCode/bundle/:bundleHash" element={<BundleView />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('complete file content')).toBeInTheDocument();
+    expect(testMocks.execute).not.toHaveBeenCalled();
   });
 });

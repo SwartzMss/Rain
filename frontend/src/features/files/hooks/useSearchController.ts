@@ -54,10 +54,13 @@ export function useSearchController(options: SearchControllerOptions = {}): Sear
   const validationAbortRef = useRef<AbortController | null>(null);
   const { snapshot, execute, cancel: cancelExecution } = useSearchExecution();
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    intentRef.current += 1;
-    validationAbortRef.current?.abort();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      intentRef.current += 1;
+      validationAbortRef.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
