@@ -622,6 +622,13 @@ describe('shared file search restoration', () => {
       }
       throw new Error(`unexpected file node request: ${fileId}`);
     });
+    testMocks.fetchFileLines.mockResolvedValue({
+      path: '/target.log',
+      start: 0,
+      limit: 1000,
+      lines: [{ line_number: 0, content: 'file contents' }]
+    });
+    testMocks.cancel.mockResolvedValue(undefined);
     testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
     testMocks.execute.mockImplementation(async (_request, options) => {
       const response = {
@@ -710,6 +717,59 @@ describe('shared file search restoration', () => {
     expect(testMocks.execute.mock.calls[1][0]).toMatchObject({
       expression: '"newterm"', bundle_hash: 'bundle', file_id: '42'
     });
+  });
+
+  it('keeps a new Issue search active when a shared search restore finishes later', async () => {
+    const restorationResponse = {
+      result_id: 'shared-result',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+        content: 'old shared match', line_number: 3
+      }]
+    };
+    const issueSearchResponse = {
+      result_id: 'issue-result',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle', file_id: 42, path: '/target.log',
+        content: 'new Issue match', line_number: 8
+      }]
+    };
+    const restorationExecution = deferred<typeof restorationResponse>();
+    let completeRestoration: (() => void) | null = null;
+    testMocks.validateSearchExpression
+      .mockResolvedValueOnce({ valid: true })
+      .mockResolvedValueOnce({ valid: true });
+    testMocks.execute
+      .mockImplementationOnce((_request, options) => {
+        completeRestoration = () => {
+          options?.onSuccess?.(restorationResponse);
+          restorationExecution.resolve(restorationResponse);
+        };
+        return restorationExecution.promise;
+      })
+      .mockImplementationOnce(async (_request, options) => {
+        options?.onSuccess?.(issueSearchResponse);
+        return issueSearchResponse;
+      });
+
+    renderSharedFileSearch();
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'issuequery' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+    expect(await screen.findByText('new Issue match')).toBeInTheDocument();
+    expect(testMocks.execute).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      completeRestoration?.();
+      await restorationExecution.promise;
+    });
+    expect(screen.getByText('new Issue match')).toBeInTheDocument();
+    expect(screen.queryByText('old shared match')).not.toBeInTheDocument();
   });
 
   it('restores nested file filters in order using each prior temporary result', async () => {

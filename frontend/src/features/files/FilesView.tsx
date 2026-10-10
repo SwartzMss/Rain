@@ -414,6 +414,17 @@ export function BundleView() {
     []
   );
 
+  const supersedeSharedRestore = useCallback(() => {
+    const attempt = sharedRestoreAttemptRef.current;
+    if (attempt?.status !== 'loading') return;
+
+    sharedRestoreGenerationRef.current += 1;
+    sharedFileSearch.invalidate();
+    const superseded = { routeKey: attempt.routeKey, status: 'superseded' as const, error: null };
+    sharedRestoreAttemptRef.current = superseded;
+    setSharedRestoreState(superseded);
+  }, [sharedFileSearch.invalidate]);
+
   const runSearch = useCallback(async () => {
     const issue = issueCode;
     if (!issue) {
@@ -433,6 +444,7 @@ export function BundleView() {
       issueSearch.setError(error instanceof Error ? error.message : '搜索条件无效');
       return;
     }
+    supersedeSharedRestore();
     issueSearch.setEditor(finalizedTokens);
     viewerSearch.clear();
     setFileSearchResults([]);
@@ -472,7 +484,7 @@ export function BundleView() {
         });
       }
     });
-  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, viewerSearch.clear]);
+  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, supersedeSharedRestore, viewerSearch.clear]);
 
   const clearDetailedSearch = useCallback(() => {
     issueSearch.clear();
@@ -1080,17 +1092,6 @@ export function BundleView() {
     setFileSearchTotal(0);
     setFileSearchFrom(0);
   }, [fileSearch.clear]);
-
-  const supersedeSharedRestore = useCallback(() => {
-    const attempt = sharedRestoreAttemptRef.current;
-    if (attempt?.status !== 'loading') return;
-
-    sharedRestoreGenerationRef.current += 1;
-    sharedFileSearch.invalidate();
-    const superseded = { routeKey: attempt.routeKey, status: 'superseded' as const, error: null };
-    sharedRestoreAttemptRef.current = superseded;
-    setSharedRestoreState(superseded);
-  }, [sharedFileSearch.invalidate]);
 
   useEffect(() => {
     if (fileSearch.executed && isFileSearchConditionEmpty(fileSearch.tokens, fileSearch.draft)) {
