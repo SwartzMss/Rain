@@ -435,7 +435,6 @@ export function BundleView() {
   );
 
   const runSearch = useCallback(async () => {
-    if (!workspaceReady) return;
     const workspaceGeneration = workspaceGenerationRef.current;
     const issue = issueCode;
     if (!issue) {
@@ -496,7 +495,7 @@ export function BundleView() {
       }
     });
     if (workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, viewerSearch.clear, workspaceGenerationRef, workspaceReady]);
+  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, viewerSearch.clear, workspaceGenerationRef]);
 
   const clearDetailedSearch = useCallback(() => {
     issueSearch.clear();
@@ -1107,7 +1106,6 @@ export function BundleView() {
   }, [clearFileSearch, fileSearch.draft, fileSearch.executed, fileSearch.tokens]);
 
   const runFileSearch = useCallback(async (from = 0) => {
-    if (!workspaceReady) return;
     const workspaceGeneration = workspaceGenerationRef.current;
     if (!selectedNode || !canPreviewText(selectedNode)) return;
     const selectedBundleId = selectedNode.bundleId || bundleId;
@@ -1172,10 +1170,9 @@ export function BundleView() {
           }
     });
     if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [bundleId, fileSearch, openViewerTab, selectedNode, workspaceGenerationRef, workspaceReady]);
+  }, [bundleId, fileSearch, openViewerTab, selectedNode, workspaceGenerationRef]);
 
   const searchWithinActiveResults = useCallback(async (tokens: SearchToken[], draft: string) => {
-    if (!workspaceReady) return;
     const workspaceGeneration = workspaceGenerationRef.current;
     if (!activeViewerTab || (activeViewerTab.kind !== 'search' && activeViewerTab.kind !== 'temp')) return;
     let finalizedTokens: SearchToken[];
@@ -1243,7 +1240,7 @@ export function BundleView() {
         }
     });
     if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [activeViewerTab, openViewerTab, viewerSearch, workspaceGenerationRef, workspaceReady]);
+  }, [activeViewerTab, openViewerTab, viewerSearch, workspaceGenerationRef]);
 
   const restoreSharedTab = useCallback(async (descriptor: SharedTabDescriptor) => {
     const workspaceGeneration = workspaceGenerationRef.current;
@@ -1338,7 +1335,6 @@ export function BundleView() {
     }
     if (
       restoredSharedRouteRef.current === sharedRouteKey
-      || !workspaceReady
       || treeLoading
       || treeError
       || (hasFileContext && rootIds.length === 0)
@@ -1347,7 +1343,7 @@ export function BundleView() {
     if (sharedTab.kind === 'search' && sharedTab.plan.root.kind === 'file' && bundleId && sharedTab.plan.root.bundleHash !== bundleId) return;
     restoredSharedRouteRef.current = sharedRouteKey;
     void restoreSharedTab(sharedTab);
-  }, [bundleId, hasFileContext, restoreSharedTab, rootIds.length, sharedRouteKey, sharedTab, treeError, treeLoading, workspaceReady]);
+  }, [bundleId, hasFileContext, restoreSharedTab, rootIds.length, sharedRouteKey, sharedTab, treeError, treeLoading]);
 
   const loadViewerPage = viewerPagination.loadPage;
 
@@ -1748,7 +1744,7 @@ export function BundleView() {
                         viewerSearch.clear();
                       }}
                       onSearchWithinResults={(tokens, draft) => searchWithinActiveResults(tokens, draft).catch(() => undefined)}
-                      canRunResultFilter={canRunResultFilter && workspaceReady}
+                      canRunResultFilter={canRunResultFilter}
                       searchLoading={viewerSearch.busy || viewerPagination.getState(activeViewerTabId).loading}
                       searchError={viewerSearch.error ?? viewerPagination.getState(activeViewerTabId).error}
                       contentRef={contentRef}
