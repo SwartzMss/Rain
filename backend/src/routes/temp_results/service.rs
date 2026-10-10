@@ -1127,23 +1127,21 @@ async fn create_preview_result_inner(
         payload.workspace_session_id.as_deref(),
         payload.workspace_subject_key.as_deref(),
         workspace_issue_code.as_deref(),
-    ) {
-        if let Err(error) = super::workspace::associate_result_with_workspace(
+    ) && let Err(error) = super::workspace::associate_result_with_workspace(
+        state,
+        session_id,
+        subject_key,
+        issue_code,
+        &outcome.id,
+    )
+    .await
+    {
+        cleanup_published_result_after_preview_failure(
             state,
-            session_id,
-            subject_key,
-            issue_code,
-            &outcome.id,
+            &load_record(state, &outcome.id).await?,
         )
-        .await
-        {
-            cleanup_published_result_after_preview_failure(
-                state,
-                &load_record(state, &outcome.id).await?,
-            )
-            .await;
-            return Err(error);
-        }
+        .await;
+        return Err(error);
     }
     let (result, read_lease) = acquire_active_result(state, &outcome.id).await?;
     let page = read_result_page(state, &result, start, limit).await;
@@ -1259,23 +1257,21 @@ pub(crate) async fn create_full_result(
                     worker_workspace_session_id.as_deref(),
                     worker_workspace_subject_key.as_deref(),
                     workspace_issue_code.as_deref(),
-                ) {
-                    if let Err(error) = super::workspace::associate_result_with_workspace(
+                ) && let Err(error) = super::workspace::associate_result_with_workspace(
+                    &worker_state,
+                    session_id,
+                    subject_key,
+                    issue_code,
+                    &outcome.id,
+                )
+                .await
+                {
+                    cleanup_published_result_after_preview_failure(
                         &worker_state,
-                        session_id,
-                        subject_key,
-                        issue_code,
-                        &outcome.id,
+                        &load_record(&worker_state, &outcome.id).await?,
                     )
-                    .await
-                    {
-                        cleanup_published_result_after_preview_failure(
-                            &worker_state,
-                            &load_record(&worker_state, &outcome.id).await?,
-                        )
-                        .await;
-                        return Err(error);
-                    }
+                    .await;
+                    return Err(error);
                 }
                 load_active_unexpired_record(&worker_state, &outcome.id).await
             },

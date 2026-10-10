@@ -360,7 +360,7 @@ pub(crate) async fn update_result_refs(
             }
             for id in add_ids {
                 sqlx::query("INSERT INTO temp_result_workspace_refs (session_id, result_id, created_at) SELECT ?, r.id, CURRENT_TIMESTAMP FROM temp_results r WHERE r.id = ? AND r.status = 'ACTIVE' AND r.issue_code = ? AND (datetime(r.expires_at) >= datetime('now') OR EXISTS (SELECT 1 FROM temp_result_workspace_refs old_ref JOIN issue_workspace_sessions old_session ON old_session.id = old_ref.session_id WHERE old_ref.result_id = r.id AND old_session.state = 'ACTIVE' AND datetime(old_session.expires_at) > datetime('now'))) ON CONFLICT(session_id, result_id) DO NOTHING")
-                    .bind(session_id).bind(&id).bind(issue_code).execute(&mut *conn).await.map_err(AppError::Database)?;
+                    .bind(session_id).bind(id).bind(issue_code).execute(&mut *conn).await.map_err(AppError::Database)?;
                 let ref_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM temp_result_workspace_refs WHERE session_id = ? AND result_id = ?)")
                     .bind(session_id).bind(id).fetch_one(&mut *conn).await.map_err(AppError::Database)?;
                 if !ref_exists {
