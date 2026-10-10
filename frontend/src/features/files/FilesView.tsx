@@ -46,11 +46,13 @@ import { ViewerTabBar } from './components/ViewerTabBar';
 import { CodeLinesPane } from './components/CodeLinesPane';
 import { FileTreeNode } from './components/FileTreeNode';
 import { SearchResultViewer } from './components/SearchResultViewer';
+import { ResultExpiryNotice } from './components/ResultExpiryNotice';
 import { SearchExecutionStatus } from '../../components/SearchExecutionStatus';
 import { takePendingSavedSearch } from './pendingSavedSearch';
 import { useIssueSearchController } from './hooks/useIssueSearchController';
 import { useFileSearchController } from './hooks/useFileSearchController';
 import { useViewerSearchController } from './hooks/useViewerSearchController';
+import { useResultRetention } from './hooks/useResultRetention';
 import { currentExpression } from './hooks/useSearchController';
 import { useViewerPaginationController } from './hooks/useViewerPaginationController';
 import { useSavedSearchController } from './hooks/useSavedSearchController';
@@ -172,6 +174,8 @@ export function BundleView() {
     pendingSavedSearch?.search_type === 'DETAIL' ? pendingSavedSearch.query_text : undefined,
     pendingSavedSearch?.search_type === 'DETAIL' ? pendingSavedSearch.options : undefined
   ));
+  const [replayingTabId, setReplayingTabId] = useState<string | null>(null);
+  const [replayErrors, setReplayErrors] = useState<Record<string, string>>({});
 
   const activeBundle: BundleInfo = {
     hash: bundleHash,
@@ -227,7 +231,12 @@ export function BundleView() {
     resetViewerTabs,
     updateViewerTabs,
     togglePinnedViewerTab
-  } = useViewerTabs(auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER');
+  } = useViewerTabs();
+  const openResultIds = useMemo(
+    () => viewerTabs.flatMap((tab) => tab.kind === 'file' ? [] : [tab.resultId]),
+    [viewerTabs]
+  );
+  const resultRetention = useResultRetention(openResultIds);
   const issueSearch = useIssueSearchController(pendingDetailEditor.tokens, pendingDetailEditor.error);
   const fileSearch = useFileSearchController();
   const viewerSearch = useViewerSearchController();
@@ -242,7 +251,11 @@ export function BundleView() {
   });
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const fileContextKey = `${issueCode}\u0000${bundleId}`;
-  const viewerPagination = useViewerPaginationController(fileContextKey, updateViewerTabs);
+  const viewerPagination = useViewerPaginationController(
+    fileContextKey,
+    updateViewerTabs,
+    resultRetention.markUnavailable
+  );
   const fileContentCache = useMemo(() => createFileContentCache(
     (request: FileContentRequestKey, signal: AbortSignal) => rainApi.fetchFileLines(
       request.bundle,
@@ -1159,6 +1172,11 @@ export function BundleView() {
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
       scopeKey: `viewer:${activeViewerTab.id}:${activeViewerTab.resultId}`,
+      onFailure: (error) => {
+        if (error instanceof ApiError && error.status === 404) {
+          resultRetention.markUnavailable(activeViewerTab.resultId);
+        }
+      },
       onSuccess: (response) => {
           const hits = response.lines.map((line) => ({
             bundle_hash: line.bundle_hash,
@@ -1198,9 +1216,9 @@ export function BundleView() {
         }
     });
     if (!response) return;
-  }, [activeViewerTab, openViewerTab, viewerSearch]);
+  }, [activeViewerTab, openViewerTab, resultRetention.markUnavailable, viewerSearch]);
 
-  const restoreSharedTab = useCallback(async (descriptor: SharedTabDescriptor) => {
+  const restoreSharedTab = useCallback(async (descriptor: SharedTabDescriptor): Promise<boolean> => {
     if (descriptor.kind === 'file') {
       try {
         const loaded = await loadNode(descriptor.bundleHash, descriptor.fileId, null);
@@ -1209,16 +1227,16 @@ export function BundleView() {
         }
         setSelectedNodeId(loaded.node.id);
         await handleNodeClick(loaded.node.id, null, { node: loaded.node });
-        return;
+        return true;
       } catch (error) {
         setSourceActionMessage(error instanceof Error ? error.message : '分享来源文件无法打开');
-        return;
+        return false;
       }
     }
 
     const { plan } = descriptor;
     const firstExpression = plan.expressions[0];
-    if (!firstExpression) return;
+    if (!firstExpression) return false;
     try {
       const firstTokens = deserializeSearchTokens(firstExpression);
       const rootController = plan.root.kind === 'issue' ? issueSearch : fileSearch;
@@ -1232,7 +1250,7 @@ export function BundleView() {
           ? `issue:${plan.root.issueCode}:shared`
           : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`
       });
-      if (!response) return;
+      if (!response) return false;
 
       for (const expression of plan.expressions.slice(1)) {
         response = await viewerSearch.run({
@@ -1245,7 +1263,7 @@ export function BundleView() {
           },
           scopeKey: `shared:${response.result_id}`
         });
-        if (!response) return;
+        if (!response) return false;
       }
 
       const lastExpression = plan.expressions[plan.expressions.length - 1] ?? firstExpression;
@@ -1277,10 +1295,36 @@ export function BundleView() {
       issueSearch.clear();
       fileSearch.clear();
       viewerSearch.clear();
+      return true;
     } catch (error) {
       setSourceActionMessage(error instanceof Error ? error.message : '分享搜索无法恢复');
+      return false;
     }
   }, [fileSearch, handleNodeClick, issueSearch, loadNode, openViewerTab, viewerSearch]);
+
+  const replayExpiredSearch = useCallback(async (tab: Extract<ViewerTab, { kind: 'search' | 'temp' }>) => {
+    setReplayErrors((current) => ({ ...current, [tab.id]: '' }));
+    if (tab.kind !== 'search' || !tab.queryPlan) {
+      setReplayErrors((current) => ({
+        ...current,
+        [tab.id]: '此标签没有保存原始搜索条件，请回到来源重新搜索。'
+      }));
+      return;
+    }
+    setReplayingTabId(tab.id);
+    try {
+      const success = await restoreSharedTab({
+        kind: 'search',
+        issueCode: issueCode || (tab.queryPlan.root.kind === 'issue' ? tab.queryPlan.root.issueCode : ''),
+        plan: tab.queryPlan
+      });
+      if (!success) {
+        setReplayErrors((current) => ({ ...current, [tab.id]: '来源已不可用或搜索失败，请检查来源后重试。' }));
+      }
+    } finally {
+      setReplayingTabId(null);
+    }
+  }, [issueCode, restoreSharedTab]);
 
   const sharedRouteKey = `${location.pathname}${location.search}`;
   useEffect(() => {
@@ -1699,6 +1743,10 @@ export function BundleView() {
                       canRunResultFilter={canRunResultFilter}
                       searchLoading={viewerSearch.busy || viewerPagination.getState(activeViewerTabId).loading}
                       searchError={viewerSearch.error ?? viewerPagination.getState(activeViewerTabId).error}
+                      unavailable={resultRetention.unavailableIds.has(activeViewerTab.resultId)}
+                      onReplay={() => replayExpiredSearch(activeViewerTab).catch(() => undefined)}
+                      replaying={replayingTabId === activeViewerTab.id}
+                      replayError={replayErrors[activeViewerTab.id] || null}
                       contentRef={contentRef}
                       pageSizeOptions={LINE_PAGE_SIZE_OPTIONS}
                       onLoadPage={(tab, from, pageSize, navigation) => {

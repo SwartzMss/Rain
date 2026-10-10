@@ -14,6 +14,7 @@ export interface SearchExecutionSnapshot {
 interface SearchExecutionOptions {
   scopeKey: string;
   onSuccess?: (result: TempResultPreviewResponse) => void;
+  onFailure?: (error: unknown) => void;
 }
 
 interface ActiveExecution {
@@ -301,6 +302,7 @@ export function useSearchExecution() {
         setSnapshot((current) => ({ ...current, status: 'CANCELLING', elapsedMs: elapsedSince(active.startedAt) }));
         return undefined;
       }
+      options.onFailure?.(error);
       const message = error instanceof ApiError && error.code === 'TEMP_RESULT_SCAN_TIMEOUT'
         ? '搜索达到系统安全时限，已停止。建议缩小搜索范围或调整搜索条件'
         : normalizeApiError(error);

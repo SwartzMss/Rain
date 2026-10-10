@@ -377,6 +377,13 @@ export const rainApi = {
   fetchTempResult(id: string) {
     return request<TempResultInfo>(`/api/temp-results/${encodePathSegment(id)}`);
   },
+  keepAliveTempResults(resultIds: string[], signal?: AbortSignal) {
+    return request<{ unavailable_ids: string[] }>('/api/temp-results/keep-alive', {
+      method: 'POST',
+      body: JSON.stringify({ result_ids: resultIds }),
+      signal
+    });
+  },
   fetchTempResultLines(id: string, options?: { start?: number; limit?: number }) {
     const params = new URLSearchParams();
     if (typeof options?.start === 'number') params.set('start', String(options.start));

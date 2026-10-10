@@ -5,6 +5,7 @@ import type { SearchViewerTab, TempViewerTab } from '../viewerTabs';
 import { SearchTokenEditor } from '../SearchTokenEditor';
 import { SearchHitContextMenu } from './SearchHitContextMenu';
 import { getSearchHitSource } from '../searchHitSource';
+import { ResultExpiryNotice } from './ResultExpiryNotice';
 
 type SearchResultViewerProps = {
   activeViewerTab: SearchViewerTab | TempViewerTab;
@@ -18,6 +19,10 @@ type SearchResultViewerProps = {
   canRunResultFilter: boolean;
   searchLoading: boolean;
   searchError?: string | null;
+  unavailable?: boolean;
+  onReplay?: () => void;
+  replaying?: boolean;
+  replayError?: string | null;
   contentRef: React.RefObject<HTMLDivElement>;
   pageSizeOptions: readonly number[];
   onLoadPage: (
@@ -43,6 +48,10 @@ export function SearchResultViewer({
   canRunResultFilter,
   searchLoading,
   searchError,
+  unavailable = false,
+  onReplay,
+  replaying,
+  replayError,
   contentRef,
   pageSizeOptions,
   onLoadPage,
@@ -50,6 +59,9 @@ export function SearchResultViewer({
   renderHighlightedText,
   onOpenSource
 }: SearchResultViewerProps) {
+  const expiryNotice = unavailable
+    ? <ResultExpiryNotice onReplay={onReplay} replaying={replaying} error={replayError} />
+    : null;
   const pageHistory = activeViewerTab.pageHistory ?? [];
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -70,17 +82,18 @@ export function SearchResultViewer({
   const changePageSize = (nextPageSize: number) => {
     onLoadPage(activeViewerTab, 0, nextPageSize, 'reset');
   };
-  if (searchLoading && results.length === 0) {
+  if (searchLoading && results.length === 0 && !unavailable) {
     return <p className="py-8 text-center text-sm text-slate-500">正在搜索...</p>;
   }
 
   if (results.length === 0) {
-    return <p className="py-8 text-center text-sm text-slate-500">未搜索到相关日志。</p>;
+    return <>{expiryNotice}<p className="py-8 text-center text-sm text-slate-500">未搜索到相关日志。</p></>;
   }
 
   return (
     <>
-      {searchError ? <p className="border-b border-rose-100 bg-rose-50 px-4 py-2 text-xs text-rose-700">{searchError}</p> : null}
+      {expiryNotice}
+      {searchError && !unavailable ? <p className="border-b border-rose-100 bg-rose-50 px-4 py-2 text-xs text-rose-700">{searchError}</p> : null}
       <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-3 focus-within:border-sky-400">
         <span className="mt-1.5 shrink-0 self-start text-slate-500" aria-hidden="true">⌕</span>
         <SearchTokenEditor
@@ -92,7 +105,7 @@ export function SearchResultViewer({
           placeholder="添加关键词"
           ariaLabel="当前结果筛选条件"
           allowOperators={false}
-          disabled={searchLoading}
+          disabled={searchLoading || unavailable}
         />
         <span className="shrink-0 text-xs text-slate-500">
           {`${activeViewerTab.total} 条结果`}
@@ -109,7 +122,7 @@ export function SearchResultViewer({
         <button
           type="button"
           className="shrink-0 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={searchLoading || !canRunResultFilter}
+          disabled={searchLoading || unavailable || !canRunResultFilter}
           onClick={onSearchWithinResults}
         >
           搜索
@@ -149,7 +162,7 @@ export function SearchResultViewer({
             <select
               className="rounded border border-slate-300 bg-white px-2 py-1 text-slate-700 outline-none focus:border-cyan-500/60"
               value={activeViewerTab.pageSize}
-              disabled={searchLoading}
+              disabled={searchLoading || unavailable}
               onChange={(event) => changePageSize(Number(event.target.value))}
             >
               {pageSizeOptions.map((size) => <option key={size} value={size}>{size} 行</option>)}
@@ -161,7 +174,7 @@ export function SearchResultViewer({
           <button
             type="button"
             className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-            disabled={pageHistory.length === 0 || searchLoading}
+            disabled={pageHistory.length === 0 || searchLoading || unavailable}
             onClick={loadPreviousPage}
           >
             上一页
@@ -169,7 +182,7 @@ export function SearchResultViewer({
           <button
             type="button"
             className="rounded border border-slate-300 px-3 py-1 hover:border-slate-500 disabled:opacity-50"
-            disabled={activeViewerTab.from + results.length >= activeViewerTab.total || searchLoading}
+            disabled={activeViewerTab.from + results.length >= activeViewerTab.total || searchLoading || unavailable}
             onClick={loadNextPage}
           >
             下一页

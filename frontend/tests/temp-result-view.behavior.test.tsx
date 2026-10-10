@@ -7,12 +7,14 @@ import type { TempResultInfo, TempResultLinesResponse } from '../src/api/types';
 import { TempResultRoute } from '../src/features/files/TempResultView';
 
 vi.mock('../src/api/client', () => ({
+  ApiError: class ApiError extends Error { status?: number; },
   normalizeApiError: (error: unknown) => String(error),
   rainApi: {
     me: vi.fn(),
     fetchTempResult: vi.fn(),
     fetchTempResultLines: vi.fn(),
     previewTempResult: vi.fn(),
+    keepAliveTempResults: vi.fn().mockResolvedValue({ unavailable_ids: [] }),
     deleteTempResult: vi.fn()
   }
 }));
@@ -75,6 +77,7 @@ describe('standalone Temp Result view', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.mocked(rainApi.me).mockResolvedValue({ authenticated: false, user: null });
+    vi.mocked(rainApi.keepAliveTempResults).mockResolvedValue({ unavailable_ids: [] });
   });
 
   it('does not display an old result while navigating to a new result or after delayed old responses', async () => {

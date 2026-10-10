@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { normalizeApiError, rainApi } from '../../../api/client';
+import { ApiError, normalizeApiError, rainApi } from '../../../api/client';
 import type { ViewerTab } from '../viewerTabs';
 
 type PageState = { loading: boolean; error: string | null };
@@ -7,7 +7,8 @@ type PageRequest = { sequence: number; resultId: string; contextKey: string };
 
 export function useViewerPaginationController(
   contextKey: string,
-  updateViewerTabs: (update: (tabs: ViewerTab[]) => ViewerTab[]) => void
+  updateViewerTabs: (update: (tabs: ViewerTab[]) => ViewerTab[]) => void,
+  onUnavailable?: (resultId: string) => void
 ) {
   const [states, setStates] = useState<Record<string, PageState>>({});
   const requestsRef = useRef(new Map<string, PageRequest>());
@@ -88,6 +89,7 @@ export function useViewerPaginationController(
       }));
     } catch (error) {
       if (isCurrent()) {
+        if (error instanceof ApiError && error.status === 404) onUnavailable?.(resultId);
         setStates((current) => ({ ...current, [tab.id]: { loading: false, error: normalizeApiError(error) } }));
       }
       return;
@@ -95,7 +97,7 @@ export function useViewerPaginationController(
     if (isCurrent()) {
       setStates((current) => ({ ...current, [tab.id]: { loading: false, error: null } }));
     }
-  }, [contextKey, updateViewerTabs]);
+  }, [contextKey, onUnavailable, updateViewerTabs]);
 
   const getState = useCallback((tabId: string | null): PageState => {
     return tabId ? states[tabId] ?? { loading: false, error: null } : { loading: false, error: null };

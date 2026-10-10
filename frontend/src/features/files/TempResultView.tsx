@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { normalizeApiError, rainApi } from '../../api/client';
+import { ApiError, normalizeApiError, rainApi } from '../../api/client';
 import type { TempResultInfo, TempResultLinesResponse } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { isUser } from '../../auth/permissions';
 import { useSearchExecution } from '../../hooks/useSearchExecution';
+import { useResultRetention } from './hooks/useResultRetention';
+import { ResultExpiryNotice } from './components/ResultExpiryNotice';
 
 type PageNavigation = 'next' | 'previous' | 'reset';
 
@@ -26,6 +28,8 @@ export function TempResultView() {
   const [error, setError] = useState<string | null>(null);
   const requestGeneration = useRef(0);
   const searchExecution = useSearchExecution();
+  const resultRetention = useResultRetention(resultId ? [resultId] : []);
+  const [unavailable, setUnavailable] = useState(false);
 
   useEffect(() => {
     if (searchExecution.snapshot.status === 'FAILED') {
@@ -42,6 +46,7 @@ export function TempResultView() {
     setPageSize(DEFAULT_PAGE_SIZE);
     setLoading(true);
     setError(null);
+    setUnavailable(false);
 
     const loadInitial = async () => {
       if (!resultId) return;
@@ -56,6 +61,7 @@ export function TempResultView() {
       } catch (loadError) {
         if (generation === requestGeneration.current) {
           setError(normalizeApiError(loadError));
+          if (loadError instanceof ApiError && loadError.status === 404) setUnavailable(true);
         }
       } finally {
         if (generation === requestGeneration.current) {
@@ -102,6 +108,7 @@ export function TempResultView() {
     } catch (loadError) {
       if (generation === requestGeneration.current) {
         setError(normalizeApiError(loadError));
+        if (loadError instanceof ApiError && loadError.status === 404) setUnavailable(true);
       }
     } finally {
       if (generation === requestGeneration.current) {
@@ -148,6 +155,9 @@ export function TempResultView() {
   return (
     <section className="panel space-y-4">
       {error ? <p className="rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-600">{error}</p> : null}
+      {(unavailable || resultRetention.unavailableIds.has(resultId))
+        ? <ResultExpiryNotice />
+        : null}
       {visibleResult ? (
         <>
           <div className="flex flex-wrap items-start justify-between gap-3">

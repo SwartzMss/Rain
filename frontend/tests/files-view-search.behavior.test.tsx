@@ -28,7 +28,8 @@ vi.mock('../src/api/client', () => ({
     fetchIssueBundles: testMocks.fetchIssueBundles,
     fetchFileNode: testMocks.fetchFileNode,
     fetchFileLines: testMocks.fetchFileLines,
-    deleteTempResult: vi.fn()
+    deleteTempResult: vi.fn(),
+    keepAliveTempResults: vi.fn().mockResolvedValue({ unavailable_ids: [] })
   }
 }));
 
