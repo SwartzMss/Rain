@@ -33,11 +33,78 @@ import type {
   ResourceMode,
   SearchReservationResponse,
   SearchExpressionValidationResponse,
+  WorkspaceSessionResponse,
   } from './types';
 
 const API_BASE_URL = '';
 const ISSUE_CODE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 let adminSettingsRevision: string | undefined;
+export type ActiveWorkspaceRequest = {
+  issueCode: string;
+  promise: Promise<WorkspaceSessionResponse>;
+  consumers: number;
+};
+let activeWorkspaceRequest: ActiveWorkspaceRequest | null = null;
+
+export function beginWorkspaceSession(issueCode: string): ActiveWorkspaceRequest {
+  const normalizedIssueCode = normalizeIssueCode(issueCode);
+  if (activeWorkspaceRequest?.issueCode === normalizedIssueCode) return activeWorkspaceRequest;
+  const promise = request<WorkspaceSessionResponse>(
+    `/api/issues/${encodePathSegment(normalizedIssueCode)}/workspace-sessions`,
+    { method: 'POST' }
+  );
+  const active = { issueCode: normalizedIssueCode, promise, consumers: 0 };
+  activeWorkspaceRequest = active;
+  return active;
+}
+
+export function resumeWorkspaceSession(issueCode: string, sessionId: string): ActiveWorkspaceRequest {
+  const normalizedIssueCode = normalizeIssueCode(issueCode);
+  if (activeWorkspaceRequest?.issueCode === normalizedIssueCode) return activeWorkspaceRequest;
+  const promise = request<WorkspaceSessionResponse>(
+    `/api/workspace-sessions/${encodePathSegment(sessionId)}`
+  ).then((session) => {
+    if (normalizeIssueCode(session.issue_code) !== normalizedIssueCode) {
+      throw new ApiError('Issue 工作区与当前页面不匹配', 409, 'WORKSPACE_SESSION_MISMATCH');
+    }
+    return session;
+  });
+  const active = { issueCode: normalizedIssueCode, promise, consumers: 0 };
+  activeWorkspaceRequest = active;
+  return active;
+}
+
+export function clearWorkspaceSessionRequest(active: ActiveWorkspaceRequest): void {
+  if (activeWorkspaceRequest === active) activeWorkspaceRequest = null;
+}
+
+export function retainWorkspaceSessionRequest(active: ActiveWorkspaceRequest): void {
+  active.consumers += 1;
+}
+
+export function releaseWorkspaceSessionRequest(active: ActiveWorkspaceRequest, preserveForHandoff = false): void {
+  active.consumers = Math.max(0, active.consumers - 1);
+  if (active.consumers > 0 || preserveForHandoff) return;
+  window.setTimeout(() => {
+    if (active.consumers === 0 && activeWorkspaceRequest === active) {
+      activeWorkspaceRequest = null;
+    }
+  }, 0);
+}
+
+export function hasWorkspaceSessionConsumers(active: ActiveWorkspaceRequest): boolean {
+  return active.consumers > 0;
+}
+
+async function activeWorkspaceHeaders(): Promise<Record<string, string>> {
+  const active = activeWorkspaceRequest;
+  if (!active) return {};
+  const session = await active.promise;
+  if (activeWorkspaceRequest !== active) {
+    throw new ApiError('Issue 工作区已切换，请重新搜索', 409, 'WORKSPACE_SESSION_SUPERSEDED');
+  }
+  return { 'X-Issue-Workspace-Session': session.session_id };
+}
 
 export class ApiError extends Error {
   constructor(
@@ -345,10 +412,12 @@ export const rainApi = {
       body: JSON.stringify({ expression })
     });
   },
-  createTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string }) {
+  async createTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string }) {
+    const workspaceHeaders = await activeWorkspaceHeaders();
     return request<TempResultInfo>('/api/temp-results', {
       method: 'POST',
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      headers: workspaceHeaders
     });
   },
   reserveSearchRequest(searchId: string, signal?: AbortSignal) {
@@ -365,13 +434,34 @@ export const rainApi = {
       signal
     });
   },
-  previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }, options?: { searchId?: string; cancelToken?: string; signal?: AbortSignal }) {
-    const headers = options?.cancelToken ? { 'X-Search-Cancel-Token': options.cancelToken } : undefined;
+  async previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }, options?: { searchId?: string; cancelToken?: string; signal?: AbortSignal }) {
+    const headers = {
+      ...await activeWorkspaceHeaders(),
+      ...(options?.cancelToken ? { 'X-Search-Cancel-Token': options.cancelToken } : {})
+    };
     return request<TempResultPreviewResponse>('/api/temp-results/preview', {
       method: 'POST',
       body: JSON.stringify({ ...payload, ...(options?.searchId ? { search_id: options.searchId } : {}) }),
       headers,
       signal: options?.signal
+    });
+  },
+  createWorkspaceSession(issueCode: string) {
+    return request<WorkspaceSessionResponse>(`/api/issues/${encodePathSegment(normalizeIssueCode(issueCode))}/workspace-sessions`, { method: 'POST' });
+  },
+  getWorkspaceSession(sessionId: string) {
+    return request<WorkspaceSessionResponse>(`/api/workspace-sessions/${encodePathSegment(sessionId)}`);
+  },
+  recordWorkspaceActivity(sessionId: string) {
+    return request<WorkspaceSessionResponse>(`/api/workspace-sessions/${encodePathSegment(sessionId)}/activity`, { method: 'POST' });
+  },
+  endWorkspaceSession(sessionId: string, keepalive = false) {
+    return request<void>(`/api/workspace-sessions/${encodePathSegment(sessionId)}/end`, { method: 'POST', keepalive });
+  },
+  addWorkspaceResultRefs(sessionId: string, resultIds: string[]) {
+    return request<void>(`/api/workspace-sessions/${encodePathSegment(sessionId)}/result-refs`, {
+      method: 'POST',
+      body: JSON.stringify({ add: resultIds })
     });
   },
   fetchTempResult(id: string) {

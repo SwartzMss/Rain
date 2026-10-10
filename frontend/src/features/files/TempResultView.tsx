@@ -6,6 +6,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { LINE_PAGE_SIZE_OPTIONS } from './linePageSizes';
 import { isUser } from '../../auth/permissions';
 import { useSearchExecution } from '../../hooks/useSearchExecution';
+import { useIssueWorkspaceSession } from './hooks/useIssueWorkspaceSession';
 
 type PageNavigation = 'next' | 'previous' | 'reset';
 
@@ -26,12 +27,36 @@ export function TempResultView() {
   const [error, setError] = useState<string | null>(null);
   const requestGeneration = useRef(0);
   const searchExecution = useSearchExecution();
+  const resultWorkspaceIssue = result?.id === resultId ? result.issue_code ?? '' : '';
+  const resetWorkspace = useCallback(() => {
+    requestGeneration.current += 1;
+    void searchExecution.cancel();
+    setResult(null);
+    setLines(null);
+    setStart(0);
+    setPageHistory([]);
+    setPageSize(DEFAULT_PAGE_SIZE);
+    setExpression('');
+    setError(null);
+    const issueCode = resultWorkspaceIssue;
+    if (issueCode) navigate(`/issue/${encodeURIComponent(issueCode)}`, { replace: true });
+  }, [navigate, resultWorkspaceIssue, searchExecution.cancel]);
+  const { ready: workspaceReady, error: workspaceError, sessionIdRef: workspaceSessionIdRef } = useIssueWorkspaceSession(
+    resultWorkspaceIssue,
+    auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest',
+    resetWorkspace
+  );
+  const attachedResultRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (searchExecution.snapshot.status === 'FAILED') {
       setError(searchExecution.snapshot.errorMessage);
     }
   }, [searchExecution.snapshot.errorMessage, searchExecution.snapshot.status]);
+
+  useEffect(() => {
+    setError(workspaceError);
+  }, [workspaceError]);
 
   useEffect(() => {
     const generation = ++requestGeneration.current;
@@ -112,6 +137,18 @@ export function TempResultView() {
 
   const visibleResult = result?.id === resultId ? result : null;
   const visibleLines = visibleResult ? lines : null;
+
+  useEffect(() => {
+    const sessionId = workspaceSessionIdRef.current;
+    if (!workspaceReady || !sessionId || !visibleResult?.issue_code) return;
+    const key = `${sessionId}:${visibleResult.id}`;
+    if (attachedResultRef.current === key) return;
+    attachedResultRef.current = key;
+    void rainApi.addWorkspaceResultRefs(sessionId, [visibleResult.id]).catch(() => {
+      if (attachedResultRef.current === key) attachedResultRef.current = null;
+      setError('工作会话无法保护此结果，请重新搜索以继续翻页和筛选');
+    });
+  }, [visibleResult, workspaceReady, workspaceSessionIdRef]);
 
   const createFromResult = async () => {
     if (!expression.trim() || !resultId) return;
