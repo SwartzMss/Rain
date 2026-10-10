@@ -131,6 +131,7 @@ pub(crate) struct ResolvedSources {
     sources: Vec<TempSource>,
     indexed_sources: Vec<Option<IndexedSource>>,
     issue_code: Option<String>,
+    workspace_issue_code: Option<String>,
     source_count: usize,
     _source_lease: Option<TempResultReadLease>,
 }
@@ -628,6 +629,7 @@ async fn resolve_sources_inner(
             }],
             indexed_sources: vec![None],
             issue_code: None,
+            workspace_issue_code: source.issue_code,
             source_count: 1,
             _source_lease: Some(source_lease),
         });
@@ -656,7 +658,8 @@ async fn resolve_sources_inner(
         return Ok(ResolvedSources {
             sources: Vec::new(),
             indexed_sources: Vec::new(),
-            issue_code: Some(issue_code),
+            issue_code: Some(issue_code.clone()),
+            workspace_issue_code: Some(issue_code),
             source_count: usize::try_from(source_count)
                 .map_err(|_| AppError::Config("issue source count is invalid".into()))?,
             _source_lease: None,
@@ -691,6 +694,7 @@ async fn resolve_sources_inner(
             file_id,
         })],
         issue_code: None,
+        workspace_issue_code: Some(bundle.issue_code),
         source_count: 1,
         _source_lease: None,
     })
@@ -916,7 +920,16 @@ pub(crate) async fn create_preview_result(
 ) -> Result<HttpResponse, AppError> {
     let settings = state.settings.snapshot().await;
     let client_key = request_client_key(&request);
-    let payload = payload.into_inner();
+    let mut payload = payload.into_inner();
+    payload.workspace_session_id = request
+        .headers()
+        .get("X-Issue-Workspace-Session")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if payload.workspace_session_id.is_some() {
+        payload.workspace_subject_key = Some(super::workspace::request_subject(&user, &request).0);
+    }
     let context = if let Some(search_id) = payload.search_id.as_deref() {
         let Some(cancel_token) = request
             .headers()
@@ -1060,6 +1073,25 @@ async fn create_preview_result_inner(
         source_temp_id: payload.source_temp_id.clone(),
     };
     let resolved = resolve_sources_with_context(&request, state, context).await?;
+    let workspace_issue_code = resolved.workspace_issue_code.clone();
+    if let Some(session_id) = payload.workspace_session_id.as_deref() {
+        let subject_key = payload.workspace_subject_key.as_deref().ok_or_else(|| {
+            AppError::api(
+                StatusCode::CONFLICT,
+                "WORKSPACE_SESSION_UNAVAILABLE",
+                "Issue 工作会话不可用，请重新搜索",
+            )
+        })?;
+        let issue_code = workspace_issue_code.as_deref().ok_or_else(|| {
+            AppError::api(
+                StatusCode::CONFLICT,
+                "WORKSPACE_ISSUE_UNAVAILABLE",
+                "无法确认搜索结果所属 Issue",
+            )
+        })?;
+        super::workspace::validate_session_for_result(state, session_id, subject_key, issue_code)
+            .await?;
+    }
     let outcome = if resolved.is_issue_scope() {
         materialize_issue_result_with_context(
             state,
@@ -1091,6 +1123,26 @@ async fn create_preview_result_inner(
         )
         .await?
     };
+    if let (Some(session_id), Some(subject_key), Some(issue_code)) = (
+        payload.workspace_session_id.as_deref(),
+        payload.workspace_subject_key.as_deref(),
+        workspace_issue_code.as_deref(),
+    ) && let Err(error) = super::workspace::associate_result_with_workspace(
+        state,
+        session_id,
+        subject_key,
+        issue_code,
+        &outcome.id,
+    )
+    .await
+    {
+        cleanup_published_result_after_preview_failure(
+            state,
+            &load_record(state, &outcome.id).await?,
+        )
+        .await;
+        return Err(error);
+    }
     let (result, read_lease) = acquire_active_result(state, &outcome.id).await?;
     let page = read_result_page(state, &result, start, limit).await;
     drop(read_lease);
@@ -1110,6 +1162,7 @@ async fn create_preview_result_inner(
 }
 
 pub(crate) async fn create_full_result(
+    user: RequireUser,
     request: HttpRequest,
     payload: web::Json<CreateTempResultRequest>,
     state: web::Data<AppState>,
@@ -1117,7 +1170,18 @@ pub(crate) async fn create_full_result(
     check_temp_result_rate_limit(&state, &request)?;
     let client_key = request_client_key(&request);
     let payload = payload.into_inner();
+    let workspace_session_id = request
+        .headers()
+        .get("X-Issue-Workspace-Session")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let workspace_subject_key = workspace_session_id
+        .as_ref()
+        .map(|_| format!("user:{}", user.0.id));
     let worker_state = state.clone();
+    let worker_workspace_session_id = workspace_session_id;
+    let worker_workspace_subject_key = workspace_subject_key;
     let worker = state
         .jobs
         .spawn(
@@ -1142,6 +1206,30 @@ pub(crate) async fn create_full_result(
                 let expression = log_expression::parse(expression_text)
                     .map_err(|error| invalid_expression(expression_text, error))?;
                 let resolved = resolve_sources_with_context(&payload, &worker_state, None).await?;
+                let workspace_issue_code = resolved.workspace_issue_code.clone();
+                if let Some(session_id) = worker_workspace_session_id.as_deref() {
+                    let subject_key = worker_workspace_subject_key.as_deref().ok_or_else(|| {
+                        AppError::api(
+                            StatusCode::CONFLICT,
+                            "WORKSPACE_SESSION_UNAVAILABLE",
+                            "Issue 工作会话不可用，请重新搜索",
+                        )
+                    })?;
+                    let issue_code = workspace_issue_code.as_deref().ok_or_else(|| {
+                        AppError::api(
+                            StatusCode::CONFLICT,
+                            "WORKSPACE_ISSUE_UNAVAILABLE",
+                            "无法确认搜索结果所属 Issue",
+                        )
+                    })?;
+                    super::workspace::validate_session_for_result(
+                        &worker_state,
+                        session_id,
+                        subject_key,
+                        issue_code,
+                    )
+                    .await?;
+                }
                 let outcome = if resolved.is_issue_scope() {
                     materialize_issue_result_with_context(
                         &worker_state,
@@ -1165,6 +1253,26 @@ pub(crate) async fn create_full_result(
                     )
                     .await?
                 };
+                if let (Some(session_id), Some(subject_key), Some(issue_code)) = (
+                    worker_workspace_session_id.as_deref(),
+                    worker_workspace_subject_key.as_deref(),
+                    workspace_issue_code.as_deref(),
+                ) && let Err(error) = super::workspace::associate_result_with_workspace(
+                    &worker_state,
+                    session_id,
+                    subject_key,
+                    issue_code,
+                    &outcome.id,
+                )
+                .await
+                {
+                    cleanup_published_result_after_preview_failure(
+                        &worker_state,
+                        &load_record(&worker_state, &outcome.id).await?,
+                    )
+                    .await;
+                    return Err(error);
+                }
                 load_active_unexpired_record(&worker_state, &outcome.id).await
             },
         )

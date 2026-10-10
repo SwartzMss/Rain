@@ -165,6 +165,10 @@ pub struct PreviewTempResultRequest {
     from: Option<i64>,
     size: Option<i64>,
     pub(crate) search_id: Option<String>,
+    #[serde(default)]
+    pub(crate) workspace_session_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) workspace_subject_key: Option<String>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -177,6 +181,7 @@ pub struct TempResult {
     size_bytes: i64,
     created_at: String,
     expires_at: String,
+    issue_code: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -190,6 +195,7 @@ pub(crate) struct TempResultRecord {
     size_bytes: i64,
     created_at: String,
     expires_at: String,
+    issue_code: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -232,11 +238,17 @@ mod routes;
 mod search_plan;
 mod service;
 mod storage;
+mod workspace;
 
 pub(crate) use lifecycle::{check_temp_result_rate_limit, cleanup_expired};
 pub(crate) use routes::{
     create_temp_result, delete_temp_result, download_temp_result, get_temp_result,
     get_temp_result_lines, preview_temp_result,
+};
+pub(crate) use workspace::{
+    create_session as create_workspace_session, end_session as end_workspace_session,
+    get_session as get_workspace_session, record_activity as record_workspace_activity,
+    update_result_refs as update_workspace_result_refs,
 };
 
 #[cfg(test)]

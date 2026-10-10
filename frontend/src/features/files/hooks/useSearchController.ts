@@ -17,6 +17,7 @@ export type SearchControllerRunOptions = {
   expression: string;
   payload: Parameters<typeof rainApi.previewTempResult>[0];
   scopeKey: string;
+  workspaceSessionId: string | null;
   onSuccess?: (response: TempResultPreviewResponse) => void;
 };
 
@@ -111,7 +112,7 @@ export function useSearchController(options: SearchControllerOptions = {}): Sear
     await cancelExecution();
   }, [cancelExecution, invalidate]);
 
-  const run = useCallback(async ({ expression, payload, scopeKey, onSuccess }: SearchControllerRunOptions) => {
+  const run = useCallback(async ({ expression, payload, scopeKey, workspaceSessionId, onSuccess }: SearchControllerRunOptions) => {
     const intent = ++intentRef.current;
     validationAbortRef.current?.abort();
     const validationController = new AbortController();
@@ -133,6 +134,7 @@ export function useSearchController(options: SearchControllerOptions = {}): Sear
     setPhase('RUNNING');
     const result = await execute(payload, {
       scopeKey,
+      workspaceSessionId,
       onSuccess: (response) => {
         if (!mountedRef.current || intent !== intentRef.current) return;
         onSuccess?.(response);

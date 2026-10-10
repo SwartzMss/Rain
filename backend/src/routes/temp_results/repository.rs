@@ -447,7 +447,7 @@ pub(crate) async fn acquire_active_read_lease(
         |conn, (id, lease_id, expires_at)| {
             Box::pin(async move {
                 let record = sqlx::query_as::<_, TempResultRecord>(
-                    "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) >= datetime('now') LIMIT 1",
+            "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at, issue_code FROM temp_results WHERE id = ? AND status = 'ACTIVE' AND (datetime(expires_at) >= datetime('now') OR EXISTS (SELECT 1 FROM temp_result_workspace_refs r JOIN issue_workspace_sessions s ON s.id = r.session_id WHERE r.result_id = temp_results.id AND s.state = 'ACTIVE' AND datetime(s.expires_at) > datetime('now'))) LIMIT 1",
                 )
                 .bind(id)
                 .fetch_optional(&mut *conn)
@@ -529,7 +529,7 @@ pub(crate) async fn find_by_id(
     id: &str,
 ) -> Result<TempResultRecord, AppError> {
     sqlx::query_as::<_, TempResultRecord>(
-        "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE id = ? LIMIT 1",
+        "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at, issue_code FROM temp_results WHERE id = ? LIMIT 1",
     )
     .bind(id).fetch_optional(&state.db.pool).await.map_err(AppError::Database)?
     .ok_or_else(|| AppError::NotFound(format!("temporary result {id}")))
@@ -540,7 +540,7 @@ pub(crate) async fn find_active_unexpired_by_id(
     id: &str,
 ) -> Result<TempResultRecord, AppError> {
     sqlx::query_as::<_, TempResultRecord>(
-        "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) >= datetime('now') LIMIT 1",
+        "SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at, issue_code FROM temp_results WHERE id = ? AND status = 'ACTIVE' AND (datetime(expires_at) >= datetime('now') OR EXISTS (SELECT 1 FROM temp_result_workspace_refs r JOIN issue_workspace_sessions s ON s.id = r.session_id WHERE r.result_id = temp_results.id AND s.state = 'ACTIVE' AND datetime(s.expires_at) > datetime('now'))) LIMIT 1",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)
@@ -552,13 +552,13 @@ pub(crate) async fn find_active_unexpired_by_id(
 pub(crate) async fn list_deleting(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
-    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? ORDER BY created_at, id")
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at, issue_code FROM temp_results WHERE status = ? ORDER BY created_at, id")
         .bind(TempResultStatus::Deleting.as_str()).fetch_all(&state.db.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn list_expired_active(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
-    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? AND datetime(expires_at) < datetime('now') ORDER BY expires_at, id")
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at, issue_code FROM temp_results WHERE status = ? AND datetime(expires_at) < datetime('now') AND NOT EXISTS (SELECT 1 FROM temp_result_workspace_refs r JOIN issue_workspace_sessions s ON s.id = r.session_id WHERE r.result_id = temp_results.id AND s.state = 'ACTIVE' AND datetime(s.expires_at) > datetime('now')) ORDER BY expires_at, id")
         .bind(TempResultStatus::Active.as_str()).fetch_all(&state.db.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn claim_expired_active(
@@ -578,7 +578,7 @@ pub(crate) async fn claim_expired_active(
         &input,
         |conn, (id, expires_at, deleting, active)| {
             Box::pin(async move {
-                sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') AND NOT EXISTS (SELECT 1 FROM temp_result_leases WHERE temp_result_id = temp_results.id AND datetime(expires_at) >= datetime('now')) RETURNING storage_path")
+                sqlx::query_scalar("UPDATE temp_results SET status = ? WHERE id = ? AND status = ? AND expires_at = ? AND datetime(expires_at) < datetime('now') AND NOT EXISTS (SELECT 1 FROM temp_result_leases WHERE temp_result_id = temp_results.id AND datetime(expires_at) >= datetime('now')) AND NOT EXISTS (SELECT 1 FROM temp_result_workspace_refs r JOIN issue_workspace_sessions s ON s.id = r.session_id WHERE r.result_id = temp_results.id AND s.state = 'ACTIVE' AND datetime(s.expires_at) > datetime('now')) RETURNING storage_path")
                     .bind(deleting)
                     .bind(id)
                     .bind(active)
@@ -602,7 +602,7 @@ pub(crate) async fn claim_expired_active(
 pub(crate) async fn list_stale_staging(
     state: &web::Data<AppState>,
 ) -> Result<Vec<TempResultRecord>, AppError> {
-    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at FROM temp_results WHERE status = ? AND datetime(created_at) < datetime('now', '-600 seconds') ORDER BY created_at, id")
+    sqlx::query_as::<_, TempResultRecord>("SELECT id, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at, issue_code FROM temp_results WHERE status = ? AND datetime(created_at) < datetime('now', '-600 seconds') ORDER BY created_at, id")
         .bind(TempResultStatus::Staging.as_str()).fetch_all(&state.db.pool).await.map_err(AppError::Database)
 }
 pub(crate) async fn claim_stale_staging(

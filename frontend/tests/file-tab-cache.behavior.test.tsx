@@ -9,13 +9,30 @@ vi.mock('../src/api/client', () => ({
   ApiError: class ApiError extends Error {},
   RequestCancelledError: class RequestCancelledError extends Error {},
   normalizeApiError: (error: unknown) => error instanceof Error ? error.message : String(error),
+  beginWorkspaceSession: vi.fn((issueCode: string) => ({
+    issueCode,
+    consumers: 0,
+    promise: Promise.resolve({ session_id: 'workspace-test', issue_code: issueCode, server_now: '', last_activity_at: '', expires_at: '' })
+  })),
+  resumeWorkspaceSession: vi.fn((issueCode: string) => ({
+    issueCode,
+    consumers: 0,
+    promise: Promise.resolve({ session_id: 'workspace-test', issue_code: issueCode, server_now: '', last_activity_at: '', expires_at: '' })
+  })),
+  retainWorkspaceSessionRequest: vi.fn((request: { consumers: number }) => { request.consumers += 1; }),
+  releaseWorkspaceSessionRequest: vi.fn((request: { consumers: number }) => { request.consumers = Math.max(0, request.consumers - 1); }),
+  hasWorkspaceSessionConsumers: vi.fn((request: { consumers: number }) => request.consumers > 0),
+  clearWorkspaceSessionRequest: vi.fn(),
   rainApi: {
     me: vi.fn(),
     fetchSavedSearches: vi.fn(),
     fetchIssueBundles: vi.fn(),
     fetchFileNode: vi.fn(),
     fetchFileLines: vi.fn(),
-    deleteTempResult: vi.fn()
+    deleteTempResult: vi.fn(),
+    endWorkspaceSession: vi.fn().mockResolvedValue(undefined),
+    recordWorkspaceActivity: vi.fn().mockResolvedValue({}),
+    addWorkspaceResultRefs: vi.fn().mockResolvedValue(undefined)
   }
 }));
 
