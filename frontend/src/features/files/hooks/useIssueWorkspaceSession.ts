@@ -14,8 +14,149 @@ export const ISSUE_WORKSPACE_IDLE_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const ACTIVITY_SYNC_INTERVAL_MS = 4 * 60 * 1000;
 const SESSION_STORAGE_WRITE_INTERVAL_MS = 1000;
 const CHECK_INTERVAL_MS = 30_000;
+const PAGE_CLAIM_WINDOW_MS = 100;
 
-type StoredWorkspaceSession = { sessionId: string; lastActivityAt: number };
+type StoredWorkspaceSession = { sessionId: string; lastActivityAt: number; pageInstanceId?: string };
+type WorkspacePageMessage = {
+  type: 'probe' | 'presence';
+  sessionId: string;
+  pageInstanceId: string;
+  documentInstanceId: string;
+};
+
+export type WorkspaceSessionPageLease = { sessionId: string; collision: boolean; close: () => void };
+type ActivePageLock = {
+  documentInstanceId: string;
+  consumers: number;
+  releaseLock: () => void;
+};
+const activePageLocks = new Map<string, ActivePageLock>();
+
+function newInstanceId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+const documentInstanceId = newInstanceId();
+
+function retainPageLock(sessionId: string, lock: ActivePageLock): WorkspaceSessionPageLease {
+  lock.consumers += 1;
+  let closed = false;
+  return {
+    sessionId,
+    collision: false,
+    close: () => {
+      if (closed) return;
+      closed = true;
+      lock.consumers -= 1;
+      if (lock.consumers === 0) {
+        if (activePageLocks.get(sessionId) === lock) activePageLocks.delete(sessionId);
+        lock.releaseLock();
+      }
+    }
+  };
+}
+
+async function acquireWorkspaceSessionLock(
+  sessionId: string,
+  currentDocumentInstanceId: string
+): Promise<WorkspaceSessionPageLease | null> {
+  if (
+    typeof navigator === 'undefined'
+    || !navigator.locks
+    || typeof navigator.locks.request !== 'function'
+  ) return null;
+  const current = activePageLocks.get(sessionId);
+  if (current) {
+    return current.documentInstanceId === currentDocumentInstanceId
+      ? retainPageLock(sessionId, current)
+      : { sessionId, collision: true, close: () => {} };
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    void navigator.locks.request(
+      `rain.issue-workspace-session:${sessionId}`,
+      { mode: 'exclusive', ifAvailable: true },
+      async (lock) => {
+        if (!lock) {
+          settled = true;
+          resolve({ sessionId, collision: true, close: () => {} });
+          return;
+        }
+        let releaseLock!: () => void;
+        const holdLock = new Promise<void>((release) => {
+          releaseLock = release;
+        });
+        const activeLock: ActivePageLock = {
+          documentInstanceId: currentDocumentInstanceId,
+          consumers: 0,
+          releaseLock
+        };
+        activePageLocks.set(sessionId, activeLock);
+        settled = true;
+        resolve(retainPageLock(sessionId, activeLock));
+        await holdLock;
+      }
+    ).catch(() => {
+      if (!settled) {
+        settled = true;
+        resolve(null);
+      }
+    });
+  });
+}
+
+export async function openWorkspaceSessionPageLease(
+  sessionId: string,
+  pageInstanceId: string,
+  detectExisting: boolean,
+  currentDocumentInstanceId = documentInstanceId
+): Promise<WorkspaceSessionPageLease> {
+  const lockedLease = await acquireWorkspaceSessionLock(sessionId, currentDocumentInstanceId);
+  if (lockedLease) return lockedLease;
+
+  if (typeof BroadcastChannel === 'undefined') {
+    // Without cross-tab coordination, never resume a persisted session.
+    return { sessionId, collision: detectExisting, close: () => {} };
+  }
+
+  let channel: BroadcastChannel;
+  try {
+    channel = new BroadcastChannel(`rain.issue-workspace-session:${sessionId}`);
+  } catch {
+    return { sessionId, collision: detectExisting, close: () => {} };
+  }
+  let collision = false;
+  channel.onmessage = (event: MessageEvent<WorkspacePageMessage>) => {
+    const message = event.data;
+    if (message?.sessionId !== sessionId || message.documentInstanceId === currentDocumentInstanceId) return;
+    if (message.type === 'probe') {
+      channel.postMessage({
+        type: 'presence',
+        sessionId,
+        pageInstanceId,
+        documentInstanceId: currentDocumentInstanceId
+      } satisfies WorkspacePageMessage);
+    } else if (message.type === 'presence') {
+      collision = true;
+    }
+  };
+
+  if (detectExisting) {
+    channel.postMessage({
+      type: 'probe',
+      sessionId,
+      pageInstanceId,
+      documentInstanceId: currentDocumentInstanceId
+    } satisfies WorkspacePageMessage);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, PAGE_CLAIM_WINDOW_MS));
+  }
+
+  return { sessionId, collision, close: () => channel.close() };
+}
 
 function readStoredSession(key: string): StoredWorkspaceSession | null {
   try {
@@ -24,16 +165,20 @@ function readStoredSession(key: string): StoredWorkspaceSession | null {
     const parsed = JSON.parse(value) as Partial<StoredWorkspaceSession>;
     return typeof parsed.sessionId === 'string'
       && Number.isFinite(parsed.lastActivityAt)
-      ? { sessionId: parsed.sessionId, lastActivityAt: parsed.lastActivityAt! }
+      ? {
+          sessionId: parsed.sessionId,
+          lastActivityAt: parsed.lastActivityAt!,
+          ...(typeof parsed.pageInstanceId === 'string' ? { pageInstanceId: parsed.pageInstanceId } : {})
+        }
       : null;
   } catch {
     return null;
   }
 }
 
-function storeSession(key: string, sessionId: string, lastActivityAt: number): void {
+function storeSession(key: string, sessionId: string, lastActivityAt: number, pageInstanceId: string): void {
   try {
-    sessionStorage.setItem(key, JSON.stringify({ sessionId, lastActivityAt }));
+    sessionStorage.setItem(key, JSON.stringify({ sessionId, lastActivityAt, pageInstanceId }));
   } catch {
     // The server session remains usable until its normal inactivity deadline.
   }
@@ -78,8 +223,11 @@ export function useIssueWorkspaceSession(
 
     disposedRef.current = false;
     generationRef.current += 1;
+    const effectGeneration = generationRef.current;
     const storageKey = `rain.issue-workspace:${encodeURIComponent(principalKey)}:${encodeURIComponent(issueCode.toUpperCase())}`;
     const savedSession = readStoredSession(storageKey);
+    let pageInstanceId = savedSession?.pageInstanceId ?? newInstanceId();
+    let pageLease: WorkspaceSessionPageLease | null = null;
     sessionIdRef.current = null;
     lastActivityRef.current = savedSession?.lastActivityAt ?? Date.now();
     lastStoredActivityRef.current = Date.now();
@@ -87,6 +235,7 @@ export function useIssueWorkspaceSession(
     setReady(false);
     setSessionError(null);
     let preserveOnUnmount = false;
+    let restorationPending = Boolean(savedSession);
 
     const startSession = (sessionToResume?: string) => {
       if (requestRef.current || sessionIdRef.current) return;
@@ -96,10 +245,10 @@ export function useIssueWorkspaceSession(
       const requestGeneration = generationRef.current;
       retainWorkspaceSessionRequest(workspaceRequest);
       requestRef.current = workspaceRequest;
-      void workspaceRequest.promise.then((session) => {
+      void workspaceRequest.promise.then(async (session) => {
         if (disposedRef.current || generationRef.current !== requestGeneration || requestRef.current !== workspaceRequest) {
           if (preserveOnUnmount) {
-            storeSession(storageKey, session.session_id, lastActivityRef.current);
+            storeSession(storageKey, session.session_id, lastActivityRef.current, pageInstanceId);
           } else if (hasWorkspaceSessionConsumers(workspaceRequest)) {
             return;
           } else {
@@ -109,8 +258,21 @@ export function useIssueWorkspaceSession(
           }
           return;
         }
+        if (pageLease?.sessionId !== session.session_id) {
+          pageLease?.close();
+          const nextLease = await openWorkspaceSessionPageLease(
+            session.session_id,
+            pageInstanceId,
+            false
+          );
+          if (disposedRef.current || generationRef.current !== requestGeneration || requestRef.current !== workspaceRequest) {
+            nextLease.close();
+            return;
+          }
+          pageLease = nextLease;
+        }
         sessionIdRef.current = session.session_id;
-        storeSession(storageKey, session.session_id, lastActivityRef.current);
+        storeSession(storageKey, session.session_id, lastActivityRef.current, pageInstanceId);
         lastStoredActivityRef.current = Date.now();
         lastSentRef.current = sessionToResume
           ? Date.now() - ACTIVITY_SYNC_INTERVAL_MS
@@ -131,7 +293,33 @@ export function useIssueWorkspaceSession(
       });
     };
 
-    startSession(savedSession?.sessionId);
+    const restoreSession = async () => {
+      if (!savedSession) {
+        startSession();
+        return;
+      }
+      const lease = await openWorkspaceSessionPageLease(
+        savedSession.sessionId,
+        pageInstanceId,
+        true
+      );
+      restorationPending = false;
+      if (disposedRef.current || generationRef.current !== effectGeneration) {
+        lease.close();
+        return;
+      }
+      if (lease.collision) {
+        lease.close();
+        clearStoredSession(storageKey, savedSession.sessionId);
+        pageInstanceId = newInstanceId();
+        lastActivityRef.current = Date.now();
+        startSession();
+        return;
+      }
+      pageLease = lease;
+      startSession(savedSession.sessionId);
+    };
+    void restoreSession();
 
     const endCurrent = (keepalive = false) => {
       generationRef.current += 1;
@@ -143,7 +331,10 @@ export function useIssueWorkspaceSession(
         releaseWorkspaceSessionRequest(activeRequest);
         clearWorkspaceSessionRequest(activeRequest);
       }
-      clearStoredSession(storageKey);
+      pageLease?.close();
+      pageLease = null;
+      restorationPending = false;
+      clearStoredSession(storageKey, sessionId ?? undefined);
       if (sessionId) void rainApi.endWorkspaceSession(sessionId, keepalive).catch(() => {});
       setReady(false);
     };
@@ -174,6 +365,8 @@ export function useIssueWorkspaceSession(
         if (code === 'WORKSPACE_SESSION_EXPIRED') {
           clearStoredSession(storageKey, sessionId);
           sessionIdRef.current = null;
+          pageLease?.close();
+          pageLease = null;
           const activeRequest = requestRef.current;
           requestRef.current = null;
           if (activeRequest) {
@@ -218,10 +411,10 @@ export function useIssueWorkspaceSession(
         sessionIdRef.current
         && lastActivityRef.current - lastStoredActivityRef.current >= SESSION_STORAGE_WRITE_INTERVAL_MS
       ) {
-        storeSession(storageKey, sessionIdRef.current, lastActivityRef.current);
+        storeSession(storageKey, sessionIdRef.current, lastActivityRef.current, pageInstanceId);
         lastStoredActivityRef.current = lastActivityRef.current;
       }
-      if (!sessionIdRef.current && !requestRef.current) startSessionAfterReset();
+      if (!restorationPending && !sessionIdRef.current && !requestRef.current) startSessionAfterReset();
       queueActivitySync();
     };
 
@@ -255,11 +448,13 @@ export function useIssueWorkspaceSession(
       sessionIdRef.current = null;
       preserveOnUnmount = window.location.pathname.startsWith('/temp-results/');
       if (activeRequest) releaseWorkspaceSessionRequest(activeRequest, preserveOnUnmount);
-      if (!preserveOnUnmount) clearStoredSession(storageKey);
+      pageLease?.close();
+      pageLease = null;
+      if (!preserveOnUnmount) clearStoredSession(storageKey, sessionId ?? undefined);
       // Keep the old session alive while the standalone result page loads and attaches it
       // to its own session, so an already-expired preview cannot disappear in the handoff.
       if (sessionId && preserveOnUnmount) {
-        storeSession(storageKey, sessionId, lastActivityRef.current);
+        storeSession(storageKey, sessionId, lastActivityRef.current, pageInstanceId);
       }
       if (sessionId && !preserveOnUnmount) {
         if (activeRequest) clearWorkspaceSessionRequest(activeRequest);

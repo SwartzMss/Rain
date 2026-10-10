@@ -43,24 +43,31 @@ export type ActiveWorkspaceRequest = {
   issueCode: string;
   promise: Promise<WorkspaceSessionResponse>;
   consumers: number;
+  sessionId?: string;
 };
-let activeWorkspaceRequest: ActiveWorkspaceRequest | null = null;
+const activeWorkspaceRequests = new Map<string, ActiveWorkspaceRequest>();
 
 export function beginWorkspaceSession(issueCode: string): ActiveWorkspaceRequest {
   const normalizedIssueCode = normalizeIssueCode(issueCode);
-  if (activeWorkspaceRequest?.issueCode === normalizedIssueCode) return activeWorkspaceRequest;
+  const current = activeWorkspaceRequests.get(normalizedIssueCode);
+  if (current) return current;
   const promise = request<WorkspaceSessionResponse>(
     `/api/issues/${encodePathSegment(normalizedIssueCode)}/workspace-sessions`,
     { method: 'POST' }
   );
-  const active = { issueCode: normalizedIssueCode, promise, consumers: 0 };
-  activeWorkspaceRequest = active;
+  const active: ActiveWorkspaceRequest = { issueCode: normalizedIssueCode, promise, consumers: 0 };
+  activeWorkspaceRequests.set(normalizedIssueCode, active);
+  void promise.then(
+    (session) => { active.sessionId = session.session_id; },
+    () => {}
+  );
   return active;
 }
 
 export function resumeWorkspaceSession(issueCode: string, sessionId: string): ActiveWorkspaceRequest {
   const normalizedIssueCode = normalizeIssueCode(issueCode);
-  if (activeWorkspaceRequest?.issueCode === normalizedIssueCode) return activeWorkspaceRequest;
+  const current = activeWorkspaceRequests.get(normalizedIssueCode);
+  if (current && (!current.sessionId || current.sessionId === sessionId)) return current;
   const promise = request<WorkspaceSessionResponse>(
     `/api/workspace-sessions/${encodePathSegment(sessionId)}`
   ).then((session) => {
@@ -69,13 +76,15 @@ export function resumeWorkspaceSession(issueCode: string, sessionId: string): Ac
     }
     return session;
   });
-  const active = { issueCode: normalizedIssueCode, promise, consumers: 0 };
-  activeWorkspaceRequest = active;
+  const active = { issueCode: normalizedIssueCode, promise, consumers: 0, sessionId };
+  activeWorkspaceRequests.set(normalizedIssueCode, active);
   return active;
 }
 
 export function clearWorkspaceSessionRequest(active: ActiveWorkspaceRequest): void {
-  if (activeWorkspaceRequest === active) activeWorkspaceRequest = null;
+  if (activeWorkspaceRequests.get(active.issueCode) === active) {
+    activeWorkspaceRequests.delete(active.issueCode);
+  }
 }
 
 export function retainWorkspaceSessionRequest(active: ActiveWorkspaceRequest): void {
@@ -86,8 +95,8 @@ export function releaseWorkspaceSessionRequest(active: ActiveWorkspaceRequest, p
   active.consumers = Math.max(0, active.consumers - 1);
   if (active.consumers > 0 || preserveForHandoff) return;
   window.setTimeout(() => {
-    if (active.consumers === 0 && activeWorkspaceRequest === active) {
-      activeWorkspaceRequest = null;
+    if (active.consumers === 0 && activeWorkspaceRequests.get(active.issueCode) === active) {
+      activeWorkspaceRequests.delete(active.issueCode);
     }
   }, 0);
 }
@@ -96,14 +105,10 @@ export function hasWorkspaceSessionConsumers(active: ActiveWorkspaceRequest): bo
   return active.consumers > 0;
 }
 
-async function activeWorkspaceHeaders(): Promise<Record<string, string>> {
-  const active = activeWorkspaceRequest;
-  if (!active) return {};
-  const session = await active.promise;
-  if (activeWorkspaceRequest !== active) {
-    throw new ApiError('Issue 工作区已切换，请重新搜索', 409, 'WORKSPACE_SESSION_SUPERSEDED');
-  }
-  return { 'X-Issue-Workspace-Session': session.session_id };
+function workspaceHeaders(workspaceSessionId: string | null): Record<string, string> {
+  return workspaceSessionId
+    ? { 'X-Issue-Workspace-Session': workspaceSessionId }
+    : {};
 }
 
 export class ApiError extends Error {
@@ -412,12 +417,14 @@ export const rainApi = {
       body: JSON.stringify({ expression })
     });
   },
-  async createTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string }) {
-    const workspaceHeaders = await activeWorkspaceHeaders();
+  createTempResult(
+    payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string },
+    options: { workspaceSessionId: string | null }
+  ) {
     return request<TempResultInfo>('/api/temp-results', {
       method: 'POST',
       body: JSON.stringify(payload),
-      headers: workspaceHeaders
+      headers: workspaceHeaders(options.workspaceSessionId)
     });
   },
   reserveSearchRequest(searchId: string, signal?: AbortSignal) {
@@ -434,9 +441,9 @@ export const rainApi = {
       signal
     });
   },
-  async previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }, options?: { searchId?: string; cancelToken?: string; signal?: AbortSignal }) {
+  async previewTempResult(payload: { expression: string; bundle_hash?: string; file_id?: string; issue_code?: string; source_temp_id?: string; from?: number; size?: number }, options: { searchId?: string; cancelToken?: string; signal?: AbortSignal; workspaceSessionId: string | null }) {
     const headers = {
-      ...await activeWorkspaceHeaders(),
+      ...workspaceHeaders(options.workspaceSessionId),
       ...(options?.cancelToken ? { 'X-Search-Cancel-Token': options.cancelToken } : {})
     };
     return request<TempResultPreviewResponse>('/api/temp-results/preview', {

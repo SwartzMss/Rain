@@ -138,16 +138,42 @@ pub(crate) async fn associate_result_with_workspace(
             if !valid_session {
                 return Err(AppError::api(StatusCode::CONFLICT, "WORKSPACE_SESSION_EXPIRED", "Issue 工作会话已结束，请重新搜索"));
             }
+            // Issue reads are public while ACTIVE, so recheck that access rule in this transaction.
+            let issue_accessible: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM issues WHERE code = ? AND status = 'ACTIVE')",
+            )
+            .bind(issue_code)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            if !issue_accessible {
+                return Err(AppError::NotFound(format!("issue {issue_code}")));
+            }
             let updated = sqlx::query(
-                "UPDATE temp_results SET issue_code = ? WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) > datetime('now')",
+                "UPDATE temp_results SET issue_code = ? WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) > datetime('now') AND (issue_code IS NULL OR issue_code = ?)",
             )
             .bind(issue_code)
             .bind(result_id)
+            .bind(issue_code)
             .execute(&mut *conn)
             .await
             .map_err(AppError::Database)?
             .rows_affected();
             if updated != 1 {
+                let existing_issue = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT issue_code FROM temp_results WHERE id = ? AND status = 'ACTIVE' AND datetime(expires_at) > datetime('now')",
+                )
+                .bind(result_id)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(AppError::Database)?;
+                if existing_issue.flatten().is_some_and(|existing| existing != *issue_code) {
+                    return Err(AppError::api(
+                        StatusCode::CONFLICT,
+                        "TEMP_RESULT_ISSUE_MISMATCH",
+                        "临时结果已关联到其他 Issue",
+                    ));
+                }
                 return Err(AppError::NotFound(format!("temporary result {result_id}")));
             }
             sqlx::query(
@@ -358,6 +384,17 @@ pub(crate) async fn update_result_refs(
             if !session_valid {
                 return Err(AppError::api(StatusCode::CONFLICT, "WORKSPACE_SESSION_EXPIRED", "Issue 工作会话已结束，请重新搜索"));
             }
+            // load_owned_session binds the caller to this session; ACTIVE is the Issue read-access rule.
+            let issue_accessible: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM issues WHERE code = ? AND status = 'ACTIVE')",
+            )
+            .bind(issue_code)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(AppError::Database)?;
+            if !issue_accessible {
+                return Err(AppError::NotFound(format!("issue {issue_code}")));
+            }
             for id in add_ids {
                 sqlx::query("INSERT INTO temp_result_workspace_refs (session_id, result_id, created_at) SELECT ?, r.id, CURRENT_TIMESTAMP FROM temp_results r WHERE r.id = ? AND r.status = 'ACTIVE' AND r.issue_code = ? AND (datetime(r.expires_at) >= datetime('now') OR EXISTS (SELECT 1 FROM temp_result_workspace_refs old_ref JOIN issue_workspace_sessions old_session ON old_session.id = old_ref.session_id WHERE old_ref.result_id = r.id AND old_session.state = 'ACTIVE' AND datetime(old_session.expires_at) > datetime('now'))) ON CONFLICT(session_id, result_id) DO NOTHING")
                     .bind(session_id).bind(id).bind(issue_code).execute(&mut *conn).await.map_err(AppError::Database)?;
@@ -383,4 +420,137 @@ pub(crate) async fn purge_inactive_sessions(state: &web::Data<AppState>) -> Resu
                 .execute(conn).await.map(|_| ()).map_err(AppError::Database)
         }),
     ).await
+}
+
+#[cfg(test)]
+mod tests {
+    use actix_web::{
+        App,
+        cookie::Cookie,
+        http::StatusCode,
+        test::{self, TestRequest},
+        web,
+    };
+    use chrono::{Duration, Utc};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use super::{GUEST_COOKIE, associate_result_with_workspace, update_result_refs};
+    use crate::{
+        AppState, auth::session::hash_session_token, config::AppLimits, db, error::AppError,
+    };
+
+    #[tokio::test]
+    async fn workspace_results_cannot_be_reassigned_or_referenced_after_issue_access_ends() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::prepare_schema(&pool, false).await.unwrap();
+        let state = web::Data::new(AppState::new(
+            pool.clone(),
+            std::env::temp_dir(),
+            AppLimits::default(),
+        ));
+        let now = Utc::now();
+        let created_at = now.to_rfc3339();
+        let expires_at = (now + Duration::hours(4)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO issues (code, name) VALUES ('ISSUE-A', 'Issue A'), ('ISSUE-B', 'Issue B')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let guest_token = "workspace-test-guest";
+        let subject_key = format!("guest:{}", hash_session_token(guest_token));
+        sqlx::query(
+            "INSERT INTO issue_workspace_sessions (id, issue_code, subject_key, created_at, last_activity_at, expires_at) VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'ISSUE-A', ?, ?, ?, ?), ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'ISSUE-B', ?, ?, ?, ?)",
+        )
+        .bind(&subject_key)
+        .bind(&created_at)
+        .bind(&created_at)
+        .bind(&expires_at)
+        .bind(&subject_key)
+        .bind(&created_at)
+        .bind(&created_at)
+        .bind(&expires_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO temp_results (id, status, name, expression, source_label, storage_path, line_count, size_bytes, created_at, expires_at, issue_code) VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'ACTIVE', 'a.log', 'ERROR', 'a.log', 'data/a.log', 0, 0, ?, ?, 'ISSUE-A'), ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'ACTIVE', 'b.log', 'ERROR', 'b.log', 'data/b.log', 0, 0, ?, ?, 'ISSUE-B')",
+        )
+        .bind(&created_at)
+        .bind(&expires_at)
+        .bind(&created_at)
+        .bind(&expires_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        associate_result_with_workspace(
+            &state,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &subject_key,
+            "ISSUE-A",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .await
+        .expect("same-Issue association remains idempotent");
+        let reassignment_error = associate_result_with_workspace(
+            &state,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &subject_key,
+            "ISSUE-B",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .await
+        .expect_err("a result already owned by Issue A must not move to Issue B");
+        assert!(matches!(
+            reassignment_error,
+            AppError::Api {
+                code: "TEMP_RESULT_ISSUE_MISMATCH",
+                ..
+            }
+        ));
+
+        sqlx::query("UPDATE issues SET status = 'DELETED' WHERE code = 'ISSUE-B'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(update_result_refs),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            TestRequest::post()
+                .uri("/workspace-sessions/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/result-refs")
+                .cookie(Cookie::new(GUEST_COOKIE, guest_token))
+                .set_json(serde_json::json!({
+                    "add": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let issue_code: String = sqlx::query_scalar(
+            "SELECT issue_code FROM temp_results WHERE id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(issue_code, "ISSUE-A");
+        let ref_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM temp_result_workspace_refs WHERE session_id = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ref_count, 0);
+    }
 }

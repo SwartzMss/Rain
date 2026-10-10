@@ -161,7 +161,7 @@ export function TempResultView() {
         from: 0,
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
-      { scopeKey: `temp:${resultId}` }
+      { scopeKey: `temp:${resultId}`, workspaceSessionId: workspaceSessionIdRef.current }
     );
     setCreating(false);
     if (created) navigate(`/temp-results/${created.result_id}`);

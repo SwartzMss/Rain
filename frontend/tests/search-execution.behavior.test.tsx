@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { RequestCancelledError, rainApi } from '../src/api/client';
+import { beginWorkspaceSession, clearWorkspaceSessionRequest, RequestCancelledError, rainApi } from '../src/api/client';
 import { SearchExecutionStatus } from '../src/components/SearchExecutionStatus';
 import { useSearchExecution } from '../src/hooks/useSearchExecution';
 import type { TempResultPreviewResponse } from '../src/api/types';
@@ -16,7 +16,7 @@ function ExecutionProbe() {
   useEffect(() => {
     if (started.current) return;
     started.current = true;
-    void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' });
+    void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE', workspaceSessionId: null });
   }, [execute]);
   return (
     <>
@@ -24,6 +24,20 @@ function ExecutionProbe() {
       <button type="button" onClick={() => { void cancel(); }}>cancel</button>
     </>
   );
+}
+
+function WorkspaceExecutionProbe() {
+  const { execute } = useSearchExecution();
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    void execute(
+      { expression: 'ERROR', issue_code: 'ISSUE-A' },
+      { scopeKey: 'issue:ISSUE-A', workspaceSessionId: 'session-a' }
+    );
+  }, [execute]);
+  return null;
 }
 
 describe('interactive search execution', () => {
@@ -61,6 +75,43 @@ describe('interactive search execution', () => {
     await waitFor(() => expect(requestBody?.search_id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
     ));
+  });
+
+  it('keeps the workspace session captured by a search when another Issue session is active', async () => {
+    const previewHeaders: Headers[] = [];
+    const fetchMock = vi.fn().mockImplementation((url: string, init: RequestInit = {}) => {
+      if (url.endsWith('/api/issues/ISSUE-B/workspace-sessions')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          session_id: 'session-b',
+          issue_code: 'ISSUE-B',
+          server_now: '',
+          last_activity_at: '',
+          expires_at: ''
+        }), { status: 201 }));
+      }
+      if (url.endsWith('/api/search-requests') && init.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { search_id: string };
+        return Promise.resolve(new Response(JSON.stringify({
+          search_id: body.search_id,
+          cancel_token: 'token',
+          expires_in_ms: 60_000
+        }), { status: 201 }));
+      }
+      if (url.endsWith('/api/temp-results/preview')) {
+        previewHeaders.push(new Headers(init.headers));
+        return Promise.resolve(new Response(JSON.stringify(previewResponse('result-a')), { status: 200 }));
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const issueBRequest = beginWorkspaceSession('ISSUE-B');
+    await issueBRequest.promise;
+
+    render(<WorkspaceExecutionProbe />);
+    await waitFor(() => expect(previewHeaders).toHaveLength(1));
+
+    expect(previewHeaders[0].get('X-Issue-Workspace-Session')).toBe('session-a');
+    clearWorkspaceSessionRequest(issueBRequest);
   });
 
   it('cancels the preview with an independent DELETE request', async () => {
@@ -156,7 +207,7 @@ describe('interactive search execution', () => {
       const [loading, setLoading] = useState(false);
       const run = () => {
         setLoading(true);
-        void execute({ expression: 'WARN', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' });
+        void execute({ expression: 'WARN', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE', workspaceSessionId: null });
       };
       useEffect(() => {
         if (snapshot.status === 'CANCELLED' || snapshot.status === 'FAILED' || snapshot.status === 'SUCCEEDED') {
@@ -216,7 +267,7 @@ describe('interactive search execution', () => {
     function BurstProbe() {
       const { snapshot, execute } = useSearchExecution();
       const run = () => {
-        void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' });
+        void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE', workspaceSessionId: null });
       };
       return (
         <>
@@ -279,7 +330,7 @@ describe('interactive search execution', () => {
       return (
         <>
           <output data-testid="status">{snapshot.status}</output>
-          <button type="button" onClick={() => { void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' }); }}>new</button>
+          <button type="button" onClick={() => { void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE', workspaceSessionId: null }); }}>new</button>
         </>
       );
     }
@@ -344,7 +395,7 @@ describe('interactive search execution', () => {
     function ReplaceProbe() {
       const { snapshot, execute, cancel } = useSearchExecution();
       const run = () => {
-        void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' })
+        void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE', workspaceSessionId: null })
           .then(() => { replacementDone = true; });
       };
       return (
@@ -399,7 +450,7 @@ describe('interactive search execution', () => {
     function ReplaceProbe() {
       const { snapshot, execute, cancel } = useSearchExecution();
       const run = () => {
-        void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE' })
+        void execute({ expression: 'ERROR', issue_code: 'ISSUE' }, { scopeKey: 'issue:ISSUE', workspaceSessionId: null })
           .then(() => { replacementDone = true; });
       };
       return (

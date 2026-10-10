@@ -13,6 +13,7 @@ export interface SearchExecutionSnapshot {
 
 interface SearchExecutionOptions {
   scopeKey: string;
+  workspaceSessionId: string | null;
   onSuccess?: (result: TempResultPreviewResponse) => void;
 }
 
@@ -20,6 +21,7 @@ interface ActiveExecution {
   generation: number;
   searchId: string;
   scopeKey: string;
+  workspaceSessionId: string | null;
   startedAt: number;
   reservationController: AbortController;
   executionController: AbortController;
@@ -242,6 +244,7 @@ export function useSearchExecution() {
       generation,
       searchId: newSearchId(),
       scopeKey: options.scopeKey,
+      workspaceSessionId: options.workspaceSessionId,
       startedAt: performance.now(),
       reservationController: new AbortController(),
       executionController: new AbortController(),
@@ -272,7 +275,8 @@ export function useSearchExecution() {
       const result = await rainApi.previewTempResult(payload, {
         searchId: active.searchId,
         cancelToken: active.cancelToken,
-        signal: active.executionController.signal
+        signal: active.executionController.signal,
+        workspaceSessionId: active.workspaceSessionId
       });
       if (!isCurrent() || active.cancelRequested) return undefined;
       finishExecution(active);

@@ -232,15 +232,6 @@ export function BundleView() {
   const issueSearch = useIssueSearchController(pendingDetailEditor.tokens, pendingDetailEditor.error);
   const fileSearch = useFileSearchController();
   const viewerSearch = useViewerSearchController();
-  const savedSearch = useSavedSearchController({
-    authenticated: auth.state.status === 'AUTHENTICATED',
-    issueCode,
-    locationPath: `${location.pathname}${location.search}`,
-    pendingSavedSearch,
-    issueSearch,
-    navigate,
-    openViewerTab
-  });
   const selectedNode = selectedNodeId ? treeNodes[selectedNodeId] : null;
   const fileContextKey = `${issueCode}\u0000${bundleId}`;
   const viewerPagination = useViewerPaginationController(fileContextKey, updateViewerTabs);
@@ -282,11 +273,21 @@ export function BundleView() {
     restoredSharedRouteRef.current = null;
     if (location.search) navigate(location.pathname, { replace: true });
   }, [fileContentCache, fileSearch.clear, issueSearch.clear, location.pathname, location.search, navigate, resetViewerTabs, viewerPagination.invalidate, viewerSearch.clear]);
-  const { ready: workspaceReady, error: workspaceError, generationRef: workspaceGenerationRef } = useIssueWorkspaceSession(
+  const { ready: workspaceReady, error: workspaceError, generationRef: workspaceGenerationRef, sessionIdRef: workspaceSessionIdRef } = useIssueWorkspaceSession(
     issueCode,
     auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest',
     resetWorkspace
   );
+  const savedSearch = useSavedSearchController({
+    authenticated: auth.state.status === 'AUTHENTICATED',
+    issueCode,
+    locationPath: `${location.pathname}${location.search}`,
+    pendingSavedSearch,
+    issueSearch,
+    navigate,
+    openViewerTab,
+    workspaceSessionIdRef
+  });
   const activeFileNode = activeViewerTab?.kind === 'file'
     ? treeNodes[activeViewerTab.nodeId] ?? null
     : null;
@@ -464,6 +465,7 @@ export function BundleView() {
       expression,
       payload: { expression, issue_code: issue, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
       scopeKey: `issue:${issue}`,
+      workspaceSessionId: workspaceSessionIdRef.current,
       onSuccess: (response) => {
         if (workspaceGenerationRef.current !== workspaceGeneration) return;
         const hits = response.lines.map((line) => ({
@@ -495,7 +497,7 @@ export function BundleView() {
       }
     });
     if (workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, viewerSearch.clear, workspaceGenerationRef]);
+  }, [fileSearch.clear, issueCode, issueSearch.clear, issueSearch.draft, issueSearch.run, issueSearch.setDraft, issueSearch.setError, issueSearch.tokens, openViewerTab, viewerSearch.clear, workspaceGenerationRef, workspaceSessionIdRef]);
 
   const clearDetailedSearch = useCallback(() => {
     issueSearch.clear();
@@ -1130,6 +1132,7 @@ export function BundleView() {
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
       scopeKey: `file:${selectedBundleId}:${selectedNode.rawId}`,
+      workspaceSessionId: workspaceSessionIdRef.current,
       onSuccess: (response) => {
         if (workspaceGenerationRef.current !== workspaceGeneration) return;
             const hits = response.lines.map((line) => ({
@@ -1170,7 +1173,7 @@ export function BundleView() {
           }
     });
     if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [bundleId, fileSearch, openViewerTab, selectedNode, workspaceGenerationRef]);
+  }, [bundleId, fileSearch, openViewerTab, selectedNode, workspaceGenerationRef, workspaceSessionIdRef]);
 
   const searchWithinActiveResults = useCallback(async (tokens: SearchToken[], draft: string) => {
     const workspaceGeneration = workspaceGenerationRef.current;
@@ -1200,6 +1203,7 @@ export function BundleView() {
         size: LINE_PAGE_SIZE_OPTIONS[0]
       },
       scopeKey: `viewer:${activeViewerTab.id}:${activeViewerTab.resultId}`,
+      workspaceSessionId: workspaceSessionIdRef.current,
       onSuccess: (response) => {
         if (workspaceGenerationRef.current !== workspaceGeneration) return;
           const hits = response.lines.map((line) => ({
@@ -1240,7 +1244,7 @@ export function BundleView() {
         }
     });
     if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
-  }, [activeViewerTab, openViewerTab, viewerSearch, workspaceGenerationRef]);
+  }, [activeViewerTab, openViewerTab, viewerSearch, workspaceGenerationRef, workspaceSessionIdRef]);
 
   const restoreSharedTab = useCallback(async (descriptor: SharedTabDescriptor) => {
     const workspaceGeneration = workspaceGenerationRef.current;
@@ -1274,7 +1278,8 @@ export function BundleView() {
           : { expression: firstExpression, bundle_hash: plan.root.bundleHash, file_id: plan.root.fileId, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
         scopeKey: plan.root.kind === 'issue'
           ? `issue:${plan.root.issueCode}:shared`
-          : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`
+          : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`,
+        workspaceSessionId: workspaceSessionIdRef.current
       });
       if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
 
@@ -1288,7 +1293,8 @@ export function BundleView() {
             from: 0,
             size: LINE_PAGE_SIZE_OPTIONS[0]
           },
-          scopeKey: `shared:${response.result_id}`
+          scopeKey: `shared:${response.result_id}`,
+          workspaceSessionId: workspaceSessionIdRef.current
         });
         if (!response || workspaceGenerationRef.current !== workspaceGeneration) return;
       }
