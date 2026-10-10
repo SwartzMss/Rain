@@ -748,6 +748,13 @@ describe('BundleView search expression flow', () => {
 describe('shared file search restoration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const sessionRequest = (issueCode: string) => ({
+      issueCode,
+      consumers: 0,
+      promise: Promise.resolve({ session_id: 'workspace-test', issue_code: issueCode, server_now: '', last_activity_at: '', expires_at: '' })
+    });
+    testMocks.beginWorkspaceSession.mockImplementation(sessionRequest);
+    testMocks.resumeWorkspaceSession.mockImplementation(sessionRequest);
     testMocks.fetchSavedSearches.mockResolvedValue([]);
     testMocks.fetchIssueBundles.mockResolvedValue({
       log_bundles: [{ hash: 'bundle', name: 'Bundle', status: { upload_status: 'READY' } }]
@@ -835,6 +842,23 @@ describe('shared file search restoration', () => {
     expect(testMocks.fetchSavedSearches).toHaveBeenCalled();
     expect(screen.getByRole('button', { name: '我的搜索条件' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '保存条件' })).toBeInTheDocument();
+  });
+
+  it('reveals the shared source in an initially empty file tree', async () => {
+    testMocks.fetchFileNode.mockImplementation(async (_bundleId, fileId) => ({
+      node: fileId === 'root'
+        ? { id: 'root', parent_id: null, name: 'bundle_root', path: '/', is_dir: true, preview_kind: 'directory' }
+        : { id: 42, parent_id: null, name: 'target.log', path: '/target.log', is_dir: false, preview_kind: 'text' },
+      children: [],
+      has_more: false,
+      next_cursor: null
+    }));
+
+    renderSharedFileSearch();
+
+    expect(await screen.findByText('lpkey match')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'target.log' })).toBeInTheDocument();
+    expect(screen.queryByText('暂无文件。')).not.toBeInTheDocument();
   });
 
   it('keeps a new file search active when a shared search restore finishes later', async () => {
