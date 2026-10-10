@@ -159,6 +159,7 @@ function detailEditorState(queryText: string | undefined, options?: Record<strin
 
 export function BundleView() {
   const auth = useAuth();
+  const isBusinessUser = auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER';
   const navigate = useNavigate();
   const params = useParams<{ issueCode?: string; bundleHash?: string }>();
   const bundleHash = params.bundleHash || '';
@@ -172,7 +173,7 @@ export function BundleView() {
   );
   const [pendingSavedSearch] = useState(() => takePendingSavedSearch(
     sessionStorage,
-    auth.state.status === 'AUTHENTICATED'
+    isBusinessUser
   ));
   const [pendingDetailEditor] = useState(() => detailEditorState(
     pendingSavedSearch?.search_type === 'DETAIL' ? pendingSavedSearch.query_text : undefined,
@@ -238,13 +239,13 @@ export function BundleView() {
     resetViewerTabs,
     updateViewerTabs,
     togglePinnedViewerTab
-  } = useViewerTabs(auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER');
+  } = useViewerTabs(isBusinessUser);
   const issueSearch = useIssueSearchController(pendingDetailEditor.tokens, pendingDetailEditor.error);
   const fileSearch = useFileSearchController();
   const viewerSearch = useViewerSearchController();
   const sharedFileSearch = useSearchController();
   const savedSearch = useSavedSearchController({
-    authenticated: auth.state.status === 'AUTHENTICATED',
+    authenticated: isBusinessUser,
     issueCode,
     locationPath: `${location.pathname}${location.search}`,
     pendingSavedSearch,
@@ -1624,7 +1625,7 @@ export function BundleView() {
                 </button>
               </form>
               <div className="mt-3 flex w-full items-center justify-between gap-2 text-xs text-slate-500">
-                {auth.state.status === 'AUTHENTICATED' ? (
+                {isBusinessUser ? (
                   <>
                     <button
                       type="button"

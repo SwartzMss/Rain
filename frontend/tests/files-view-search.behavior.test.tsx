@@ -3,8 +3,10 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BundleView } from '../src/features/files/FilesView';
+import { PENDING_SAVED_SEARCH_KEY } from '../src/features/files/pendingSavedSearch';
 
 const testMocks = vi.hoisted(() => ({
+  role: 'USER' as 'USER' | 'ADMIN',
   validateSearchExpression: vi.fn(),
   execute: vi.fn(),
   cancel: vi.fn(),
@@ -37,7 +39,7 @@ vi.mock('../src/auth/AuthContext', () => ({
   useAuth: () => ({
     state: {
       status: 'AUTHENTICATED',
-      user: { id: 'user-1', username: 'tester', role: 'USER', status: 'ACTIVE' }
+      user: { id: 'user-1', username: 'tester', role: testMocks.role, status: 'ACTIVE' }
     }
   })
 }));
@@ -56,6 +58,11 @@ vi.mock('../src/hooks/useSearchExecution', () => ({
     cancel: testMocks.cancel
   })
 }));
+
+beforeEach(() => {
+  testMocks.role = 'USER';
+  sessionStorage.clear();
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -644,6 +651,24 @@ describe('shared file search restoration', () => {
     });
   });
 
+  it('opens a shared file search for admins without accessing personal saved searches', async () => {
+    testMocks.role = 'ADMIN';
+    const pending = JSON.stringify(savedAdvancedSearch);
+    sessionStorage.setItem(PENDING_SAVED_SEARCH_KEY, pending);
+    testMocks.fetchSavedSearches.mockRejectedValue(new Error('此操作需要普通用户权限'));
+
+    renderSharedFileSearch();
+
+    expect(await screen.findByText('lpkey match')).toBeInTheDocument();
+    expect(testMocks.fetchSavedSearches).not.toHaveBeenCalled();
+    expect(testMocks.createSavedSearch).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '我的搜索条件' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '保存条件' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '保存', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText('此操作需要普通用户权限')).not.toBeInTheDocument();
+    expect(sessionStorage.getItem(PENDING_SAVED_SEARCH_KEY)).toBe(pending);
+  });
+
   it('runs a file-scoped shared search while the file tree selects its initial node', async () => {
     renderSharedFileSearch();
 
@@ -656,6 +681,9 @@ describe('shared file search restoration', () => {
       from: 0
     });
     expect(await screen.findByText('lpkey match')).toBeInTheDocument();
+    expect(testMocks.fetchSavedSearches).toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '我的搜索条件' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存条件' })).toBeInTheDocument();
   });
 
   it('keeps a new file search active when a shared search restore finishes later', async () => {
