@@ -309,6 +309,58 @@ describe('BundleView search expression flow', () => {
     expect(screen.getAllByRole('button', { name: '编辑关键词 A' })).toHaveLength(2);
   });
 
+  it('runs the current-results filter when Enter is pressed', async () => {
+    const firstResponse = {
+      result_id: 'result-1',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle',
+        file_id: 101,
+        path: '/target.log',
+        content: 'ERROR timeout',
+        line_number: 10
+      }]
+    };
+    const filteredResponse = {
+      result_id: 'result-2',
+      total: 1,
+      lines: [{
+        bundle_hash: 'bundle',
+        file_id: 101,
+        path: '/target.log',
+        content: 'ERROR timeout',
+        line_number: 10
+      }]
+    };
+    testMocks.validateSearchExpression.mockResolvedValue({ valid: true });
+    testMocks.execute
+      .mockImplementationOnce(async (_request, options) => {
+        options?.onSuccess?.(firstResponse);
+        return firstResponse;
+      })
+      .mockImplementationOnce(async (_request, options) => {
+        options?.onSuccess?.(filteredResponse);
+        return filteredResponse;
+      });
+
+    renderBundleView();
+    fireEvent.change(screen.getByRole('textbox', { name: '日志内容搜索条件' }), {
+      target: { value: 'ERROR' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: '搜索日志内容' }));
+
+    const filter = await screen.findByRole('textbox', { name: '当前结果筛选条件' });
+    fireEvent.change(filter, { target: { value: 'timeout' } });
+    fireEvent.keyDown(filter, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(2));
+    expect(testMocks.execute.mock.calls[1][0]).toMatchObject({
+      expression: '"timeout"',
+      source_temp_id: 'result-1',
+      from: 0
+    });
+  });
+
   it('reveals a root page-two source in the file tree without loading sibling pages', async () => {
     const response = {
       result_id: 'result-1',
