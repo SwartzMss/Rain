@@ -51,7 +51,7 @@ import { takePendingSavedSearch } from './pendingSavedSearch';
 import { useIssueSearchController } from './hooks/useIssueSearchController';
 import { useFileSearchController } from './hooks/useFileSearchController';
 import { useViewerSearchController } from './hooks/useViewerSearchController';
-import { currentExpression } from './hooks/useSearchController';
+import { currentExpression, useSearchController } from './hooks/useSearchController';
 import { useViewerPaginationController } from './hooks/useViewerPaginationController';
 import { useSavedSearchController } from './hooks/useSavedSearchController';
 import { buildTabShareUrl, parseSharedTabSearch, type SharedTabDescriptor } from './tabShareLink';
@@ -80,6 +80,12 @@ type TreeLoadGuard = {
   contextKey: string;
   generation: number;
   isCurrent: () => boolean;
+};
+
+type SharedRestoreState = {
+  routeKey: string;
+  status: 'loading' | 'failed' | 'succeeded';
+  error: string | null;
 };
 
 function highlightText(text: string, keyword: string): React.ReactNode {
@@ -186,6 +192,8 @@ export function BundleView() {
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
+  const [treeReady, setTreeReady] = useState(false);
+  const [treeReadyContextKey, setTreeReadyContextKey] = useState<string | null>(null);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [fileSearchResults, setFileSearchResults] = useState<LogSearchHit[]>([]);
@@ -199,10 +207,13 @@ export function BundleView() {
   const [shareDialogUrl, setShareDialogUrl] = useState<string | null>(null);
   const [shareDialogCopied, setShareDialogCopied] = useState(false);
   const [shareDialogError, setShareDialogError] = useState<string | null>(null);
+  const [sharedRestoreState, setSharedRestoreState] = useState<SharedRestoreState | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const fileTreeContainerRef = useRef<HTMLDivElement | null>(null);
   const restoredPendingSearchRef = useRef(Boolean(pendingSavedSearch));
-  const restoredSharedRouteRef = useRef<string | null>(null);
+  const sharedRestoreGenerationRef = useRef(0);
+  const sharedRestoreAttemptRef = useRef<SharedRestoreState | null>(null);
+  const sharedRouteKeyRef = useRef('');
   const contextKeyRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
   const viewerTabsRef = useRef<ViewerTab[]>([]);
@@ -231,6 +242,7 @@ export function BundleView() {
   const issueSearch = useIssueSearchController(pendingDetailEditor.tokens, pendingDetailEditor.error);
   const fileSearch = useFileSearchController();
   const viewerSearch = useViewerSearchController();
+  const sharedFileSearch = useSearchController();
   const savedSearch = useSavedSearchController({
     authenticated: auth.state.status === 'AUTHENTICATED',
     issueCode,
@@ -487,6 +499,7 @@ export function BundleView() {
     const refreshGuard: TreeLoadGuard = { contextKey, generation: refreshGeneration, isCurrent: isCurrentRefresh };
     const init = async () => {
       setTreeLoading(true);
+      setTreeReady(false);
       setTreeError(null);
       const activeTabIdSnapshot = activeViewerTabIdRef.current;
       const tabsSnapshot = activeTabIdSnapshot && contentRef.current
@@ -499,6 +512,7 @@ export function BundleView() {
         issueSearch.invalidate();
         fileSearch.invalidate();
         viewerSearch.invalidate();
+        sharedFileSearch.invalidate();
         setTreeNodes({});
         setExpandedNodes(new Set());
         setRootIds([]);
@@ -682,6 +696,11 @@ export function BundleView() {
       if (isCurrentRefresh()) {
         setTreeLoading(false);
       }
+    }).finally(() => {
+      if (isCurrentRefresh()) {
+        setTreeReadyContextKey(contextKey);
+        setTreeReady(true);
+      }
     });
     return () => {
       ignore = true;
@@ -698,7 +717,8 @@ export function BundleView() {
     setViewerTabsState,
     issueSearch.invalidate,
     fileSearch.invalidate,
-    viewerSearch.invalidate
+    viewerSearch.invalidate,
+    sharedFileSearch.invalidate
   ]);
 
   useEffect(() => {
@@ -1200,109 +1220,242 @@ export function BundleView() {
     if (!response) return;
   }, [activeViewerTab, openViewerTab, viewerSearch]);
 
-  const restoreSharedTab = useCallback(async (descriptor: SharedTabDescriptor) => {
-    if (descriptor.kind === 'file') {
-      try {
-        const loaded = await loadNode(descriptor.bundleHash, descriptor.fileId, null);
-        if (!loaded?.node || loaded.node.is_dir || isArchiveNode(loaded.node)) {
-          throw new Error('分享来源文件不存在或无法预览');
-        }
-        setSelectedNodeId(loaded.node.id);
-        await handleNodeClick(loaded.node.id, null, { node: loaded.node });
-        return;
-      } catch (error) {
-        setSourceActionMessage(error instanceof Error ? error.message : '分享来源文件无法打开');
-        return;
+  const restoreSharedTab = useCallback(async (
+    descriptor: SharedTabDescriptor,
+    isCurrentAttempt: () => boolean
+  ) => {
+    const loadSharedSource = (bundleHash: string, fileId: string) => loadNode(
+      bundleHash,
+      fileId,
+      null,
+      {
+        contextKey: `${descriptor.issueCode}\u0000${bundleHash}`,
+        generation: refreshGenerationRef.current,
+        isCurrent: isCurrentAttempt
       }
+    );
+
+    if (descriptor.kind === 'file') {
+      const loaded = await loadSharedSource(descriptor.bundleHash, descriptor.fileId);
+      if (!loaded?.node || loaded.node.is_dir || isArchiveNode(loaded.node)) {
+        throw new Error('分享来源文件不存在或无法预览');
+      }
+      if (!isCurrentAttempt()) return;
+      setSelectedNodeId(loaded.node.id);
+      await handleNodeClick(loaded.node.id, null, { node: loaded.node });
+      return;
     }
 
     const { plan } = descriptor;
     const firstExpression = plan.expressions[0];
-    if (!firstExpression) return;
-    try {
-      const firstTokens = deserializeSearchTokens(firstExpression);
-      const rootController = plan.root.kind === 'issue' ? issueSearch : fileSearch;
-      rootController.setEditor(firstTokens);
-      let response = await rootController.run({
-        expression: firstExpression,
-        payload: plan.root.kind === 'issue'
-          ? { expression: firstExpression, issue_code: plan.root.issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] }
-          : { expression: firstExpression, bundle_hash: plan.root.bundleHash, file_id: plan.root.fileId, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
-        scopeKey: plan.root.kind === 'issue'
-          ? `issue:${plan.root.issueCode}:shared`
-          : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`
-      });
-      if (!response) return;
+    if (!firstExpression) throw new Error('分享链接中没有搜索表达式');
 
-      for (const expression of plan.expressions.slice(1)) {
-        response = await viewerSearch.run({
-          expression,
-          payload: {
-            expression,
-            source_temp_id: response.result_id,
-            from: 0,
-            size: LINE_PAGE_SIZE_OPTIONS[0]
-          },
-          scopeKey: `shared:${response.result_id}`
-        });
-        if (!response) return;
+    const fileScoped = plan.root.kind === 'file';
+    if (plan.root.kind === 'file') {
+      const loaded = await loadSharedSource(plan.root.bundleHash, plan.root.fileId);
+      if (!loaded?.node || loaded.node.is_dir || isArchiveNode(loaded.node)) {
+        throw new Error('分享来源文件不存在或无法预览');
       }
-
-      const lastExpression = plan.expressions[plan.expressions.length - 1] ?? firstExpression;
-      const hits = response.lines.map((line) => ({
-        bundle_hash: line.bundle_hash,
-        file_id: line.file_id ?? '',
-        path: line.path,
-        snippet: line.content,
-        line_number: line.line_number
-      }));
-      openViewerTab({
-        id: `search:${response.result_id}`,
-        kind: 'search',
-        resultId: response.result_id,
-        title: formatSearchTokens(deserializeSearchTokens(lastExpression)),
-        pinned: false,
-        scrollTop: 0,
-        expression: lastExpression,
-        hits,
-        total: response.total,
-        from: 0,
-        pageSize: LINE_PAGE_SIZE_OPTIONS[0],
-        pageHistory: [],
-        source: plan.root.kind === 'issue'
-          ? { kind: 'issue', issueCode: plan.root.issueCode }
-          : { kind: 'file', bundleHash: plan.root.bundleHash, fileId: plan.root.fileId },
-        queryPlan: plan
-      });
-      issueSearch.clear();
-      fileSearch.clear();
-      viewerSearch.clear();
-    } catch (error) {
-      setSourceActionMessage(error instanceof Error ? error.message : '分享搜索无法恢复');
+      if (!isCurrentAttempt()) return;
+      setSelectedNodeId(loaded.node.id);
     }
-  }, [fileSearch, handleNodeClick, issueSearch, loadNode, openViewerTab, viewerSearch]);
+
+    const firstTokens = deserializeSearchTokens(firstExpression);
+    const rootController = fileScoped ? sharedFileSearch : issueSearch;
+    rootController.setEditor(firstTokens);
+    let response = await rootController.run({
+      expression: firstExpression,
+      payload: plan.root.kind === 'issue'
+        ? { expression: firstExpression, issue_code: plan.root.issueCode, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] }
+        : { expression: firstExpression, bundle_hash: plan.root.bundleHash, file_id: plan.root.fileId, from: 0, size: LINE_PAGE_SIZE_OPTIONS[0] },
+      scopeKey: plan.root.kind === 'issue'
+        ? `issue:${plan.root.issueCode}:shared`
+        : `file:${plan.root.bundleHash}:${plan.root.fileId}:shared`
+    });
+    if (!isCurrentAttempt()) return;
+    if (!response) {
+      throw new Error(rootController.error ?? '搜索未完成，可能已取消。请重试。');
+    }
+
+    const nestedController = fileScoped ? sharedFileSearch : viewerSearch;
+    for (const expression of plan.expressions.slice(1)) {
+      response = await nestedController.run({
+        expression,
+        payload: {
+          expression,
+          source_temp_id: response.result_id,
+          from: 0,
+          size: LINE_PAGE_SIZE_OPTIONS[0]
+        },
+        scopeKey: `shared:${response.result_id}`
+      });
+      if (!isCurrentAttempt()) return;
+      if (!response) {
+        throw new Error(nestedController.error ?? '后续筛选未完成，可能已取消。请重试。');
+      }
+    }
+
+    const lastExpression = plan.expressions[plan.expressions.length - 1] ?? firstExpression;
+    const hits = response.lines.map((line) => ({
+      bundle_hash: line.bundle_hash,
+      file_id: line.file_id ?? '',
+      path: line.path,
+      snippet: line.content,
+      line_number: line.line_number
+    }));
+    openViewerTab({
+      id: `search:${response.result_id}`,
+      kind: 'search',
+      resultId: response.result_id,
+      title: formatSearchTokens(deserializeSearchTokens(lastExpression)),
+      pinned: false,
+      scrollTop: 0,
+      expression: lastExpression,
+      hits,
+      total: response.total,
+      from: 0,
+      pageSize: LINE_PAGE_SIZE_OPTIONS[0],
+      pageHistory: [],
+      source: plan.root.kind === 'issue'
+        ? { kind: 'issue', issueCode: plan.root.issueCode }
+        : { kind: 'file', bundleHash: plan.root.bundleHash, fileId: plan.root.fileId },
+      queryPlan: plan
+    });
+    issueSearch.clear();
+    fileSearch.clear();
+    viewerSearch.clear();
+  }, [
+    fileSearch.clear,
+    handleNodeClick,
+    issueSearch.clear,
+    issueSearch.run,
+    issueSearch.setEditor,
+    loadNode,
+    openViewerTab,
+    sharedFileSearch.error,
+    sharedFileSearch.run,
+    sharedFileSearch.setEditor,
+    viewerSearch.clear,
+    viewerSearch.run
+  ]);
 
   const sharedRouteKey = `${location.pathname}${location.search}`;
+  const sharedContextKey = `${issueCode}\u0000${bundleId}`;
+  sharedRouteKeyRef.current = sharedRouteKey;
   useEffect(() => {
     if (!sharedTab) {
-      restoredSharedRouteRef.current = null;
+      sharedRestoreGenerationRef.current += 1;
+      sharedRestoreAttemptRef.current = null;
+      sharedFileSearch.invalidate();
+      setSharedRestoreState(null);
       return;
     }
+
+    if (sharedRestoreAttemptRef.current?.routeKey === sharedRouteKey) return;
+    if (!treeReady || treeReadyContextKey !== sharedContextKey || treeLoading) return;
+
+    if (treeError && sharedTab.kind !== 'search') {
+      const failed = { routeKey: sharedRouteKey, status: 'failed' as const, error: treeError };
+      sharedRestoreAttemptRef.current = failed;
+      setSharedRestoreState(failed);
+      return;
+    }
+    if (treeError && sharedTab.kind === 'search' && sharedTab.plan.root.kind !== 'file') {
+      const failed = { routeKey: sharedRouteKey, status: 'failed' as const, error: treeError };
+      sharedRestoreAttemptRef.current = failed;
+      setSharedRestoreState(failed);
+      return;
+    }
+    if (sharedTab.kind === 'file' && bundleId && sharedTab.bundleHash !== bundleId) {
+      const failed = { routeKey: sharedRouteKey, status: 'failed' as const, error: '分享链接中的文件包与当前页面不匹配。' };
+      sharedRestoreAttemptRef.current = failed;
+      setSharedRestoreState(failed);
+      return;
+    }
+    if (sharedTab.kind === 'search' && sharedTab.plan.root.kind === 'file' && bundleId && sharedTab.plan.root.bundleHash !== bundleId) {
+      const failed = { routeKey: sharedRouteKey, status: 'failed' as const, error: '分享链接中的文件包与当前页面不匹配。' };
+      sharedRestoreAttemptRef.current = failed;
+      setSharedRestoreState(failed);
+      return;
+    }
+
+    if (sharedRestoreState?.routeKey !== sharedRouteKey) {
+      sharedFileSearch.invalidate();
+    }
+    const generation = ++sharedRestoreGenerationRef.current;
+    const isCurrentAttempt = () => (
+      generation === sharedRestoreGenerationRef.current
+      && sharedRouteKeyRef.current === sharedRouteKey
+    );
+    const loading = { routeKey: sharedRouteKey, status: 'loading' as const, error: null };
+    sharedRestoreAttemptRef.current = loading;
+    setSharedRestoreState(loading);
+    void restoreSharedTab(sharedTab, isCurrentAttempt).then(() => {
+      if (isCurrentAttempt()) {
+        const succeeded = { routeKey: sharedRouteKey, status: 'succeeded' as const, error: null };
+        sharedRestoreAttemptRef.current = succeeded;
+        setSharedRestoreState(succeeded);
+      }
+    }).catch((error: unknown) => {
+      if (!isCurrentAttempt()) return;
+      const message = error instanceof Error ? error.message : '分享内容无法恢复';
+      const failed = { routeKey: sharedRouteKey, status: 'failed' as const, error: message };
+      sharedRestoreAttemptRef.current = failed;
+      setSharedRestoreState(failed);
+      setSourceActionMessage(message);
+    });
+  }, [
+    bundleId,
+    restoreSharedTab,
+    sharedFileSearch.invalidate,
+    sharedRestoreState,
+    sharedRouteKey,
+    sharedTab,
+    treeError,
+    treeLoading,
+    treeReady,
+    treeReadyContextKey,
+    sharedContextKey
+  ]);
+
+  useEffect(() => {
     if (
-      restoredSharedRouteRef.current === sharedRouteKey
-      || treeLoading
-      || treeError
-      || (hasFileContext && rootIds.length === 0)
+      sharedRestoreState?.routeKey !== sharedRouteKey
+      || sharedRestoreState.status !== 'failed'
+      || !sharedFileSearch.error
+      || sharedRestoreState.error === sharedFileSearch.error
     ) return;
-    if (sharedTab.kind === 'file' && bundleId && sharedTab.bundleHash !== bundleId) return;
-    if (sharedTab.kind === 'search' && sharedTab.plan.root.kind === 'file' && bundleId && sharedTab.plan.root.bundleHash !== bundleId) return;
-    restoredSharedRouteRef.current = sharedRouteKey;
-    void restoreSharedTab(sharedTab);
-  }, [bundleId, hasFileContext, restoreSharedTab, rootIds.length, sharedRouteKey, sharedTab, treeError, treeLoading]);
+    setSharedRestoreState({ ...sharedRestoreState, error: sharedFileSearch.error });
+  }, [sharedFileSearch.error, sharedRestoreState, sharedRouteKey]);
+
+  const retrySharedRestore = useCallback(() => {
+    sharedRestoreAttemptRef.current = null;
+    if (treeError) {
+      setTreeError(null);
+      setTreeReady(false);
+      setRefreshKey((current) => current + 1);
+    }
+    setSharedRestoreState(null);
+  }, [treeError]);
+
+  const cancelSharedRestore = useCallback(() => {
+    sharedRestoreGenerationRef.current += 1;
+    void sharedFileSearch.cancel();
+    const cancelled = {
+      routeKey: sharedRouteKey,
+      status: 'failed',
+      error: '搜索已取消，可以重试。'
+    } as const;
+    sharedRestoreAttemptRef.current = cancelled;
+    setSharedRestoreState(cancelled);
+  }, [sharedFileSearch.cancel, sharedRouteKey]);
 
   const loadViewerPage = viewerPagination.loadPage;
 
   const activeIssueLabel = activeBundle.issue || '未知 Issue';
+  const currentSharedRestore = sharedRestoreState?.routeKey === sharedRouteKey
+    ? sharedRestoreState
+    : null;
 
   useEffect(() => {
     clearFileSearch();
@@ -1577,6 +1730,41 @@ export function BundleView() {
               onClose={closeTab}
               onCloseMany={closeTabs}
             />
+            {sharedTab && currentSharedRestore?.status !== 'succeeded' ? (
+              <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-4 py-2 text-sm">
+                {currentSharedRestore?.status === 'failed' ? (
+                  <>
+                    <p role="alert" className="flex-1 text-rose-700">
+                      {currentSharedRestore.error ?? '分享内容无法恢复'}
+                    </p>
+                    <button
+                      type="button"
+                      className="rounded border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                      onClick={retrySharedRestore}
+                    >
+                      重试
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <p role="status" aria-live="polite" className="flex-1 text-slate-600">
+                      {sharedTab.kind === 'search' ? '正在恢复分享的搜索结果…' : '正在打开分享文件…'}
+                    </p>
+                    {sharedTab.kind === 'search'
+                    && sharedTab.plan.root.kind === 'file'
+                    && sharedFileSearch.busy ? (
+                      <button
+                        type="button"
+                        className="rounded border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                        onClick={cancelSharedRestore}
+                      >
+                        取消
+                      </button>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            ) : null}
             <p
               aria-live="polite"
               className={`px-4 py-1 text-xs ${sourceActionMessage ? 'text-slate-600' : 'sr-only'}`}
