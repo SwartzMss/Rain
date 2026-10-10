@@ -1,6 +1,13 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { beginWorkspaceSession, clearWorkspaceSessionRequest, RequestCancelledError, rainApi } from '../src/api/client';
+import {
+  beginWorkspaceSession,
+  clearWorkspaceSessionRequest,
+  releaseWorkspaceSessionRequest,
+  retainWorkspaceSessionRequest,
+  RequestCancelledError,
+  rainApi
+} from '../src/api/client';
 import { SearchExecutionStatus } from '../src/components/SearchExecutionStatus';
 import { useSearchExecution } from '../src/hooks/useSearchExecution';
 import type { TempResultPreviewResponse } from '../src/api/types';
@@ -104,7 +111,7 @@ describe('interactive search execution', () => {
       throw new Error(`unexpected request ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
-    const issueBRequest = beginWorkspaceSession('ISSUE-B');
+    const issueBRequest = beginWorkspaceSession('ISSUE-B', 'test-user');
     await issueBRequest.promise;
 
     render(<WorkspaceExecutionProbe />);
@@ -112,6 +119,40 @@ describe('interactive search execution', () => {
 
     expect(previewHeaders[0].get('X-Issue-Workspace-Session')).toBe('session-a');
     clearWorkspaceSessionRequest(issueBRequest);
+  });
+
+  it('does not reuse a handed-off workspace request for a different principal', async () => {
+    const createdSessionIds: string[] = [];
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/api/issues/ISSUE-HANDOFF/workspace-sessions')) {
+        const sessionId = createdSessionIds.length === 0 ? 'user-session' : 'guest-session';
+        createdSessionIds.push(sessionId);
+        return Promise.resolve(new Response(JSON.stringify({
+          session_id: sessionId,
+          issue_code: 'ISSUE-HANDOFF',
+          server_now: '',
+          last_activity_at: '',
+          expires_at: ''
+        }), { status: 201 }));
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const userRequest = beginWorkspaceSession('ISSUE-HANDOFF', 'user-1');
+    retainWorkspaceSessionRequest(userRequest);
+    releaseWorkspaceSessionRequest(userRequest, true);
+    const samePrincipalHandoff = beginWorkspaceSession('ISSUE-HANDOFF', 'user-1');
+    const guestRequest = beginWorkspaceSession('ISSUE-HANDOFF', 'guest');
+
+    expect(samePrincipalHandoff).toBe(userRequest);
+    expect(guestRequest).not.toBe(userRequest);
+    await Promise.all([userRequest.promise, guestRequest.promise]);
+    expect(createdSessionIds).toEqual(['user-session', 'guest-session']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    clearWorkspaceSessionRequest(userRequest);
+    clearWorkspaceSessionRequest(guestRequest);
   });
 
   it('cancels the preview with an independent DELETE request', async () => {

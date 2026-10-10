@@ -207,6 +207,8 @@ export function useIssueWorkspaceSession(
   const [ready, setReady] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const resetRef = useRef(onReset);
+  const principalKeyRef = useRef(principalKey);
+  principalKeyRef.current = principalKey;
   const sessionIdRef = useRef<string | null>(null);
   const sessionContextRef = useRef<string | null>(null);
   const sessionWaitersRef = useRef<WorkspaceSessionWaiter[]>([]);
@@ -275,8 +277,8 @@ export function useIssueWorkspaceSession(
     const startSession = (sessionToResume?: string) => {
       if (requestRef.current || sessionIdRef.current) return;
       const workspaceRequest = sessionToResume
-        ? resumeWorkspaceSession(issueCode, sessionToResume)
-        : beginWorkspaceSession(issueCode);
+        ? resumeWorkspaceSession(issueCode, sessionToResume, principalKey)
+        : beginWorkspaceSession(issueCode, principalKey);
       const requestGeneration = generationRef.current;
       retainWorkspaceSessionRequest(workspaceRequest);
       requestRef.current = workspaceRequest;
@@ -514,7 +516,8 @@ export function useIssueWorkspaceSession(
       sessionContextRef.current = null;
       activityRequestRef.current = null;
       syncInFlightRef.current = false;
-      preserveOnUnmount = window.location.pathname.startsWith('/temp-results/');
+      preserveOnUnmount = window.location.pathname.startsWith('/temp-results/')
+        && principalKeyRef.current === principalKey;
       if (activeRequest) releaseWorkspaceSessionRequest(activeRequest, preserveOnUnmount);
       pageLease?.close();
       pageLease = null;

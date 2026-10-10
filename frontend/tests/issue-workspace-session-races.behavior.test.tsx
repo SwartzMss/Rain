@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useIssueWorkspaceSession } from '../src/features/files/hooks/useIssueWorkspaceSession';
 
@@ -6,19 +6,24 @@ const testMocks = vi.hoisted(() => ({
   beginWorkspaceSession: vi.fn(),
   resumeWorkspaceSession: vi.fn(),
   recordWorkspaceActivity: vi.fn(),
-  clearWorkspaceSessionRequest: vi.fn()
+  clearWorkspaceSessionRequest: vi.fn(),
+  releaseWorkspaceSessionRequest: vi.fn(),
+  endWorkspaceSession: vi.fn(() => Promise.resolve())
 }));
 
 vi.mock('../src/api/client', () => ({
   beginWorkspaceSession: testMocks.beginWorkspaceSession,
   resumeWorkspaceSession: testMocks.resumeWorkspaceSession,
   retainWorkspaceSessionRequest: vi.fn((request: { consumers: number }) => { request.consumers += 1; }),
-  releaseWorkspaceSessionRequest: vi.fn((request: { consumers: number }) => { request.consumers = Math.max(0, request.consumers - 1); }),
+  releaseWorkspaceSessionRequest: (request: { consumers: number }, preserveForHandoff?: boolean) => {
+    request.consumers = Math.max(0, request.consumers - 1);
+    testMocks.releaseWorkspaceSessionRequest(request, preserveForHandoff);
+  },
   hasWorkspaceSessionConsumers: vi.fn((request: { consumers: number }) => request.consumers > 0),
   clearWorkspaceSessionRequest: testMocks.clearWorkspaceSessionRequest,
   rainApi: {
     recordWorkspaceActivity: testMocks.recordWorkspaceActivity,
-    endWorkspaceSession: vi.fn(() => Promise.resolve())
+    endWorkspaceSession: testMocks.endWorkspaceSession
   }
 }));
 
@@ -32,8 +37,8 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function WorkspaceProbe({ issueCode }: { issueCode: string }) {
-  const workspace = useIssueWorkspaceSession(issueCode, 'race-test-user', () => {});
+function WorkspaceProbe({ issueCode, principalKey = 'race-test-user' }: { issueCode: string; principalKey?: string }) {
+  const workspace = useIssueWorkspaceSession(issueCode, principalKey, () => {});
   return (
     <>
       <output data-testid="ready">{String(workspace.ready)}</output>
@@ -58,8 +63,51 @@ describe('Issue workspace session races', () => {
     vi.unstubAllGlobals();
     sessionStorage.clear();
     localStorage.clear();
+    window.history.replaceState({}, '', '/');
     vi.restoreAllMocks();
     vi.clearAllMocks();
+  });
+
+  it('does not preserve a temp-result handoff when the access principal changes', async () => {
+    vi.stubGlobal('navigator', {});
+    vi.stubGlobal('BroadcastChannel', undefined);
+    testMocks.endWorkspaceSession.mockResolvedValue(undefined);
+    const userSession = deferred<ReturnType<typeof resolveSession>>();
+    const guestSession = deferred<ReturnType<typeof resolveSession>>();
+    const userRequest = {
+      issueCode: 'ISSUE-A',
+      principalKey: 'user-1',
+      consumers: 0,
+      promise: userSession.promise
+    };
+    const guestRequest = {
+      issueCode: 'ISSUE-A',
+      principalKey: 'guest',
+      consumers: 0,
+      promise: guestSession.promise
+    };
+    testMocks.beginWorkspaceSession.mockImplementation((_issueCode: string, principalKey: string) => (
+      principalKey === 'user-1' ? userRequest : guestRequest
+    ));
+    testMocks.resumeWorkspaceSession.mockImplementation(() => { throw new Error('unexpected resume'); });
+
+    const view = render(<WorkspaceProbe issueCode="ISSUE-A" principalKey="user-1" />);
+    await act(async () => userSession.resolve(resolveSession('user-session', 'ISSUE-A')));
+    await waitFor(() => expect(screen.getByTestId('session')).toHaveTextContent('user-session'));
+
+    window.history.replaceState({}, '', '/temp-results/result-a');
+    view.rerender(<WorkspaceProbe issueCode="ISSUE-A" principalKey="guest" />);
+    expect(testMocks.beginWorkspaceSession).toHaveBeenCalledWith('ISSUE-A', 'guest');
+    expect(testMocks.releaseWorkspaceSessionRequest).toHaveBeenCalledWith(userRequest, false);
+    expect(testMocks.clearWorkspaceSessionRequest).toHaveBeenCalledWith(userRequest);
+    expect(testMocks.endWorkspaceSession).toHaveBeenCalledWith('user-session', true);
+
+    await act(async () => guestSession.resolve(resolveSession('guest-session', 'ISSUE-A')));
+    await waitFor(() => {
+      expect(screen.getByTestId('ready')).toHaveTextContent('true');
+      expect(screen.getByTestId('session')).toHaveTextContent('guest-session');
+    });
+    view.unmount();
   });
 
   it('ignores an expired activity response from the previous Issue session', async () => {

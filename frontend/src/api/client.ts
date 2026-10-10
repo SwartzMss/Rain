@@ -41,22 +41,28 @@ const ISSUE_CODE_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 let adminSettingsRevision: string | undefined;
 export type ActiveWorkspaceRequest = {
   issueCode: string;
+  principalKey: string;
   promise: Promise<WorkspaceSessionResponse>;
   consumers: number;
   sessionId?: string;
 };
 const activeWorkspaceRequests = new Map<string, ActiveWorkspaceRequest>();
 
-export function beginWorkspaceSession(issueCode: string): ActiveWorkspaceRequest {
+function workspaceRequestKey(issueCode: string, principalKey: string): string {
+  return JSON.stringify([principalKey, issueCode]);
+}
+
+export function beginWorkspaceSession(issueCode: string, principalKey: string): ActiveWorkspaceRequest {
   const normalizedIssueCode = normalizeIssueCode(issueCode);
-  const current = activeWorkspaceRequests.get(normalizedIssueCode);
+  const key = workspaceRequestKey(normalizedIssueCode, principalKey);
+  const current = activeWorkspaceRequests.get(key);
   if (current) return current;
   const promise = request<WorkspaceSessionResponse>(
     `/api/issues/${encodePathSegment(normalizedIssueCode)}/workspace-sessions`,
     { method: 'POST' }
   );
-  const active: ActiveWorkspaceRequest = { issueCode: normalizedIssueCode, promise, consumers: 0 };
-  activeWorkspaceRequests.set(normalizedIssueCode, active);
+  const active: ActiveWorkspaceRequest = { issueCode: normalizedIssueCode, principalKey, promise, consumers: 0 };
+  activeWorkspaceRequests.set(key, active);
   void promise.then(
     (session) => { active.sessionId = session.session_id; },
     () => {}
@@ -64,9 +70,10 @@ export function beginWorkspaceSession(issueCode: string): ActiveWorkspaceRequest
   return active;
 }
 
-export function resumeWorkspaceSession(issueCode: string, sessionId: string): ActiveWorkspaceRequest {
+export function resumeWorkspaceSession(issueCode: string, sessionId: string, principalKey: string): ActiveWorkspaceRequest {
   const normalizedIssueCode = normalizeIssueCode(issueCode);
-  const current = activeWorkspaceRequests.get(normalizedIssueCode);
+  const key = workspaceRequestKey(normalizedIssueCode, principalKey);
+  const current = activeWorkspaceRequests.get(key);
   if (current && (!current.sessionId || current.sessionId === sessionId)) return current;
   const promise = request<WorkspaceSessionResponse>(
     `/api/workspace-sessions/${encodePathSegment(sessionId)}`
@@ -76,14 +83,15 @@ export function resumeWorkspaceSession(issueCode: string, sessionId: string): Ac
     }
     return session;
   });
-  const active = { issueCode: normalizedIssueCode, promise, consumers: 0, sessionId };
-  activeWorkspaceRequests.set(normalizedIssueCode, active);
+  const active = { issueCode: normalizedIssueCode, principalKey, promise, consumers: 0, sessionId };
+  activeWorkspaceRequests.set(key, active);
   return active;
 }
 
 export function clearWorkspaceSessionRequest(active: ActiveWorkspaceRequest): void {
-  if (activeWorkspaceRequests.get(active.issueCode) === active) {
-    activeWorkspaceRequests.delete(active.issueCode);
+  const key = workspaceRequestKey(active.issueCode, active.principalKey);
+  if (activeWorkspaceRequests.get(key) === active) {
+    activeWorkspaceRequests.delete(key);
   }
 }
 
@@ -95,8 +103,9 @@ export function releaseWorkspaceSessionRequest(active: ActiveWorkspaceRequest, p
   active.consumers = Math.max(0, active.consumers - 1);
   if (active.consumers > 0 || preserveForHandoff) return;
   window.setTimeout(() => {
-    if (active.consumers === 0 && activeWorkspaceRequests.get(active.issueCode) === active) {
-      activeWorkspaceRequests.delete(active.issueCode);
+    const key = workspaceRequestKey(active.issueCode, active.principalKey);
+    if (active.consumers === 0 && activeWorkspaceRequests.get(key) === active) {
+      activeWorkspaceRequests.delete(key);
     }
   }, 0);
 }
