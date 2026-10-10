@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { IssueLogSearchHit } from '../../../api/types';
-import type { SearchToken } from '../searchTokens';
+import { canFinalizeSearch, type SearchToken } from '../searchTokens';
 import type { SearchViewerTab, TempViewerTab } from '../viewerTabs';
 import { SearchTokenEditor } from '../SearchTokenEditor';
 import { SearchHitContextMenu } from './SearchHitContextMenu';
@@ -14,7 +14,7 @@ type SearchResultViewerProps = {
   onResultFilterTokensChange: (tokens: SearchToken[]) => void;
   onResultFilterDraftChange: (draft: string) => void;
   onClearResultFilter: () => void;
-  onSearchWithinResults: () => void;
+  onSearchWithinResults: (tokens: SearchToken[], draft: string) => void;
   canRunResultFilter: boolean;
   searchLoading: boolean;
   searchError?: string | null;
@@ -87,6 +87,11 @@ export function SearchResultViewer({
           className="min-w-[220px]"
           tokens={resultFilterTokens}
           draft={resultFilterDraft}
+          onSubmit={(tokens, draft) => {
+            if (canFinalizeSearch(tokens, draft, false)) {
+              onSearchWithinResults(tokens, draft);
+            }
+          }}
           onTokensChange={onResultFilterTokensChange}
           onDraftChange={onResultFilterDraftChange}
           placeholder="添加关键词"
@@ -110,7 +115,7 @@ export function SearchResultViewer({
           type="button"
           className="shrink-0 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={searchLoading || !canRunResultFilter}
-          onClick={onSearchWithinResults}
+          onClick={() => onSearchWithinResults(resultFilterTokens, resultFilterDraft)}
         >
           搜索
         </button>
