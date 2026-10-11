@@ -880,10 +880,20 @@ export function BundleView() {
     }
   };
 
-  const revealSourceNode = async (source: ReturnType<typeof getSearchHitSource>) => {
+  const revealSourceNode = async (
+    source: ReturnType<typeof getSearchHitSource>,
+    guard?: TreeLoadGuard,
+    initialNode?: TreeNode
+  ) => {
     if (!source) return null;
+    const isCurrent = () => !guard || (
+      guard.generation === refreshGenerationRef.current
+      && contextKeyRef.current === guard.contextKey
+      && guard.isCurrent()
+    );
 
     const knownNodes = new Map(Object.entries(treeNodesRef.current));
+    if (initialNode) knownNodes.set(initialNode.id, initialNode);
     const remember = (node: TreeNode, children: TreeNode[]) => {
       const rememberNode = (candidate: TreeNode) => {
         knownNodes.set(
@@ -895,8 +905,10 @@ export function BundleView() {
       children.forEach(rememberNode);
     };
     const updateTreeNodes = (nodes: TreeNode[]) => {
+      if (!isCurrent()) return;
       nodes.forEach((node) => knownNodes.set(node.id, node));
       setTreeNodes((prev) => {
+        if (!isCurrent()) return prev;
         const next = { ...prev };
         nodes.forEach((node) => {
           next[node.id] = node;
@@ -913,12 +925,13 @@ export function BundleView() {
       return attached;
     };
     const loadKnownNode = async (nodeId: string, parentId: string | null) => {
-      const result = await loadNode(source.bundleHash, nodeId, parentId);
-      if (!result) return null;
+      const result = await loadNode(source.bundleHash, nodeId, parentId, guard);
+      if (!result || !isCurrent()) return null;
       remember(result.node, result.children);
       return result.node;
     };
 
+    if (!isCurrent()) return null;
     let current = knownNodes.get(source.nodeId) ?? null;
     if (!current) {
       current = await loadKnownNode(source.fileId, null);
@@ -930,6 +943,7 @@ export function BundleView() {
     const ancestors: string[] = [];
     const visited = new Set<string>();
     while (true) {
+      if (!isCurrent()) return null;
       const activeNode: TreeNode | null = current;
       const parentId: string | null = activeNode ? activeNode.parentId : null;
       if (!parentId || visited.has(parentId)) break;
@@ -968,12 +982,13 @@ export function BundleView() {
     }
 
     if (ancestors.length > 0) {
-      setExpandedNodes((prev) => new Set([...prev, ...ancestors]));
+      setExpandedNodes((prev) => isCurrent() ? new Set([...prev, ...ancestors]) : prev);
     }
 
     const syntheticRootId = `${source.bundleHash}:root`;
     const syntheticRoot = knownNodes.get(syntheticRootId)
       ?? await loadKnownNode('root', null);
+    if (!isCurrent()) return null;
     if (syntheticRoot && current.id !== syntheticRoot.id && !current.parentId) {
       attachChild(syntheticRoot, current);
     }
@@ -1304,16 +1319,18 @@ export function BundleView() {
       }
       return true;
     };
+    const sharedSourceGuard = (bundleHash: string): TreeLoadGuard => ({
+      contextKey: `${descriptor.issueCode}\u0000${bundleHash}`,
+      generation: refreshGenerationRef.current,
+      isCurrent: isCurrentAttempt
+    });
     const loadSharedSource = (bundleHash: string, fileId: string) => loadNode(
-      bundleHash,
-      fileId,
-      null,
-      {
-        contextKey: `${descriptor.issueCode}\u0000${bundleHash}`,
-        generation: refreshGenerationRef.current,
-        isCurrent: isCurrentAttempt
-      }
+      bundleHash, fileId, null, sharedSourceGuard(bundleHash)
     );
+    const revealSharedSource = async (bundleHash: string, fileId: string, node: TreeNode) => {
+      await revealSourceNode({ bundleHash, fileId, nodeId: node.id, path: node.path, line: null },
+        sharedSourceGuard(bundleHash), node);
+    };
 
     if (descriptor.kind === 'file') {
       const loaded = await loadSharedSource(descriptor.bundleHash, descriptor.fileId);
@@ -1321,6 +1338,8 @@ export function BundleView() {
       if (!loaded?.node || loaded.node.is_dir || isArchiveNode(loaded.node)) {
         throw new Error('分享来源文件不存在或无法预览');
       }
+      await revealSharedSource(descriptor.bundleHash, descriptor.fileId, loaded.node);
+      if (!ensureCurrent()) return;
       setSelectedNodeId(loaded.node.id);
       await handleNodeClick(loaded.node.id, null, { node: loaded.node });
       if (!ensureCurrent()) return;
@@ -1338,6 +1357,8 @@ export function BundleView() {
       if (!loaded?.node || loaded.node.is_dir || isArchiveNode(loaded.node)) {
         throw new Error('分享来源文件不存在或无法预览');
       }
+      await revealSharedSource(plan.root.bundleHash, plan.root.fileId, loaded.node);
+      if (!ensureCurrent()) return;
       setSelectedNodeId(loaded.node.id);
     }
 
@@ -1419,6 +1440,7 @@ export function BundleView() {
     issueSearch.setEditor,
     loadNode,
     openViewerTab,
+    revealSourceNode,
     sharedFileSearch.clear,
     sharedFileSearch.error,
     sharedFileSearch.run,
