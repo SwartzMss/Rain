@@ -3,14 +3,16 @@ import { useAuth } from './auth/AuthContext';
 import { AuthPage } from './features/auth/AuthPage';
 import { AccountPage } from './features/auth/AccountPage';
 import { BundleView } from './features/files/FilesView';
-import { HomeView } from './features/files/HomeView';
 import { TempResultRoute } from './features/files/TempResultView';
 import { APP_VERSION } from './version';
 import './App.css';
 import { isAdmin } from './auth/permissions';
 import { AdminPage, AdminUsersPage, AuditLogsPage, AdminSettingsPage, AuthRateLimitsPage, InvitationsAdminPage } from './features/admin/AdminPage';
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { rainApi } from './api/client';
+import { readOnboardingProgress, subscribeOnboardingProgress, updateOnboardingProgress } from './features/files/onboardingProgress';
+
+const HomeView = lazy(() => import('./features/files/HomeView').then((module) => ({ default: module.HomeView })));
 
 function App() {
   const auth = useAuth();
@@ -18,6 +20,18 @@ function App() {
   const returnPath = `${location.pathname}${location.search}`;
   const [serviceStatus, setServiceStatus] = useState<'checking' | 'healthy' | 'unhealthy'>('checking');
   const [registrationAvailable, setRegistrationAvailable] = useState(false);
+  const adminIdentity = auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user)
+    ? auth.state.user.id
+    : null;
+  const [adminOnboardingEnabled, setAdminOnboardingEnabled] = useState(true);
+
+  useEffect(() => {
+    if (!adminIdentity) return;
+    setAdminOnboardingEnabled(readOnboardingProgress(adminIdentity).enabled);
+    return subscribeOnboardingProgress(adminIdentity, (progress) => {
+      setAdminOnboardingEnabled(progress.enabled);
+    });
+  }, [adminIdentity]);
 
   useEffect(() => {
     let active = true;
@@ -63,6 +77,34 @@ function App() {
             </div>
           </Link>
           <div className="flex items-center gap-3 text-sm font-medium text-slate-200">
+            {adminIdentity ? (
+              <label
+                className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 hover:bg-white/10"
+                title="关闭后不会自动显示新手提示，仍可在 Issue 页面手动打开"
+              >
+                <input
+                  aria-label="自动显示新手提示"
+                  checked={adminOnboardingEnabled}
+                  className="accent-cyan-300"
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setAdminOnboardingEnabled(enabled);
+                    updateOnboardingProgress(adminIdentity, { enabled });
+                  }}
+                  type="checkbox"
+                />
+                自动提示
+              </label>
+            ) : null}
+            {(location.pathname === '/' || location.pathname.startsWith('/issue/') || location.pathname.startsWith('/issues/')) ? (
+              <button
+                type="button"
+                className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 font-semibold text-cyan-100 hover:bg-cyan-300/20"
+                onClick={() => window.dispatchEvent(new Event('rain:open-onboarding'))}
+              >
+                ? 新手指引
+              </button>
+            ) : null}
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
               <span className={`h-2.5 w-2.5 rounded-full ${serviceStatus === 'healthy' ? 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]' : serviceStatus === 'checking' ? 'bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.8)]' : 'bg-rose-400 shadow-[0_0_10px_rgba(251,113,133,0.8)]'}`} />
               <span>{serviceStatus === 'healthy' ? '服务正常' : serviceStatus === 'checking' ? '检测中' : '服务异常'}</span>
@@ -120,7 +162,12 @@ function App() {
 
       <main className="mx-auto w-full max-w-none flex-1 px-5 py-5">
         <Routes>
-          <Route path="/" element={auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user) ? <Navigate to="/admin/users" replace /> : <HomeView />} />
+          <Route
+            path="/"
+            element={auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user)
+              ? <Navigate to="/admin/users" replace />
+              : <Suspense fallback={<p role="status" className="p-4 text-sm text-slate-500">正在加载…</p>}><HomeView /></Suspense>}
+          />
           <Route path="/login" element={<AuthPage mode="login" />} />
           <Route path="/register" element={<AuthPage mode="register" />} />
           <Route path="/account" element={<AccountPage />} />

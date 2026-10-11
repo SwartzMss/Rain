@@ -5,6 +5,7 @@ type IssueCreateDialogProps = {
   onChangeIssueCode: (value: string) => void;
   onClose: () => void;
   onSubmit: () => void;
+  guidance?: string;
 };
 
 export function IssueCreateDialog({
@@ -13,7 +14,8 @@ export function IssueCreateDialog({
   issueCode,
   onChangeIssueCode,
   onClose,
-  onSubmit
+  onSubmit,
+  guidance
 }: IssueCreateDialogProps) {
   return (
     <div
@@ -33,6 +35,7 @@ export function IssueCreateDialog({
         }}
       >
         <h3 className="text-lg font-semibold text-slate-950">新建 Issue</h3>
+        {guidance ? <p className="mt-2 rounded-md bg-cyan-50 px-3 py-2 text-sm text-cyan-900">{guidance}</p> : null}
         <label className="mt-4 block text-sm text-slate-600">
           Issue ID
           <input

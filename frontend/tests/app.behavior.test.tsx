@@ -1,9 +1,10 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider } from '../src/auth/AuthContext';
 import { rainApi } from '../src/api/client';
 import App from '../src/App';
+import { onboardingStorageKey, updateOnboardingProgress } from '../src/features/files/onboardingProgress';
 
 vi.mock('../src/api/client', () => ({
   rainApi: { me: vi.fn(), login: vi.fn(), register: vi.fn(), logout: vi.fn(), changePassword: vi.fn(), fetchRegistrationStatus: vi.fn() }
@@ -80,6 +81,13 @@ describe('application behavior', () => {
     expect(await screen.findByText('admin users page')).toBeInTheDocument();
     expect(screen.getByText('root')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '账户' })).not.toBeInTheDocument();
+    const onboardingToggle = await screen.findByRole('checkbox', { name: '自动显示新手提示' });
+    expect(onboardingToggle).toBeChecked();
+    act(() => updateOnboardingProgress('admin', { enabled: false }));
+    await waitFor(() => expect(onboardingToggle).not.toBeChecked());
+    fireEvent.click(onboardingToggle);
+    expect(onboardingToggle).toBeChecked();
+    expect(JSON.parse(localStorage.getItem(onboardingStorageKey('admin')) ?? '{}')).toMatchObject({ enabled: true });
   });
 
   it('shows a normal user account entry and reports readiness failure', async () => {

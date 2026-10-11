@@ -71,6 +71,7 @@ export function ViewerTabBar({
 
   if (tabs.length === 0) return null;
 
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
   const contextIndex = menu ? tabs.findIndex((tab) => tab.id === menu.tabId) : -1;
   const contextTab = contextIndex >= 0 ? tabs[contextIndex] : null;
   const closeOthers = contextTab ? tabs.filter((tab) => tab.id !== contextTab.id && !tab.pinned).map((tab) => tab.id) : [];
@@ -83,8 +84,9 @@ export function ViewerTabBar({
   };
 
   return (
-    <div className="flex min-h-14 items-end gap-2 overflow-x-auto border-b border-slate-200 bg-gradient-to-r from-slate-100 to-slate-50 px-4 pt-3">
-      {tabs.map((tab) => (
+    <div className="flex min-h-14 items-end gap-2 border-b border-slate-200 bg-gradient-to-r from-slate-100 to-slate-50 px-3 pt-3">
+      <div className="flex min-w-0 flex-1 items-end gap-2 overflow-x-auto px-1">
+        {tabs.map((tab) => (
         <div
           key={tab.id}
           onContextMenu={(event) => {
@@ -132,7 +134,23 @@ export function ViewerTabBar({
             ×
           </button>
         </div>
-      ))}
+        ))}
+      </div>
+      {activeTab ? (
+        <div className="z-10 shrink-0 border-l border-slate-200 bg-slate-50/95 pb-1 pl-2">
+          <button
+            type="button"
+            data-guide-anchor="share-tab"
+            className="mb-1 ml-auto inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-sky-200 bg-white px-3 text-xs font-semibold text-sky-800 shadow-sm hover:border-sky-400 hover:bg-sky-50 disabled:cursor-not-allowed disabled:text-slate-400"
+            aria-label="分享当前标签"
+            title={activeTab.kind === 'temp' ? '临时结果无法分享' : '分享当前标签'}
+            disabled={activeTab.kind === 'temp'}
+            onClick={() => onShare(activeTab)}
+          >
+            <span aria-hidden="true">↗</span> 分享当前标签
+          </button>
+        </div>
+      ) : null}
       {menu && contextTab
         ? createPortal(
             <div

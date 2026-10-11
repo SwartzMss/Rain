@@ -14,6 +14,7 @@ type IssueSelectorProps = {
   canChooseScope: boolean;
   canWrite: boolean;
   canCreateIssue: boolean;
+  highlightCreateButton?: boolean;
   onCreateClick: () => void;
   onIssueScopeChange: (scope: IssueListScope) => void;
   onIssueSearchTextChange: (value: string) => void;
@@ -36,6 +37,7 @@ export function IssueSelector({
   canChooseScope,
   canWrite,
   canCreateIssue,
+  highlightCreateButton = false,
   onCreateClick,
   onIssueScopeChange,
   onIssueSearchTextChange,
@@ -51,7 +53,8 @@ export function IssueSelector({
         {canCreateIssue ? (
           <button
             type="button"
-            className="rounded-lg bg-slate-950 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+            data-guide-anchor="create-issue"
+            className={`rounded-lg bg-slate-950 px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 ${highlightCreateButton ? 'outline outline-2 outline-cyan-500 outline-offset-2' : ''}`}
             onClick={onCreateClick}
           >
             新建 Issue

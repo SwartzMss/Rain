@@ -7,9 +7,10 @@ import { visibleInactivityExpiry } from '../issueExpiration';
 export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => void) {
   const [bundles, setBundles] = useState<UploadSummary[]>([]);
   const [canWrite, setCanWrite] = useState(false);
+  const [resolvedIssueCode, setResolvedIssueCode] = useState<string | null>(null);
   const [ownerUsername, setOwnerUsername] = useState<string | null>(null);
   const [inactivityExpiry, setInactivityExpiry] = useState<IssueInactivityExpiry | null>(null);
-  const [, setBundlesLoading] = useState(false);
+  const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [refreshRetryPending, setRefreshRetryPending] = useState(false);
   const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
@@ -25,6 +26,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
     setBundles([]);
     setBundlesLoading(false);
     setCanWrite(false);
+    setResolvedIssueCode(null);
     setOwnerUsername(null);
     setInactivityExpiry(null);
     setBundleFiles({});
@@ -44,6 +46,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
       const requestId = ++bundleRequestIdRef.current;
 
       setBundlesLoading(true);
+      setResolvedIssueCode(null);
       setBundlesError(null);
       try {
         const data: IssueBundlesResponse = await rainApi.fetchIssueBundles(trimmed);
@@ -53,6 +56,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
         setBundles(data.log_bundles);
         setRefreshRetryPending(false);
         setCanWrite(data.can_write);
+        setResolvedIssueCode(trimmed);
         setOwnerUsername(data.owner_username);
         setInactivityExpiry(visibleInactivityExpiry(data.inactivity_expiry));
         setBundleFiles((prev) => {
@@ -207,6 +211,8 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   return {
     bundleFiles,
     bundles,
+    bundlesLoading,
+    resolvedIssueCode,
     hasProcessingBundles: hasActiveBundles,
     canWrite,
     inactivityExpiry,

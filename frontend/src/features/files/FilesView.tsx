@@ -56,6 +56,7 @@ import { useViewerPaginationController } from './hooks/useViewerPaginationContro
 import { useSavedSearchController } from './hooks/useSavedSearchController';
 import { useIssueWorkspaceSession } from './hooks/useIssueWorkspaceSession';
 import { buildTabShareUrl, parseSharedTabSearch, type SharedTabDescriptor } from './tabShareLink';
+import { readOnboardingProgress, subscribeOnboardingProgress, updateOnboardingProgress } from './onboardingProgress';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
@@ -161,6 +162,14 @@ function detailEditorState(queryText: string | undefined, options?: Record<strin
 export function BundleView() {
   const auth = useAuth();
   const isBusinessUser = auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER';
+  const onboardingIdentity = auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest';
+  const [guideChooserOpen, setGuideChooserOpen] = useState(false);
+  const [guideTask, setGuideTask] = useState<'save' | 'share' | null>(null);
+  const [guideStep, setGuideStep] = useState('');
+  const [guideEnabled, setGuideEnabled] = useState(true);
+  const [guideIntroDismissed, setGuideIntroDismissed] = useState(false);
+  const [guideCompleted, setGuideCompleted] = useState<string[]>([]);
+  const [shareDialogTab, setShareDialogTab] = useState<ViewerTab | null>(null);
   const navigate = useNavigate();
   const params = useParams<{ issueCode?: string; bundleHash?: string }>();
   const bundleHash = params.bundleHash || '';
@@ -305,6 +314,13 @@ export function BundleView() {
     auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest',
     resetWorkspace
   );
+  const completeSaveGuide = useCallback(() => {
+    if (guideTask !== 'save') return;
+    const completed = [...new Set([...guideCompleted, 'save'])];
+    setGuideCompleted(completed);
+    updateOnboardingProgress(onboardingIdentity, { introDismissed: true, completed });
+    setGuideStep('complete');
+  }, [guideCompleted, guideTask, onboardingIdentity]);
   const savedSearch = useSavedSearchController({
     authenticated: isBusinessUser,
     issueCode,
@@ -313,8 +329,42 @@ export function BundleView() {
     issueSearch,
     navigate,
     openViewerTab,
-    waitForWorkspaceSession
+    waitForWorkspaceSession,
+    onSaveSuccess: completeSaveGuide
   });
+  useEffect(() => {
+    const saved = readOnboardingProgress(onboardingIdentity);
+    setGuideEnabled(saved.enabled);
+    setGuideIntroDismissed(saved.introDismissed);
+    setGuideCompleted(saved.completed);
+    setGuideTask(null);
+    setGuideStep('');
+    return subscribeOnboardingProgress(onboardingIdentity, (updated) => {
+      setGuideEnabled(updated.enabled);
+      setGuideIntroDismissed(updated.introDismissed);
+      setGuideCompleted(updated.completed);
+    });
+  }, [onboardingIdentity]);
+
+  useEffect(() => {
+    const openGuide = () => setGuideChooserOpen(true);
+    window.addEventListener('rain:open-onboarding', openGuide);
+    return () => window.removeEventListener('rain:open-onboarding', openGuide);
+  }, []);
+
+  useEffect(() => {
+    if (guideTask === 'share' && guideStep === 'share-target' && activeViewerTab && activeViewerTab.kind !== 'temp') {
+      setGuideStep('share-button');
+    }
+  }, [activeViewerTab, guideStep, guideTask]);
+
+  useEffect(() => {
+    if (location.pathname.includes('/issue/')) {
+      setGuideTask(null);
+      setGuideStep('');
+      setGuideChooserOpen(false);
+    }
+  }, [issueCode, location.pathname]);
   const activeFileNode = activeViewerTab?.kind === 'file'
     ? treeNodes[activeViewerTab.nodeId] ?? null
     : null;
@@ -1078,12 +1128,14 @@ export function BundleView() {
     }
     setSourceActionMessage(null);
     setShareDialogUrl(url);
+    setShareDialogTab(tab);
     setShareDialogCopied(false);
     setShareDialogError(null);
   };
 
   const closeShareDialog = () => {
     setShareDialogUrl(null);
+    setShareDialogTab(null);
     setShareDialogCopied(false);
     setShareDialogError(null);
   };
@@ -1094,6 +1146,7 @@ export function BundleView() {
       await copyText(shareDialogUrl);
       setShareDialogCopied(true);
       setShareDialogError(null);
+      if (guideTask === 'share' && guideStep === 'share-copy') completeShareGuide();
     } catch (error) {
       setShareDialogError(error instanceof Error ? error.message : '链接复制失败，请手动复制地址');
     }
@@ -1659,9 +1712,54 @@ export function BundleView() {
   );
   const canRunFileSearch = canFinalizeSearch(fileSearch.tokens, fileSearch.draft, false);
   const canRunResultFilter = canFinalizeSearch(viewerSearch.tokens, viewerSearch.draft, false);
+  const startGuide = (task: 'save' | 'share') => {
+    setGuideChooserOpen(false);
+    setGuideTask(task);
+    setGuideStep(task === 'save'
+      ? (isBusinessUser ? 'save-condition' : 'save-access')
+      : (activeViewerTab && activeViewerTab.kind !== 'temp' ? 'share-button' : 'share-target'));
+  };
+  const stopGuide = () => {
+    setGuideTask(null);
+    setGuideStep('');
+    setGuideChooserOpen(false);
+  };
+  const dismissGuideIntro = () => {
+    setGuideIntroDismissed(true);
+    updateOnboardingProgress(onboardingIdentity, { introDismissed: true });
+  };
+  function completeShareGuide() {
+    const completed = [...new Set([...guideCompleted, 'share'])];
+    setGuideCompleted(completed);
+    updateOnboardingProgress(onboardingIdentity, { introDismissed: true, completed });
+    setGuideStep('complete');
+  }
+  const setOnboardingEnabled = (enabled: boolean) => {
+    setGuideEnabled(enabled);
+    updateOnboardingProgress(onboardingIdentity, { enabled });
+  };
+  const handleGuideShare = (tab: ViewerTab) => {
+    shareTab(tab);
+    if (guideTask === 'share' && guideStep === 'share-button' && buildTabShareUrl(tab, issueCode, window.location.origin)) {
+      setGuideStep('share-copy');
+    }
+  };
 
   return (
     <div className="space-y-5">
+      {issueCode && !sharedTab && guideEnabled && !guideIntroDismissed && auth.state.status !== 'LOADING' ? (
+        <section aria-label="快速上手" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm">
+          <div>
+            <p className="font-semibold text-slate-900">快速上手</p>
+            <p className="mt-0.5 text-slate-600">{isBusinessUser ? '学习保存常用的 Issue 搜索条件，或分享当前打开的文件和搜索结果。' : auth.state.status === 'GUEST' ? '访客可以搜索和分享日志；登录普通用户后可保存搜索条件。' : '普通用户可以保存搜索条件；也可以分享当前打开的文件和搜索结果。'}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="rounded-md bg-slate-950 px-3 py-2 font-semibold text-white hover:bg-slate-800" onClick={() => startGuide('save')}>{isBusinessUser ? '保存搜索条件' : auth.state.status === 'GUEST' ? '保存搜索条件（需登录）' : '保存条件（普通用户可用）'}</button>
+            <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800 hover:bg-sky-50" onClick={() => startGuide('share')}>分享文件 / 搜索结果</button>
+            <button type="button" className="rounded-md px-2 py-2 text-slate-600 hover:bg-white" onClick={dismissGuideIntro}>暂时跳过</button>
+          </div>
+        </section>
+      ) : null}
       <section className="panel overflow-hidden !p-0 lg:h-[calc(100vh-104px)]">
         {treeError ? (
           <p className="m-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-600">
@@ -1687,7 +1785,8 @@ export function BundleView() {
                 </button>
               </div>
               <form
-                className="flex min-h-11 items-start gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm shadow-slate-100 focus-within:border-sky-400"
+                data-guide-anchor="issue-search"
+                className={`flex min-h-11 items-start gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm shadow-slate-100 focus-within:border-sky-400 ${guideTask === 'save' && guideStep === 'save-condition' ? 'outline outline-2 outline-cyan-500 outline-offset-2' : ''}`}
                 onSubmit={handleSearchSubmit}
               >
                 <span className="mt-1.5 shrink-0 text-slate-500" aria-hidden="true">⌕</span>
@@ -1727,6 +1826,7 @@ export function BundleView() {
                   <>
                     <button
                       type="button"
+                      data-guide-anchor="my-saved-searches"
                       className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
                       onClick={() => savedSearch.setSavedSearchesOpen((open) => !open)}
                     >
@@ -1734,8 +1834,12 @@ export function BundleView() {
                     </button>
                     <button
                       type="button"
-                      className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400"
-                      onClick={savedSearch.beginSaveSearch}
+                      data-guide-anchor="save-search"
+                      className={`rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-semibold text-slate-700 hover:border-sky-400 ${guideTask === 'save' && guideStep === 'save-button' ? 'outline outline-2 outline-cyan-500 outline-offset-2' : ''}`}
+                      onClick={() => {
+                        savedSearch.beginSaveSearch();
+                        if (guideTask === 'save' && guideStep === 'save-button') setGuideStep('save-name');
+                      }}
                     >
                       保存条件
                     </button>
@@ -1841,7 +1945,7 @@ export function BundleView() {
               activeTabId={activeViewerTabId}
               onActivate={activateViewerTabWithState}
               onTogglePinned={togglePinnedViewerTab}
-              onShare={shareTab}
+              onShare={handleGuideShare}
               onClose={closeTab}
               onCloseMany={closeTabs}
             />
@@ -2139,16 +2243,68 @@ export function BundleView() {
           </div>
         </div>
       </section>
+      {guideChooserOpen ? (
+        <div role="dialog" aria-label="新手指引" className="fixed right-4 top-20 z-[70] w-[min(22rem,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-4 shadow-2xl">
+          <div className="flex items-start justify-between gap-3">
+            <div><h2 className="font-semibold text-slate-950">你想了解什么？</h2><p className="mt-1 text-xs text-slate-500">{auth.state.status === 'GUEST' ? '访客可以分享内容；保存搜索条件需要登录普通用户账号。' : '可以随时退出，之后再从这里打开。'}</p></div>
+            <button type="button" aria-label="关闭新手指引选择" className="rounded px-2 text-xl text-slate-500 hover:bg-slate-100" onClick={() => setGuideChooserOpen(false)}>×</button>
+          </div>
+          <label className="mt-3 flex cursor-pointer items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            <span>自动显示新手提示</span>
+            <input type="checkbox" checked={guideEnabled} onChange={(event) => setOnboardingEnabled(event.target.checked)} />
+          </label>
+          <div className="mt-3 grid gap-2">
+            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startGuide('save')}>
+              <span className="block text-sm font-semibold text-slate-900">保存搜索条件{isBusinessUser ? '' : auth.state.status === 'GUEST' ? '（登录后可用）' : '（普通用户可用）'}</span>
+              <span className="mt-1 block text-xs text-slate-600">{isBusinessUser ? '保存左侧 Issue 搜索条件，之后可以重复使用。' : auth.state.status === 'GUEST' ? '登录普通用户账号后，可保存并重复使用搜索条件。' : '保存搜索条件仅面向普通用户账号。'}</span>
+            </button>
+            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startGuide('share')}>
+              <span className="block text-sm font-semibold text-slate-900">分享文件或搜索结果</span>
+              <span className="mt-1 block text-xs text-slate-600">复制当前标签的链接，让对方打开相同来源。</span>
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {guideTask ? (
+        <aside aria-live="polite" className="fixed bottom-4 right-4 z-40 w-[min(25rem,calc(100vw-2rem))] rounded-xl border border-sky-200 bg-white p-4 shadow-2xl">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-sky-700">新手指引 · {guideTask === 'save' ? '保存条件' : '分享内容'}</p>
+              <p className="mt-1 text-sm leading-5 text-slate-700">
+                {guideStep === 'save-condition' ? '在左侧 Issue 搜索框输入条件。这里保存的是搜索条件，不需要先执行搜索。' : null}
+                {guideStep === 'save-button' ? '条件有效了。点击左侧“保存条件”继续。' : null}
+                {guideStep === 'save-name' ? '给这组条件取个容易识别的名字，然后在弹窗里保存。' : null}
+                {guideStep === 'share-target' ? '先打开一个文件，或运行一次搜索，生成要分享的标签。' : null}
+                {guideStep === 'share-button' ? '确认当前标签是你要分享的内容，再点击标签栏里的“分享当前标签”。' : null}
+                {guideStep === 'share-copy' ? '点击“复制链接”分享给对方。' : null}
+                {guideStep === 'save-access' && auth.state.status === 'GUEST' ? '保存条件需要普通用户账户。登录后可以保存并重复使用。' : null}
+                {guideStep === 'save-access' && auth.state.status === 'AUTHENTICATED' ? '保存条件面向普通用户账户。当前管理员账户没有个人搜索条件功能。' : null}
+                {guideStep === 'complete' ? `完成：${guideTask === 'save' ? '已保存。之后从“我的搜索条件”选择“使用”，即可在当前 Issue 搜索。' : '链接已复制，可以粘贴给对方。'}` : null}
+              </p>
+            </div>
+            <button type="button" aria-label="退出新手指引" className="-mr-2 -mt-2 rounded px-2 text-xl text-slate-500 hover:bg-slate-100" onClick={stopGuide}>×</button>
+          </div>
+          <div className="mt-3 flex justify-end gap-2">
+            {guideStep === 'save-condition' ? <button type="button" disabled={!canRunSearch} className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40" onClick={() => setGuideStep('save-button')}>我已输入条件，下一步</button> : null}
+            {guideStep === 'save-access' && auth.state.status === 'GUEST' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={() => navigate('/login', { state: { from: `${location.pathname}${location.search}` } })}>登录 / 注册</button> : null}
+            {guideStep === 'complete' && guideTask === 'save' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={() => { savedSearch.setSavedSearchesOpen(true); stopGuide(); }}>查看我的搜索条件</button> : null}
+            {guideStep === 'complete' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={stopGuide}>完成</button> : null}
+            {guideStep !== 'complete' && guideStep !== 'save-access' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={stopGuide}>退出指引</button> : null}
+          </div>
+        </aside>
+      ) : null}
       {savedSearch.saveDialogOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <h3 className="text-xl font-semibold">保存搜索条件</h3>
+            <p className="mt-2 text-sm text-slate-600">保存当前左侧 Issue 搜索条件，之后可从“我的搜索条件”重复使用。</p>
+            {guideTask === 'save' && guideStep === 'save-name' ? <p className="mt-2 rounded-md bg-cyan-50 px-3 py-2 text-sm text-cyan-900">取个容易识别的名字，例如“错误日志”。保存成功后就学会了。</p> : null}
             <label className="mt-4 block text-sm font-medium">名称
               <input className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2" maxLength={80} value={savedSearch.savedSearchName} onChange={(event) => { savedSearch.bumpSaveGeneration(); savedSearch.setSavedSearchName(event.target.value); }} autoFocus />
             </label>
             {savedSearch.error ? <p className="mt-3 text-sm text-rose-600">{savedSearch.error}</p> : null}
             <div className="mt-6 flex justify-end gap-3">
-              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { savedSearch.bumpSaveGeneration(); savedSearch.setSaveDialogOpen(false); }}>取消</button>
+              <button className="rounded-lg border border-slate-300 px-4 py-2" type="button" onClick={() => { savedSearch.bumpSaveGeneration(); savedSearch.setSaveDialogOpen(false); if (guideTask === 'save' && guideStep === 'save-name') setGuideStep('save-button'); }}>取消</button>
               <button className="rounded-lg bg-slate-950 px-4 py-2 font-semibold text-white" type="button" onClick={() => void savedSearch.saveSearch()}>保存</button>
             </div>
           </div>
@@ -2206,10 +2362,10 @@ export function BundleView() {
                 ×
               </button>
             </div>
-            <label htmlFor="share-dialog-url" className="mt-5 block text-sm font-medium text-slate-700">分享链接</label>
             <input
               id="share-dialog-url"
-              className="mt-2 w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
+              aria-label="分享链接"
+              className="mt-5 w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
               type="text"
               readOnly
               value={shareDialogUrl}
@@ -2217,13 +2373,18 @@ export function BundleView() {
             />
             {shareDialogError ? <p className="mt-3 text-sm text-rose-600" role="alert">{shareDialogError}</p> : null}
             <div className="mt-6 flex justify-end">
-              <button
-                type="button"
-                className="rounded-lg bg-sky-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
-                onClick={() => void copyShareDialogUrl()}
-              >
-                {shareDialogCopied ? '已复制' : '复制链接'}
-              </button>
+              <div className="flex flex-wrap justify-end gap-2">
+                {shareDialogError && guideTask === 'share' && guideStep === 'share-copy' ? (
+                  <button type="button" className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700" onClick={completeShareGuide}>我已手动复制</button>
+                ) : null}
+                <button
+                  type="button"
+                  className="rounded-lg bg-sky-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
+                  onClick={() => void copyShareDialogUrl()}
+                >
+                  {shareDialogCopied ? '已复制' : '复制链接'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
