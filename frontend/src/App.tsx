@@ -10,7 +10,7 @@ import { isAdmin } from './auth/permissions';
 import { AdminPage, AdminUsersPage, AuditLogsPage, AdminSettingsPage, AuthRateLimitsPage, InvitationsAdminPage } from './features/admin/AdminPage';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { rainApi } from './api/client';
-import { readOnboardingProgress, updateOnboardingProgress } from './features/files/onboardingProgress';
+import { readOnboardingProgress, subscribeOnboardingProgress, updateOnboardingProgress } from './features/files/onboardingProgress';
 
 const HomeView = lazy(() => import('./features/files/HomeView').then((module) => ({ default: module.HomeView })));
 
@@ -26,9 +26,11 @@ function App() {
   const [adminOnboardingEnabled, setAdminOnboardingEnabled] = useState(true);
 
   useEffect(() => {
-    if (adminIdentity) {
-      setAdminOnboardingEnabled(readOnboardingProgress(adminIdentity).enabled);
-    }
+    if (!adminIdentity) return;
+    setAdminOnboardingEnabled(readOnboardingProgress(adminIdentity).enabled);
+    return subscribeOnboardingProgress(adminIdentity, (progress) => {
+      setAdminOnboardingEnabled(progress.enabled);
+    });
   }, [adminIdentity]);
 
   useEffect(() => {

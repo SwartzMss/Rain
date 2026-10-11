@@ -11,6 +11,12 @@ const defaults: OnboardingProgress = {
 };
 
 export const onboardingStorageKey = (identity: string) => `rain:onboarding:v1:${identity}`;
+const onboardingProgressChangedEvent = 'rain:onboarding-progress-changed';
+
+type OnboardingProgressChange = {
+  identity: string;
+  progress: OnboardingProgress;
+};
 
 export function readOnboardingProgress(identity: string): OnboardingProgress {
   try {
@@ -34,5 +40,31 @@ export function updateOnboardingProgress(identity: string, patch: Partial<Onboar
   } catch {
     // Onboarding preferences are optional and must not affect app behavior.
   }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent<OnboardingProgressChange>(onboardingProgressChangedEvent, {
+      detail: { identity, progress: next }
+    }));
+  }
   return next;
+}
+
+export function subscribeOnboardingProgress(
+  identity: string,
+  onChange: (progress: OnboardingProgress) => void
+) {
+  if (typeof window === 'undefined') return () => undefined;
+  const key = onboardingStorageKey(identity);
+  const handleCustomChange = (event: Event) => {
+    const detail = (event as CustomEvent<OnboardingProgressChange>).detail;
+    if (detail?.identity === identity) onChange(detail.progress);
+  };
+  const handleStorageChange = (event: StorageEvent) => {
+    if (event.key === key || event.key === null) onChange(readOnboardingProgress(identity));
+  };
+  window.addEventListener(onboardingProgressChangedEvent, handleCustomChange);
+  window.addEventListener('storage', handleStorageChange);
+  return () => {
+    window.removeEventListener(onboardingProgressChangedEvent, handleCustomChange);
+    window.removeEventListener('storage', handleStorageChange);
+  };
 }

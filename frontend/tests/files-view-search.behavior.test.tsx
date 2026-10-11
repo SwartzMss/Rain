@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BundleView } from '../src/features/files/FilesView';
 import { PENDING_SAVED_SEARCH_KEY } from '../src/features/files/pendingSavedSearch';
+import { onboardingStorageKey, updateOnboardingProgress } from '../src/features/files/onboardingProgress';
 
 const testMocks = vi.hoisted(() => ({
   role: 'USER' as 'USER' | 'ADMIN',
@@ -1139,5 +1140,23 @@ describe('shared file search restoration', () => {
 
     expect(await screen.findByText('complete file content')).toBeInTheDocument();
     expect(testMocks.execute).not.toHaveBeenCalled();
+  });
+});
+
+describe('onboarding preference synchronization', () => {
+  it('updates the BundleView guide when the same-user preference changes elsewhere', async () => {
+    localStorage.removeItem(onboardingStorageKey('user-1'));
+    testMocks.fetchIssueBundles.mockResolvedValue({ log_bundles: [] });
+    renderBundleView();
+
+    expect(await screen.findByLabelText('快速上手')).toBeInTheDocument();
+    act(() => updateOnboardingProgress('user-1', { enabled: false }));
+    await waitFor(() => expect(screen.queryByLabelText('快速上手')).not.toBeInTheDocument());
+
+    act(() => window.dispatchEvent(new Event('rain:open-onboarding')));
+    const onboardingToggle = await screen.findByRole('checkbox', { name: '自动显示新手提示' });
+    expect(onboardingToggle).not.toBeChecked();
+    fireEvent.click(onboardingToggle);
+    expect(await screen.findByLabelText('快速上手')).toBeInTheDocument();
   });
 });

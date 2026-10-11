@@ -56,7 +56,7 @@ import { useViewerPaginationController } from './hooks/useViewerPaginationContro
 import { useSavedSearchController } from './hooks/useSavedSearchController';
 import { useIssueWorkspaceSession } from './hooks/useIssueWorkspaceSession';
 import { buildTabShareUrl, parseSharedTabSearch, type SharedTabDescriptor } from './tabShareLink';
-import { readOnboardingProgress, updateOnboardingProgress } from './onboardingProgress';
+import { readOnboardingProgress, subscribeOnboardingProgress, updateOnboardingProgress } from './onboardingProgress';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
@@ -339,6 +339,11 @@ export function BundleView() {
     setGuideCompleted(saved.completed);
     setGuideTask(null);
     setGuideStep('');
+    return subscribeOnboardingProgress(onboardingIdentity, (updated) => {
+      setGuideEnabled(updated.enabled);
+      setGuideIntroDismissed(updated.introDismissed);
+      setGuideCompleted(updated.completed);
+    });
   }, [onboardingIdentity]);
 
   useEffect(() => {

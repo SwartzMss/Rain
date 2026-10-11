@@ -17,7 +17,7 @@ import { IssueExpirationNotice } from './components/IssueExpirationNotice';
 import { IssueDeleteButton } from './components/IssueDeleteButton';
 import type { FileDeletionBatchResponse, FileDeletionJobResponse } from '../../api/types';
 import { normalizeDeletionError } from './deleteFeedback';
-import { readOnboardingProgress, updateOnboardingProgress } from './onboardingProgress';
+import { readOnboardingProgress, subscribeOnboardingProgress, updateOnboardingProgress } from './onboardingProgress';
 
 const wait = (milliseconds: number) => new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 
@@ -115,6 +115,11 @@ export function HomeView() {
     setGuideCompleted(progress.completed);
     setGuideTask(null);
     setGuideStep('');
+    return subscribeOnboardingProgress(onboardingIdentity, (updated) => {
+      setGuideEnabled(updated.enabled);
+      setGuideIntroDismissed(updated.introDismissed);
+      setGuideCompleted(updated.completed);
+    });
   }, [onboardingIdentity]);
 
   useEffect(() => {
@@ -124,20 +129,35 @@ export function HomeView() {
   }, []);
 
   useEffect(() => {
-    if (guideTask === 'upload' && guideStep === 'upload-issue' && issues.currentIssueCode && !bundles.bundlesLoading) {
-      setGuideStep(canWrite ? 'upload-action' : 'upload-access');
+    if (
+      guideTask === 'upload' &&
+      (guideStep === 'upload-issue' || guideStep === 'upload-loading') &&
+      issues.currentIssueCode
+    ) {
+      if (bundles.resolvedIssueCode !== issues.currentIssueCode || bundles.bundlesLoading) {
+        if (guideStep !== 'upload-loading') setGuideStep('upload-loading');
+      } else {
+        setGuideStep(canWrite ? 'upload-action' : 'upload-access');
+      }
     }
-    if (guideTask === 'delete' && guideStep === 'delete-issue' && issues.currentIssueCode && !bundles.bundlesLoading) {
-      setGuideStep(canWrite
-        ? (deleteGuideLoading ? 'delete-loading' : hasDeletableFiles ? 'delete-action' : 'delete-empty')
-        : 'delete-access');
+    if (
+      guideTask === 'delete' &&
+      (guideStep === 'delete-issue' || guideStep === 'delete-loading') &&
+      issues.currentIssueCode
+    ) {
+      if (
+        bundles.resolvedIssueCode !== issues.currentIssueCode ||
+        bundles.bundlesLoading ||
+        deleteGuideLoading
+      ) {
+        if (guideStep !== 'delete-loading') setGuideStep('delete-loading');
+      } else {
+        setGuideStep(canWrite
+          ? (hasDeletableFiles ? 'delete-action' : 'delete-empty')
+          : 'delete-access');
+      }
     }
-    if (guideTask === 'delete' && guideStep === 'delete-loading' && !deleteGuideLoading) {
-      setGuideStep(canWrite
-        ? (hasDeletableFiles ? 'delete-action' : 'delete-empty')
-        : 'delete-access');
-    }
-  }, [canWrite, deleteGuideLoading, guideStep, guideTask, hasDeletableFiles, issues.currentIssueCode]);
+  }, [bundles.bundlesLoading, bundles.resolvedIssueCode, canWrite, deleteGuideLoading, guideStep, guideTask, hasDeletableFiles, issues.currentIssueCode]);
 
   useEffect(() => {
     if (guideTask !== 'upload' || guideStep !== 'upload-wait') return;
@@ -160,7 +180,15 @@ export function HomeView() {
     if (task === 'create') {
       setGuideStep(canCreateIssue ? 'create-button' : 'create-access');
     } else if (task === 'upload') {
-      setGuideStep(isGuest ? 'upload-access' : !issues.currentIssueCode ? 'upload-issue' : canWrite ? 'upload-action' : 'upload-access');
+      setGuideStep(isGuest
+        ? 'upload-access'
+        : !issues.currentIssueCode
+          ? 'upload-issue'
+          : bundles.resolvedIssueCode !== issues.currentIssueCode || bundles.bundlesLoading
+            ? 'upload-loading'
+            : canWrite
+              ? 'upload-action'
+              : 'upload-access');
     } else {
       guideDeleteSucceededRef.current = false;
       guideDeleteTargetKeyRef.current = null;
@@ -168,7 +196,7 @@ export function HomeView() {
         ? 'delete-access'
         : !issues.currentIssueCode
         ? 'delete-issue'
-        : deleteGuideLoading
+        : bundles.resolvedIssueCode !== issues.currentIssueCode || bundles.bundlesLoading || deleteGuideLoading
           ? 'delete-loading'
           : !canWrite
             ? 'delete-access'
@@ -643,12 +671,13 @@ export function HomeView() {
             {guideStep === 'create-form' ? '在弹窗里填写 Issue ID 并点击创建。只有创建成功后教程才会完成。' : null}
             {guideStep === 'create-access' ? '新建 Issue 需要普通用户账户。' : null}
             {guideStep === 'upload-issue' ? '先选择一个 Issue，上传的压缩包会放在该 Issue 下面。' : null}
+            {guideStep === 'upload-loading' ? '正在读取当前 Issue 的权限…' : null}
             {guideStep === 'upload-action' ? '点击“选择文件”或把 .zip、.7z、.tar.gz 等支持的日志压缩包拖到上传区域。' : null}
             {guideStep === 'upload-wait' ? '上传已加入任务队列。Rain 会在后台接收、校验、解压并建立索引。' : null}
             {guideStep === 'upload-failed' ? '上传没有成功。查看上传区域的错误信息，然后重试；教程仍可从这里重新打开。' : null}
             {guideStep === 'upload-access' || guideStep === 'delete-access' ? (isGuest ? '访客不能上传或删除文件。登录普通用户账号后，还需要对目标 Issue 有写入权限。' : '这个 Issue 是只读的。上传和删除文件需要该 Issue 的写入权限。') : null}
             {guideStep === 'delete-issue' ? '先选择包含待删除文件的 Issue。' : null}
-            {guideStep === 'delete-loading' ? '正在读取 Issue 中的文件…' : null}
+            {guideStep === 'delete-loading' ? '正在读取 Issue 的权限和文件…' : null}
             {guideStep === 'delete-action' ? '在“文件列表”中找到要删除的日志文件，点击这一行的“删除”。这只会删除选中的文件。' : null}
             {guideStep === 'delete-confirm' ? '确认窗口会说明将删除的文件；确认后，这个文件会从当前 Issue 中移除。' : null}
             {guideStep === 'delete-empty' ? '当前 Issue 没有可删除的日志文件。先选择一个包含已处理日志的 Issue。' : null}
