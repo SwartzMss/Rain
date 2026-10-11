@@ -809,6 +809,32 @@ describe('shared file search restoration', () => {
     });
   });
 
+  it.each([
+    { committed: '', draft: 'timeout', expression: '"timeout"' },
+    { committed: 'file', draft: '', expression: '"file"' },
+    { committed: 'file', draft: 'timeout', expression: '"timeout"' }
+  ])('runs file search on Enter with $committed and $draft', async ({ committed, draft, expression }) => {
+    renderBundleView();
+    const input = await screen.findByRole('textbox', { name: '当前文件搜索条件' });
+
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    expect(testMocks.execute).not.toHaveBeenCalled();
+    if (committed) {
+      fireEvent.change(input, { target: { value: committed } });
+      fireEvent.keyDown(input, { key: 'Tab', code: 'Tab' });
+      expect(screen.getByRole('button', { name: `编辑关键词 ${committed}` })).toBeInTheDocument();
+      expect(testMocks.execute).not.toHaveBeenCalled();
+    }
+    fireEvent.change(input, { target: { value: draft } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => expect(testMocks.execute).toHaveBeenCalledTimes(1));
+    expect(testMocks.execute.mock.calls[0][0]).toMatchObject({
+      expression, bundle_hash: 'bundle', file_id: '42', from: 0
+    });
+    expect(await screen.findByText('lpkey match')).toBeInTheDocument();
+  });
+
   it('opens a shared file search for admins without accessing personal saved searches', async () => {
     testMocks.role = 'ADMIN';
     const pending = JSON.stringify(savedAdvancedSearch);
