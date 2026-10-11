@@ -15,10 +15,9 @@ import { shouldShowOptimisticUploadTask } from './uploadRows';
 import { isUser } from '../../auth/permissions';
 import { IssueExpirationNotice } from './components/IssueExpirationNotice';
 import { IssueDeleteButton } from './components/IssueDeleteButton';
-import type { FileDeletionBatchResponse, FileDeletionJobResponse, UploadSummary } from '../../api/types';
+import type { FileDeletionBatchResponse, FileDeletionJobResponse } from '../../api/types';
 import { normalizeDeletionError } from './deleteFeedback';
 import { readOnboardingProgress, updateOnboardingProgress } from './onboardingProgress';
-import { UploadBundleList } from './components/UploadBundleList';
 
 const wait = (milliseconds: number) => new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 
@@ -77,7 +76,7 @@ export function HomeView() {
   const [guideTask, setGuideTask] = useState<'create' | 'upload' | 'delete' | null>(null);
   const [guideStep, setGuideStep] = useState('');
   const [guideUploadBaselineIds, setGuideUploadBaselineIds] = useState<string[]>([]);
-  const [guideDeleteBundleHash, setGuideDeleteBundleHash] = useState<string | null>(null);
+  const guideDeleteTargetKeyRef = useRef<string | null>(null);
   const guideDeleteSucceededRef = useRef(false);
 
   const issues = useIssues();
@@ -104,6 +103,10 @@ export function HomeView() {
     setGuideStep('complete');
   }, [guideCompleted, onboardingIdentity]);
 
+  const readyBundles = bundles.bundles.filter((bundle) => bundle.status.upload_status === 'READY');
+  const deleteGuideLoading = bundles.bundlesLoading || readyBundles.some((bundle) => !bundles.bundleFiles[bundle.hash]?.loaded);
+  const hasDeletableFiles = readyBundles.some((bundle) => (bundles.bundleFiles[bundle.hash]?.files.length ?? 0) > 0);
+
   useEffect(() => {
     const progress = readOnboardingProgress(onboardingIdentity);
     setGuideEnabled(progress.enabled);
@@ -125,15 +128,15 @@ export function HomeView() {
     }
     if (guideTask === 'delete' && guideStep === 'delete-issue' && issues.currentIssueCode && !bundles.bundlesLoading) {
       setGuideStep(canWrite
-        ? (bundles.bundles.some((bundle) => bundle.status.upload_status === 'READY' || bundle.status.upload_status === 'FAILED') ? 'delete-action' : 'delete-empty')
+        ? (deleteGuideLoading ? 'delete-loading' : hasDeletableFiles ? 'delete-action' : 'delete-empty')
         : 'delete-access');
     }
-    if (guideTask === 'delete' && guideStep === 'delete-loading' && !bundles.bundlesLoading) {
+    if (guideTask === 'delete' && guideStep === 'delete-loading' && !deleteGuideLoading) {
       setGuideStep(canWrite
-        ? (bundles.bundles.some((bundle) => bundle.status.upload_status === 'READY' || bundle.status.upload_status === 'FAILED') ? 'delete-action' : 'delete-empty')
+        ? (hasDeletableFiles ? 'delete-action' : 'delete-empty')
         : 'delete-access');
     }
-  }, [bundles.bundles, bundles.bundlesLoading, canWrite, guideStep, guideTask, issues.currentIssueCode]);
+  }, [canWrite, deleteGuideLoading, guideStep, guideTask, hasDeletableFiles, issues.currentIssueCode]);
 
   useEffect(() => {
     if (guideTask !== 'upload' || guideStep !== 'upload-wait') return;
@@ -159,14 +162,14 @@ export function HomeView() {
       setGuideStep(!issues.currentIssueCode ? 'upload-issue' : canWrite ? 'upload-action' : 'upload-access');
     } else {
       guideDeleteSucceededRef.current = false;
-      const hasDeletableBundle = bundles.bundles.some((bundle) => bundle.status.upload_status === 'READY' || bundle.status.upload_status === 'FAILED');
+      guideDeleteTargetKeyRef.current = null;
       setGuideStep(!issues.currentIssueCode
         ? 'delete-issue'
-        : bundles.bundlesLoading
+        : deleteGuideLoading
           ? 'delete-loading'
           : !canWrite
             ? 'delete-access'
-            : hasDeletableBundle
+            : hasDeletableFiles
               ? 'delete-action'
               : 'delete-empty');
     }
@@ -175,6 +178,7 @@ export function HomeView() {
     setGuideTask(null);
     setGuideStep('');
     setGuideChooserOpen(false);
+    guideDeleteTargetKeyRef.current = null;
   };
   const dismissHomeGuideIntro = () => {
     setGuideIntroDismissed(true);
@@ -184,11 +188,12 @@ export function HomeView() {
     setGuideEnabled(enabled);
     updateOnboardingProgress(onboardingIdentity, { enabled });
   };
-  const cancelGuideBundleDelete = () => {
+  const cancelGuideDelete = () => {
     setConfirmDialog(null);
     if (guideTask === 'delete' && guideStep === 'delete-confirm' && !guideDeleteSucceededRef.current) {
       setGuideStep('delete-action');
     }
+    guideDeleteTargetKeyRef.current = null;
   };
 
   const existingBundleHashes = useMemo(
@@ -357,19 +362,20 @@ export function HomeView() {
               throw new Error(finishedJob.last_error_code || '删除任务等待重试');
             }
             await bundles.loadBundleFiles(row.bundleHash);
-          } else {
-            await rainApi.deleteBundle(issues.currentIssueCode, row.bundleHash);
-            if (guideTask === 'delete' && guideStep === 'delete-confirm' && guideDeleteBundleHash === row.bundleHash) {
+            if (guideTask === 'delete' && guideDeleteTargetKeyRef.current === row.key) {
               guideDeleteSucceededRef.current = true;
+              guideDeleteTargetKeyRef.current = null;
               completeHomeGuide('delete');
             }
+          } else {
+            await rainApi.deleteBundle(issues.currentIssueCode, row.bundleHash);
             await bundles.loadBundles(issues.currentIssueCode);
           }
           completed += 1;
         } catch (error) {
           failed.push(`${row.name}：${normalizeDeletionError(error)}`);
           bundles.setBundlesError(normalizeDeletionError(error));
-          if (guideTask === 'delete' && guideDeleteBundleHash === row.bundleHash) setGuideStep('delete-error');
+          if (guideTask === 'delete' && guideDeleteTargetKeyRef.current === row.key) setGuideStep('delete-error');
         } finally {
           setDeletionBatch({ total: rows.length, completed, failed: [...failed], current: null });
           setDeletingKeys((current) => {
@@ -392,33 +398,21 @@ export function HomeView() {
       ]);
       setDeletionBatch({ total: rows.length, completed, failed, current: null });
     },
-    [bundles, completeHomeGuide, guideDeleteBundleHash, guideStep, guideTask, issues]
+    [bundles, completeHomeGuide, guideStep, guideTask, issues]
   );
 
   const deleteRow = useCallback((row: FileRow) => {
     const target = row.file ? `文件 ${row.name}` : `压缩包 ${row.name}`;
+    if (guideTask === 'delete' && guideStep === 'delete-action' && row.file) {
+      guideDeleteSucceededRef.current = false;
+      guideDeleteTargetKeyRef.current = row.key;
+      setGuideStep('delete-confirm');
+    }
     setConfirmDialog({
       message: `确定删除${target}吗？此操作不可恢复。`,
       onConfirm: () => deleteRows([row])
     });
-  }, [deleteRows]);
-
-  const handleDeleteBundle = (bundle: UploadSummary) => {
-    const row: FileRow = {
-      key: bundle.hash,
-      bundleHash: bundle.hash,
-      bundleName: bundle.name || bundle.hash,
-      name: bundle.name || bundle.hash,
-      status: bundle.status.upload_status,
-      stage: bundle.stage
-    };
-    if (guideTask === 'delete' && guideStep === 'delete-action') {
-      guideDeleteSucceededRef.current = false;
-      setGuideDeleteBundleHash(bundle.hash);
-      setGuideStep('delete-confirm');
-    }
-    deleteRow(row);
-  };
+  }, [deleteRows, guideStep, guideTask]);
 
   const handleFilesSelected = (files: File[]) => {
     if (guideTask === 'upload' && guideStep === 'upload-action') {
@@ -463,11 +457,11 @@ export function HomeView() {
     <div className="space-y-4">
       {guideEnabled && !guideIntroDismissed ? (
         <section aria-label="快速上手" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm">
-          <div><p className="font-semibold text-slate-900">快速上手</p><p className="mt-0.5 text-slate-600">学习新建 Issue、上传压缩包和移除不需要的压缩包。</p></div>
+          <div><p className="font-semibold text-slate-900">快速上手</p><p className="mt-0.5 text-slate-600">学习新建 Issue、上传压缩包和删除日志文件。</p></div>
           <div className="flex flex-wrap gap-2">
             <button type="button" className="rounded-md bg-slate-950 px-3 py-2 font-semibold text-white" onClick={() => startHomeGuide('create')}>新建 Issue</button>
             <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800" onClick={() => startHomeGuide('upload')}>上传压缩包</button>
-            <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800" onClick={() => startHomeGuide('delete')}>删除压缩包</button>
+            <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800" onClick={() => startHomeGuide('delete')}>删除日志文件</button>
             <button type="button" className="rounded-md px-2 py-2 text-slate-600 hover:bg-white" onClick={dismissHomeGuideIntro}>暂时跳过</button>
           </div>
         </section>
@@ -535,14 +529,6 @@ export function HomeView() {
             />
           ) : null}
         </div>
-
-        <UploadBundleList
-          bundles={bundles.bundles}
-          canWrite={canWrite}
-          deletingKeys={deletingKeys}
-          highlightDelete={guideTask === 'delete' && guideStep === 'delete-action'}
-          onDeleteBundle={handleDeleteBundle}
-        />
 
         {deletionJob || deletionBatch ? (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -619,8 +605,8 @@ export function HomeView() {
         <ConfirmDialog
           dialog={confirmDialog}
           onBusyChange={(busy) => setConfirmDialog((prev) => (prev ? { ...prev, busy } : prev))}
-          onCancel={cancelGuideBundleDelete}
-          onClose={cancelGuideBundleDelete}
+          onCancel={cancelGuideDelete}
+          onClose={cancelGuideDelete}
         />
       ) : null}
       {guideChooserOpen ? (
@@ -633,13 +619,13 @@ export function HomeView() {
           <div className="mt-3 grid gap-2">
             <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('create')}><span className="block text-sm font-semibold">新建 Issue</span><span className="mt-1 block text-xs text-slate-600">创建一个 Issue 来整理日志。</span></button>
             <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('upload')}><span className="block text-sm font-semibold">上传压缩包</span><span className="mt-1 block text-xs text-slate-600">将日志包添加到一个有写入权限的 Issue。</span></button>
-            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('delete')}><span className="block text-sm font-semibold">删除压缩包</span><span className="mt-1 block text-xs text-slate-600">删除一个压缩包及其中全部日志文件。</span></button>
+            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('delete')}><span className="block text-sm font-semibold">删除日志文件</span><span className="mt-1 block text-xs text-slate-600">从当前 Issue 的文件列表中移除不需要的文件。</span></button>
           </div>
         </div>
       ) : null}
       {guideTask ? (
         <aside aria-live="polite" className="fixed bottom-4 right-4 z-40 w-[min(26rem,calc(100vw-2rem))] rounded-xl border border-sky-200 bg-white p-4 shadow-2xl">
-          <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wide text-sky-700">新手指引 · {guideTask === 'create' ? '新建 Issue' : guideTask === 'upload' ? '上传压缩包' : '删除压缩包'}</p><p className="mt-1 text-sm leading-5 text-slate-700">
+          <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wide text-sky-700">新手指引 · {guideTask === 'create' ? '新建 Issue' : guideTask === 'upload' ? '上传压缩包' : '删除日志文件'}</p><p className="mt-1 text-sm leading-5 text-slate-700">
             {guideStep === 'create-button' ? '点击左侧“新建 Issue”，然后填写一个容易识别的 Issue ID。' : null}
             {guideStep === 'create-form' ? '在弹窗里填写 Issue ID 并点击创建。只有创建成功后教程才会完成。' : null}
             {guideStep === 'create-access' ? '新建 Issue 需要普通用户账户。' : null}
@@ -647,14 +633,14 @@ export function HomeView() {
             {guideStep === 'upload-action' ? '点击“选择文件”或把 .zip、.7z、.tar.gz 等支持的日志压缩包拖到上传区域。' : null}
             {guideStep === 'upload-wait' ? '上传已加入任务队列。Rain 会在后台接收、校验、解压并建立索引。' : null}
             {guideStep === 'upload-failed' ? '上传没有成功。查看上传区域的错误信息，然后重试；教程仍可从这里重新打开。' : null}
-            {guideStep === 'upload-access' || guideStep === 'delete-access' ? '这个 Issue 是只读的。上传和删除压缩包需要该 Issue 的写入权限。' : null}
-            {guideStep === 'delete-issue' ? '先选择包含你要删除压缩包的 Issue。' : null}
-            {guideStep === 'delete-loading' ? '正在读取 Issue 中的压缩包列表…' : null}
-            {guideStep === 'delete-action' ? '在“已上传压缩包”列表里点击对应压缩包旁的“删除压缩包”。删除会移除包内全部日志，且不可恢复。' : null}
-            {guideStep === 'delete-confirm' ? '请确认压缩包名称和影响范围，再在确认窗口里点击“确定删除”。' : null}
-            {guideStep === 'delete-empty' ? '当前 Issue 没有可删除的压缩包。先上传一个压缩包，再回来学习删除。' : null}
+            {guideStep === 'upload-access' || guideStep === 'delete-access' ? '这个 Issue 是只读的。上传和删除文件需要该 Issue 的写入权限。' : null}
+            {guideStep === 'delete-issue' ? '先选择包含待删除文件的 Issue。' : null}
+            {guideStep === 'delete-loading' ? '正在读取 Issue 中的文件…' : null}
+            {guideStep === 'delete-action' ? '在“文件列表”中找到要删除的日志文件，点击这一行的“删除”。这只会删除选中的文件。' : null}
+            {guideStep === 'delete-confirm' ? '确认窗口会说明将删除的文件；确认后，这个文件会从当前 Issue 中移除。' : null}
+            {guideStep === 'delete-empty' ? '当前 Issue 没有可删除的日志文件。先选择一个包含已处理日志的 Issue。' : null}
             {guideStep === 'delete-error' ? '删除请求失败。检查页面上的错误信息后，可以重新尝试。' : null}
-            {guideStep === 'complete' ? (guideTask === 'create' ? 'Issue 已创建。现在可以选择它并上传日志包。' : guideTask === 'upload' ? '服务器已接收压缩包，后台会继续校验、解压并建立索引。' : '压缩包删除任务已提交，包内日志会一并移除。') : null}
+            {guideStep === 'complete' ? (guideTask === 'create' ? 'Issue 已创建。现在可以选择它并上传日志包。' : guideTask === 'upload' ? '服务器已接收压缩包，后台会继续校验、解压并建立索引。' : '日志文件已删除；同一压缩包中的其他文件不受影响。') : null}
           </p></div><button type="button" aria-label="退出新手指引" className="-mr-2 -mt-2 rounded px-2 text-xl text-slate-500 hover:bg-slate-100" onClick={stopHomeGuide}>×</button></div>
           <div className="mt-3 flex justify-end gap-2">
             {(guideStep === 'create-access' || guideStep === 'upload-access' || guideStep === 'delete-access') && auth.state.status === 'GUEST' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={() => navigate('/login', { state: { from: '/' } })}>登录</button> : null}
