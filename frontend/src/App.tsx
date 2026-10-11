@@ -3,14 +3,15 @@ import { useAuth } from './auth/AuthContext';
 import { AuthPage } from './features/auth/AuthPage';
 import { AccountPage } from './features/auth/AccountPage';
 import { BundleView } from './features/files/FilesView';
-import { HomeView } from './features/files/HomeView';
 import { TempResultRoute } from './features/files/TempResultView';
 import { APP_VERSION } from './version';
 import './App.css';
 import { isAdmin } from './auth/permissions';
 import { AdminPage, AdminUsersPage, AuditLogsPage, AdminSettingsPage, AuthRateLimitsPage, InvitationsAdminPage } from './features/admin/AdminPage';
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { rainApi } from './api/client';
+
+const HomeView = lazy(() => import('./features/files/HomeView').then((module) => ({ default: module.HomeView })));
 
 function App() {
   const auth = useAuth();
@@ -63,7 +64,7 @@ function App() {
             </div>
           </Link>
           <div className="flex items-center gap-3 text-sm font-medium text-slate-200">
-            {(location.pathname.startsWith('/issue/') || location.pathname.startsWith('/issues/')) ? (
+            {(location.pathname === '/' || location.pathname.startsWith('/issue/') || location.pathname.startsWith('/issues/')) ? (
               <button
                 type="button"
                 className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 font-semibold text-cyan-100 hover:bg-cyan-300/20"
@@ -129,7 +130,12 @@ function App() {
 
       <main className="mx-auto w-full max-w-none flex-1 px-5 py-5">
         <Routes>
-          <Route path="/" element={auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user) ? <Navigate to="/admin/users" replace /> : <HomeView />} />
+          <Route
+            path="/"
+            element={auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user)
+              ? <Navigate to="/admin/users" replace />
+              : <Suspense fallback={<p role="status" className="p-4 text-sm text-slate-500">正在加载…</p>}><HomeView /></Suspense>}
+          />
           <Route path="/login" element={<AuthPage mode="login" />} />
           <Route path="/register" element={<AuthPage mode="register" />} />
           <Route path="/account" element={<AccountPage />} />

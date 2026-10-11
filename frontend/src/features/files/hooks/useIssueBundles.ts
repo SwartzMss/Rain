@@ -9,7 +9,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   const [canWrite, setCanWrite] = useState(false);
   const [ownerUsername, setOwnerUsername] = useState<string | null>(null);
   const [inactivityExpiry, setInactivityExpiry] = useState<IssueInactivityExpiry | null>(null);
-  const [, setBundlesLoading] = useState(false);
+  const [bundlesLoading, setBundlesLoading] = useState(false);
   const [bundlesError, setBundlesError] = useState<string | null>(null);
   const [refreshRetryPending, setRefreshRetryPending] = useState(false);
   const [bundleFiles, setBundleFiles] = useState<Record<string, BundleFileState>>({});
@@ -207,6 +207,7 @@ export function useIssueBundles(currentIssueCode: string, onIssueMissing: () => 
   return {
     bundleFiles,
     bundles,
+    bundlesLoading,
     hasProcessingBundles: hasActiveBundles,
     canWrite,
     inactivityExpiry,

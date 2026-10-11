@@ -56,6 +56,7 @@ import { useViewerPaginationController } from './hooks/useViewerPaginationContro
 import { useSavedSearchController } from './hooks/useSavedSearchController';
 import { useIssueWorkspaceSession } from './hooks/useIssueWorkspaceSession';
 import { buildTabShareUrl, parseSharedTabSearch, type SharedTabDescriptor } from './tabShareLink';
+import { readOnboardingProgress, updateOnboardingProgress } from './onboardingProgress';
 
 const bundleStatusLabel = (bundle: UploadSummary) => {
   if (bundle.status.upload_status === 'PROCESSING' || bundle.status.upload_status === 'PENDING') {
@@ -162,10 +163,10 @@ export function BundleView() {
   const auth = useAuth();
   const isBusinessUser = auth.state.status === 'AUTHENTICATED' && auth.state.user.role === 'USER';
   const onboardingIdentity = auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest';
-  const onboardingStorageKey = `rain:onboarding:v1:${onboardingIdentity}`;
   const [guideChooserOpen, setGuideChooserOpen] = useState(false);
   const [guideTask, setGuideTask] = useState<'save' | 'share' | null>(null);
   const [guideStep, setGuideStep] = useState('');
+  const [guideEnabled, setGuideEnabled] = useState(true);
   const [guideIntroDismissed, setGuideIntroDismissed] = useState(false);
   const [guideCompleted, setGuideCompleted] = useState<string[]>([]);
   const [shareDialogTab, setShareDialogTab] = useState<ViewerTab | null>(null);
@@ -317,9 +318,9 @@ export function BundleView() {
     if (guideTask !== 'save') return;
     const completed = [...new Set([...guideCompleted, 'save'])];
     setGuideCompleted(completed);
-    try { localStorage.setItem(onboardingStorageKey, JSON.stringify({ introDismissed: true, completed })); } catch { /* Local storage is optional. */ }
+    updateOnboardingProgress(onboardingIdentity, { introDismissed: true, completed });
     setGuideStep('complete');
-  }, [guideCompleted, guideTask, onboardingStorageKey]);
+  }, [guideCompleted, guideTask, onboardingIdentity]);
   const savedSearch = useSavedSearchController({
     authenticated: isBusinessUser,
     issueCode,
@@ -332,18 +333,13 @@ export function BundleView() {
     onSaveSuccess: completeSaveGuide
   });
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(onboardingStorageKey);
-      const saved = raw ? JSON.parse(raw) as { introDismissed?: boolean; completed?: string[] } : {};
-      setGuideIntroDismissed(Boolean(saved.introDismissed));
-      setGuideCompleted(Array.isArray(saved.completed) ? saved.completed : []);
-    } catch {
-      setGuideIntroDismissed(false);
-      setGuideCompleted([]);
-    }
+    const saved = readOnboardingProgress(onboardingIdentity);
+    setGuideEnabled(saved.enabled);
+    setGuideIntroDismissed(saved.introDismissed);
+    setGuideCompleted(saved.completed);
     setGuideTask(null);
     setGuideStep('');
-  }, [onboardingStorageKey]);
+  }, [onboardingIdentity]);
 
   useEffect(() => {
     const openGuide = () => setGuideChooserOpen(true);
@@ -1725,16 +1721,18 @@ export function BundleView() {
   };
   const dismissGuideIntro = () => {
     setGuideIntroDismissed(true);
-    try {
-      localStorage.setItem(onboardingStorageKey, JSON.stringify({ introDismissed: true, completed: guideCompleted }));
-    } catch { /* Local storage is optional. */ }
+    updateOnboardingProgress(onboardingIdentity, { introDismissed: true });
   };
   function completeShareGuide() {
     const completed = [...new Set([...guideCompleted, 'share'])];
     setGuideCompleted(completed);
-    try { localStorage.setItem(onboardingStorageKey, JSON.stringify({ introDismissed: true, completed })); } catch { /* Local storage is optional. */ }
+    updateOnboardingProgress(onboardingIdentity, { introDismissed: true, completed });
     setGuideStep('complete');
   }
+  const setOnboardingEnabled = (enabled: boolean) => {
+    setGuideEnabled(enabled);
+    updateOnboardingProgress(onboardingIdentity, { enabled });
+  };
   const handleGuideShare = (tab: ViewerTab) => {
     shareTab(tab);
     if (guideTask === 'share' && guideStep === 'share-button' && buildTabShareUrl(tab, issueCode, window.location.origin)) {
@@ -1744,7 +1742,7 @@ export function BundleView() {
 
   return (
     <div className="space-y-5">
-      {issueCode && !sharedTab && !guideIntroDismissed ? (
+      {issueCode && !sharedTab && guideEnabled && !guideIntroDismissed ? (
         <section aria-label="快速上手" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm">
           <div>
             <p className="font-semibold text-slate-900">快速上手</p>
@@ -2246,6 +2244,10 @@ export function BundleView() {
             <div><h2 className="font-semibold text-slate-950">你想了解什么？</h2><p className="mt-1 text-xs text-slate-500">可以随时退出，之后再从这里打开。</p></div>
             <button type="button" aria-label="关闭新手指引选择" className="rounded px-2 text-xl text-slate-500 hover:bg-slate-100" onClick={() => setGuideChooserOpen(false)}>×</button>
           </div>
+          <label className="mt-3 flex cursor-pointer items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            <span>自动显示新手提示</span>
+            <input type="checkbox" checked={guideEnabled} onChange={(event) => setOnboardingEnabled(event.target.checked)} />
+          </label>
           <div className="mt-3 grid gap-2">
             <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startGuide('save')}>
               <span className="block text-sm font-semibold text-slate-900">保存搜索条件</span>

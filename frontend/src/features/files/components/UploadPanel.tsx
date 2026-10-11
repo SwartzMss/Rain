@@ -10,6 +10,7 @@ type UploadPanelProps = {
   uploadError: string | null;
   uploadTasks?: readonly UploadTaskSnapshot[];
   uploading: boolean;
+  highlightUpload?: boolean;
 };
 
 export function UploadPanel({
@@ -20,7 +21,8 @@ export function UploadPanel({
   uploadDisabled,
   uploadError,
   uploadTasks = [],
-  uploading
+  uploading,
+  highlightUpload = false
 }: UploadPanelProps) {
   const uploadingCount = uploadTasks.filter((task) => task.status === 'UPLOADING').length;
   const waitingCount = uploadTasks.filter(
@@ -52,7 +54,8 @@ export function UploadPanel({
         }}
       />
       <div
-        className="flex min-h-28 items-center justify-between gap-4 rounded-xl border border-dashed border-slate-300 bg-gradient-to-br from-slate-50 to-sky-50/50 px-5 py-4 text-sm transition hover:border-sky-400 hover:shadow-[inset_0_0_0_1px_rgba(6,182,212,0.08)] aria-disabled:opacity-60"
+        data-guide-anchor="upload-archive"
+        className={`flex min-h-28 items-center justify-between gap-4 rounded-xl border border-dashed border-slate-300 bg-gradient-to-br from-slate-50 to-sky-50/50 px-5 py-4 text-sm transition hover:border-sky-400 hover:shadow-[inset_0_0_0_1px_rgba(6,182,212,0.08)] aria-disabled:opacity-60 ${highlightUpload ? 'outline outline-2 outline-cyan-500 outline-offset-2' : ''}`}
         aria-disabled={uploadDisabled}
         onClick={() => {
           if (canWrite && !uploadDisabled) {
