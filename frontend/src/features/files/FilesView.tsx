@@ -2271,8 +2271,7 @@ export function BundleView() {
                 {guideStep === 'save-name' ? '给这组条件取个容易识别的名字，然后在弹窗里保存。' : null}
                 {guideStep === 'share-target' ? '先打开一个文件，或运行一次搜索，生成要分享的标签。' : null}
                 {guideStep === 'share-button' ? '确认当前标签是你要分享的内容，再点击标签栏里的“分享当前标签”。' : null}
-                {guideStep === 'share-copy' && shareDialogTab?.kind === 'search' ? '对方打开链接后会按这个标签的来源和条件重新搜索；链接分享的是搜索方式，不是固定的结果快照。' : null}
-                {guideStep === 'share-copy' && shareDialogTab?.kind === 'file' ? '复制链接发给对方，对方打开后就能直接查看这个文件。' : null}
+                {guideStep === 'share-copy' ? '点击“复制链接”分享给对方。' : null}
                 {guideStep === 'save-access' && auth.state.status === 'GUEST' ? '保存条件需要普通用户账户。登录后可以保存并重复使用。' : null}
                 {guideStep === 'save-access' && auth.state.status === 'AUTHENTICATED' ? '保存条件面向普通用户账户。当前管理员账户没有个人搜索条件功能。' : null}
                 {guideStep === 'complete' ? `完成：${guideTask === 'save' ? '已保存。之后从“我的搜索条件”选择“使用”，即可在当前 Issue 搜索。' : '链接已复制，可以粘贴给对方。'}` : null}
@@ -2358,11 +2357,6 @@ export function BundleView() {
                 ×
               </button>
             </div>
-            {shareDialogTab?.kind === 'search' ? (
-              <p className="mt-3 rounded-lg bg-sky-50 px-3 py-2 text-sm text-sky-950">对方打开链接后会按“{shareDialogTab.title}”的来源和条件重新搜索；结果会随当前数据变化，链接不会保存固定的结果快照。</p>
-            ) : shareDialogTab?.kind === 'file' ? (
-              <p className="mt-3 rounded-lg bg-sky-50 px-3 py-2 text-sm text-sky-950">复制链接发给对方，对方打开后就能直接查看这个文件。</p>
-            ) : null}
             <label htmlFor="share-dialog-url" className="mt-5 block text-sm font-medium text-slate-700">分享链接</label>
             <input
               id="share-dialog-url"
