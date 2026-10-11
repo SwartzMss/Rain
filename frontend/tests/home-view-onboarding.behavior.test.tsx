@@ -6,7 +6,8 @@ import { HomeView } from '../src/features/files/HomeView';
 const testMocks = vi.hoisted(() => ({
   fetchIssueBundles: vi.fn(),
   fetchFileNode: vi.fn(),
-  setUploadTasks: vi.fn()
+  setUploadTasks: vi.fn(),
+  nextUploadStatus: 'FAILED' as 'FAILED' | 'UPLOADING'
 }));
 
 vi.mock('../src/api/client', () => ({
@@ -74,21 +75,23 @@ vi.mock('../src/features/files/hooks/useUploadTask', async () => {
     file: File;
     name: string;
     sizeBytes: number;
-    status: 'FAILED' | 'QUEUED' | 'ACCEPTED';
+    status: 'FAILED' | 'QUEUED' | 'UPLOADING' | 'ACCEPTED';
     progressPercent: number;
     message: string | null;
     response: null | { bundle_hash: string; status: 'PENDING' };
   };
   return {
-    useUploadTask: () => {
+    useUploadTask: ({ currentIssueCode }: { currentIssueCode: string }) => {
       const [tasks, setTasks] = useState<TestUploadTask[]>([]);
       testMocks.setUploadTasks.mockImplementation((nextTasks: TestUploadTask[]) => setTasks(nextTasks));
-      const performUpload = useCallback(async () => {
-        setTasks([{
-          id: 'retry-task', issueCode: 'ISSUE-1', file: new File(['log'], 'logs.zip'), name: 'logs.zip',
-          sizeBytes: 3, status: 'FAILED', progressPercent: 0, message: 'network error', response: null
+      const performUpload = useCallback(() => {
+        setTasks((current) => [...current.filter((task) => task.issueCode !== currentIssueCode), {
+          id: 'retry-task', issueCode: currentIssueCode, file: new File(['log'], 'logs.zip'), name: 'logs.zip',
+          sizeBytes: 3, status: testMocks.nextUploadStatus, progressPercent: 0,
+          message: testMocks.nextUploadStatus === 'FAILED' ? 'network error' : null, response: null
         }]);
-      }, []);
+        return ['retry-task'];
+      }, [currentIssueCode]);
       const retryUpload = useCallback((taskId: string) => {
         setTasks((current) => current.map((task) => task.id === taskId
           ? { ...task, status: 'QUEUED', message: null }
@@ -99,7 +102,7 @@ vi.mock('../src/features/files/hooks/useUploadTask', async () => {
         performUpload,
         resetSelection: useCallback(() => undefined, []),
         retryUpload,
-        tasks,
+        tasks: tasks.filter((task) => task.issueCode === currentIssueCode),
         uploadDisabled: false,
         uploadError: null,
         uploading: tasks.some((task) => task.status === 'QUEUED')
@@ -160,6 +163,7 @@ describe('HomeView onboarding Issue permissions', () => {
     vi.clearAllMocks();
     localStorage.clear();
     testMocks.setUploadTasks.mockReset();
+    testMocks.nextUploadStatus = 'FAILED';
     testMocks.fetchIssueBundles.mockResolvedValue({
       log_bundles: [], can_write: true, owner_username: 'writer', inactivity_expiry: null
     });
@@ -282,6 +286,45 @@ describe('HomeView onboarding Issue permissions', () => {
       sizeBytes: 3, status: 'ACCEPTED', progressPercent: 100, message: null,
       response: { bundle_hash: 'accepted-bundle', status: 'PENDING' }
     }]));
+    expect(await screen.findByText('服务器已接收压缩包，后台会继续校验、解压并建立索引。')).toBeInTheDocument();
+  });
+
+  it('does not treat another Issue upload as completion of the current upload guide', async () => {
+    testMocks.nextUploadStatus = 'UPLOADING';
+    renderHomeView();
+    act(() => testMocks.setUploadTasks([{
+      id: 'issue-b-history', issueCode: 'ISSUE-2', file: new File(['old'], 'old.zip'), name: 'old.zip',
+      sizeBytes: 3, status: 'ACCEPTED', progressPercent: 100, message: null,
+      response: { bundle_hash: 'old-bundle', status: 'PENDING' }
+    }]));
+
+    fireEvent.click(screen.getByRole('button', { name: '上传压缩包' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择测试 Issue' }));
+    expect(await screen.findByText('上传操作已就绪')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '模拟选择上传文件' }));
+    expect(await screen.findByText('上传已加入任务队列。Rain 会在后台接收、校验、解压并建立索引。')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '选择含文件 Issue' }));
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByText('上传已加入任务队列。Rain 会在后台接收、校验、解压并建立索引。')).toBeInTheDocument();
+    expect(screen.queryByText('服务器已接收压缩包，后台会继续校验、解压并建立索引。')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择测试 Issue' }));
+    act(() => testMocks.setUploadTasks([
+      {
+        id: 'issue-b-history', issueCode: 'ISSUE-2', file: new File(['old'], 'old.zip'), name: 'old.zip',
+        sizeBytes: 3, status: 'ACCEPTED', progressPercent: 100, message: null,
+        response: { bundle_hash: 'old-bundle', status: 'PENDING' }
+      },
+      {
+        id: 'retry-task', issueCode: 'ISSUE-1', file: new File(['log'], 'logs.zip'), name: 'logs.zip',
+        sizeBytes: 3, status: 'ACCEPTED', progressPercent: 100, message: null,
+        response: { bundle_hash: 'accepted-bundle', status: 'PENDING' }
+      }
+    ]));
     expect(await screen.findByText('服务器已接收压缩包，后台会继续校验、解压并建立索引。')).toBeInTheDocument();
   });
 });

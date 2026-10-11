@@ -76,7 +76,10 @@ export function HomeView() {
   const [guideChooserOpen, setGuideChooserOpen] = useState(false);
   const [guideTask, setGuideTask] = useState<'create' | 'upload' | 'delete' | null>(null);
   const [guideStep, setGuideStep] = useState('');
-  const [guideUploadBaselineIds, setGuideUploadBaselineIds] = useState<string[]>([]);
+  const [guideUploadTracking, setGuideUploadTracking] = useState<{
+    issueCode: string;
+    taskIds: string[];
+  } | null>(null);
   const guideDeleteTargetKeyRef = useRef<string | null>(null);
   const guideDeleteSucceededRef = useRef(false);
 
@@ -160,23 +163,29 @@ export function HomeView() {
   }, [bundles.bundlesLoading, bundles.resolvedIssueCode, canWrite, deleteGuideLoading, guideStep, guideTask, hasDeletableFiles, issues.currentIssueCode]);
 
   useEffect(() => {
-    if (guideTask !== 'upload' || guideStep !== 'upload-wait') return;
-    const newTasks = upload.tasks.filter((task) => !guideUploadBaselineIds.includes(task.id));
-    if (!newTasks.length) return;
-    const finished = newTasks.every((task) => ['ACCEPTED', 'HANDED_OFF', 'FAILED', 'UNCONFIRMED'].includes(task.status));
+    if (
+      guideTask !== 'upload' ||
+      guideStep !== 'upload-wait' ||
+      !guideUploadTracking ||
+      guideUploadTracking.issueCode !== issues.currentIssueCode
+    ) return;
+    const guideTasks = upload.tasks.filter((task) => guideUploadTracking.taskIds.includes(task.id));
+    if (!guideTasks.length) return;
+    const finished = guideTasks.every((task) => ['ACCEPTED', 'HANDED_OFF', 'FAILED', 'UNCONFIRMED'].includes(task.status));
     if (!finished) return;
-    if (newTasks.some((task) => task.status === 'FAILED' || task.status === 'UNCONFIRMED')) {
+    if (guideTasks.some((task) => task.status === 'FAILED' || task.status === 'UNCONFIRMED')) {
       setGuideStep('upload-failed');
       return;
     }
     completeHomeGuide('upload');
-  }, [completeHomeGuide, guideStep, guideTask, guideUploadBaselineIds, upload.tasks]);
+  }, [completeHomeGuide, guideStep, guideTask, guideUploadTracking, issues.currentIssueCode, upload.tasks]);
 
   const startHomeGuide = (task: 'create' | 'upload' | 'delete') => {
     setGuideChooserOpen(false);
     setGuideIntroDismissed(true);
     updateOnboardingProgress(onboardingIdentity, { introDismissed: true });
     setGuideTask(task);
+    setGuideUploadTracking(null);
     if (task === 'create') {
       setGuideStep(canCreateIssue ? 'create-button' : 'create-access');
     } else if (task === 'upload') {
@@ -446,11 +455,13 @@ export function HomeView() {
   }, [deleteRows, guideStep, guideTask]);
 
   const handleFilesSelected = (files: File[]) => {
+    const taskIds = upload.performUpload(files);
     if (guideTask === 'upload' && guideStep === 'upload-action') {
-      setGuideUploadBaselineIds(upload.tasks.map((task) => task.id));
-      setGuideStep('upload-wait');
+      if (taskIds.length > 0) {
+        setGuideUploadTracking({ issueCode: issues.currentIssueCode, taskIds });
+        setGuideStep('upload-wait');
+      }
     }
-    upload.performUpload(files).catch(() => undefined);
   };
 
   const retryUpload = (taskId: string) => {
@@ -458,12 +469,11 @@ export function HomeView() {
     if (
       guideTask === 'upload' &&
       (guideStep === 'upload-failed' || guideStep === 'upload-action') &&
+      guideUploadTracking?.issueCode === issues.currentIssueCode &&
+      guideUploadTracking.taskIds.includes(taskId) &&
       task &&
       (task.status === 'FAILED' || task.status === 'UNCONFIRMED')
     ) {
-      setGuideUploadBaselineIds(upload.tasks
-        .filter((task) => task.id !== taskId)
-        .map((task) => task.id));
       setGuideStep('upload-wait');
     }
     upload.retryUpload(taskId);
@@ -471,13 +481,12 @@ export function HomeView() {
 
   const retryGuideUpload = () => {
     const failedTask = upload.tasks.find((task) =>
-      !guideUploadBaselineIds.includes(task.id) &&
+      guideUploadTracking?.issueCode === issues.currentIssueCode &&
+      guideUploadTracking.taskIds.includes(task.id) &&
       (task.status === 'FAILED' || task.status === 'UNCONFIRMED')
     );
     if (failedTask) {
       retryUpload(failedTask.id);
-    } else {
-      setGuideStep('upload-action');
     }
   };
 

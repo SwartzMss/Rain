@@ -67,17 +67,17 @@ export function useUploadTask(options: {
   }, [loadBundles, loadIssues, uploadTasks]);
 
   const performUpload = useCallback(
-    async (files: File[]) => {
+    (files: File[]) => {
       setValidationError(null);
       if (!currentIssueCode) {
         setValidationError('请先选择或创建 Issue');
-        return;
+        return [];
       }
       if (files.length === 0) {
         setValidationError('请至少选择一个文件');
-        return;
+        return [];
       }
-      uploadQueue.enqueue(currentIssueCode, files);
+      return uploadQueue.enqueue(currentIssueCode, files);
     },
     [currentIssueCode]
   );
