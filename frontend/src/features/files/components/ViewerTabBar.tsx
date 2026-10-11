@@ -71,6 +71,7 @@ export function ViewerTabBar({
 
   if (tabs.length === 0) return null;
 
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
   const contextIndex = menu ? tabs.findIndex((tab) => tab.id === menu.tabId) : -1;
   const contextTab = contextIndex >= 0 ? tabs[contextIndex] : null;
   const closeOthers = contextTab ? tabs.filter((tab) => tab.id !== contextTab.id && !tab.pinned).map((tab) => tab.id) : [];
@@ -83,8 +84,9 @@ export function ViewerTabBar({
   };
 
   return (
-    <div className="flex min-h-14 items-end gap-2 overflow-x-auto border-b border-slate-200 bg-gradient-to-r from-slate-100 to-slate-50 px-4 pt-3">
-      {tabs.map((tab) => (
+    <div className="flex min-h-14 items-end gap-2 border-b border-slate-200 bg-gradient-to-r from-slate-100 to-slate-50 px-3 pt-3">
+      <div className="flex min-w-0 flex-1 items-end gap-2 overflow-x-auto px-1">
+        {tabs.map((tab) => (
         <div
           key={tab.id}
           onContextMenu={(event) => {
@@ -132,10 +134,10 @@ export function ViewerTabBar({
             ×
           </button>
         </div>
-      ))}
-      {(() => {
-        const activeTab = tabs.find((tab) => tab.id === activeTabId);
-        return activeTab ? (
+        ))}
+      </div>
+      {activeTab ? (
+        <div className="z-10 shrink-0 border-l border-slate-200 bg-slate-50/95 pb-1 pl-2">
           <button
             type="button"
             data-guide-anchor="share-tab"
@@ -147,8 +149,8 @@ export function ViewerTabBar({
           >
             <span aria-hidden="true">↗</span> 分享当前标签
           </button>
-        ) : null;
-      })()}
+        </div>
+      ) : null}
       {menu && contextTab
         ? createPortal(
             <div
