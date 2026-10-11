@@ -133,6 +133,22 @@ export function ViewerTabBar({
           </button>
         </div>
       ))}
+      {(() => {
+        const activeTab = tabs.find((tab) => tab.id === activeTabId);
+        return activeTab ? (
+          <button
+            type="button"
+            data-guide-anchor="share-tab"
+            className="mb-1 ml-auto inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-sky-200 bg-white px-3 text-xs font-semibold text-sky-800 shadow-sm hover:border-sky-400 hover:bg-sky-50 disabled:cursor-not-allowed disabled:text-slate-400"
+            aria-label="分享当前标签"
+            title={activeTab.kind === 'temp' ? '临时结果无法分享' : '分享当前标签'}
+            disabled={activeTab.kind === 'temp'}
+            onClick={() => onShare(activeTab)}
+          >
+            <span aria-hidden="true">↗</span> 分享当前标签
+          </button>
+        ) : null;
+      })()}
       {menu && contextTab
         ? createPortal(
             <div

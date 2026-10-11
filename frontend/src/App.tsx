@@ -63,6 +63,15 @@ function App() {
             </div>
           </Link>
           <div className="flex items-center gap-3 text-sm font-medium text-slate-200">
+            {(location.pathname.startsWith('/issue/') || location.pathname.startsWith('/issues/')) ? (
+              <button
+                type="button"
+                className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 font-semibold text-cyan-100 hover:bg-cyan-300/20"
+                onClick={() => window.dispatchEvent(new Event('rain:open-onboarding'))}
+              >
+                ? 新手指引
+              </button>
+            ) : null}
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5">
               <span className={`h-2.5 w-2.5 rounded-full ${serviceStatus === 'healthy' ? 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]' : serviceStatus === 'checking' ? 'bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.8)]' : 'bg-rose-400 shadow-[0_0_10px_rgba(251,113,133,0.8)]'}`} />
               <span>{serviceStatus === 'healthy' ? '服务正常' : serviceStatus === 'checking' ? '检测中' : '服务异常'}</span>

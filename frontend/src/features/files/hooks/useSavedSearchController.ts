@@ -18,7 +18,8 @@ export function useSavedSearchController({
   issueSearch,
   navigate,
   openViewerTab,
-  waitForWorkspaceSession
+  waitForWorkspaceSession,
+  onSaveSuccess
 }: {
   authenticated: boolean;
   issueCode: string;
@@ -28,6 +29,7 @@ export function useSavedSearchController({
   navigate: (path: string, options?: { state?: unknown }) => void;
   openViewerTab: OpenViewerTab;
   waitForWorkspaceSession: () => Promise<string | null>;
+  onSaveSuccess?: () => void;
 }) {
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [savedSearchesOpen, setSavedSearchesOpen] = useState(false);
@@ -107,11 +109,12 @@ export function useSavedSearchController({
       if (generation !== saveGenerationRef.current) return;
       setSavedSearchName('');
       setSaveDialogOpen(false);
+      onSaveSuccess?.();
       await loadSavedSearches();
     } catch (requestError) {
       setError(normalizeApiError(requestError));
     }
-  }, [currentPayload, loadSavedSearches, savedSearchName]);
+  }, [currentPayload, loadSavedSearches, onSaveSuccess, savedSearchName]);
 
   const useSavedSearch = useCallback(async (item: SavedSearch) => {
     const editor = detailEditorState(item.query_text, item.options);
