@@ -264,4 +264,24 @@ describe('HomeView onboarding Issue permissions', () => {
     }]));
     expect(await screen.findByText('服务器已接收压缩包，后台会继续校验、解压并建立索引。')).toBeInTheDocument();
   });
+
+  it('tracks a retry started from the upload guide card', async () => {
+    renderHomeView();
+
+    fireEvent.click(screen.getByRole('button', { name: '上传压缩包' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择测试 Issue' }));
+    expect(await screen.findByText('上传操作已就绪')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '模拟选择上传文件' }));
+
+    expect(await screen.findByText('上传没有成功。查看上传区域的错误信息，然后重试；教程仍可从这里重新打开。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '重试上传' }));
+    expect(await screen.findByText('上传已加入任务队列。Rain 会在后台接收、校验、解压并建立索引。')).toBeInTheDocument();
+
+    act(() => testMocks.setUploadTasks([{
+      id: 'retry-task', issueCode: 'ISSUE-1', file: new File(['log'], 'logs.zip'), name: 'logs.zip',
+      sizeBytes: 3, status: 'ACCEPTED', progressPercent: 100, message: null,
+      response: { bundle_hash: 'accepted-bundle', status: 'PENDING' }
+    }]));
+    expect(await screen.findByText('服务器已接收压缩包，后台会继续校验、解压并建立索引。')).toBeInTheDocument();
+  });
 });

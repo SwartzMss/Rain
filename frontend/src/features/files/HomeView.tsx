@@ -454,13 +454,31 @@ export function HomeView() {
   };
 
   const retryUpload = (taskId: string) => {
-    if (guideTask === 'upload' && guideStep === 'upload-failed') {
+    const task = upload.tasks.find((candidate) => candidate.id === taskId);
+    if (
+      guideTask === 'upload' &&
+      (guideStep === 'upload-failed' || guideStep === 'upload-action') &&
+      task &&
+      (task.status === 'FAILED' || task.status === 'UNCONFIRMED')
+    ) {
       setGuideUploadBaselineIds(upload.tasks
         .filter((task) => task.id !== taskId)
         .map((task) => task.id));
       setGuideStep('upload-wait');
     }
     upload.retryUpload(taskId);
+  };
+
+  const retryGuideUpload = () => {
+    const failedTask = upload.tasks.find((task) =>
+      !guideUploadBaselineIds.includes(task.id) &&
+      (task.status === 'FAILED' || task.status === 'UNCONFIRMED')
+    );
+    if (failedTask) {
+      retryUpload(failedTask.id);
+    } else {
+      setGuideStep('upload-action');
+    }
   };
 
   const deleteSelectedRows = useCallback(() => {
@@ -697,7 +715,8 @@ export function HomeView() {
           <div className="mt-3 flex justify-end gap-2">
             {(guideStep === 'create-access' || guideStep === 'upload-access' || guideStep === 'delete-access') && isGuest ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={() => navigate('/login', { state: { from: '/' } })}>登录 / 注册</button> : null}
             {guideStep === 'delete-empty' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={() => startHomeGuide('upload')}>去上传压缩包</button> : null}
-            {guideStep === 'upload-failed' || guideStep === 'delete-error' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={() => setGuideStep(guideTask === 'upload' ? 'upload-action' : 'delete-action')}>重试</button> : null}
+            {guideStep === 'upload-failed' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={retryGuideUpload}>重试上传</button> : null}
+            {guideStep === 'delete-error' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={() => setGuideStep('delete-action')}>重试</button> : null}
             {guideStep === 'complete' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={stopHomeGuide}>完成</button> : null}
             {guideStep !== 'complete' && guideStep !== 'create-access' && guideStep !== 'upload-access' && guideStep !== 'delete-access' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={stopHomeGuide}>退出指引</button> : null}
           </div>
