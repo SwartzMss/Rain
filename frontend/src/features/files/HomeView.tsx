@@ -142,7 +142,7 @@ export function HomeView() {
     }
     if (
       guideTask === 'delete' &&
-      (guideStep === 'delete-issue' || guideStep === 'delete-loading') &&
+      (guideStep === 'delete-issue' || guideStep === 'delete-loading' || guideStep === 'delete-empty') &&
       issues.currentIssueCode
     ) {
       if (
@@ -453,6 +453,16 @@ export function HomeView() {
     upload.performUpload(files).catch(() => undefined);
   };
 
+  const retryUpload = (taskId: string) => {
+    if (guideTask === 'upload' && guideStep === 'upload-failed') {
+      setGuideUploadBaselineIds(upload.tasks
+        .filter((task) => task.id !== taskId)
+        .map((task) => task.id));
+      setGuideStep('upload-wait');
+    }
+    upload.retryUpload(taskId);
+  };
+
   const deleteSelectedRows = useCallback(() => {
     const rows = fileRows.filter((row) => selectedRowKeys.has(row.key));
     if (!rows.length) return;
@@ -624,7 +634,7 @@ export function HomeView() {
           })}
           onClearSelection={() => setSelectedRowKeys(new Set())}
           onDeleteSelected={deleteSelectedRows}
-          onRetryUpload={upload.retryUpload}
+          onRetryUpload={retryUpload}
         />
       </section>
 
