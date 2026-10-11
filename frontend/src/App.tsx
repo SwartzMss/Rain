@@ -10,6 +10,7 @@ import { isAdmin } from './auth/permissions';
 import { AdminPage, AdminUsersPage, AuditLogsPage, AdminSettingsPage, AuthRateLimitsPage, InvitationsAdminPage } from './features/admin/AdminPage';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { rainApi } from './api/client';
+import { readOnboardingProgress, updateOnboardingProgress } from './features/files/onboardingProgress';
 
 const HomeView = lazy(() => import('./features/files/HomeView').then((module) => ({ default: module.HomeView })));
 
@@ -19,6 +20,16 @@ function App() {
   const returnPath = `${location.pathname}${location.search}`;
   const [serviceStatus, setServiceStatus] = useState<'checking' | 'healthy' | 'unhealthy'>('checking');
   const [registrationAvailable, setRegistrationAvailable] = useState(false);
+  const adminIdentity = auth.state.status === 'AUTHENTICATED' && isAdmin(auth.state.user)
+    ? auth.state.user.id
+    : null;
+  const [adminOnboardingEnabled, setAdminOnboardingEnabled] = useState(true);
+
+  useEffect(() => {
+    if (adminIdentity) {
+      setAdminOnboardingEnabled(readOnboardingProgress(adminIdentity).enabled);
+    }
+  }, [adminIdentity]);
 
   useEffect(() => {
     let active = true;
@@ -64,6 +75,25 @@ function App() {
             </div>
           </Link>
           <div className="flex items-center gap-3 text-sm font-medium text-slate-200">
+            {adminIdentity ? (
+              <label
+                className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 hover:bg-white/10"
+                title="关闭后不会自动显示新手提示，仍可在 Issue 页面手动打开"
+              >
+                <input
+                  aria-label="自动显示新手提示"
+                  checked={adminOnboardingEnabled}
+                  className="accent-cyan-300"
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setAdminOnboardingEnabled(enabled);
+                    updateOnboardingProgress(adminIdentity, { enabled });
+                  }}
+                  type="checkbox"
+                />
+                自动提示
+              </label>
+            ) : null}
             {(location.pathname === '/' || location.pathname.startsWith('/issue/') || location.pathname.startsWith('/issues/')) ? (
               <button
                 type="button"
