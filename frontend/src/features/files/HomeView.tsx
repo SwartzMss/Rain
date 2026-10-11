@@ -50,6 +50,7 @@ async function waitForFileDeletionBatch(batchId: string, onUpdate: (batch: FileD
 export function HomeView() {
   const navigate = useNavigate();
   const auth = useAuth();
+  const isGuest = auth.state.status === 'GUEST';
   const canCreateIssue = auth.state.status === 'AUTHENTICATED' && isUser(auth.state.user);
   const onboardingIdentity = auth.state.status === 'AUTHENTICATED' ? auth.state.user.id : 'guest';
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -159,11 +160,13 @@ export function HomeView() {
     if (task === 'create') {
       setGuideStep(canCreateIssue ? 'create-button' : 'create-access');
     } else if (task === 'upload') {
-      setGuideStep(!issues.currentIssueCode ? 'upload-issue' : canWrite ? 'upload-action' : 'upload-access');
+      setGuideStep(isGuest ? 'upload-access' : !issues.currentIssueCode ? 'upload-issue' : canWrite ? 'upload-action' : 'upload-access');
     } else {
       guideDeleteSucceededRef.current = false;
       guideDeleteTargetKeyRef.current = null;
-      setGuideStep(!issues.currentIssueCode
+      setGuideStep(isGuest
+        ? 'delete-access'
+        : !issues.currentIssueCode
         ? 'delete-issue'
         : deleteGuideLoading
           ? 'delete-loading'
@@ -455,16 +458,26 @@ export function HomeView() {
 
   return (
     <div className="space-y-4">
-      {guideEnabled && !guideIntroDismissed ? (
-        <section aria-label="快速上手" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm">
-          <div><p className="font-semibold text-slate-900">快速上手</p><p className="mt-0.5 text-slate-600">学习新建 Issue、上传压缩包和删除日志文件。</p></div>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" className="rounded-md bg-slate-950 px-3 py-2 font-semibold text-white" onClick={() => startHomeGuide('create')}>新建 Issue</button>
-            <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800" onClick={() => startHomeGuide('upload')}>上传压缩包</button>
-            <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800" onClick={() => startHomeGuide('delete')}>删除日志文件</button>
-            <button type="button" className="rounded-md px-2 py-2 text-slate-600 hover:bg-white" onClick={dismissHomeGuideIntro}>暂时跳过</button>
-          </div>
-        </section>
+      {guideEnabled && !guideIntroDismissed && auth.state.status !== 'LOADING' ? (
+        isGuest ? (
+          <section aria-label="访客快速上手" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm">
+            <div><p className="font-semibold text-slate-900">访客模式</p><p className="mt-0.5 text-slate-600">你可以浏览、搜索和分享日志。登录普通用户后可新建 Issue、保存搜索条件；上传或删除还需要对应 Issue 的写入权限。</p></div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="rounded-md bg-slate-950 px-3 py-2 font-semibold text-white" onClick={() => navigate('/login', { state: { from: '/' } })}>登录 / 注册</button>
+              <button type="button" className="rounded-md px-2 py-2 text-slate-600 hover:bg-white" onClick={dismissHomeGuideIntro}>知道了</button>
+            </div>
+          </section>
+        ) : (
+          <section aria-label="快速上手" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm">
+            <div><p className="font-semibold text-slate-900">快速上手</p><p className="mt-0.5 text-slate-600">学习新建 Issue、上传压缩包和删除日志文件。</p></div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="rounded-md bg-slate-950 px-3 py-2 font-semibold text-white" onClick={() => startHomeGuide('create')}>新建 Issue</button>
+              <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800" onClick={() => startHomeGuide('upload')}>上传压缩包</button>
+              <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800" onClick={() => startHomeGuide('delete')}>删除日志文件</button>
+              <button type="button" className="rounded-md px-2 py-2 text-slate-600 hover:bg-white" onClick={dismissHomeGuideIntro}>暂时跳过</button>
+            </div>
+          </section>
+        )
       ) : null}
       <div className="grid min-h-[calc(100vh-72px)] gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
       <IssueSelector
@@ -612,14 +625,14 @@ export function HomeView() {
       {guideChooserOpen ? (
         <div role="dialog" aria-label="新手指引" className="fixed right-4 top-20 z-[70] w-[min(23rem,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-4 shadow-2xl">
           <div className="flex items-start justify-between gap-3">
-            <div><h2 className="font-semibold text-slate-950">你想了解什么？</h2><p className="mt-1 text-xs text-slate-500">教程会跟随实际操作推进，随时可以退出。</p></div>
+            <div><h2 className="font-semibold text-slate-950">你想了解什么？</h2><p className="mt-1 text-xs text-slate-500">{isGuest ? '访客可以浏览、搜索和分享；创建、上传和删除需要登录及相应权限。' : '教程会跟随实际操作推进，随时可以退出。'}</p></div>
             <button type="button" aria-label="关闭新手指引选择" className="rounded px-2 text-xl text-slate-500 hover:bg-slate-100" onClick={() => setGuideChooserOpen(false)}>×</button>
           </div>
           <label className="mt-3 flex cursor-pointer items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700"><span>自动显示新手提示</span><input type="checkbox" checked={guideEnabled} onChange={(event) => setHomeGuideEnabled(event.target.checked)} /></label>
           <div className="mt-3 grid gap-2">
-            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('create')}><span className="block text-sm font-semibold">新建 Issue</span><span className="mt-1 block text-xs text-slate-600">创建一个 Issue 来整理日志。</span></button>
-            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('upload')}><span className="block text-sm font-semibold">上传压缩包</span><span className="mt-1 block text-xs text-slate-600">将日志包添加到一个有写入权限的 Issue。</span></button>
-            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('delete')}><span className="block text-sm font-semibold">删除日志文件</span><span className="mt-1 block text-xs text-slate-600">从当前 Issue 的文件列表中移除不需要的文件。</span></button>
+            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('create')}><span className="block text-sm font-semibold">新建 Issue{isGuest ? '（登录后可用）' : ''}</span><span className="mt-1 block text-xs text-slate-600">{isGuest ? '登录普通用户账号后可创建。' : '创建一个 Issue 来整理日志。'}</span></button>
+            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('upload')}><span className="block text-sm font-semibold">上传压缩包{isGuest ? '（登录后可用）' : ''}</span><span className="mt-1 block text-xs text-slate-600">{isGuest ? '登录普通用户账号，并对目标 Issue 有写入权限。' : '将日志包添加到一个有写入权限的 Issue。'}</span></button>
+            <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startHomeGuide('delete')}><span className="block text-sm font-semibold">删除日志文件{isGuest ? '（登录后可用）' : ''}</span><span className="mt-1 block text-xs text-slate-600">{isGuest ? '登录普通用户账号，并对目标 Issue 有写入权限。' : '从当前 Issue 的文件列表中移除不需要的文件。'}</span></button>
           </div>
         </div>
       ) : null}
@@ -633,7 +646,7 @@ export function HomeView() {
             {guideStep === 'upload-action' ? '点击“选择文件”或把 .zip、.7z、.tar.gz 等支持的日志压缩包拖到上传区域。' : null}
             {guideStep === 'upload-wait' ? '上传已加入任务队列。Rain 会在后台接收、校验、解压并建立索引。' : null}
             {guideStep === 'upload-failed' ? '上传没有成功。查看上传区域的错误信息，然后重试；教程仍可从这里重新打开。' : null}
-            {guideStep === 'upload-access' || guideStep === 'delete-access' ? '这个 Issue 是只读的。上传和删除文件需要该 Issue 的写入权限。' : null}
+            {guideStep === 'upload-access' || guideStep === 'delete-access' ? (isGuest ? '访客不能上传或删除文件。登录普通用户账号后，还需要对目标 Issue 有写入权限。' : '这个 Issue 是只读的。上传和删除文件需要该 Issue 的写入权限。') : null}
             {guideStep === 'delete-issue' ? '先选择包含待删除文件的 Issue。' : null}
             {guideStep === 'delete-loading' ? '正在读取 Issue 中的文件…' : null}
             {guideStep === 'delete-action' ? '在“文件列表”中找到要删除的日志文件，点击这一行的“删除”。这只会删除选中的文件。' : null}
@@ -643,7 +656,7 @@ export function HomeView() {
             {guideStep === 'complete' ? (guideTask === 'create' ? 'Issue 已创建。现在可以选择它并上传日志包。' : guideTask === 'upload' ? '服务器已接收压缩包，后台会继续校验、解压并建立索引。' : '日志文件已删除；同一压缩包中的其他文件不受影响。') : null}
           </p></div><button type="button" aria-label="退出新手指引" className="-mr-2 -mt-2 rounded px-2 text-xl text-slate-500 hover:bg-slate-100" onClick={stopHomeGuide}>×</button></div>
           <div className="mt-3 flex justify-end gap-2">
-            {(guideStep === 'create-access' || guideStep === 'upload-access' || guideStep === 'delete-access') && auth.state.status === 'GUEST' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={() => navigate('/login', { state: { from: '/' } })}>登录</button> : null}
+            {(guideStep === 'create-access' || guideStep === 'upload-access' || guideStep === 'delete-access') && isGuest ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={() => navigate('/login', { state: { from: '/' } })}>登录 / 注册</button> : null}
             {guideStep === 'delete-empty' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={() => startHomeGuide('upload')}>去上传压缩包</button> : null}
             {guideStep === 'upload-failed' || guideStep === 'delete-error' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={() => setGuideStep(guideTask === 'upload' ? 'upload-action' : 'delete-action')}>重试</button> : null}
             {guideStep === 'complete' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={stopHomeGuide}>完成</button> : null}

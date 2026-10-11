@@ -1742,14 +1742,14 @@ export function BundleView() {
 
   return (
     <div className="space-y-5">
-      {issueCode && !sharedTab && guideEnabled && !guideIntroDismissed ? (
+      {issueCode && !sharedTab && guideEnabled && !guideIntroDismissed && auth.state.status !== 'LOADING' ? (
         <section aria-label="快速上手" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm">
           <div>
             <p className="font-semibold text-slate-900">快速上手</p>
-            <p className="mt-0.5 text-slate-600">学习保存常用的 Issue 搜索条件，或分享当前打开的文件和搜索结果。</p>
+            <p className="mt-0.5 text-slate-600">{isBusinessUser ? '学习保存常用的 Issue 搜索条件，或分享当前打开的文件和搜索结果。' : auth.state.status === 'GUEST' ? '访客可以搜索和分享日志；登录普通用户后可保存搜索条件。' : '普通用户可以保存搜索条件；也可以分享当前打开的文件和搜索结果。'}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {isBusinessUser ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 font-semibold text-white hover:bg-slate-800" onClick={() => startGuide('save')}>保存搜索条件</button> : null}
+            <button type="button" className="rounded-md bg-slate-950 px-3 py-2 font-semibold text-white hover:bg-slate-800" onClick={() => startGuide('save')}>{isBusinessUser ? '保存搜索条件' : auth.state.status === 'GUEST' ? '保存搜索条件（需登录）' : '保存条件（普通用户可用）'}</button>
             <button type="button" className="rounded-md border border-sky-300 bg-white px-3 py-2 font-semibold text-sky-800 hover:bg-sky-50" onClick={() => startGuide('share')}>分享文件 / 搜索结果</button>
             <button type="button" className="rounded-md px-2 py-2 text-slate-600 hover:bg-white" onClick={dismissGuideIntro}>暂时跳过</button>
           </div>
@@ -2241,7 +2241,7 @@ export function BundleView() {
       {guideChooserOpen ? (
         <div role="dialog" aria-label="新手指引" className="fixed right-4 top-20 z-[70] w-[min(22rem,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-4 shadow-2xl">
           <div className="flex items-start justify-between gap-3">
-            <div><h2 className="font-semibold text-slate-950">你想了解什么？</h2><p className="mt-1 text-xs text-slate-500">可以随时退出，之后再从这里打开。</p></div>
+            <div><h2 className="font-semibold text-slate-950">你想了解什么？</h2><p className="mt-1 text-xs text-slate-500">{auth.state.status === 'GUEST' ? '访客可以分享内容；保存搜索条件需要登录普通用户账号。' : '可以随时退出，之后再从这里打开。'}</p></div>
             <button type="button" aria-label="关闭新手指引选择" className="rounded px-2 text-xl text-slate-500 hover:bg-slate-100" onClick={() => setGuideChooserOpen(false)}>×</button>
           </div>
           <label className="mt-3 flex cursor-pointer items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
@@ -2250,8 +2250,8 @@ export function BundleView() {
           </label>
           <div className="mt-3 grid gap-2">
             <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startGuide('save')}>
-              <span className="block text-sm font-semibold text-slate-900">保存搜索条件</span>
-              <span className="mt-1 block text-xs text-slate-600">保存左侧 Issue 搜索条件，之后可以重复使用。</span>
+              <span className="block text-sm font-semibold text-slate-900">保存搜索条件{isBusinessUser ? '' : auth.state.status === 'GUEST' ? '（登录后可用）' : '（普通用户可用）'}</span>
+              <span className="mt-1 block text-xs text-slate-600">{isBusinessUser ? '保存左侧 Issue 搜索条件，之后可以重复使用。' : auth.state.status === 'GUEST' ? '登录普通用户账号后，可保存并重复使用搜索条件。' : '保存搜索条件仅面向普通用户账号。'}</span>
             </button>
             <button type="button" className="rounded-lg border border-slate-200 p-3 text-left hover:border-sky-400 hover:bg-sky-50" onClick={() => startGuide('share')}>
               <span className="block text-sm font-semibold text-slate-900">分享文件或搜索结果</span>
@@ -2281,7 +2281,7 @@ export function BundleView() {
           </div>
           <div className="mt-3 flex justify-end gap-2">
             {guideStep === 'save-condition' ? <button type="button" disabled={!canRunSearch} className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40" onClick={() => setGuideStep('save-button')}>我已输入条件，下一步</button> : null}
-            {guideStep === 'save-access' && auth.state.status === 'GUEST' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={() => navigate('/login', { state: { from: `${location.pathname}${location.search}` } })}>登录</button> : null}
+            {guideStep === 'save-access' && auth.state.status === 'GUEST' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={() => navigate('/login', { state: { from: `${location.pathname}${location.search}` } })}>登录 / 注册</button> : null}
             {guideStep === 'complete' && guideTask === 'save' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={() => { savedSearch.setSavedSearchesOpen(true); stopGuide(); }}>查看我的搜索条件</button> : null}
             {guideStep === 'complete' ? <button type="button" className="rounded-md bg-slate-950 px-3 py-2 text-xs font-semibold text-white" onClick={stopGuide}>完成</button> : null}
             {guideStep !== 'complete' && guideStep !== 'save-access' ? <button type="button" className="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700" onClick={stopGuide}>退出指引</button> : null}
